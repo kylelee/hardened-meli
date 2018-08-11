@@ -54,6 +54,13 @@ impl HtmlView {
     }
 }
 
+impl fmt::Display for HtmlView {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // TODO display subject/info
+        write!(f, "view")
+    }
+}
+
 impl Component for HtmlView {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
         self.pager.draw(grid, area, context);
@@ -90,4 +97,5 @@ impl Component for HtmlView {
     fn is_dirty(&self) -> bool {
         self.pager.is_dirty()
     }
+    fn set_dirty(&mut self) {}
 }

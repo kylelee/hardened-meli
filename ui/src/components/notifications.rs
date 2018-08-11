@@ -29,6 +29,13 @@ use super::*;
 /// Passes notifications to the OS using the XDG specifications.
 pub struct XDGNotifications {}
 
+impl fmt::Display for XDGNotifications {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // TODO display subject/info
+        write!(f, "")
+    }
+}
+
 impl Component for XDGNotifications {
     fn draw(&mut self, _grid: &mut CellBuffer, _area: Area, _context: &mut Context) {}
     fn process_event(&mut self, event: &UIEvent, _context: &mut Context) {
@@ -41,4 +48,5 @@ impl Component for XDGNotifications {
                 .unwrap();
         }
     }
+    fn set_dirty(&mut self) {}
 }
