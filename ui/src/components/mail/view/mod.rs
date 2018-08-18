@@ -28,6 +28,9 @@ pub use self::html::*;
 mod thread;
 pub use self::thread::*;
 
+mod envelope;
+pub use self::envelope::*;
+
 use mime_apps::query_default_app;
 
 #[derive(PartialEq, Debug)]
@@ -74,7 +77,7 @@ impl MailView {
         local_collection: Vec<usize>,
         pager: Option<Pager>,
         subview: Option<Box<Component>>,
-    ) -> Self {
+        ) -> Self {
         MailView {
             coordinates,
             local_collection,
@@ -90,17 +93,13 @@ impl MailView {
     /// Returns the string to be displayed in the Viewer
     fn attachment_to_text(&self, body: Attachment) -> String {
         let finder = LinkFinder::new();
-        let body_text = if body.content_type().is_text_html() {
-            let mut s =
-                String::from("Text piped through `w3m`. Press `v` to open in web browser. \n\n");
-            s.extend(
-                String::from_utf8_lossy(&decode(
-                    &body,
-                    Some(Box::new(|a: &Attachment| {
+        let body_text = String::from_utf8_lossy(&decode_rec(
+                &body,
+                Some(Box::new(|a: &Attachment, v: &mut Vec<u8>| {
+                    if a.content_type().is_text_html() {
                         use std::io::Write;
                         use std::process::{Command, Stdio};
 
-                        let raw = decode(a, None);
                         let mut html_filter = Command::new("w3m")
                             .args(&["-I", "utf-8", "-T", "text/html"])
                             .stdin(Stdio::piped())
@@ -112,17 +111,13 @@ impl MailView {
                             .stdin
                             .as_mut()
                             .unwrap()
-                            .write_all(&raw)
+                            .write_all(&v)
                             .expect("Failed to write to w3m stdin");
-                        html_filter.wait_with_output().unwrap().stdout
-                    })),
-                )).into_owned()
-                    .chars(),
-            );
-            s
-        } else {
-            String::from_utf8_lossy(&decode_rec(&body, None)).into()
-        };
+                        *v = b"Text piped through `w3m`. Press `v` to open in web browser. \n\n".to_vec();
+                        v.extend(html_filter.wait_with_output().unwrap().stdout);
+                    }
+                })),
+                )).into_owned();
         match self.mode {
             ViewMode::Normal | ViewMode::Subview => {
                 let mut t = body_text.to_string();
@@ -364,7 +359,7 @@ impl Component for MailView {
                 };
                 self.dirty = true;
             }
-            UIEventType::Input(Key::Char('r')) if self.mode.is_attachment() => {
+            UIEventType::Input(Key::Char('r')) if self.mode.is_attachment() || self.mode == ViewMode::Subview => {
                 self.mode = ViewMode::Normal;
                 self.subview.take();
                 self.dirty = true;
@@ -391,6 +386,12 @@ impl Component for MailView {
                     let op = context.accounts[self.coordinates.0].backend.operation(envelope.hash());
                     if let Some(u) = envelope.body(op).attachments().get(lidx) {
                         match u.content_type() {
+                            ContentType::MessageRfc822 => {
+                                self.mode = ViewMode::Subview;
+                                let wrapper = EnvelopeWrapper::new(u.bytes().to_vec());
+                                self.subview = Some(Box::new(EnvelopeView::new(wrapper, None, None)));
+                            },
+
                             ContentType::Text { .. } => {
                                 self.mode = ViewMode::Attachment(lidx);
                                 self.dirty = true;
