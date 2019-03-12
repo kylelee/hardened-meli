@@ -50,6 +50,10 @@ mod types;
 pub use types::*;
 
 #[macro_use]
+mod terminal;
+pub use terminal::*;
+
+#[macro_use]
 mod execute;
 use execute::*;
 
