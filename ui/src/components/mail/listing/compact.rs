@@ -88,7 +88,7 @@ impl MailboxView {
             view: ThreadView::default(),
 
             movement: None,
-            id: ComponentId::default(),
+            id: ComponentId::new_v4(),
         }
     }
     /// Fill the `self.content` `CellBuffer` with the contents of the account folder the user has
@@ -636,7 +636,7 @@ impl CompactListing {
             cursor: 0,
             dirty: true,
             populated: false,
-            id: ComponentId::default(),
+            id: ComponentId::new_v4(),
         }
     }
 }
