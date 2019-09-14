@@ -739,11 +739,9 @@ impl CompactListing {
             .duration_since(d)
             .unwrap_or_else(|_| std::time::Duration::new(std::u64::MAX, 0));
         match now.as_secs() {
-            n if n < 10 * 60 * 60 => format!("{} hours ago{}", n / (60 * 60), " ".repeat(8)),
-            n if n < 24 * 60 * 60 => format!("{} hours ago{}", n / (60 * 60), " ".repeat(7)),
-            n if n < 4 * 24 * 60 * 60 => {
-                format!("{} days ago{}", n / (24 * 60 * 60), " ".repeat(9))
-            }
+            n if n < 10 * 60 * 60 => format!("{} hours ago", n / (60 * 60),),
+            n if n < 24 * 60 * 60 => format!("{} hours ago", n / (60 * 60),),
+            n if n < 4 * 24 * 60 * 60 => format!("{} days ago", n / (24 * 60 * 60),),
             _ => envelope.datetime().format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
