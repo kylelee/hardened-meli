@@ -1,4 +1,5 @@
-name: Tests
+# SPDX-License-Identifier: EUPL-1.2
+name: Run Tests
 
 env:
   CARGO_INCREMENTAL: 0
@@ -48,7 +49,7 @@ jobs:
         name: install OS dependencies
         run: |
           apt-get update
-          apt-get install -y libdbus-1-dev pkg-config mandoc libssl-dev
+          apt-get install -y libdbus-1-dev pkg-config mandoc libssl-dev make
           #- id: cache-rustup
           #  name: Cache Rust toolchain
           #  uses: https://github.com/actions/cache@v3
@@ -56,14 +57,16 @@ jobs:
           #    path: ~/.rustup
           #    key: toolchain-${{ matrix.os }}-${{ matrix.rust }}
           #- if: ${{ steps.cache-rustup.outputs.cache-hit != 'true' }}
-      - name: Install Rust ${{ matrix.rust }}
-        uses: https://github.com/actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          components: clippy, rustfmt
-          target: ${{ matrix.target }}
-          override: true
+      - id: rustup-setup
+        name: Install rustup and toolchains
+        shell: bash
+        run: |
+          if ! command -v rustup &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail "https://sh.rustup.rs" | sh -s -- --default-toolchain none -y
+            source "${HOME}/.cargo/env"
+            echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> $GITHUB_PATH
+            rustup toolchain install --profile minimal ${{ matrix.rust }} --target ${{ matrix.target }}
+          fi
       - name: Configure cargo data directory
         # After this point, all cargo registry and crate data is stored in
         # $GITHUB_WORKSPACE/.cargo_home. This allows us to cache only the files
@@ -86,9 +89,8 @@ jobs:
           target = "${{ matrix.target }}"
           EOF
       - if: ${{ steps.cache-cargo.outputs.cache-hit != 'true' }} && matrix.target
-        name: Add lint dependencies
+        name: Add test dependencies
         run: |
-          cargo install --quiet --version 1.0.9 --target "${{ matrix.target }}" cargo-sort
           cargo install --quiet --version 0.9.54 --target "${{ matrix.target }}" cargo-nextest
       - name: cargo-check
         run: |
@@ -101,15 +103,7 @@ jobs:
         run: |
           cargo nextest run --all --no-fail-fast --all-features --future-incompat-report -E 'not (test(smtp::test::test_smtp))'
           #cargo test --all --no-fail-fast --all-features -- --nocapture --quiet
-      - name: cargo-sort
+      - name: rustdoc build
         if: success() || failure()
         run: |
-          cargo sort --check
-      - name: rustfmt
-        if: success() || failure()
-        run: |
-          cargo fmt --check --all
-      - name: clippy
-        if: success() || failure()
-        run: |
-          cargo clippy --no-deps --all-features --all --tests --examples --benches --bins
+          make build-rustdoc
