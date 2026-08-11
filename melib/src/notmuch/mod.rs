@@ -266,12 +266,7 @@ impl DbConnection {
                     let query_str = format!("{} id:{}", m.query_str.as_str(), message.msg_id_str());
                     let query: Query = Query::new(self, &query_str)?;
                     if query.count().unwrap_or(0) > 0 {
-                        let env = snapshot.insert_envelope(&message);
-                        snapshot
-                            .env_to_mailbox_index
-                            .entry(env.hash())
-                            .or_default()
-                            .push(mailbox_hash);
+                        let env = snapshot.insert_envelope(&message, mailbox_hash);
                         let mut total_lck = m.total.lock().unwrap();
                         let mut unseen_lck = m.unseen.lock().unwrap();
                         *total_lck += 1;

@@ -52,8 +52,16 @@ pub struct Snapshot {
 impl Snapshot {
     /// Convert `message` into an [`Envelope`], update inner caches and return
     /// it.
-    pub fn insert_envelope(&mut self, message: &Message<'_>) -> Envelope {
+    pub fn insert_envelope(
+        &mut self,
+        message: &Message<'_>,
+        mailbox_hash: MailboxHash,
+    ) -> Envelope {
         let env_hash = message.env_hash();
+        self.env_to_mailbox_index
+            .entry(env_hash)
+            .or_default()
+            .push(mailbox_hash);
         let mut env = Envelope::new(env_hash);
         self.message_id_index
             .insert(env_hash, message.msg_id_cstr().into());
