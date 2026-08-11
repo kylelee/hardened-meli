@@ -46,7 +46,7 @@ impl std::fmt::Debug for NotmuchDirectory {
 impl Drop for NotmuchDirectory {
     fn drop(&mut self) {
         // SAFETY: `self.inner` is a valid `notmuch_directory_t` pointer.
-        unsafe { call!(self.lib, ffi::notmuch_directory_destroy)(self.inner.as_mut()) };
+        unsafe { (self.lib.directory_destroy())(self.inner.as_mut()) };
     }
 }
 
@@ -61,7 +61,7 @@ impl NotmuchDirectory {
         NotmuchFilenames {
             path: Some(self.path.clone()),
             inner: NonNull::new(unsafe {
-                call!(self.lib, ffi::notmuch_directory_get_child_files)(self.inner.as_mut())
+                (self.lib.directory_get_child_files())(self.inner.as_mut())
             })
             .unwrap(),
             lib: self.lib.clone(),
@@ -79,7 +79,7 @@ impl NotmuchDirectory {
         NotmuchFilenames {
             path: None,
             inner: NonNull::new(unsafe {
-                call!(self.lib, ffi::notmuch_directory_get_child_files)(self.inner.as_mut())
+                (self.lib.directory_get_child_files())(self.inner.as_mut())
             })
             .unwrap(),
             lib: self.lib.clone(),
@@ -97,7 +97,7 @@ impl NotmuchDirectory {
         NotmuchFilenames {
             path: Some(self.path.clone()),
             inner: NonNull::new(unsafe {
-                call!(self.lib, ffi::notmuch_directory_get_child_directories)(self.inner.as_mut())
+                (self.lib.directory_get_child_directories())(self.inner.as_mut())
             })
             .unwrap(),
             lib: self.lib.clone(),
@@ -115,7 +115,7 @@ impl NotmuchDirectory {
         NotmuchFilenames {
             path: None,
             inner: NonNull::new(unsafe {
-                call!(self.lib, ffi::notmuch_directory_get_child_directories)(self.inner.as_mut())
+                (self.lib.directory_get_child_directories())(self.inner.as_mut())
             })
             .unwrap(),
             lib: self.lib.clone(),
@@ -134,7 +134,7 @@ impl NotmuchDirectory {
 
     pub fn mtime(&mut self) -> libc::time_t {
         // SAFETY: `self.inner` is a valid `notmuch_directory_t` pointer.
-        unsafe { call!(self.lib, ffi::notmuch_directory_get_mtime)(self.inner.as_mut()) }
+        unsafe { (self.lib.directory_get_mtime())(self.inner.as_mut()) }
     }
 
     pub fn set_mtime(&mut self, value: libc::time_t) -> Result<(), NotmuchError> {
@@ -142,7 +142,7 @@ impl NotmuchDirectory {
         unsafe {
             try_call!(
                 self.lib,
-                call!(self.lib, ffi::notmuch_directory_set_mtime)(self.inner.as_mut(), value)
+                (self.lib.directory_set_mtime())(self.inner.as_mut(), value)
             )
         }
     }
@@ -166,7 +166,7 @@ impl std::fmt::Debug for NotmuchFilenames {
 impl Drop for NotmuchFilenames {
     fn drop(&mut self) {
         // SAFETY: `self.inner` is a valid `notmuch_filenames_t` pointer.
-        unsafe { call!(self.lib, ffi::notmuch_filenames_destroy)(self.inner.as_mut()) };
+        unsafe { (self.lib.filenames_destroy())(self.inner.as_mut()) };
     }
 }
 
@@ -175,11 +175,11 @@ impl Iterator for NotmuchFilenames {
 
     fn next(&mut self) -> Option<Self::Item> {
         // SAFETY: `self.inner` is a valid `notmuch_filenames_t` pointer.
-        if unsafe { call!(self.lib, ffi::notmuch_filenames_valid)(self.inner.as_mut()) } == 0 {
+        if unsafe { (self.lib.filenames_valid())(self.inner.as_mut()) } == 0 {
             return None;
         }
         // SAFETY: `self.inner` is a valid `notmuch_filenames_t` pointer.
-        let next_ptr = unsafe { call!(self.lib, ffi::notmuch_filenames_get)(self.inner.as_mut()) };
+        let next_ptr = unsafe { (self.lib.filenames_get())(self.inner.as_mut()) };
         if next_ptr.is_null() {
             return None;
         }
@@ -197,7 +197,7 @@ impl Iterator for NotmuchFilenames {
             next_basename.into()
         };
         // SAFETY: `self.inner` is a valid `notmuch_filenames_t` pointer.
-        unsafe { call!(self.lib, ffi::notmuch_filenames_move_to_next)(self.inner.as_mut()) };
+        unsafe { (self.lib.filenames_move_to_next())(self.inner.as_mut()) };
         Some(ret)
     }
 }
@@ -231,7 +231,7 @@ impl Iterator for NotmuchDirectories {
         let mut directory_ptr = std::ptr::null_mut();
         // SAFETY: `self.db`, `path`, `directory_ptr` are all valid.
         if unsafe {
-            call!(self.lib, ffi::notmuch_database_get_directory)(
+            (self.lib.database_get_directory())(
                 self.db.lock().unwrap().as_mut(),
                 path.as_ptr(),
                 &raw mut directory_ptr,

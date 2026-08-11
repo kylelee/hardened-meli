@@ -25,10 +25,7 @@ use crate::{
     email::HeaderName,
     error::{Error, ErrorKind, Result},
     notmuch::{
-        ffi::{
-            notmuch_messages_t, notmuch_query_count_messages, notmuch_query_create,
-            notmuch_query_destroy, notmuch_query_search_messages, notmuch_query_t,
-        },
+        ffi::{notmuch_messages_t, notmuch_query_t},
         DbConnection, MessageIterator, NotmuchLibrary,
     },
 };
@@ -44,10 +41,7 @@ impl<'s> Query<'s> {
         let lib: Arc<NotmuchLibrary> = database.lib.clone();
         let query_cstr = CString::new(query_str)?;
         let query: *mut notmuch_query_t = unsafe {
-            call!(lib, notmuch_query_create)(
-                database.inner.lock().unwrap().as_mut(),
-                query_cstr.as_ptr(),
-            )
+            (lib.query_create())(database.inner.lock().unwrap().as_mut(), query_cstr.as_ptr())
         };
         Ok(Query {
             lib,
@@ -62,10 +56,7 @@ impl<'s> Query<'s> {
         unsafe {
             try_call!(
                 self.lib,
-                call!(self.lib, notmuch_query_count_messages)(
-                    self.ptr.as_ptr(),
-                    std::ptr::addr_of_mut!(count)
-                )
+                (self.lib.query_count_messages())(self.ptr.as_ptr(), std::ptr::addr_of_mut!(count))
             )
             .map_err(|err| err.0)?;
         }
@@ -75,10 +66,7 @@ impl<'s> Query<'s> {
     pub fn search(&'s self) -> Result<MessageIterator<'s>> {
         let mut messages: *mut notmuch_messages_t = std::ptr::null_mut();
         let status = unsafe {
-            call!(self.lib, notmuch_query_search_messages)(
-                self.ptr.as_ptr(),
-                std::ptr::addr_of_mut!(messages),
-            )
+            (self.lib.query_search_messages())(self.ptr.as_ptr(), std::ptr::addr_of_mut!(messages))
         };
         if status != 0 {
             return Err(Error::new(format!(
@@ -112,7 +100,7 @@ impl<'s> Query<'s> {
 impl Drop for Query<'_> {
     fn drop(&mut self) {
         unsafe {
-            call!(self.lib, notmuch_query_destroy)(self.ptr.as_ptr());
+            (self.lib.query_destroy())(self.ptr.as_ptr());
         }
     }
 }

@@ -23,14 +23,7 @@ use std::{borrow::Cow, cell::Cell, marker::PhantomData, ptr::NonNull};
 
 use super::*;
 use crate::{
-    notmuch::ffi::{
-        notmuch_database_find_message, notmuch_message_add_tag, notmuch_message_destroy,
-        notmuch_message_freeze, notmuch_message_get_date, notmuch_message_get_filename,
-        notmuch_message_get_header, notmuch_message_get_message_id, notmuch_message_get_replies,
-        notmuch_message_remove_tag, notmuch_message_tags_to_maildir_flags, notmuch_message_thaw,
-        notmuch_messages_get, notmuch_messages_move_to_next, notmuch_messages_valid,
-        NOTMUCH_STATUS_READ_ONLY_DATABASE, NOTMUCH_STATUS_UNBALANCED_FREEZE_THAW,
-    },
+    notmuch::ffi::{NOTMUCH_STATUS_READ_ONLY_DATABASE, NOTMUCH_STATUS_UNBALANCED_FREEZE_THAW},
     thread::{ThreadHash, ThreadNode, ThreadNodeHash},
 };
 
@@ -47,7 +40,7 @@ impl<'m> Message<'m> {
         let mut message: *mut ffi::notmuch_message_t = std::ptr::null_mut();
         let lib = db.lib.clone();
         unsafe {
-            call!(lib, notmuch_database_find_message)(
+            (lib.database_find_message())(
                 db.inner.lock().unwrap().as_mut(),
                 msg_id.as_ptr(),
                 std::ptr::addr_of_mut!(message),
@@ -71,7 +64,7 @@ impl<'m> Message<'m> {
         let mut message: *mut ffi::notmuch_message_t = std::ptr::null_mut();
         let lib = db.lib.clone();
         unsafe {
-            call!(lib, ffi::notmuch_database_find_message_by_filename)(
+            (lib.database_find_message_by_filename())(
                 db.inner.lock().unwrap().as_mut(),
                 path.as_ptr(),
                 std::ptr::addr_of_mut!(message),
@@ -87,16 +80,14 @@ impl<'m> Message<'m> {
     }
 
     pub fn env_hash(&self) -> EnvelopeHash {
-        let msg_id =
-            unsafe { call!(self.lib, notmuch_message_get_message_id)(self.message.as_ptr()) };
+        let msg_id = unsafe { (self.lib.message_get_message_id())(self.message.as_ptr()) };
         let c_str = unsafe { CStr::from_ptr(msg_id) };
         EnvelopeHash::from_bytes(c_str.to_bytes_with_nul())
     }
 
     pub fn header(&self, header: &CStr) -> Option<&[u8]> {
-        let header_val = unsafe {
-            call!(self.lib, notmuch_message_get_header)(self.message.as_ptr(), header.as_ptr())
-        };
+        let header_val =
+            unsafe { (self.lib.message_get_header())(self.message.as_ptr(), header.as_ptr()) };
         if header_val.is_null() {
             None
         } else {
@@ -118,8 +109,7 @@ impl<'m> Message<'m> {
     ///
     /// See also [`Message::msg_id_cstr`] and [`Message::msg_id_str`].
     pub fn msg_id_cstr(&self) -> &CStr {
-        let msg_id =
-            unsafe { call!(self.lib, notmuch_message_get_message_id)(self.message.as_ptr()) };
+        let msg_id = unsafe { (self.lib.message_get_message_id())(self.message.as_ptr()) };
         unsafe { CStr::from_ptr(msg_id) }
     }
 
@@ -132,7 +122,7 @@ impl<'m> Message<'m> {
     }
 
     pub fn date(&self) -> crate::UnixTimestamp {
-        (unsafe { call!(self.lib, notmuch_message_get_date)(self.message.as_ptr()) }) as u64
+        (unsafe { (self.lib.message_get_date())(self.message.as_ptr()) }) as u64
     }
 
     pub fn into_envelope(
@@ -188,7 +178,7 @@ impl<'m> Message<'m> {
     pub fn replies_iter(&self) -> Option<MessageIterator<'_>> {
         if self.is_from_thread {
             let messages = Some(NonNull::new(unsafe {
-                call!(self.lib, notmuch_message_get_replies)(self.message.as_ptr())
+                (self.lib.message_get_replies())(self.message.as_ptr())
             })?);
             Some(MessageIterator {
                 lib: self.lib.clone(),
@@ -223,7 +213,7 @@ impl<'m> Message<'m> {
         if let Err(err) = unsafe {
             try_call!(
                 self.lib,
-                call!(self.lib, notmuch_message_add_tag)(self.message.as_ptr(), tag.as_ptr())
+                (self.lib.message_add_tag())(self.message.as_ptr(), tag.as_ptr())
             )
         } {
             return Err(Error::new("Could not set tag.").set_source(Some(Arc::new(err))));
@@ -236,7 +226,7 @@ impl<'m> Message<'m> {
         if let Err(err) = unsafe {
             try_call!(
                 self.lib,
-                call!(self.lib, notmuch_message_remove_tag)(self.message.as_ptr(), tag.as_ptr())
+                (self.lib.message_remove_tag())(self.message.as_ptr(), tag.as_ptr())
             )
         } {
             return Err(Error::new("Could not set tag.").set_source(Some(Arc::new(err))));
@@ -253,7 +243,7 @@ impl<'m> Message<'m> {
         if let Err(err) = unsafe {
             try_call!(
                 self.lib,
-                call!(self.lib, notmuch_message_tags_to_maildir_flags)(self.message.as_ptr())
+                (self.lib.message_tags_to_maildir_flags())(self.message.as_ptr())
             )
         } {
             return Err(Error::new("Could not set flags.").set_source(Some(Arc::new(err))));
@@ -266,8 +256,7 @@ impl<'m> Message<'m> {
     /// Quoted from `libnotmuch` C header:
     ///
     /// The returned filename is an absolute filename, (the initial
-    /// component will match
-    /// [`notmuch_database_get_path`](crate::notmuch::ffi::notmuch_database_get_path)).
+    /// component will match `notmuch_database_get_path`).
     ///
     /// The returned string belongs to the message so should not be
     /// modified or freed by the caller (nor should it be referenced after
@@ -276,14 +265,11 @@ impl<'m> Message<'m> {
     /// Note: If this message corresponds to multiple files in the mail
     /// store, (that is, multiple files contain identical message IDs),
     /// this function will arbitrarily return a single one of those
-    /// filenames. See
-    /// [`notmuch_message_get_filenames`](crate::notmuch::ffi::notmuch_message_get_filenames)
-    /// for returning the
+    /// filenames. See `notmuch_message_get_filenames` for returning the
     /// complete list of filenames.
     #[doc(alias = "notmuch_message_get_filename")]
     pub fn get_filename(&self) -> &OsStr {
-        let fs_path =
-            unsafe { call!(self.lib, notmuch_message_get_filename)(self.message.as_ptr()) };
+        let fs_path = unsafe { (self.lib.message_get_filename())(self.message.as_ptr()) };
         let c_str = unsafe { CStr::from_ptr(fs_path) };
         OsStr::from_bytes(c_str.to_bytes())
     }
@@ -293,10 +279,10 @@ impl<'m> Message<'m> {
     /// Quoted from `libnotmuch` C header:
     ///
     /// This means that changes to the message state, (via
-    /// [`notmuch_message_add_tag`], [`notmuch_message_remove_tag`](, and
-    /// [`notmuch_message_remove_all_tags`](crate::notmuch::ffi::notmuch_message_remove_all_tags)), will not be committed to the
+    /// `notmuch_message_add_tag`, `notmuch_message_remove_tag`(, and
+    /// `notmuch_message_remove_all_tags`), will not be committed to the
     /// database until the message is thawed with
-    /// [`notmuch_message_thaw`].
+    /// `notmuch_message_thaw`.
     ///
     /// Multiple calls to freeze/thaw are valid and these calls will
     /// "stack". That is there must be as many calls to thaw as to freeze
@@ -324,7 +310,7 @@ impl<'m> Message<'m> {
     /// Imagine the example above without freeze/thaw and the operation
     /// somehow getting interrupted. This could result in the message being
     /// left with no tags if the interruption happened after
-    /// [`notmuch_message_remove_all_tags`](crate::notmuch::ffi::notmuch_message_remove_all_tags) but before [`notmuch_message_add_tag`].
+    /// `notmuch_message_remove_all_tags` but before `notmuch_message_add_tag`.
     ///
     /// Return value:
     ///
@@ -334,7 +320,7 @@ impl<'m> Message<'m> {
     #[doc(alias = "notmuch_message_freeze")]
     pub fn freeze(&self) {
         if NOTMUCH_STATUS_READ_ONLY_DATABASE
-            == unsafe { call!(self.lib, notmuch_message_freeze)(self.message.as_ptr()) }
+            == unsafe { (self.lib.message_freeze())(self.message.as_ptr()) }
         {
             return;
         }
@@ -358,7 +344,7 @@ impl<'m> Message<'m> {
     /// - [`NOTMUCH_STATUS_SUCCESS`](crate::notmuch::ffi::NOTMUCH_STATUS_SUCCESS): Message successfully thawed, (or at least its frozen count has successfully been reduced by 1).
     /// - [`NOTMUCH_STATUS_UNBALANCED_FREEZE_THAW`]: An attempt was made to thaw
     ///   an unfrozen message. That is, there have been an unbalanced number of
-    ///   calls to [`notmuch_message_freeze`] and [`notmuch_message_thaw`].
+    ///   calls to `notmuch_message_freeze` and `notmuch_message_thaw`.
     #[doc(alias = "notmuch_message_thaw")]
     pub fn thaw(&self) {
         if self.freezes.get() == 0 {
@@ -366,7 +352,7 @@ impl<'m> Message<'m> {
         }
 
         if NOTMUCH_STATUS_UNBALANCED_FREEZE_THAW
-            == unsafe { call!(self.lib, notmuch_message_thaw)(self.message.as_ptr()) }
+            == unsafe { (self.lib.message_thaw())(self.message.as_ptr()) }
         {
             return;
         }
@@ -379,7 +365,7 @@ impl Drop for Message<'_> {
         while self.freezes.get() > 0 {
             self.thaw();
         }
-        unsafe { call!(self.lib, notmuch_message_destroy)(self.message.as_ptr()) };
+        unsafe { (self.lib.message_destroy())(self.message.as_ptr()) };
     }
 }
 
@@ -395,10 +381,10 @@ impl<'q> Iterator for MessageIterator<'q> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let messages = self.messages?;
-        if unsafe { call!(self.lib, notmuch_messages_valid)(messages.as_ptr()) } == 1 {
-            let message = unsafe { call!(self.lib, notmuch_messages_get)(messages.as_ptr()) };
+        if unsafe { (self.lib.messages_valid())(messages.as_ptr()) } == 1 {
+            let message = unsafe { (self.lib.messages_get())(messages.as_ptr()) };
             unsafe {
-                call!(self.lib, notmuch_messages_move_to_next)(messages.as_ptr());
+                (self.lib.messages_move_to_next())(messages.as_ptr());
             }
             Some(Message {
                 lib: self.lib.clone(),

@@ -38,24 +38,13 @@ use crate::{
     utils::shellexpand::ShellExpandTrait,
 };
 
-macro_rules! call {
-    ($lib:expr, $func:ty) => {{
-        const S: &str = stringify!($func);
-        let func: libloading::Symbol<$func> = $lib
-            .inner
-            .get(S.split("::").last().unwrap_or(S).trim().as_bytes())
-            .unwrap();
-        func
-    }};
-}
-
 macro_rules! try_call {
     ($lib:expr, $call:expr) => {{
         let status = $call;
         if status == $crate::notmuch::ffi::NOTMUCH_STATUS_SUCCESS {
             Ok(())
         } else {
-            let c_str = call!($lib, $crate::notmuch::ffi::notmuch_status_to_string)(status);
+            let c_str = ($lib.status_to_string())(status);
             Err($crate::notmuch::NotmuchError(
                 std::ffi::CStr::from_ptr(c_str)
                     .to_string_lossy()
@@ -69,8 +58,10 @@ pub mod query;
 use query::{MelibQueryToNotmuchQuery, Query};
 pub mod mailbox;
 use mailbox::NotmuchMailbox;
+pub mod api;
 pub mod ffi;
-use ffi::{notmuch_database_close, notmuch_database_destroy, notmuch_database_open};
+
+use api::NotmuchLibrary;
 
 mod directory;
 mod message;
@@ -99,12 +90,6 @@ impl DbPointer {
 }
 
 #[derive(Debug)]
-pub struct NotmuchLibrary {
-    pub inner: libloading::Library,
-    pub dlpath: Cow<'static, str>,
-}
-
-#[derive(Debug)]
 pub struct DbConnection {
     pub lib: Arc<NotmuchLibrary>,
     pub inner: Arc<Mutex<DbPointer>>,
@@ -116,7 +101,7 @@ impl DbConnection {
         let path_ptr = path_c.as_ptr();
         let mut database: *mut ffi::notmuch_database_t = std::ptr::null_mut();
         let status = unsafe {
-            call!(lib, notmuch_database_open)(
+            (lib.database_open())(
                 path_ptr,
                 if write {
                     ffi::NOTMUCH_DATABASE_MODE_READ_WRITE
@@ -158,7 +143,7 @@ impl DbConnection {
         unsafe {
             try_call!(
                 self.lib,
-                call!(self.lib, ffi::notmuch_database_reopen)(
+                (self.lib.database_reopen())(
                     self.inner.lock().unwrap().as_mut(),
                     if write {
                         ffi::NOTMUCH_DATABASE_MODE_READ_WRITE
@@ -179,7 +164,7 @@ impl DbConnection {
     ) -> Result<Option<BackendEvent>> {
         let mut stack: VecDeque<CString> = VecDeque::new();
         let mut events = vec![];
-        stack.push_back(self.mail_root()?.into());
+        stack.push_back(self.mail_root()?);
         while let Some(path) = stack.pop_front() {
             let mut directory_snapshot: Option<NotmuchDirectory> =
                 snapshot.connection.directory(&path)?;
@@ -323,18 +308,17 @@ impl DbConnection {
     /// Return the mail root
     /// ([`NOTMUCH_CONFIG_MAIL_ROOT`](ffi::notmuch_config_key_t::NOTMUCH_CONFIG_MAIL_ROOT))
     /// of the given database's configuration.
-    pub fn mail_root(&self) -> Result<&CStr> {
-        let ptr = unsafe {
-            call!(self.lib, ffi::notmuch_config_get)(
-                self.inner.lock().unwrap().as_mut(),
-                ffi::notmuch_config_key_t::NOTMUCH_CONFIG_MAIL_ROOT,
-            )
-        };
-        // let ptr = unsafe {
-        //     call!(self.lib,
-        // ffi::notmuch_database_get_path)(self.inner.lock().unwrap().as_mut())
-        // };
-        Ok(unsafe { CStr::from_ptr(ptr) })
+    pub fn mail_root(&self) -> Result<CString> {
+        if let Some(v) = self.lib.notmuch_config_get(
+            &mut self.inner.lock().unwrap(),
+            ffi::notmuch_config_key_t::NOTMUCH_CONFIG_MAIL_ROOT,
+        ) {
+            return Ok(v);
+        }
+        Err(
+            Error::new("Notmuch database config has no NOTMUCH_CONFIG_MAIL_ROOT key set")
+                .set_kind(ErrorKind::ValueError),
+        )
     }
 
     /// Return mail root path of database as a [`NotmuchDirectory`].
@@ -347,7 +331,7 @@ impl DbConnection {
         unsafe {
             try_call!(
                 self.lib,
-                call!(self.lib, ffi::notmuch_database_get_directory)(
+                (self.lib.database_get_directory())(
                     self.inner.lock().unwrap().as_mut(),
                     path.as_ptr(),
                     &raw mut ptr
@@ -356,7 +340,7 @@ impl DbConnection {
         }?;
         Ok(NonNull::new(ptr).map(|inner| NotmuchDirectory {
             lib: self.lib.clone(),
-            path: path.into(),
+            path,
             db: self.inner.clone(),
             inner,
         }))
@@ -371,7 +355,7 @@ impl DbConnection {
         unsafe {
             try_call!(
                 self.lib,
-                call!(self.lib, ffi::notmuch_database_get_directory)(
+                (self.lib.database_get_directory())(
                     self.inner.lock().unwrap().as_mut(),
                     path.as_ptr(),
                     &raw mut ptr
@@ -412,17 +396,11 @@ impl Drop for DbConnection {
     fn drop(&mut self) {
         let mut inner = self.inner.lock().unwrap();
         unsafe {
-            if let Err(err) = try_call!(
-                self.lib,
-                call!(self.lib, notmuch_database_close)(inner.as_mut())
-            ) {
+            if let Err(err) = try_call!(self.lib, (self.lib.database_close())(inner.as_mut())) {
                 log::error!("Could not call C notmuch_database_close: {err}");
                 return;
             }
-            if let Err(err) = try_call!(
-                self.lib,
-                call!(self.lib, notmuch_database_destroy)(inner.as_mut())
-            ) {
+            if let Err(err) = try_call!(self.lib, (self.lib.database_destroy())(inner.as_mut())) {
                 log::error!("Could not call C notmuch_database_destroy: {err}");
             }
         }
@@ -473,8 +451,8 @@ impl NotmuchDb {
         } else {
             false
         };
-        let lib = Arc::new(NotmuchLibrary {
-            inner: unsafe {
+        let lib = Arc::new(NotmuchLibrary::new(
+            unsafe {
                 match libloading::Library::new(dlpath.as_ref()) {
                     Ok(l) => l,
                     Err(err) => {
@@ -495,7 +473,7 @@ impl NotmuchDb {
                 }
             },
             dlpath,
-        });
+        ));
         let mut path = Path::new(s.root_mailbox.as_str()).expand();
         if !path.try_exists().unwrap_or(false) {
             return Err(Error::new(format!(

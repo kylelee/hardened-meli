@@ -18,14 +18,10 @@
  * You should have received a copy of the GNU General Public License
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
+
 use super::*;
 use crate::{
-    notmuch::ffi::{
-        notmuch_thread_destroy, notmuch_thread_get_messages, notmuch_thread_get_newest_date,
-        notmuch_thread_get_thread_id, notmuch_thread_get_total_messages, notmuch_thread_t,
-        notmuch_threads_get, notmuch_threads_move_to_next, notmuch_threads_t,
-        notmuch_threads_valid,
-    },
+    notmuch::ffi::{notmuch_thread_t, notmuch_threads_t},
     thread::ThreadHash,
 };
 
@@ -41,7 +37,7 @@ impl<'q> Thread<'q> {
         let thread_id = unsafe {
             // SAFETY:
             // All pointers used here are NonNull<_> wrapped.
-            call!(self.lib, notmuch_thread_get_thread_id)(self.inner.as_ptr())
+            (self.lib.thread_get_thread_id())(self.inner.as_ptr())
         };
         let c_str = unsafe { CStr::from_ptr(thread_id) };
         ThreadHash::from(c_str.to_bytes())
@@ -52,7 +48,7 @@ impl<'q> Thread<'q> {
         (unsafe {
             // SAFETY:
             // All pointers used here are NonNull<_> wrapped.
-            call!(self.lib, notmuch_thread_get_newest_date)(self.inner.as_ptr())
+            (self.lib.thread_get_newest_date())(self.inner.as_ptr())
         }) as u64
     }
 
@@ -61,7 +57,7 @@ impl<'q> Thread<'q> {
         (unsafe {
             // SAFETY:
             // All pointers used here are NonNull<_> wrapped.
-            call!(self.lib, notmuch_thread_get_total_messages)(self.inner.as_ptr())
+            (self.lib.thread_get_total_messages())(self.inner.as_ptr())
         }) as usize
     }
 
@@ -74,7 +70,7 @@ impl<'q> Thread<'q> {
         let messages = NonNull::new(unsafe {
             // SAFETY:
             // All pointers used here are NonNull<_> wrapped.
-            call!(self.lib, notmuch_thread_get_messages)(self.inner.as_ptr())
+            (self.lib.thread_get_messages())(self.inner.as_ptr())
         });
         MessageIterator {
             lib: self.lib.clone(),
@@ -99,7 +95,7 @@ impl Drop for Thread<'_> {
         unsafe {
             // SAFETY:
             // All pointers used here are NonNull<_> wrapped.
-            call!(self.lib, notmuch_thread_destroy)(self.inner.as_ptr())
+            (self.lib.thread_destroy())(self.inner.as_ptr())
         }
     }
 }
@@ -126,17 +122,17 @@ impl<'q> Iterator for ThreadsIterator<'q> {
     type Item = Thread<'q>;
     fn next(&mut self) -> Option<Self::Item> {
         let inner = self.inner?;
-        if unsafe { call!(self.lib, notmuch_threads_valid)(inner.as_ptr()) } == 1 {
+        if unsafe { (self.lib.threads_valid())(inner.as_ptr()) } == 1 {
             let Some(thread_inner) = NonNull::new(unsafe {
                 // SAFETY:
                 // All pointers used here are NonNull<_> wrapped.
-                call!(self.lib, notmuch_threads_get)(inner.as_ptr())
+                (self.lib.threads_get())(inner.as_ptr())
             }) else {
                 self.inner = None;
                 return None;
             };
             unsafe {
-                call!(self.lib, notmuch_threads_move_to_next)(inner.as_ptr());
+                (self.lib.threads_move_to_next())(inner.as_ptr());
             }
             Some(Thread {
                 lib: self.lib.clone(),
