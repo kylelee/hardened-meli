@@ -856,24 +856,25 @@ impl MailBackend for NotmuchDb {
         Ok(Box::pin(try_fn_stream(|emitter| async move {
             // Move watcher to prevent it being Dropped.
             let _watcher = watcher;
-            // Set to non-zero value whenever a filesystem event is received, and poll more
-            // frequently as long as it is non-zero. This allows us to be more sensitive
+            // Set to true whenever a filesystem event is received, and poll more
+            // frequently as long as it is true. This allows us to be more sensitive
             // about updates whenever notmuch-new is more likely to have been
             // called.
-            let mut fs_event_counter: u32 = 10;
+            let mut is_fs_event: bool = true;
             loop {
-                let sleep_fut = crate::utils::futures::sleep(if fs_event_counter > 0 {
-                    std::time::Duration::from_secs(2)
-                } else {
-                    std::time::Duration::from_secs(30)
-                });
-                //sleep_fut.await;
+                let sleep_fut =
+                    crate::utils::futures::sleep(std::time::Duration::from_secs(if is_fs_event {
+                        is_fs_event = false;
+                        2
+                    } else {
+                        30
+                    }));
                 match futures::future::select(rx.next(), std::pin::pin!(sleep_fut)).await {
                     futures::future::Either::Left((None, _)) => {
                         break;
                     }
                     futures::future::Either::Left((Some(ev), _)) => {
-                        fs_event_counter = 10;
+                        is_fs_event = true;
                         ev?;
                     }
                     futures::future::Either::Right((_, _)) => {}
