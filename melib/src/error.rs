@@ -115,7 +115,6 @@ impl ErrorKind {
     is_variant! { is_oserror, OSError(_) }
     is_variant! { is_protocol_error, ProtocolError }
     is_variant! { is_protocol_not_supported, ProtocolNotSupported }
-    is_variant! { is_timeout, TimedOut }
     is_variant! { is_value_error, ValueError }
 
     #[inline]
@@ -131,6 +130,11 @@ impl ErrorKind {
             || self.is_protocol_error()
             || self.is_protocol_not_supported()
             || self.is_value_error())
+    }
+
+    #[inline]
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::TimedOut) || matches!(self, Self::Network(ref k) if k.is_timeout())
     }
 }
 

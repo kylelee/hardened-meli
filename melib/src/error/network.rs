@@ -267,6 +267,12 @@ impl NetworkErrorKind {
             ConnectionFailed | TLSConnectionFailed | InvalidTLSConnection
         )
     }
+
+    /// Error kind means there has been a timeout
+    pub const fn is_timeout(&self) -> bool {
+        use NetworkErrorKind::*;
+        matches!(self, Timeout | RequestTimeout | GatewayTimeout)
+    }
 }
 
 #[cfg(feature = "http")]
