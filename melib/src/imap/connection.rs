@@ -67,7 +67,7 @@ use crate::{
     imap::{
         protocol_parser::{
             self, id_ext::id_ext_response, ImapLineSplit, ImapResponse, RequiredResponses,
-            ResponseCode, SelectResponse,
+            SelectResponse,
         },
         search::ToImapSearch,
         Capabilities, ImapServerConf, UIDStore, UID,
@@ -1169,10 +1169,10 @@ impl ImapConnection {
 
             match self.server_conf.protocol {
                 ImapProtocol::IMAP { .. } if response.trim().is_empty() => {
-                    let r: ImapResponse =
-                        ImapResponse::Bye(ResponseCode::Alert("Disconnected".into()));
-                    self.stream = Err(Error::new("Offline"));
-                    r.into()
+                    let err: Error = Error::new("Disconnected")
+                        .set_kind(ErrorKind::Network(NetworkErrorKind::ConnectionFailed));
+                    self.stream = Err(err.clone());
+                    Err(err)
                 }
                 ImapProtocol::IMAP { .. } => {
                     let r: ImapResponse = ImapResponse::try_from(response.as_slice())?;
@@ -1237,6 +1237,12 @@ impl ImapConnection {
                         } else {
                             ret.extend_from_slice(l);
                         }
+                    }
+                    if response.is_empty() && ret.is_empty() && !required_responses.is_empty() {
+                        let err: Error = Error::new("Disconnected")
+                            .set_kind(ErrorKind::Network(NetworkErrorKind::ConnectionFailed));
+                        self.stream = Err(err.clone());
+                        return Err(err);
                     }
                     Ok(())
                 }

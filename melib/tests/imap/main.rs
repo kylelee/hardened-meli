@@ -1041,6 +1041,7 @@ mod tests {
                 "use_tls".to_string() => "false".to_string(),
                 // Important for testing, because we expect only one connection to be used.
                 "use_connection_pool".to_string() => "false".to_string(),
+                "timeout".to_string() => 1_u64.to_string(),
             },
         };
 
@@ -1264,10 +1265,22 @@ hello world 3.
             watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
             main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
             loops_handle.join().unwrap();
-            let (value1, _rest) = watch_fut.await;
+            let (mut value1, rest) = watch_fut.await;
+            let watch_fut = rest.into_future();
+            if matches!(
+                value1,
+                Some(Ok(
+                    BackendEvent::Refresh(RefreshEvent {
+                        kind: RefreshEventKind::Failure(ref err),
+                        ..
+                    })))
+                if err.summary == "Disconnected"
+            ) {
+                value1 = watch_fut.await.0;
+            }
             if let Some(val) = value1 {
                 if !(matches!(val, Err(ref err) if matches!(err.kind, ErrorKind::OSError(nix::errno::Errno::EPIPE | nix::errno::Errno::ECONNRESET)))
-                    || matches!(val, Err(ref err) if err.summary == "Offline"))
+                    || matches!(val, Err(ref err) if err.summary == "Disconnected"))
                 {
                     panic!(
                         "Expected watch TCP connection to have disconnected with \
