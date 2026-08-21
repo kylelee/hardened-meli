@@ -123,7 +123,6 @@ impl ErrorKind {
             || self.is_configuration()
             || self.is_bug()
             || self.is_external()
-            || (self.is_network() && !self.is_network_down())
             || self.is_not_implemented()
             || self.is_not_supported()
             || self.is_not_found()
