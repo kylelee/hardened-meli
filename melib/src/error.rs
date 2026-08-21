@@ -358,17 +358,7 @@ impl Error {
 
     #[inline]
     pub fn is_recoverable(&self) -> bool {
-        !(self.kind.is_authentication()
-            || self.kind.is_configuration()
-            || self.kind.is_bug()
-            || self.kind.is_external()
-            || (self.kind.is_network() && !self.kind.is_network_down())
-            || self.kind.is_not_implemented()
-            || self.kind.is_not_supported()
-            || self.kind.is_not_found()
-            || self.kind.is_protocol_error()
-            || self.kind.is_protocol_not_supported()
-            || self.kind.is_value_error())
+        self.kind.is_recoverable()
     }
 
     /// Display error chain to user.
