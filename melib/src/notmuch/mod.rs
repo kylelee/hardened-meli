@@ -841,7 +841,12 @@ impl MailBackend for NotmuchDb {
 
         let (mut tx, mut rx) = mpsc::channel(16);
         let watcher = RecommendedWatcher::new(
-            move |res| {
+            move |res: notify::Result<notify::Event>| {
+                use notify::event::EventKind;
+
+                if matches!(res, Ok(ref ev) if matches!(ev.kind, EventKind::Access(_) | EventKind::Other)) {
+                    return;
+                }
                 futures::executor::block_on(async {
                     _ = tx.send(res).await;
                 })
