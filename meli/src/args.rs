@@ -68,6 +68,8 @@ pub enum SubCommand {
     PrintConfigPath,
     /// edit configuration files with EDITOR/VISUAL.
     EditConfig,
+    // We don't put stuff in backticks because clap completions evaluate them.
+    #[expect(clippy::doc_markdown)]
     /// create a sample configuration file with available configuration options.
     /// If PATH is not specified, meli will try to create it in
     /// XDG_CONFIG_HOME/meli/config.toml. Path - will output to standard
@@ -77,6 +79,8 @@ pub enum SubCommand {
         #[structopt(value_name = "NEW_CONFIG_PATH", parse(from_os_str = try_path_or_stdio))]
         path: Option<PathOrStdio>,
     },
+    // We don't put stuff in backticks because clap completions evaluate them.
+    #[expect(clippy::doc_markdown)]
     /// test a configuration file for syntax issues or missing options.
     /// If PATH is not specified, meli will try to read it from
     /// XDG_CONFIG_HOME/meli/config.toml. Path - will read input from
@@ -103,6 +107,13 @@ pub enum SubCommand {
     #[structopt(display_order = 6)]
     /// Print compile time feature flags of this binary
     CompiledWith,
+    /// Generate shell completions and print them to stdout.
+    #[structopt(display_order = 7)]
+    Completions {
+        /// Shell to generate completions for.
+        #[structopt(possible_values = &structopt::clap::Shell::variants(), case_insensitive = true)]
+        shell: structopt::clap::Shell,
+    },
     /// Print log file location.
     PrintLogPath,
     /// View mail from input file.
@@ -247,6 +258,10 @@ impl Opt {
             }
             SubCommand::CompiledWith => {
                 subcommands::compiled_with()
+            }
+            SubCommand::Completions { shell } => {
+                Self::clap().gen_completions_to("meli", shell, &mut std::io::stdout());
+                Ok(())
             }
             SubCommand::PrintLoadedThemes => {
                 let s = ret_err!(conf::FileSettings::new());
