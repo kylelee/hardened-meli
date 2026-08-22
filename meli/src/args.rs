@@ -66,11 +66,11 @@ pub enum SubCommand {
     /// print location of configuration file that will be loaded on normal app
     /// startup.
     PrintConfigPath,
-    /// edit configuration files with `$EDITOR`/`$VISUAL`.
+    /// edit configuration files with EDITOR/VISUAL.
     EditConfig,
     /// create a sample configuration file with available configuration options.
-    /// If `PATH` is not specified, meli will try to create it in
-    /// `$XDG_CONFIG_HOME/meli/config.toml`. Path `-` will output to standard
+    /// If PATH is not specified, meli will try to create it in
+    /// XDG_CONFIG_HOME/meli/config.toml. Path - will output to standard
     /// output instead.
     #[structopt(display_order = 1)]
     CreateConfig {
@@ -78,8 +78,8 @@ pub enum SubCommand {
         path: Option<PathOrStdio>,
     },
     /// test a configuration file for syntax issues or missing options.
-    /// If `PATH` is not specified, meli will try to read it from
-    /// `$XDG_CONFIG_HOME/meli/config.toml`. Path `-` will read input from
+    /// If PATH is not specified, meli will try to read it from
+    /// XDG_CONFIG_HOME/meli/config.toml. Path - will read input from
     /// standard input instead.
     #[structopt(display_order = 2)]
     TestConfig {
@@ -94,8 +94,8 @@ pub enum SubCommand {
     /// print documentation page and exit (Piping to a pager is recommended.).
     Man(ManOpt),
     #[structopt(display_order = 5)]
-    /// Install manual pages to the first location provided by `$MANPATH` /
-    /// `manpath(1)`, unless you specify the directory as an argument.
+    /// Install manual pages to the first location provided by MANPATH /
+    /// manpath(1), unless you specify the directory as an argument.
     InstallMan {
         #[structopt(value_name = "DESTINATION_PATH", parse(from_os_str))]
         destination_path: Option<PathBuf>,
@@ -114,7 +114,7 @@ pub enum SubCommand {
 
 #[derive(Debug, StructOpt)]
 pub struct ManOpt {
-    /// If set, output text in stdout instead of spawning `$PAGER`.
+    /// If set, output text in stdout instead of spawning PAGER.
     #[cfg(feature = "cli-docs")]
     #[cfg_attr(feature = "cli-docs", structopt(long = "no-raw", alias = "no-raw"))]
     pub no_raw: bool,
@@ -162,7 +162,7 @@ pub enum PublicInboxOpt {
         /// fetched.
         #[structopt(short, long)]
         thread: bool,
-        /// Default: save to mbox in current directory. Use `-` for stdout.
+        /// Default: save to mbox in current directory. Use - for stdout.
         #[structopt(long, value_name = "OUTPUT", parse(from_os_str = try_path_or_stdio))]
         output: Option<PathOrStdio>,
         #[structopt(value_name = "MESSAGE_ID")]
