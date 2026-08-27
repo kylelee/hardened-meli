@@ -35,12 +35,12 @@ const SECKEY: &[u8] = b"-----BEGIN PGP PRIVATE KEY BLOCK-----\r\nVersion: GnuPG 
 
 rusty_fork_test! {
 #[test]
-fn test_gpgme_verify_sig() {
-    run_gpgme_verify_sig();
-}
+    fn test_gpgme_keylist() {
+        run_gpgme_keylist();
+    }
 }
 
-fn run_gpgme_verify_sig() {
+fn run_gpgme_keylist() {
     fn make_fut(
         secret: bool,
         local: bool,
