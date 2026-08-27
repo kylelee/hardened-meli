@@ -29,12 +29,13 @@ use crate::{
     Address, Result,
 };
 
-const PUBKEY: &[u8]=b"-----BEGIN PGP PUBLIC KEY BLOCK-----\r\nVersion: GnuPG v2.1.0-gitb3c71eb (GNU/Linux)\r\n\r\nmQGiBDo41NoRBADSfQazKGYf8nokq6zUKH/6INtV6MypSzSGmX2XErnARkIIPPYj\r\ncQRQ8zCbGV7ZU2ezVbzhFLUSJveE8PZUzzCrLp1O2NSyBTRcR5HVSXW95nJfY8eV\r\npOvZRAKul0BVLh81kYTsrfzaaCjh9VWNP26LoeN2r+PjZyktXe7gM3C4SwCgoTxK\r\nWUVi9HoT2HCLY7p7oig5hEcEALdCJal0UYomX3nJapIVLVZg3vkidr1RICYMb2vz\r\n58i17h8sxEtobD1vdIKNejulntaRAXs4n0tDYD9z7pRlwG1CLz1R9WxYzeOOqUDr\r\nfnVXdmU8L/oVWABat8v1V7QQhjMMf+41fuzVwDMMGqjVPLhu4X6wp3A8uyM3YDnQ\r\nVMN1A/4n2G5gHoOvjqxn8Ch5tBAdMGfO8gH4RjQOwzm2R1wPQss/yzUN1+tlMZGX\r\nK2dQ2FCWC/hDUSNaEQRlI15wxxBNZ2RQwlzE2A8v113DpvyzOtv0QO95gJ1teCXC\r\n7j/BN9asgHaBBc39JLO/TcpuI7Hf8PQ5VcP2F0UE3lczGhXbLLRESm9lIFJhbmRv\r\nbSBIYWNrZXIgKHRlc3Qga2V5IHdpdGggcGFzc3BocmFzZSAiYWJjIikgPGpvZUBl\r\neGFtcGxlLmNvbT6IYgQTEQIAIgUCTbdXqQIbIwYLCQgHAwIGFQgCCQoLBBYCAwEC\r\nHgECF4AACgkQr4IkT5zZ/VUcCACfQvSPi//9/gBv8SVrK6O4DiyD+jAAn3LEnfF1\r\n4j6MjwlqXTqol2VgQn1yuQENBDo41N0QBACedJb7Qhm50JSPe1V+rSZKLHT5nc3l\r\n2k1n7//wNsJkgDW2J7snIRjGtSzeNxMPh+hVzFidzAf3sbOlARQoBrMPPKpnJWtm\r\n6LEDf2lSwO36l0/bo6qDRmiFRJoHWytTJEjxVwRclVt4bXqHfNw9FKhZZbcKeAN2\r\noHgmBVSU6edHdwADBQP+OGAkEG4PcfSb8x191R+wkV/q2hA5Ay9z289Dx2rO28CO\r\n4M2fhhcjSmgr6x0DsrkfESCiG47UGJ169eu+QqJwk3HiF4crGN9rE5+VelBVFtrd\r\nMWkX2rPLGQWyw8iCZKbeH8g/ujmkaLovSmalzDcLe4v1xSLaP7Fnfzit0iIGZAGI\r\nRgQYEQIABgUCOjjU3QAKCRCvgiRPnNn9VVSaAJ9+rj1lIQnRl20i8Rom2Hwbe3re\r\n9QCfSYFnkZUw0yKF2DfCfqrDzdGAsbaIRgQYEQIABgUCOjjU3gAKCRCvgiRPnNn9\r\nVe4iAJ9FrGMlFR7s+GWf1scTeeyrthKrPQCfSpc/Yps72aFI7hPfyIa9MuerVZ4=\r\n=QRit\r\n-----END PGP PUBLIC KEY BLOCK-----\r\n";
+const PUBKEY: &[u8] = b"-----BEGIN PGP PUBLIC KEY BLOCK-----\r\nVersion: GnuPG v2.1.0-gitb3c71eb (GNU/Linux)\r\n\r\nmQGiBDo41NoRBADSfQazKGYf8nokq6zUKH/6INtV6MypSzSGmX2XErnARkIIPPYj\r\ncQRQ8zCbGV7ZU2ezVbzhFLUSJveE8PZUzzCrLp1O2NSyBTRcR5HVSXW95nJfY8eV\r\npOvZRAKul0BVLh81kYTsrfzaaCjh9VWNP26LoeN2r+PjZyktXe7gM3C4SwCgoTxK\r\nWUVi9HoT2HCLY7p7oig5hEcEALdCJal0UYomX3nJapIVLVZg3vkidr1RICYMb2vz\r\n58i17h8sxEtobD1vdIKNejulntaRAXs4n0tDYD9z7pRlwG1CLz1R9WxYzeOOqUDr\r\nfnVXdmU8L/oVWABat8v1V7QQhjMMf+41fuzVwDMMGqjVPLhu4X6wp3A8uyM3YDnQ\r\nVMN1A/4n2G5gHoOvjqxn8Ch5tBAdMGfO8gH4RjQOwzm2R1wPQss/yzUN1+tlMZGX\r\nK2dQ2FCWC/hDUSNaEQRlI15wxxBNZ2RQwlzE2A8v113DpvyzOtv0QO95gJ1teCXC\r\n7j/BN9asgHaBBc39JLO/TcpuI7Hf8PQ5VcP2F0UE3lczGhXbLLRESm9lIFJhbmRv\r\nbSBIYWNrZXIgKHRlc3Qga2V5IHdpdGggcGFzc3BocmFzZSAiYWJjIikgPGpvZUBl\r\neGFtcGxlLmNvbT6IYgQTEQIAIgUCTbdXqQIbIwYLCQgHAwIGFQgCCQoLBBYCAwEC\r\nHgECF4AACgkQr4IkT5zZ/VUcCACfQvSPi//9/gBv8SVrK6O4DiyD+jAAn3LEnfF1\r\n4j6MjwlqXTqol2VgQn1yuQENBDo41N0QBACedJb7Qhm50JSPe1V+rSZKLHT5nc3l\r\n2k1n7//wNsJkgDW2J7snIRjGtSzeNxMPh+hVzFidzAf3sbOlARQoBrMPPKpnJWtm\r\n6LEDf2lSwO36l0/bo6qDRmiFRJoHWytTJEjxVwRclVt4bXqHfNw9FKhZZbcKeAN2\r\noHgmBVSU6edHdwADBQP+OGAkEG4PcfSb8x191R+wkV/q2hA5Ay9z289Dx2rO28CO\r\n4M2fhhcjSmgr6x0DsrkfESCiG47UGJ169eu+QqJwk3HiF4crGN9rE5+VelBVFtrd\r\nMWkX2rPLGQWyw8iCZKbeH8g/ujmkaLovSmalzDcLe4v1xSLaP7Fnfzit0iIGZAGI\r\nRgQYEQIABgUCOjjU3QAKCRCvgiRPnNn9VVSaAJ9+rj1lIQnRl20i8Rom2Hwbe3re\r\n9QCfSYFnkZUw0yKF2DfCfqrDzdGAsbaIRgQYEQIABgUCOjjU3gAKCRCvgiRPnNn9\r\nVe4iAJ9FrGMlFR7s+GWf1scTeeyrthKrPQCfSpc/Yps72aFI7hPfyIa9MuerVZ4=\r\n=QRit\r\n-----END PGP PUBLIC KEY BLOCK-----\r\n";
 
-const SECKEY: &[u8] = b"-----BEGIN PGP PRIVATE KEY BLOCK-----\r\nVersion: GnuPG v2.1.0-gitb3c71eb (GNU/Linux)\r\n\r\nlQHpBDo41NoRBADSfQazKGYf8nokq6zUKH/6INtV6MypSzSGmX2XErnARkIIPPYj\r\ncQRQ8zCbGV7ZU2ezVbzhFLUSJveE8PZUzzCrLp1O2NSyBTRcR5HVSXW95nJfY8eV\r\npOvZRAKul0BVLh81kYTsrfzaaCjh9VWNP26LoeN2r+PjZyktXe7gM3C4SwCgoTxK\r\nWUVi9HoT2HCLY7p7oig5hEcEALdCJal0UYomX3nJapIVLVZg3vkidr1RICYMb2vz\r\n58i17h8sxEtobD1vdIKNejulntaRAXs4n0tDYD9z7pRlwG1CLz1R9WxYzeOOqUDr\r\nfnVXdmU8L/oVWABat8v1V7QQhjMMf+41fuzVwDMMGqjVPLhu4X6wp3A8uyM3YDnQ\r\nVMN1A/4n2G5gHoOvjqxn8Ch5tBAdMGfO8gH4RjQOwzm2R1wPQss/yzUN1+tlMZGX\r\nK2dQ2FCWC/hDUSNaEQRlI15wxxBNZ2RQwlzE2A8v113DpvyzOtv0QO95gJ1teCXC\r\n7j/BN9asgHaBBc39JLO/TcpuI7Hf8PQ5VcP2F0UE3lczGhXbLP4HAwL0A7A1a/jY\r\n6s5JxysLUpKA31U2SrKxePmkmzYSuAiValUVdfkmLRrLSwmNJSy5NcrBHGimja1O\r\nfUUmPTg465j1+vD/tERKb2UgUmFuZG9tIEhhY2tlciAodGVzdCBrZXkgd2l0aCBw\r\nYXNzcGhyYXNlICJhYmMiKSA8am9lQGV4YW1wbGUuY29tPohiBBMRAgAiBQJNt1ep\r\nAhsjBgsJCAcDAgYVCAIJCgsEFgIDAQIeAQIXgAAKCRCvgiRPnNn9VRwIAJ9C9I+L\r\n//3+AG/xJWsro7gOLIP6MACfcsSd8XXiPoyPCWpdOqiXZWBCfXKdAWAEOjjU3RAE\r\nAJ50lvtCGbnQlI97VX6tJkosdPmdzeXaTWfv//A2wmSANbYnuychGMa1LN43Ew+H\r\n6FXMWJ3MB/exs6UBFCgGsw88qmcla2bosQN/aVLA7fqXT9ujqoNGaIVEmgdbK1Mk\r\nSPFXBFyVW3hteod83D0UqFlltwp4A3ageCYFVJTp50d3AAMFA/44YCQQbg9x9Jvz\r\nHX3VH7CRX+raEDkDL3Pbz0PHas7bwI7gzZ+GFyNKaCvrHQOyuR8RIKIbjtQYnXr1\r\n675ConCTceIXhysY32sTn5V6UFUW2t0xaRfas8sZBbLDyIJkpt4fyD+6OaRoui9K\r\nZqXMNwt7i/XFIto/sWd/OK3SIgZkAf4HAwIoimqPHVJZM85dNw6JtvLKFvvmkm3X\r\nuoCUG5nU6cgk6vetUYiykuKpU4zG3mDtdZdIZf76hJJ6lZTSHH9frLy7bRYPfu/k\r\nU1AFd1T1OxENiEYEGBECAAYFAjo41N0ACgkQr4IkT5zZ/VVUmgCffq49ZSEJ0Zdt\r\nIvEaJth8G3t63vUAn0mBZ5GVMNMihdg3wn6qw83RgLG2iEYEGBECAAYFAjo41N4A\r\nCgkQr4IkT5zZ/VXuIgCfRaxjJRUe7Phln9bHE3nsq7YSqz0An0qXP2KbO9mhSO4T\r\n38iGvTLnq1We\r\n=m0YJ\r\n-----END PGP PRIVATE KEY BLOCK-----\r\n";
+const PRIVKEY: &[u8] = b"-----BEGIN PGP PRIVATE KEY BLOCK-----\r\nVersion: GnuPG v2.1.0-gitb3c71eb (GNU/Linux)\r\n\r\nlQHpBDo41NoRBADSfQazKGYf8nokq6zUKH/6INtV6MypSzSGmX2XErnARkIIPPYj\r\ncQRQ8zCbGV7ZU2ezVbzhFLUSJveE8PZUzzCrLp1O2NSyBTRcR5HVSXW95nJfY8eV\r\npOvZRAKul0BVLh81kYTsrfzaaCjh9VWNP26LoeN2r+PjZyktXe7gM3C4SwCgoTxK\r\nWUVi9HoT2HCLY7p7oig5hEcEALdCJal0UYomX3nJapIVLVZg3vkidr1RICYMb2vz\r\n58i17h8sxEtobD1vdIKNejulntaRAXs4n0tDYD9z7pRlwG1CLz1R9WxYzeOOqUDr\r\nfnVXdmU8L/oVWABat8v1V7QQhjMMf+41fuzVwDMMGqjVPLhu4X6wp3A8uyM3YDnQ\r\nVMN1A/4n2G5gHoOvjqxn8Ch5tBAdMGfO8gH4RjQOwzm2R1wPQss/yzUN1+tlMZGX\r\nK2dQ2FCWC/hDUSNaEQRlI15wxxBNZ2RQwlzE2A8v113DpvyzOtv0QO95gJ1teCXC\r\n7j/BN9asgHaBBc39JLO/TcpuI7Hf8PQ5VcP2F0UE3lczGhXbLP4HAwL0A7A1a/jY\r\n6s5JxysLUpKA31U2SrKxePmkmzYSuAiValUVdfkmLRrLSwmNJSy5NcrBHGimja1O\r\nfUUmPTg465j1+vD/tERKb2UgUmFuZG9tIEhhY2tlciAodGVzdCBrZXkgd2l0aCBw\r\nYXNzcGhyYXNlICJhYmMiKSA8am9lQGV4YW1wbGUuY29tPohiBBMRAgAiBQJNt1ep\r\nAhsjBgsJCAcDAgYVCAIJCgsEFgIDAQIeAQIXgAAKCRCvgiRPnNn9VRwIAJ9C9I+L\r\n//3+AG/xJWsro7gOLIP6MACfcsSd8XXiPoyPCWpdOqiXZWBCfXKdAWAEOjjU3RAE\r\nAJ50lvtCGbnQlI97VX6tJkosdPmdzeXaTWfv//A2wmSANbYnuychGMa1LN43Ew+H\r\n6FXMWJ3MB/exs6UBFCgGsw88qmcla2bosQN/aVLA7fqXT9ujqoNGaIVEmgdbK1Mk\r\nSPFXBFyVW3hteod83D0UqFlltwp4A3ageCYFVJTp50d3AAMFA/44YCQQbg9x9Jvz\r\nHX3VH7CRX+raEDkDL3Pbz0PHas7bwI7gzZ+GFyNKaCvrHQOyuR8RIKIbjtQYnXr1\r\n675ConCTceIXhysY32sTn5V6UFUW2t0xaRfas8sZBbLDyIJkpt4fyD+6OaRoui9K\r\nZqXMNwt7i/XFIto/sWd/OK3SIgZkAf4HAwIoimqPHVJZM85dNw6JtvLKFvvmkm3X\r\nuoCUG5nU6cgk6vetUYiykuKpU4zG3mDtdZdIZf76hJJ6lZTSHH9frLy7bRYPfu/k\r\nU1AFd1T1OxENiEYEGBECAAYFAjo41N0ACgkQr4IkT5zZ/VVUmgCffq49ZSEJ0Zdt\r\nIvEaJth8G3t63vUAn0mBZ5GVMNMihdg3wn6qw83RgLG2iEYEGBECAAYFAjo41N4A\r\nCgkQr4IkT5zZ/VXuIgCfRaxjJRUe7Phln9bHE3nsq7YSqz0An0qXP2KbO9mhSO4T\r\n38iGvTLnq1We\r\n=m0YJ\r\n-----END PGP PRIVATE KEY BLOCK-----\r\n";
 
 rusty_fork_test! {
 #[test]
+    /// Test that listing keys with gpgme works.
     fn test_gpgme_keylist() {
         run_gpgme_keylist();
     }
@@ -97,6 +98,7 @@ fn run_gpgme_keylist() {
         )
         .unwrap();
     let new_engine_info = gpgme_ctx.engine_info().unwrap();
+    // Sanity check:
     assert_eq!(
         new_engine_info.len(),
         prev_len,
@@ -105,6 +107,7 @@ fn run_gpgme_keylist() {
         new_engine_info.len(),
         new_engine_info
     );
+    // Sanity check:
     assert_eq!(
         new_engine_info[0].home_dir,
         Some(tempdir.path().display().to_string()),
@@ -112,6 +115,9 @@ fn run_gpgme_keylist() {
         new_engine_info[0].home_dir
     );
     let mut pubkey_data = Some(gpgme_ctx.new_data_mem(PUBKEY).unwrap());
+    // Run test loop two times:
+    // 1. loop will fail to find any keys, so `pubkey_data` will be imported
+    // 2. loop will find `PUBKEY` since it was imported in the previous iteration.
     for _ in 0..2 {
         let keylist: Vec<Key> = smol::block_on(async {
             make_fut(false, true, "".to_string(), &mut gpgme_ctx)
@@ -121,6 +127,7 @@ fn run_gpgme_keylist() {
         .unwrap();
 
         if let Some(pubkey_data) = pubkey_data.take() {
+            // 1st loop iteration enters here
             assert_eq!(
                 &keylist,
                 &[],
@@ -128,6 +135,7 @@ fn run_gpgme_keylist() {
             );
             gpgme_ctx.import_key(pubkey_data).unwrap();
         } else {
+            // 2nd loop iteration enters here
             let assert_key = |key: &Key| {
                 key.fingerprint() == "ADAB7FCC1F4DE2616ECFA402AF82244F9CD9FD55"
                     && key.primary_uid()
@@ -148,10 +156,12 @@ fn run_gpgme_keylist() {
             );
         }
     }
+    // Now, import another key...
     gpgme_ctx
-        .import_key(gpgme_ctx.new_data_mem(SECKEY).unwrap())
+        .import_key(gpgme_ctx.new_data_mem(PRIVKEY).unwrap())
         .unwrap();
+    // ... and verify that importing it twice fails.
     gpgme_ctx
-        .import_key(gpgme_ctx.new_data_mem(SECKEY).unwrap())
+        .import_key(gpgme_ctx.new_data_mem(PRIVKEY).unwrap())
         .unwrap_err();
 }
