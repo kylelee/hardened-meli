@@ -1277,7 +1277,13 @@ impl Component for Tabbed {
             if height.wrapping_div(rows + 1) > 0 || width.wrapping_div(cols + 1) > 0 {
                 let help_area = self.help_view.content.area();
                 self.help_view.content.grid_mut().write_string(
-                    "Use Up, Down, Left, Right to scroll.",
+                    &format!(
+                        "Use {down}, {up}, {right}, {left} to scroll.",
+                        down = self.help_view.curr_views[Shortcuts::GENERAL]["scroll_down"],
+                        up = self.help_view.curr_views[Shortcuts::GENERAL]["scroll_up"],
+                        right = self.help_view.curr_views[Shortcuts::GENERAL]["scroll_right"],
+                        left = self.help_view.curr_views[Shortcuts::GENERAL]["scroll_left"],
+                    ),
                     self.theme_default.fg,
                     self.theme_default.bg,
                     self.theme_default.attrs | Attr::ITALICS,
