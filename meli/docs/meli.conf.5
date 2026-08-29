@@ -1574,13 +1574,26 @@ Show them only as UI notifications.
 .El
 .It Ic script Ar String
 .Pq Em optional
-Script to pass notifications to, with title as 1st arg and body as 2nd
+Script to pass notifications to, with kind as 1st argument, title as 2nd and body as 3rd.
 .Pq Em none \" default value
+Kind values:
+.Bl -dash -compact
+.It
+.Qq "info"
+.It
+"error" or "error: " plus kind
+.It
+.Qq "new mail"
+.It
+.Qq "sent mail"
+.It
+.Qq "saved"
+.El
 .It Ic new_mail_script Ar String
 .Pq Em optional
 A command to pipe new mail notifications through (preferred over
 .Ic script Ns
-), with title as 1st arg and body as 2nd.
+, and has the exact same usage).
 .Pq Em none \" default value
 .It Ic xbiff_file_path Ar String
 .Pq Em optional

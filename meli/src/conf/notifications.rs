@@ -36,13 +36,15 @@ pub struct NotificationsSettings {
     #[serde(default)]
     pub enable: NotificationEnable,
 
-    /// A command to pipe notifications through.
+    /// A command to pipe notifications through, with kind as 1st argument,
+    /// title as 2nd and body as 3rd.
     /// Default: None
     #[serde(default = "none")]
     pub script: Option<String>,
 
     /// A command to pipe new mail notifications through (preferred over
-    /// `script`). Default: None
+    /// `script`, and has the exact same usage).
+    /// Default: None
     #[serde(default = "none")]
     pub new_mail_script: Option<String>,
 
