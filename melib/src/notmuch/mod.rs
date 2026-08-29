@@ -174,26 +174,6 @@ impl DbConnection {
             let mtime_snapshot: libc::time_t =
                 directory_snapshot.as_mut().map(|d| d.mtime()).unwrap_or(0);
 
-            // Compare mtime_snapshot to mtime_current. If they are equivalent, terminate
-            // the algorithm at this point, (this directory has not been updated
-            // in the filesystem since the last database scan of PASS 2).
-            //
-            // If the directory's modification time in the filesystem is the same as what we
-            // recorded in the database the last time we scanned it, then we can skip the
-            // second pass entirely.
-            //
-            // We test for strict equality here to avoid a bug that can happen if the system
-            // clock jumps backward, (preventing new mail from being discovered
-            // until the clock catches up and the directory is modified again).
-
-            if directory_snapshot.is_some()
-                && directory_current.is_some()
-                && mtime_snapshot == mtime_current
-                && mtime_snapshot != 0
-            {
-                continue;
-            }
-
             let (current_files, current_subdirs): (HashSet<CString>, HashSet<CString>) =
                 if let Some(directory) = directory_current.as_mut() {
                     assert_eq!(&directory.path, &path);
@@ -222,6 +202,34 @@ impl DbConnection {
                     }
                     (current_files, current_subdirs)
                 };
+
+            // Compare mtime_snapshot to mtime_current. If they are equivalent, terminate
+            // the algorithm at this point, (this directory has not been updated
+            // in the filesystem since the last database scan of PASS 2).
+            //
+            // If the directory's modification time in the filesystem is the same as what we
+            // recorded in the database the last time we scanned it, then we can skip the
+            // second pass entirely.
+            //
+            // We test for strict equality here to avoid a bug that can happen if the system
+            // clock jumps backward, (preventing new mail from being discovered
+            // until the clock catches up and the directory is modified again).
+
+            if directory_snapshot.is_some()
+                && directory_current.is_some()
+                && mtime_snapshot == mtime_current
+                && mtime_snapshot != 0
+                && Some(mtime_current)
+                    == std::fs::metadata(OsStr::from_bytes(path.as_bytes()))
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(|mtime| {
+                            mtime.duration_since(std::time::SystemTime::UNIX_EPOCH).ok()
+                        })
+                        .map(|dur| dur.as_secs() as i64)
+            {
+                continue;
+            }
 
             // Ask the snapshot database for files and directories within 'path'
             // (snapshot_files and snapshot_subdirs)
