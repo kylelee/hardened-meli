@@ -309,17 +309,6 @@ impl SmtpConnection {
 
                     AsyncWrapper::new(conn)?
                 };
-                if !matches!(server_conf.security, SmtpSecurity::Tls { .. }) {
-                    let pre_ehlo_extensions_reply = read_lines(
-                        &mut socket,
-                        &mut res,
-                        Some((ReplyCode::_220, &[])),
-                        &mut String::new(),
-                    )
-                    .await?;
-                    drop(pre_ehlo_extensions_reply);
-                }
-
                 if matches!(server_conf.security, SmtpSecurity::Auto { .. }) {
                     if server_conf.port == 465 {
                         server_conf.security = SmtpSecurity::Tls {
@@ -335,6 +324,17 @@ impl SmtpConnection {
                              instead of `auto`.",
                         ));
                     }
+                }
+
+                if !matches!(server_conf.security, SmtpSecurity::Tls { .. }) {
+                    let pre_ehlo_extensions_reply = read_lines(
+                        &mut socket,
+                        &mut res,
+                        Some((ReplyCode::_220, &[])),
+                        &mut String::new(),
+                    )
+                    .await?;
+                    drop(pre_ehlo_extensions_reply);
                 }
                 if !matches!(server_conf.security, SmtpSecurity::Tls { .. }) {
                     socket.write_all(b"EHLO meli-email.org\r\n").await?;
