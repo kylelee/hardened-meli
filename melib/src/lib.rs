@@ -142,9 +142,11 @@ pub mod text;
 
 pub use utils::{
     datetime::UnixTimestamp,
-    logging::{LogLevel, StderrLogger},
+    logging::{LogLevel, Logger},
     SortField, SortOrder,
 };
+#[deprecated(since = "0.8.14", note = "StderrLogger was renamed to just Logger")]
+pub use Logger as StderrLogger;
 
 pub mod contacts;
 pub use contacts::*;

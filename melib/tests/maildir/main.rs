@@ -52,7 +52,7 @@ use futures::{
 use melib::{
     backends::prelude::*,
     maildir::{utilities::MaildirFilePathExt, *},
-    utils::logging::{LogLevel, StderrLogger},
+    utils::logging::{LogLevel, Logger},
     Mail,
 };
 use tempfile::TempDir;
@@ -147,7 +147,7 @@ fn move_file(
 /// Test that `MaildirType::watch` `Stream` returns the expected `Refresh`
 /// events when altering the mail store in the filesystem.
 fn run_maildir_watch() {
-    let mut _logger = StderrLogger::new_with(LogLevel::TRACE, true);
+    let mut _logger = Logger::new_with(LogLevel::TRACE, true);
     let temp_dir = TempDir::new().unwrap();
     let backend_event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(16)));
 
@@ -302,7 +302,7 @@ hello world.
 /// Test that `MaildirType::watch` `Stream` returns the expected `Refresh`
 /// events when altering the mail store in the filesystem.
 fn run_maildir_refresh() {
-    let mut _logger = StderrLogger::new_with(LogLevel::TRACE, true);
+    let mut _logger = Logger::new_with(LogLevel::TRACE, true);
     let temp_dir = TempDir::new().unwrap();
     let backend_event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(16)));
 

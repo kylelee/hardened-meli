@@ -40,7 +40,7 @@ use melib::{
     conf::{ActionFlag, MailboxConf, ToggleFlag},
     error::*,
     search::Query,
-    ShellExpandTrait, SortField, SortOrder, StderrLogger,
+    Logger, ShellExpandTrait, SortField, SortOrder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -594,7 +594,7 @@ pub struct Settings {
     pub terminal: terminal::TerminalSettings,
     pub log: LogSettings,
     #[serde(skip)]
-    pub _logger: StderrLogger,
+    pub _logger: Logger,
 }
 
 impl Settings {
@@ -609,7 +609,7 @@ impl Settings {
             s.insert(id, ac);
         }
 
-        let mut _logger = StderrLogger::new(fs.log.maximum_level);
+        let mut _logger = Logger::new(fs.log.maximum_level);
 
         if let Some(ref log_path) = fs.log.log_file {
             _logger.change_log_dest(log_path.into());
@@ -632,7 +632,7 @@ impl Settings {
 
     pub fn without_accounts() -> Result<Self> {
         let fs = FileSettings::new()?;
-        let mut _logger = StderrLogger::new(fs.log.maximum_level);
+        let mut _logger = Logger::new(fs.log.maximum_level);
 
         if let Some(ref log_path) = fs.log.log_file {
             _logger.change_log_dest(log_path.into());

@@ -31,6 +31,8 @@ use std::{
 };
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
+#[deprecated(since = "0.8.14", note = "StderrLogger was renamed to just Logger")]
+pub use Logger as StderrLogger;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, PartialOrd, Serialize)]
 #[repr(u8)]
@@ -167,7 +169,7 @@ struct FileOutput {
 }
 
 #[derive(Clone)]
-pub struct StderrLogger {
+pub struct Logger {
     dest: Arc<Mutex<FileOutput>>,
     level: Arc<AtomicU8>,
     print_level: bool,
@@ -175,9 +177,9 @@ pub struct StderrLogger {
     debug_dest: Destination,
 }
 
-impl std::fmt::Debug for StderrLogger {
+impl std::fmt::Debug for Logger {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        fmt.debug_struct(crate::identify!(StderrLogger))
+        fmt.debug_struct(crate::identify!(Logger))
             .field("level", &LogLevel::from(self.level.load(Ordering::SeqCst)))
             .field("print_level", &self.print_level)
             .field("print_module_names", &self.print_module_names)
@@ -186,13 +188,13 @@ impl std::fmt::Debug for StderrLogger {
     }
 }
 
-impl Default for StderrLogger {
+impl Default for Logger {
     fn default() -> Self {
         Self::new(LogLevel::default())
     }
 }
 
-impl StderrLogger {
+impl Logger {
     pub fn new_with(level: LogLevel, test: bool) -> Self {
         use std::sync::Once;
 
@@ -289,7 +291,7 @@ impl StderrLogger {
     }
 }
 
-impl Log for StderrLogger {
+impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         !["polling", "async_io", "tracing"]
             .iter()
