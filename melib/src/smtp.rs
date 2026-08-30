@@ -43,7 +43,7 @@
 //!     envelope_from: String::new(),
 //!     extensions: SmtpExtensionSupport::default(),
 //!     auth: SmtpAuth::Auto {
-//!         username: "l15".into(),
+//!         username: Secret::Value("l15".into()),
 //!         password: Secret::Evaluate {
 //!             command: "gpg2 --no-tty -q -d ~/.passwords/mail.gpg".into(),
 //!             store_in_memory: false,
@@ -128,7 +128,7 @@ pub enum SmtpAuth {
     None,
     #[serde(alias = "auto")]
     Auto {
-        username: String,
+        username: Secret,
         password: Secret,
         #[serde(default = "crate::conf::true_val")]
         require_auth: bool,
@@ -464,12 +464,15 @@ impl SmtpConnection {
                     auth_type,
                     ..
                 } => {
+                    let username = username
+                        .value_with_timeout(std::time::Duration::new(4, 0))
+                        .await
+                        .chain_err_summary(|| "username")?;
                     let password = password
                         .value_with_timeout(std::time::Duration::new(4, 0))
                         .await
                         .chain_err_summary(|| "password")?;
                     if auth_type.login {
-                        let username = username.to_string();
                         ret.send_command(&[b"AUTH LOGIN"]).await?;
                         ret.read_lines(&mut res, Some((ReplyCode::_334, &[])))
                             .await
