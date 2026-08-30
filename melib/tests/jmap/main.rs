@@ -318,7 +318,11 @@ pub mod server {
                                         let Some(prev_response) =
                                             responses.method_responses.get(&result_of)
                                         else {
-                                            eprintln!("{id} {type}: resultOf={result_of:?} not found, have: {method_responses:?}", method_responses=responses.method_responses);
+                                            eprintln!(
+                                                "{id} {type}: resultOf={result_of:?} not found, \
+                                                 have: {method_responses:?}",
+                                                method_responses = responses.method_responses
+                                            );
                                             responses.method_responses.insert(
                                                 id.clone(),
                                                 serde_json::json! {["error",{"type":"invalidResultReference"},id]},
@@ -326,7 +330,10 @@ pub mod server {
                                             continue;
                                         };
                                         if prev_response[0].as_str() == Some("error") {
-                                            eprintln!("{id} {type}: resultOf={result_of:?} was error: {prev_response:?}");
+                                            eprintln!(
+                                                "{id} {type}: resultOf={result_of:?} was error: \
+                                                 {prev_response:?}"
+                                            );
                                             responses.method_responses.insert(
                                                 id.clone(),
                                                 serde_json::json! {["error",{"type":"invalidResultReference"},id]},
