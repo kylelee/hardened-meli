@@ -34,6 +34,9 @@ use crate::{
 };
 
 mod field_types;
+#[cfg(test)]
+mod tests;
+
 pub use field_types::*;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
