@@ -80,6 +80,7 @@ use smallvec::SmallVec;
 use smol::{unblock, Async as AsyncWrapper};
 
 use crate::{
+    conf::Secret,
     email::{Address, Envelope},
     error::{Error, ErrorKind, Result, ResultIntoError},
     utils::connections::{std_net::connect as tcp_stream_connect, Connection},
@@ -178,7 +179,7 @@ pub enum SmtpAuth {
     },
     #[serde(alias = "xoauth2")]
     XOAuth2 {
-        token_command: String,
+        token: Secret,
         #[serde(default = "crate::conf::true_val")]
         require_auth: bool,
     },
@@ -546,33 +547,13 @@ impl SmtpConnection {
                         .chain_err_kind(ErrorKind::Authentication)?;
                     ret.send_command(&[b"EHLO meli-email.org"]).await?;
                 }
-                SmtpAuth::XOAuth2 { token_command, .. } => {
-                    let password_token = {
-                        let _token_command = token_command.clone();
-                        let mut output = unblock(move || {
-                            Command::new("sh")
-                                .args(["-c", &_token_command])
-                                .stdin(std::process::Stdio::piped())
-                                .stdout(std::process::Stdio::piped())
-                                .stderr(std::process::Stdio::piped())
-                                .output()
-                        })
-                        .await?;
-                        if !output.status.success() {
-                            return Err(Error::new(format!(
-                                "SMTP XOAUTH2 token evaluation command `{}` returned {}: {}",
-                                token_command,
-                                output.status,
-                                String::from_utf8_lossy(&output.stderr)
-                            )));
-                        }
-                        if output.stdout.ends_with(b"\n") {
-                            output.stdout.pop();
-                        }
-                        output.stdout
-                    };
+                SmtpAuth::XOAuth2 { token, .. } => {
+                    let password_token = token
+                        .value_with_timeout(std::time::Duration::new(4, 0))
+                        .await
+                        .chain_err_summary(|| "SMTP XOAUTH2 token")?;
                     // https://developers.google.com/gmail/imap/xoauth2-protocol#smtp_protocol_exchange
-                    ret.send_command(&[b"AUTH XOAUTH2 ", &password_token])
+                    ret.send_command(&[b"AUTH XOAUTH2 ", password_token.as_bytes()])
                         .await?;
                     ret.read_lines(&mut res, Some((ReplyCode::_235, &[])))
                         .await

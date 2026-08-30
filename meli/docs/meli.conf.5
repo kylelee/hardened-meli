@@ -596,7 +596,7 @@ listing.index_style = "Conversations"
 identity = "username@gmail.com"
 display_name = "Name Name"
 subscribed_mailboxes = ["*" ]
-send_mail = { hostname = "smtp.gmail.com", port = 587, auth = { type = "xoauth2", token_command = "...", require_auth = true }, security = { type = "STARTTLS" } }
+send_mail = { hostname = "smtp.gmail.com", port = 587, auth = { type = "xoauth2", token = { command = "..." }, require_auth = true }, security = { type = "STARTTLS" } }
 composing.store_sent_mail = false
 .Ed
 .El
@@ -2335,8 +2335,8 @@ For type
 .Qq xoauth2 Ns
 :
 .Bl -tag -width 36n
-.It Ic token_command Ar String
-Command to evaluate that returns an
+.It Ic token Ar Secret
+A string literal or a command to evaluate that returns an
 .Em XOAUTH2
 token.
 .It Ic require_auth Ar boolean
@@ -2374,7 +2374,7 @@ for details on the authentication token command):
 .\"
 .\"
 .Bd -literal
-auth = { type = "xoauth2", token_command = "TOKEN=$(python3 oauth2.py --user=xxx@gmail.com --quiet --client_id=1038[...].apps.googleusercontent.com --client_secret=[..] --refresh_token=[..] && python3 oauth2.py --user=xxx@gmail.com --generate_oauth2_string --quiet --access_token=$TOKEN" }
+auth = { type = "xoauth2", token = { command = "TOKEN=$(python3 oauth2.py --user=xxx@gmail.com --quiet --client_id=1038[...].apps.googleusercontent.com --client_secret=[..] --refresh_token=[..] && python3 oauth2.py --user=xxx@gmail.com --generate_oauth2_string --quiet --access_token=$TOKEN" } }
 .Ed
 .\"
 .\"

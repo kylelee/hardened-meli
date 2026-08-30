@@ -354,7 +354,13 @@ Possible values for `send_mail.auth`:
 
     XOAuth2 authentication:
     Note: `require_auth` is optional and can be skipped.
-        auth = { type = "xoauth2", token_command = "...", require_auth = true }
+        auth = { type = "xoauth2", token = "...", require_auth = true }
+
+        token can be:
+            A literal string:
+            token = "my_token"
+            A command:
+            token = { command = "/path/to/xoauth2_script.sh" }
 
 Possible values for `send_mail.auth.auth_type` when `auth.type` is "auto":
 
