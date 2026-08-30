@@ -30,48 +30,46 @@
 //! The connection and methods are `async` and uses the `smol` runtime.
 //!# Example
 //!
-//! ```not_run
+//! ```no_run
 //! extern crate melib;
 //!
-//! use melib::futures;
-//! use melib::smol;
-//! use melib::smtp::*;
-//! use melib::Result;
+//! use melib::{email::Address, futures, smol, smtp::*, Result};
 //! let conf = SmtpServerConf {
 //!     hostname: "smtp.example.com".into(),
 //!     port: 587,
 //!     security: SmtpSecurity::StartTLS {
 //!         danger_accept_invalid_certs: false,
 //!     },
+//!     envelope_from: String::new(),
 //!     extensions: SmtpExtensionSupport::default(),
 //!     auth: SmtpAuth::Auto {
 //!         username: "l15".into(),
-//!         password: Password::CommandEval(
-//!             "gpg2 --no-tty -q -d ~/.passwords/mail.gpg".into(),
-//!         ),
+//!         password: Password::CommandEval("gpg2 --no-tty -q -d ~/.passwords/mail.gpg".into()),
 //!         require_auth: true,
+//!         auth_type: SmtpAuthType::default(),
 //!     },
 //! };
 //!
-//! std::thread::Builder::new().spawn(move || {
-//!     let ex = smol::Executor::new();
-//!     futures::executor::block_on(ex.run(futures::future::pending::<()>()));
-//! }).unwrap();
+//! std::thread::Builder::new()
+//!     .spawn(move || {
+//!         let ex = smol::Executor::new();
+//!         futures::executor::block_on(ex.run(futures::future::pending::<()>()));
+//!     })
+//!     .unwrap();
 //!
 //! let mut conn = futures::executor::block_on(SmtpConnection::new_connection(conf)).unwrap();
-//! futures::executor::block_on(conn.mail_transaction(r#"To: l10@example.com
+//! futures::executor::block_on(conn.mail_transaction(
+//!     r#"To: l10@example.com
 //! Subject: Fwd: SMTP TEST
 //! From: Me <l15@example.com>
 //! Message-Id: <E1hSjnr-0003fN-RL@example.com>
 //! Date: Mon, 13 Jul 2020 09:02:15 +0300
 //!
 //! Prescriptions-R-X"#,
-//!     Some(&[
-//!         Address::try_from("foo-chat@example.com").unwrap(),
-//!     ]),
-//! )).unwrap();
+//!     Some(&[Address::try_from("foo-chat@example.com").unwrap()]),
+//! ))
+//! .unwrap();
 //! futures::executor::block_on(conn.quit()).unwrap();
-//! Ok(())
 //! ```
 
 use std::{borrow::Cow, convert::TryFrom, process::Command};
