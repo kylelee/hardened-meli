@@ -111,22 +111,8 @@ impl<'de> Deserialize<'de> for ToggleFlag {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum InnerToggleFlag {
-            Bool(bool),
-        }
-        let s = <InnerToggleFlag>::deserialize(deserializer);
-        Ok(
-            match s.map_err(|err| {
-                serde::de::Error::custom(format!(
-                    r#"expected one of "true", "false", found `{err}`"#
-                ))
-            })? {
-                InnerToggleFlag::Bool(true) => Self::True,
-                InnerToggleFlag::Bool(false) => Self::False,
-            },
-        )
+        let s = <bool>::deserialize(deserializer)?;
+        Ok(s.into())
     }
 }
 
