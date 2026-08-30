@@ -12,7 +12,7 @@
 #root_mailbox = "/path/to/root/mailbox"
 #format = "Maildir"
 #send_mail = 'msmtp --read-recipients --read-envelope-from'
-##send_mail = { hostname = "smtp.example.com", port = 587, auth = { type = "auto", username = "user", password = { type = "command_eval", value = "gpg2 --no-tty -q -d ~/.passwords/user.gpg" } }, security = { type = "STARTTLS" } }
+##send_mail = { hostname = "smtp.example.com", port = 587, auth = { type = "auto", username = "user", password = { command = "gpg2 --no-tty -q -d ~/.passwords/user.gpg" } }, security = { type = "STARTTLS" } }
 #listing.index_style = "Conversations" # or [plain, threaded, compact]
 #identity="email@example.com"
 #display_name = "Name"
@@ -37,7 +37,7 @@
 #[accounts."imap"]
 #root_mailbox = "INBOX"
 #format = "imap"
-#send_mail = { hostname = "smtp.example.com", port = 587, auth = { type = "auto", username = "user", password = { type = "command_eval", value = "gpg2 --no-tty -q -d ~/.passwords/user.gpg" } }, security = { type = "STARTTLS" } }
+#send_mail = { hostname = "smtp.example.com", port = 587, auth = { type = "auto", username = "user", password = { command = "gpg2 --no-tty -q -d ~/.passwords/user.gpg" } }, security = { type = "STARTTLS" } }
 #server_hostname="mail.example.com"
 #server_password="pha2hiLohs2eeeish2phaii1We3ood4chakaiv0hien2ahie3m"
 #server_username="username@example.com"
@@ -68,7 +68,7 @@
 #[accounts."gmail"]
 #root_mailbox = '[Gmail]'
 #format = "imap"
-#send_mail = { hostname = "smtp.gmail.com", port = 587, auth = { type = "auto", username = "user", password = { type = "command_eval", value = "gpg2 --no-tty -q -d ~/.passwords/user.gpg" } }, security = { type = "STARTTLS" } }
+#send_mail = { hostname = "smtp.gmail.com", port = 587, auth = { type = "auto", username = "user", password = { command = "gpg2 --no-tty -q -d ~/.passwords/user.gpg" } }, security = { type = "STARTTLS" } }
 #server_hostname='imap.gmail.com'
 #server_password="password"
 #server_username="username@gmail.com"

@@ -33,7 +33,7 @@
 //! ```no_run
 //! extern crate melib;
 //!
-//! use melib::{email::Address, futures, smol, smtp::*, Result};
+//! use melib::{conf::Secret, email::Address, futures, smol, smtp::*, Result};
 //! let conf = SmtpServerConf {
 //!     hostname: "smtp.example.com".into(),
 //!     port: 587,
@@ -44,7 +44,10 @@
 //!     extensions: SmtpExtensionSupport::default(),
 //!     auth: SmtpAuth::Auto {
 //!         username: "l15".into(),
-//!         password: Password::CommandEval("gpg2 --no-tty -q -d ~/.passwords/mail.gpg".into()),
+//!         password: Secret::Evaluate {
+//!             command: "gpg2 --no-tty -q -d ~/.passwords/mail.gpg".into(),
+//!             store_in_memory: false,
+//!         },
 //!         require_auth: true,
 //!         auth_type: SmtpAuthType::default(),
 //!     },
@@ -72,7 +75,7 @@
 //! futures::executor::block_on(conn.quit()).unwrap();
 //! ```
 
-use std::{borrow::Cow, convert::TryFrom, process::Command};
+use std::{borrow::Cow, convert::TryFrom};
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use native_tls::TlsConnector;
@@ -117,51 +120,6 @@ impl Default for SmtpSecurity {
     }
 }
 
-/// Source of user's password for SMTP authentication
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "type", content = "value")]
-pub enum Password {
-    #[serde(alias = "raw")]
-    Raw(String),
-    #[serde(alias = "command_evaluation", alias = "command_eval")]
-    CommandEval(String),
-}
-
-impl Password {
-    pub async fn evaluate(&self) -> Result<Vec<u8>> {
-        match self {
-            Self::Raw(p) => Ok(p.as_bytes().to_vec()),
-            Self::CommandEval(command) => {
-                let _command = command.clone();
-
-                let mut output = unblock(move || {
-                    Command::new("sh")
-                        .args(["-c", &_command])
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .output()
-                })
-                .await
-                .chain_err_summary(|| format!("Could not execute CommandEval value: {command}"))
-                .chain_err_kind(ErrorKind::External)?;
-                if !output.status.success() {
-                    return Err(Error::new(format!(
-                        "SMTP password evaluation command `{command}` returned {}: {}",
-                        output.status,
-                        String::from_utf8_lossy(&output.stderr)
-                    ))
-                    .set_kind(ErrorKind::External));
-                }
-                if output.stdout.ends_with(b"\n") {
-                    output.stdout.pop();
-                }
-                Ok(output.stdout)
-            }
-        }
-    }
-}
-
 /// Kind of server authentication the client should attempt
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type")]
@@ -171,7 +129,7 @@ pub enum SmtpAuth {
     #[serde(alias = "auto")]
     Auto {
         username: String,
-        password: Password,
+        password: Secret,
         #[serde(default = "crate::conf::true_val")]
         require_auth: bool,
         #[serde(skip_serializing, skip_deserializing, default)]
@@ -506,7 +464,10 @@ impl SmtpConnection {
                     auth_type,
                     ..
                 } => {
-                    let password = password.evaluate().await?;
+                    let password = password
+                        .value_with_timeout(std::time::Duration::new(4, 0))
+                        .await
+                        .chain_err_summary(|| "password")?;
                     if auth_type.login {
                         let username = username.to_string();
                         ret.send_command(&[b"AUTH LOGIN"]).await?;
@@ -535,7 +496,7 @@ impl SmtpConnection {
                             buf.push(b'\0');
                             buf.extend(username.as_bytes().to_vec());
                             buf.push(b'\0');
-                            buf.extend(password);
+                            buf.extend(password.as_bytes());
                             #[allow(deprecated)]
                             base64::encode(buf)
                         };

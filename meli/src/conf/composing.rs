@@ -320,12 +320,12 @@ Direct SMTP connection
 ======================
 
     [accounts.account-name]
-    send_mail = { hostname = "mail.example.com", port = 587, auth = { type = "auto", password = { type = "raw", value = "hunter2" } }, security = { type = "STARTTLS" } }
+    send_mail = { hostname = "mail.example.com", port = 587, auth = { type = "auto", password = "hunter2" }, security = { type = "STARTTLS" } }
 
     [accounts.account-name.send_mail]
     hostname = "mail.example.com"
     port = 587
-    auth = { type = "auto", password = { type = "command_eval", value = "/path/to/password_script.sh" } }
+    auth = { type = "auto", password = { command = "/path/to/password_script.sh" } }
     security = { type = "TLS", danger_accept_invalid_certs = true } }
 
 
@@ -346,11 +346,13 @@ Possible values for `send_mail.auth`:
     Regular authentication:
     Note: `require_auth` and `auth_type` are optional and can be skipped.
 
-        auth = { type = "auto", username = "...", password = "...", require_auth = true, auth_type = ... }
+        auth = { type = "auto", username = ..., password = ..., require_auth = true, auth_type = ... }
 
-        password can be:
-            password = { type = "raw", value = "..." }
-            password = { type = "command_eval", value = "/path/to/password_script.sh" }
+        username/password can be:
+            A literal string:
+            password = "hunter2"
+            A command:
+            password = { command = "/path/to/password_script.sh" }
 
     XOAuth2 authentication:
     Note: `require_auth` is optional and can be skipped.
