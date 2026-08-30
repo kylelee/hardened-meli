@@ -35,7 +35,7 @@
 //!
 //! use melib::{conf::Secret, email::Address, futures, smol, smtp::*, Result};
 //! let conf = SmtpServerConf {
-//!     hostname: "smtp.example.com".into(),
+//!     hostname: Secret::Value("smtp.example.com".into()),
 //!     port: 587,
 //!     security: SmtpSecurity::StartTLS {
 //!         danger_accept_invalid_certs: false,
@@ -163,7 +163,7 @@ impl SmtpAuth {
 /// Server configuration for connecting the SMTP client
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SmtpServerConf {
-    pub hostname: String,
+    pub hostname: Secret,
     pub port: u16,
     #[serde(default)]
     pub envelope_from: String,
@@ -237,7 +237,11 @@ pub struct SmtpConnection {
 impl SmtpConnection {
     /// Performs connection and if configured: TLS negotiation and SMTP AUTH
     pub async fn new_connection(mut server_conf: SmtpServerConf) -> Result<Self> {
-        let path = &server_conf.hostname;
+        let path = server_conf
+            .hostname
+            .value_with_timeout(std::time::Duration::new(4, 0))
+            .await
+            .chain_err_summary(|| "hostname")?;
         let mut res = String::with_capacity(8 * 1024);
         let stream = match server_conf.security {
             SmtpSecurity::Auto {

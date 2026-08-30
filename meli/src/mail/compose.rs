@@ -701,9 +701,18 @@ To: {}
                                     }
                                     #[cfg(feature = "smtp")]
                                     crate::conf::composing::SendMail::Smtp(ref inner) => {
-                                        let mut hostname = inner.hostname.as_str();
-                                        hostname.truncate_at_boundary(10);
-                                        format!("{} [smtp: {}]", acc.name(), hostname)
+                                        let hostname = match inner.hostname {
+                                            melib::conf::Secret::Value(ref val) => {
+                                                Some(val.as_str())
+                                            }
+                                            melib::conf::Secret::Evaluate { .. } => None,
+                                        };
+                                        if let Some(mut hostname) = hostname {
+                                            hostname.truncate_at_boundary(10);
+                                            format!("{} [smtp: {}]", acc.name(), hostname)
+                                        } else {
+                                            format!("{} [smtp]", acc.name())
+                                        }
                                     }
                                     crate::conf::composing::SendMail::ServerSubmission => {
                                         format!("{} [server submission]", acc.name())

@@ -358,6 +358,7 @@ pub mod tests {
 
     use futures::{channel::mpsc::unbounded, executor::block_on};
     use melib::{
+        conf::Secret,
         email::Address,
         smtp::*,
         utils::logging::{LogLevel, Logger},
@@ -373,7 +374,7 @@ pub mod tests {
         let server_state = server.state.clone();
 
         let smtp_server_conf = SmtpServerConf {
-            hostname: server.addr.ip().to_string(),
+            hostname: Secret::Value(server.addr.ip().to_string()),
             port: server.addr.port(),
             envelope_from: "user@example.com".into(),
             auth: SmtpAuth::None,
