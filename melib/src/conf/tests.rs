@@ -70,3 +70,117 @@ fn test_config_serde_actionflag() {
         "invalid type: map, expected either a boolean or the string \"ask\"",
     );
 }
+
+#[test]
+fn test_config_serde_secret() {
+    use crate::conf::Secret;
+
+    const VALUE: &str = "value";
+
+    assert_tokens(&Secret::Value(VALUE.to_string()), &[Token::Str(VALUE)]);
+    assert_tokens(
+        &Secret::Evaluate {
+            command: VALUE.to_string(),
+            store_in_memory: true,
+        },
+        &[
+            Token::Map { len: Some(1) },
+            Token::Str("command"),
+            Token::Str(VALUE),
+            Token::MapEnd,
+        ],
+    );
+    assert_de_tokens(
+        &Secret::Evaluate {
+            command: VALUE.to_string(),
+            store_in_memory: true,
+        },
+        &[
+            Token::Map { len: Some(2) },
+            Token::Str("command"),
+            Token::Str(VALUE),
+            Token::Str("store_in_memory"),
+            Token::Bool(true),
+            Token::MapEnd,
+        ],
+    );
+    assert_tokens(
+        &Secret::Evaluate {
+            command: VALUE.to_string(),
+            store_in_memory: false,
+        },
+        &[
+            Token::Map { len: Some(2) },
+            Token::Str("command"),
+            Token::Str(VALUE),
+            Token::Str("store_in_memory"),
+            Token::Bool(false),
+            Token::MapEnd,
+        ],
+    );
+    assert_de_tokens_error::<Secret>(
+        &[
+            Token::Map { len: Some(2) },
+            Token::Str("comman"),
+            Token::MapEnd,
+        ],
+        "unknown field `comman`, expected `command` or `store_in_memory`",
+    );
+    assert_de_tokens_error::<Secret>(
+        &[Token::Bool(true)],
+        "invalid type: boolean `true`, expected either a string literal or map with keys \
+         \"command\" (string) and optionally \"store_in_memory\" (bool)",
+    );
+
+    // Backwards-compatibilty for melib::smtp::Password
+    assert_de_tokens(
+        &Secret::Value(VALUE.to_string()),
+        &[
+            Token::Map { len: Some(2) },
+            Token::Str("type"),
+            Token::Str("raw"),
+            Token::Str("value"),
+            Token::Str(VALUE),
+            Token::MapEnd,
+        ],
+    );
+    assert_de_tokens(
+        &Secret::Value(VALUE.to_string()),
+        &[
+            Token::Map { len: Some(2) },
+            Token::Str("value"),
+            Token::Str(VALUE),
+            Token::Str("type"),
+            Token::Str("raw"),
+            Token::MapEnd,
+        ],
+    );
+    assert_de_tokens(
+        &Secret::Evaluate {
+            command: VALUE.to_string(),
+            store_in_memory: false,
+        },
+        &[
+            Token::Map { len: Some(2) },
+            Token::Str("type"),
+            Token::Str("command_eval"),
+            Token::Str("value"),
+            Token::Str(VALUE),
+            Token::MapEnd,
+        ],
+    );
+    assert_de_tokens(
+        &Secret::Evaluate {
+            command: VALUE.to_string(),
+            store_in_memory: false,
+        },
+        &[
+            Token::Map { len: Some(2) },
+            Token::Str("value"),
+            Token::Str(VALUE),
+            Token::Str("type"),
+            Token::Str("command_eval"),
+            Token::MapEnd,
+        ],
+    );
+}
