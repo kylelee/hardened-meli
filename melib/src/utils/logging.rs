@@ -266,6 +266,11 @@ impl Logger {
         self.level.load(Ordering::SeqCst).into()
     }
 
+    /// Change log level.
+    pub fn change_log_level(&self, new_level: LogLevel) {
+        self.level.store(new_level as u8, Ordering::SeqCst)
+    }
+
     pub fn change_log_dest(&self, path: PathBuf) {
         use crate::utils::shellexpand::ShellExpandTrait;
 
