@@ -25,37 +25,6 @@ use serde::{
     ser::{Serialize, Serializer},
 };
 
-macro_rules! named_unit_variant {
-    ($variant:ident) => {
-        pub mod $variant {
-            pub fn deserialize<'de, D>(deserializer: D) -> Result<(), D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                struct V;
-                impl<'de> serde::de::Visitor<'de> for V {
-                    type Value = ();
-                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                        f.write_str(concat!("\"", stringify!($variant), "\""))
-                    }
-                    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                        if value == stringify!($variant) {
-                            Ok(())
-                        } else {
-                            Err(E::invalid_value(serde::de::Unexpected::Str(value), &self))
-                        }
-                    }
-                }
-                deserializer.deserialize_str(V)
-            }
-        }
-    };
-}
-
-pub mod strings {
-    named_unit_variant!(ask);
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ToggleFlag {
     #[default]
@@ -172,24 +141,32 @@ impl<'de> Deserialize<'de> for ActionFlag {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum InnerActionFlag {
-            Bool(bool),
-            #[serde(with = "strings::ask")]
-            Ask,
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = ActionFlag;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("either a boolean or the string \"ask\"")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(if value {
+                    ActionFlag::True
+                } else {
+                    ActionFlag::False
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                if value.eq_ignore_ascii_case("ask") {
+                    Ok(ActionFlag::Ask)
+                } else {
+                    Err(E::invalid_value(
+                        serde::de::Unexpected::Str(value),
+                        &"either a boolean or the string \"ask\"",
+                    ))
+                }
+            }
         }
-        let s = <InnerActionFlag>::deserialize(deserializer);
-        Ok(
-            match s.map_err(|err| {
-                serde::de::Error::custom(format!(
-                    r#"expected one of "true", "false", "ask", found `{err}`"#
-                ))
-            })? {
-                InnerActionFlag::Bool(true) => Self::True,
-                InnerActionFlag::Bool(false) => Self::False,
-                InnerActionFlag::Ask => Self::Ask,
-            },
-        )
+        deserializer.deserialize_any(V)
     }
 }
