@@ -29,7 +29,6 @@ use melib::{
     email::HeaderName,
     error::{Error, Result},
 };
-use serde::{de, Deserialize, Deserializer};
 
 use crate::conf::{
     default_values::{ask, false_val, none, true_val},
@@ -266,7 +265,7 @@ pub mod strings {
     named_unit_variant!(server_submission);
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SendMail {
     #[cfg(feature = "smtp")]
@@ -300,122 +299,5 @@ impl DotAddressable for ComposeHook {}
 impl From<ComposeHook> for crate::mail::hooks::Hook {
     fn from(c: ComposeHook) -> Self {
         Self::new_shell_command(c.name.into(), c.command)
-    }
-}
-const SENDMAIL_ERR_HELP: &str = r#"Invalid `send_mail` value.
-
-Here are some valid examples:
-
-Use server submission in protocols that support it (JMAP, NNTP)
-===============================================================
-
-    send_mail = "server_submission"
-
-Using a shell script
-====================
-
-    send_mail = "msmtp --read-recipients --read-envelope-from"
-
-Direct SMTP connection
-======================
-
-    [accounts.account-name]
-    send_mail = { hostname = "mail.example.com", port = 587, auth = { type = "auto", password = "hunter2" }, security = { type = "STARTTLS" } }
-
-    [accounts.account-name.send_mail]
-    hostname = "mail.example.com"
-    port = 587
-    auth = { type = "auto", password = { command = "/path/to/password_script.sh" } }
-    security = { type = "TLS", danger_accept_invalid_certs = true } }
-
-
-`send_mail` direct SMTP connection fields:
-    - hostname: text
-    - port: valid port number
-    - envelope_from: text (optional, default is empty),
-    - auth: ...
-    - security: ... (optional, default is "auto")
-    - extensions: ... (optional, default is PIPELINING, CHUNKING, PRDR, 8BITMIME, BINARYMIME, SMTPUTF8, AUTH and DSN_NOTIFY)
-
-Possible values for `send_mail.auth`:
-
-    No authentication:
-
-        auth = { type = "none" }
-
-    Regular authentication:
-    Note: `require_auth` and `auth_type` are optional and can be skipped.
-
-        auth = { type = "auto", username = ..., password = ..., require_auth = true, auth_type = ... }
-
-        username/password can be:
-            A literal string:
-            password = "hunter2"
-            A command:
-            password = { command = "/path/to/password_script.sh" }
-
-    XOAuth2 authentication:
-    Note: `require_auth` is optional and can be skipped.
-        auth = { type = "xoauth2", token = "...", require_auth = true }
-
-        token can be:
-            A literal string:
-            token = "my_token"
-            A command:
-            token = { command = "/path/to/xoauth2_script.sh" }
-
-Possible values for `send_mail.auth.auth_type` when `auth.type` is "auto":
-
-    auth_type = { plain = false, login = true }
-
-Possible values for `send_mail.security`:
-Note that in all cases field `danger_accept_invalid_certs` is optional and its default value is false.
-
-    security = "none"
-    security = { type = "auto", danger_accept_invalid_certs = false }
-    security = { type = "STARTTLS", danger_accept_invalid_certs = false }
-    security = { type = "TLS", danger_accept_invalid_certs = false }
-
-Possible values for `send_mail.extensions` (All optional and have default values `true`:
-    pipelining
-    chunking
-    8bitmime
-    prdr
-    binarymime
-    smtputf8
-    auth
-    dsn_notify: Array of options e.g. ["FAILURE"]
-"#;
-
-impl<'de> Deserialize<'de> for SendMail {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum SendMailInner {
-            #[cfg(feature = "smtp")]
-            Smtp(melib::smtp::SmtpServerConf),
-            #[serde(with = "strings::server_submission")]
-            ServerSubmission,
-            ShellCommand(String),
-        }
-
-        match melib::serde_path_to_error::deserialize(deserializer) {
-            #[cfg(feature = "smtp")]
-            Ok(SendMailInner::Smtp(v)) => Ok(Self::Smtp(v)),
-            Ok(SendMailInner::ServerSubmission) => Ok(Self::ServerSubmission),
-            Ok(SendMailInner::ShellCommand(v)) => Ok(Self::ShellCommand(v)),
-            Err(err)
-                if err.inner().to_string() == D::Error::missing_field("send_mail").to_string() =>
-            {
-                // Surely there should be a better way to do this...
-                Err(err.into_inner())
-            }
-            Err(_err) => Err(de::Error::custom(SENDMAIL_ERR_HELP)),
-        }
     }
 }
