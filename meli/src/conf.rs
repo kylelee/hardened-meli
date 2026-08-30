@@ -599,7 +599,13 @@ pub struct Settings {
 
 impl Settings {
     pub fn new() -> Result<Self> {
+        let mut _logger = Logger::new(melib::LogLevel::default());
+
         let fs = FileSettings::new()?;
+        if _logger.log_level() != fs.log.maximum_level {
+            _logger.change_log_level(fs.log.maximum_level)
+        }
+
         let mut s: IndexMap<String, AccountConf> = IndexMap::new();
 
         for (id, x) in fs.accounts {
@@ -608,8 +614,6 @@ impl Settings {
 
             s.insert(id, ac);
         }
-
-        let mut _logger = Logger::new(fs.log.maximum_level);
 
         if let Some(ref log_path) = fs.log.log_file {
             _logger.change_log_dest(log_path.into());
@@ -631,8 +635,13 @@ impl Settings {
     }
 
     pub fn without_accounts() -> Result<Self> {
+        let mut _logger = Logger::new(melib::LogLevel::default());
+
         let fs = FileSettings::new()?;
-        let mut _logger = Logger::new(fs.log.maximum_level);
+
+        if _logger.log_level() != fs.log.maximum_level {
+            _logger.change_log_level(fs.log.maximum_level)
+        }
 
         if let Some(ref log_path) = fs.log.log_file {
             _logger.change_log_dest(log_path.into());
