@@ -936,21 +936,24 @@ pub trait MailListingTrait: ListingTrait {
                                     .map(|&env_hash| collection.get_env(env_hash))
                                     .collect();
                                 if path.is_dir() {
-                                    if envs.len() == 1 {
-                                        path.push(format!("{}.mbox", envs[0].message_id()));
+                                    let mut filename = if envs.len() == 1 {
+                                        format!("{}.mbox", envs[0].message_id()).into()
                                     } else {
                                         let now = datetime::timestamp_to_string(
                                             datetime::now(),
                                             Some(datetime::formats::RFC3339_DATETIME),
                                             false,
                                         );
-                                        path.push(format!(
+                                        format!(
                                             "{}-{}-{}_envelopes.mbox",
                                             now,
                                             envs[0].message_id(),
                                             envs.len(),
-                                        ));
-                                    }
+                                        )
+                                        .into()
+                                    };
+                                    crate::sanitize_filename(&mut filename);
+                                    path.push(filename.as_ref());
                                 }
                                 let mut file = BufWriter::new(
                                     File::options()

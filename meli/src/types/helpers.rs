@@ -20,6 +20,7 @@
  */
 
 use std::{
+    borrow::Cow,
     fs,
     fs::OpenOptions,
     io::{Read, Write},
@@ -83,11 +84,18 @@ impl File {
     /// so make sure to add it on `context.temp_files` to reap it later.
     pub fn create_temp_file(
         bytes: &[u8],
-        mut filename: Option<&str>,
+        filename: Option<&str>,
         mut path: Option<&mut PathBuf>,
         extension: Option<&str>,
         delete_on_drop: bool,
     ) -> Result<Self> {
+        let filename_value: Option<Cow<'_, str>> = filename.map(|f| {
+            let mut f = Cow::Borrowed(f);
+            sanitize_filename(&mut f);
+            f
+        });
+        let mut filename: Option<&str> = filename_value.as_deref();
+
         loop {
             let mut dir = std::env::temp_dir();
             let path = if let Some(ref mut p) = path {
@@ -191,27 +199,48 @@ pub fn pipe() -> Result<(OwnedFd, OwnedFd)> {
     })
 }
 
-/// Create a shell-friendly filename by removing control characters and
-/// replacing characters that need escaping.
-pub fn sanitize_filename(og: String) -> Option<String> {
-    use regex::Regex;
+/// Create a friendly filename by removing control characters and replacing characters that need
+/// escaping.
+pub fn sanitize_filename(value: &mut Cow<'_, str>) {
+    // Replace with <https://docs.rs/regex/latest/regex/macro.regex.html> when we update the regex
+    // dependency
+    macro_rules! regex {
+        ($re:literal) => {{
+            static REGEX: std::sync::LazyLock<regex::Regex> =
+                std::sync::LazyLock::new(|| regex::Regex::new($re).expect("invalid regex pattern"));
 
-    let mut ret = og.replace(std::path::MAIN_SEPARATOR, "_");
+            // Coerce returned type from `&Lazy<Regex>` to `&Regex` to avoid making the
+            // inner type public.
+            let re: &regex::Regex = &REGEX;
+            re
+        }};
+    }
 
-    let regex = Regex::new(r"(?m)[[:space:]]+").ok()?; // _
-    ret = regex.replace_all(&ret, "_").to_string();
-    let regex = Regex::new(r"(?m)[[:punct:]]+").ok()?; // -
-    ret = regex.replace_all(&ret, "-").to_string();
-    let regex = Regex::new(r"(?m)[[:cntrl:]]*").ok()?; //
-    ret = regex.replace_all(&ret, "").to_string();
-    let regex = Regex::new(r"(?m)[[:blank:]]*").ok()?; //
-    ret = regex.replace_all(&ret, "").to_string();
-    let regex = Regex::new(r"^[[:punct:]]*").ok()?; //
-    ret = regex.replace_all(&ret, "").to_string();
-    let regex = Regex::new(r"(?m)__+").ok()?; // -
-    ret = regex.replace_all(&ret, "_").to_string();
-    let regex = Regex::new(r"[[:punct:]]*$").ok()?; //
-    Some(regex.replace_all(&ret, "").to_string())
+    // Macro to detect whether <regex>.replace_all performed no replacements, because it returnes a
+    // Cow::Borrowed that borrowes the _haystack_ and not the function argument `value`'s lifetime.
+    macro_rules! replace_all {
+        ($re:expr, $with:literal) => {{
+            let re = $re;
+            match re.replace_all(value.as_ref(), $with) {
+                Cow::Owned(owned) => {
+                    *value = Cow::Owned(owned);
+                }
+                Cow::Borrowed(_haystack) => {}
+            }
+        }};
+    }
+
+    if value.contains(std::path::MAIN_SEPARATOR) {
+        *value = Cow::Owned(value.replace(std::path::MAIN_SEPARATOR, "_"))
+    };
+
+    replace_all!(regex!(r"(?m)[[:space:]]+"), "_");
+    replace_all!(regex!(r"(?m)[[:punct:]]+"), "-");
+    replace_all!(regex!(r"(?m)[[:cntrl:]]*"), "");
+    replace_all!(regex!(r"(?m)[[:blank:]]*"), "");
+    replace_all!(regex!(r"^[[:punct:]]*"), "");
+    replace_all!(regex!(r"(?m)__+"), "_");
+    replace_all!(regex!(r"[[:punct:]]*$"), "");
 }
 
 #[cfg(test)]
@@ -261,9 +290,30 @@ mod tests {
 
     #[test]
     fn test_file_sanitize_filename() {
+        const OK_FILENAME: &str = "okay";
+        const PATH_SEP_FILENAME: &str = "meli/meli/issues/712/comment/4492@git.meli-email.org";
+        const EFFED_UP_FILENAME: &str = "Re: Some long subject - \"User Dot. Name\" \
+                                         <user1@example.com> Sent from my bPad 2024-09-07, on   a \
+                                         sunny Saturday";
+
+        let mut filename = Cow::Borrowed(OK_FILENAME);
+        sanitize_filename(&mut filename);
+        assert_eq!(filename, Cow::<'static, str>::Borrowed(OK_FILENAME));
+
+        let mut filename = Cow::Borrowed(PATH_SEP_FILENAME);
+        sanitize_filename(&mut filename);
         assert_eq!(
-            sanitize_filename("Re: Some long subject - \"User Dot. Name\" <user1@example.com> Sent from my bPad 2024-09-07, on   a sunny Saturday".to_string()),
-            Some("Re-Some-long-subject-User-Dot-Name-user1-example-com-Sent-from-my-bPad-2024-09-07-on-a-sunny-Saturday".to_string())
+            filename,
+            Cow::<'static, str>::Owned(
+                "meli-meli-issues-712-comment-4492-git-meli-email-org".to_string()
+            )
+        );
+
+        let mut filename = Cow::Borrowed(EFFED_UP_FILENAME);
+        sanitize_filename(&mut filename);
+        assert_eq!(
+            filename,
+            Cow::<'static, str>::Owned("Re-Some-long-subject-User-Dot-Name-user1-example-com-Sent-from-my-bPad-2024-09-07-on-a-sunny-Saturday".to_string())
         );
     }
 }

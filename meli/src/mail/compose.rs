@@ -44,7 +44,7 @@ use crate::{
     command::actions::{ComposerTabAction, FileAction},
     jobs::{IsAsync, JoinHandle},
     terminal::embedded::Terminal,
-    types::{sanitize_filename, File},
+    types::File,
 };
 
 #[cfg(feature = "gpgme")]
@@ -1997,7 +1997,7 @@ impl Component for Composer {
 
                 let f = match File::create_temp_file(
                     self.draft.to_edit_string().as_bytes(),
-                    sanitize_filename(filename).as_deref(),
+                    Some(&filename),
                     None,
                     Some("eml"),
                     true,

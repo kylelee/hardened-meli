@@ -550,8 +550,9 @@ impl EnvelopeView {
 
         if let Some(u) = self.open_attachment(a_i, context) {
             if path.is_dir() {
-                if let Some(filename) = u.filename() {
-                    path.push(filename);
+                if let Some(mut filename) = u.filename() {
+                    crate::sanitize_filename(&mut filename);
+                    path.push(filename.as_ref());
                 } else {
                     path.push(format!(
                         "meli_attachment_{a_i}_{}",
@@ -1415,7 +1416,9 @@ impl Component for EnvelopeView {
                 let mut path = std::path::Path::new(path).to_path_buf().expand();
 
                 if path.is_dir() {
-                    path.push(format!("{}.eml", self.mail.message_id()));
+                    let mut filename = self.mail.message_id().to_string().into();
+                    crate::sanitize_filename(&mut filename);
+                    path.push(format!("{filename}.eml",));
                 }
                 if path.is_relative() {
                     path = context.current_dir().join(&path);

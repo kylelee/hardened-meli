@@ -22,7 +22,7 @@
 use melib::{AccountHash, Card};
 
 use crate::{
-    types::{sanitize_filename, File, NotificationType, UIEvent},
+    types::{File, NotificationType, UIEvent},
     Context,
 };
 
@@ -35,7 +35,7 @@ pub fn export_to_vcard(card: &Card, account_hash: AccountHash, context: &mut Con
         .account
         .vcard_folder()
         .map(|s| std::path::Path::new(s).to_path_buf());
-    let filename = sanitize_filename(format!(
+    let filename = format!(
         "{prefix}{name}{suffix}{space}{additionalname}",
         prefix = card.name_prefix(),
         name = card.name(),
@@ -46,10 +46,10 @@ pub fn export_to_vcard(card: &Card, account_hash: AccountHash, context: &mut Con
             " "
         },
         additionalname = card.additionalname()
-    ));
+    );
     let res = File::create_temp_file(
         card.to_vcard_string().as_bytes(),
-        filename.as_deref(),
+        Some(&filename),
         output_dir.as_mut(),
         Some("vcf"),
         false,
