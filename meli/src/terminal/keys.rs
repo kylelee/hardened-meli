@@ -160,6 +160,13 @@ impl<'de> Deserialize<'de> for Key {
                     .write_str("a valid key value. Please consult the manual for valid key inputs.")
             }
 
+            fn visit_char<E>(self, value: char) -> Result<Key, E>
+            where
+                E: de::Error,
+            {
+                Ok(Key::Char(value))
+            }
+
             fn visit_str<E>(self, value: &str) -> Result<Key, E>
             where
                 E: de::Error,
@@ -224,7 +231,7 @@ impl<'de> Deserialize<'de> for Key {
             }
         }
 
-        deserializer.deserialize_identifier(KeyVisitor)
+        deserializer.deserialize_any(KeyVisitor)
     }
 }
 
