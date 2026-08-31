@@ -15,6 +15,7 @@ rusty-fork = { version = "0.3.0" }
 serde = { version = "1" }
 serde_derive = { version = "1" }
 serde_json = { version = "1" }
+serde_test2 = { version = "2" }
 smallvec = { version = "^1.15", features = ["serde"] }
 tempfile = { version = "3.3" }
 toml = { version = "0.8", default-features = false, features = ["display", "preserve_order", "parse"] }

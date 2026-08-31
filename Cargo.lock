@@ -1173,6 +1173,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
+ "serde_test2",
  "signal-hook",
  "signal-hook-registry",
  "smallvec",

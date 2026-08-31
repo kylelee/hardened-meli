@@ -268,63 +268,58 @@ impl Serialize for Key {
 
 #[test]
 fn test_key_serde() {
-    #[derive(Debug, Deserialize, Eq, PartialEq)]
-    struct V {
-        k: Key,
-    }
+    use serde_test2::{
+        assert_de_tokens, assert_de_tokens_error, assert_ser_tokens, assert_tokens, Token,
+    };
 
-    macro_rules! test_key {
-        ($s:literal, ok $v:expr) => {
-            assert_eq!(
-                toml::from_str::<V>(std::concat!("k = \"", $s, "\"")),
-                Ok(V { k: $v })
-            );
-        };
-        ($s:literal, err $v:literal) => {
-            test_key!($s, err $v, "^")
-        };
-        ($s:literal, err $v:literal, $extra:literal) => {
-            assert_eq!(
-                toml::from_str::<V>(std::concat!("k = \"", $s, "\""))
-                    .unwrap_err()
-                    .to_string(),
-                std::concat!(
-                    "TOML parse error at line 1, column 5\n  |\n1 | k = \"",
-                    $s,
-                    "\"\n  |     ",
-                    $extra,
-                    "^^^^\n",
-                    $v,
-                    '\n',
-                )
-                .to_string()
-            );
-        };
-    }
-    test_key!("Backspace", ok Key::Backspace);
-    test_key!("Left", ok  Key::Left );
-    test_key!("Right", ok  Key::Right);
-    test_key!("Up", ok  Key::Up );
-    test_key!("Down", ok  Key::Down );
-    test_key!("Home", ok  Key::Home );
-    test_key!("End", ok  Key::End );
-    test_key!("PageUp", ok  Key::PageUp );
-    test_key!("PageDown", ok  Key::PageDown );
-    test_key!("Delete", ok  Key::Delete );
-    test_key!("Insert", ok  Key::Insert );
-    test_key!("Enter", ok  Key::Char('\n') );
-    test_key!("Tab", ok  Key::Char('\t') );
-    test_key!("k", ok  Key::Char('k') );
-    test_key!("1", ok  Key::Char('1') );
-    test_key!("Esc", ok  Key::Esc );
-    test_key!("C-a", ok  Key::Ctrl('a') );
-    test_key!("C-1", ok  Key::Ctrl('1') );
-    test_key!("M-a", ok  Key::Alt('a') );
-    test_key!("F1", ok  Key::F(1) );
-    test_key!("F12", ok  Key::F(12) );
-    test_key!("C-V", err "`V` should be a lowercase and alphanumeric character instead.");
-    test_key!("M-V", err "`V` should be a lowercase and alphanumeric character instead.");
-    test_key!("F13", err "`13` should be a number 1 <= n <= 12 instead.");
-    test_key!("Fc", err "`c` should be a number 1 <= n <= 12 instead.", "");
-    test_key!("adsfsf", err "Cannot derive shortcut from `adsfsf`. Please consult the manual for valid key inputs.", "^^^^");
+    assert_tokens(&Key::Backspace, &[Token::Str("Backspace")]);
+    assert_tokens(&Key::Left, &[Token::Str("Left")]);
+    assert_tokens(&Key::Right, &[Token::Str("Right")]);
+    assert_tokens(&Key::Up, &[Token::Str("Up")]);
+    assert_tokens(&Key::Down, &[Token::Str("Down")]);
+    assert_tokens(&Key::Home, &[Token::Str("Home")]);
+    assert_tokens(&Key::End, &[Token::Str("End")]);
+    assert_tokens(&Key::PageUp, &[Token::Str("PageUp")]);
+    assert_tokens(&Key::PageDown, &[Token::Str("PageDown")]);
+    assert_tokens(&Key::Delete, &[Token::Str("Delete")]);
+    assert_tokens(&Key::Insert, &[Token::Str("Insert")]);
+    assert_tokens(&Key::Char('\n'), &[Token::Str("Enter")]);
+    assert_tokens(&Key::Esc, &[Token::Str("Esc")]);
+    assert_tokens(&Key::Char('\t'), &[Token::Str("Tab")]);
+    assert_tokens(&Key::Ctrl('a'), &[Token::Str("C-a")]);
+    assert_tokens(&Key::Ctrl('1'), &[Token::Str("C-1")]);
+    assert_tokens(&Key::Alt('a'), &[Token::Str("M-a")]);
+    assert_tokens(&Key::F(1), &[Token::Str("F1")]);
+    assert_tokens(&Key::F(12), &[Token::Str("F12")]);
+
+    // Key::Char deserialises from both string and char, but only serialises to char
+
+    // Round-trip
+    assert_tokens(&Key::Char('k'), &[Token::Char('k')]);
+    assert_tokens(&Key::Char('1'), &[Token::Char('1')]);
+
+    // One-way
+    assert_de_tokens(&Key::Char('1'), &[Token::Str("1")]);
+    assert_ser_tokens(&Key::Char('1'), &[Token::Char('1')]);
+
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("C-V")],
+        "`V` should be a lowercase and alphanumeric character instead.",
+    );
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("M-V")],
+        "`V` should be a lowercase and alphanumeric character instead.",
+    );
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("F13")],
+        "`13` should be a number 1 <= n <= 12 instead.",
+    );
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("Fc")],
+        "`c` should be a number 1 <= n <= 12 instead.",
+    );
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("adsfsf")],
+        "Cannot derive shortcut from `adsfsf`. Please consult the manual for valid key inputs.",
+    );
 }
