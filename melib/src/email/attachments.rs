@@ -21,7 +21,7 @@
 
 //! Attachment encoding and decoding.
 
-use std::str;
+use std::borrow::Cow;
 
 use data_encoding::BASE64_MIME;
 use smallvec::SmallVec;
@@ -350,7 +350,7 @@ impl AttachmentBuilder {
                 log::debug!(
                     "error {:?}\n\traw: {:?}\n\tboundary: {:?}",
                     a,
-                    str::from_utf8(raw).unwrap(),
+                    std::str::from_utf8(raw).unwrap(),
                     boundary
                 );
                 Vec::new()
@@ -874,9 +874,12 @@ impl Attachment {
         ret
     }
 
-    pub fn filename(&self) -> Option<String> {
+    pub fn filename(&'_ self) -> Option<Cow<'_, str>> {
         if self.content_disposition.kind.is_attachment() {
-            self.content_disposition.filename.clone()
+            self.content_disposition
+                .filename
+                .as_deref()
+                .map(Cow::Borrowed)
         } else {
             None
         }
@@ -886,20 +889,20 @@ impl Attachment {
                 .find(|(h, _)| {
                     h.eq_ignore_ascii_case(b"name") | h.eq_ignore_ascii_case(b"filename")
                 })
-                .map(|(_, v)| String::from_utf8_lossy(v).to_string()),
+                .map(|(_, v)| String::from_utf8_lossy(v)),
             ContentType::Other { .. } | ContentType::OctetStream { .. } => {
-                self.content_type.name().map(|s| s.to_string())
+                self.content_type.name().map(Cow::Borrowed)
             }
             _ => None,
         })
         .map(|s| {
-            crate::email::parser::encodings::phrase(s.as_bytes(), false)
-                .map(|(_, v)| v)
-                .ok()
-                .and_then(|n| String::from_utf8(n).ok())
-                .unwrap_or(s)
+            if let Ok((_, v)) = crate::email::parser::encodings::phrase(s.as_bytes(), false) {
+                if let Ok(v) = String::from_utf8(v) {
+                    return Cow::Owned(v);
+                }
+            }
+            s
         })
-        .map(|n| n.replace(|c| std::path::is_separator(c) || c.is_ascii_control(), "_"))
     }
 
     fn decode_rec_helper(&self, options: &mut DecodeOptions<'_>) -> Vec<u8> {
