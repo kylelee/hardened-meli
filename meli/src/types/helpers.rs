@@ -196,8 +196,10 @@ pub fn pipe() -> Result<(OwnedFd, OwnedFd)> {
 pub fn sanitize_filename(og: String) -> Option<String> {
     use regex::Regex;
 
+    let mut ret = og.replace(std::path::MAIN_SEPARATOR, "_");
+
     let regex = Regex::new(r"(?m)[[:space:]]+").ok()?; // _
-    let mut ret = regex.replace_all(&og, "_").to_string();
+    ret = regex.replace_all(&ret, "_").to_string();
     let regex = Regex::new(r"(?m)[[:punct:]]+").ok()?; // -
     ret = regex.replace_all(&ret, "-").to_string();
     let regex = Regex::new(r"(?m)[[:cntrl:]]*").ok()?; //
