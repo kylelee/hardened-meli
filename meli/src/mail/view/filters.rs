@@ -51,13 +51,17 @@ use crate::{
     Context, ErrorKind, File, StatusEvent, UIEvent,
 };
 
-type FilterResult = std::result::Result<(Attachment, Vec<u8>), (Error, Vec<u8>)>;
-type OnSuccessNoticeCb = Arc<dyn (Fn() -> Cow<'static, str>) + Send + Sync>;
+pub struct FilterOutput {
+    attachment: Attachment,
+    raw: Vec<u8>,
+    notice: Option<Cow<'static, str>>,
+}
+
+type FilterResult = std::result::Result<FilterOutput, (Error, Vec<u8>)>;
 
 pub enum ViewFilterContent {
     Running {
         job_id: JobId,
-        on_success_notice_cb: OnSuccessNoticeCb,
         job_handle: JoinHandle<FilterResult>,
         view_settings: ViewSettings,
     },
@@ -78,7 +82,6 @@ impl std::fmt::Debug for ViewFilterContent {
         match self {
             Running {
                 ref job_id,
-                on_success_notice_cb: _,
                 job_handle: _,
                 view_settings: _,
             } => fmt
@@ -259,6 +262,7 @@ impl ViewFilter {
 
         let filter_invocation2 = filter_invocation.to_string();
         let bytes2 = bytes.clone();
+        let open_html_shortcut = settings.shortcuts.envelope_view.open_html.clone();
         let job = async move {
             let filter_invocation = filter_invocation2;
             let bytes = bytes2;
@@ -278,19 +282,20 @@ impl ViewFilter {
                 Ok(body_text) => {
                     let mut att = AttachmentBuilder::default();
                     att.set_raw(body_text.into_bytes()).set_body_to_raw();
-                    Ok((att.build(), bytes))
+                    Ok(FilterOutput {
+                        attachment: att.build(),
+                        raw: bytes,
+                        notice: Some(
+                            format!(
+                                "Text piped through `{filter_invocation}` Press \
+                                 `{open_html_shortcut}` to open in web browser."
+                            )
+                            .into(),
+                        ),
+                    })
                 }
             }
         };
-        let filter_invocation2 = filter_invocation.to_string();
-        let open_html_shortcut = settings.shortcuts.envelope_view.open_html.clone();
-        let on_success_notice_cb = Arc::new(move || {
-            format!(
-                "Text piped through `{filter_invocation2}` Press `{open_html_shortcut}` to open \
-                 in web browser."
-            )
-            .into()
-        });
         let mut job_handle = context.main_loop_handler.job_executor.spawn(
             filter_invocation.to_string().into(),
             job,
@@ -312,23 +317,16 @@ impl ViewFilter {
         if let Ok(Some(job_result)) = try_recv_timeout!(&mut job_handle.chan) {
             retval.body_text = ViewFilterContent::Running {
                 job_id: job_handle.job_id,
-                on_success_notice_cb: on_success_notice_cb.clone(),
                 job_handle,
                 view_settings: view_settings.clone(),
             };
             retval.event_handler = Some(Self::html_process_event);
-            retval.process_job_result(
-                Ok(Some(job_result)),
-                on_success_notice_cb,
-                view_settings,
-                context,
-            );
+            retval.process_job_result(Ok(Some(job_result)), view_settings, context);
             return Ok(retval);
         }
         Ok(Self {
             body_text: ViewFilterContent::Running {
                 job_id: job_handle.job_id,
-                on_success_notice_cb,
                 job_handle,
                 view_settings: view_settings.clone(),
             },
@@ -545,8 +543,12 @@ impl ViewFilter {
                             async move {
                                 crate::mail::pgp::verify(att)
                                     .await
-                                    .map_err(|err| (err, bytes.clone()))
-                                    .map(|_| (a, bytes))
+                                    .map_err(|err| (err, bytes.clone()))?;
+                                Ok(FilterOutput {
+                                    attachment: a,
+                                    raw: bytes,
+                                    notice: Some("Verified signature".into()),
+                                })
                             }
                         };
                         let mut job_handle = context.main_loop_handler.job_executor.spawn(
@@ -554,7 +556,6 @@ impl ViewFilter {
                             verify_fut,
                             IsAsync::Blocking,
                         );
-                        let on_success_notice_cb = Arc::new(|| "Verified signature.".into());
                         let mut retval = Self {
                             filter_invocation: "gpg::verify".into(),
                             content_type: att.content_type.clone(),
@@ -571,23 +572,16 @@ impl ViewFilter {
                         if let Ok(Some(job_result)) = try_recv_timeout!(&mut job_handle.chan) {
                             retval.body_text = ViewFilterContent::Running {
                                 job_id: job_handle.job_id,
-                                on_success_notice_cb: on_success_notice_cb.clone(),
                                 job_handle,
                                 view_settings: view_settings.clone(),
                             };
                             retval.event_handler = None;
-                            retval.process_job_result(
-                                Ok(Some(job_result)),
-                                on_success_notice_cb,
-                                view_settings,
-                                context,
-                            );
+                            retval.process_job_result(Ok(Some(job_result)), view_settings, context);
                             return Ok(retval);
                         }
                         return Ok(Self {
                             body_text: ViewFilterContent::Running {
                                 job_id: job_handle.job_id,
-                                on_success_notice_cb,
                                 job_handle,
                                 view_settings: view_settings.clone(),
                             },
@@ -641,14 +635,18 @@ impl ViewFilter {
                             )
                             .await
                             .map_err(|err| (err, bytes))?;
-                            Ok((AttachmentBuilder::new(&bytes).build(), bytes))
+                            let attachment = AttachmentBuilder::new(&bytes).build();
+                            Ok(FilterOutput {
+                                attachment,
+                                raw: bytes,
+                                notice: Some("Decrypted content.".into()),
+                            })
                         };
                         let mut job_handle = context.main_loop_handler.job_executor.spawn(
                             "gpg::decrypt".into(),
                             decrypt_fut,
                             IsAsync::Blocking,
                         );
-                        let on_success_notice_cb = Arc::new(|| "Decrypted content.".into());
                         let mut retval = Self {
                             filter_invocation: "gpg::decrypt".into(),
                             content_type: att.content_type.clone(),
@@ -665,23 +663,16 @@ impl ViewFilter {
                         if let Ok(Some(job_result)) = try_recv_timeout!(&mut job_handle.chan) {
                             retval.body_text = ViewFilterContent::Running {
                                 job_id: job_handle.job_id,
-                                on_success_notice_cb: on_success_notice_cb.clone(),
                                 job_handle,
                                 view_settings: view_settings.clone(),
                             };
                             retval.event_handler = None;
-                            retval.process_job_result(
-                                Ok(Some(job_result)),
-                                on_success_notice_cb,
-                                view_settings,
-                                context,
-                            );
+                            retval.process_job_result(Ok(Some(job_result)), view_settings, context);
                             return Ok(retval);
                         }
                         return Ok(Self {
                             body_text: ViewFilterContent::Running {
                                 job_id: job_handle.job_id,
-                                on_success_notice_cb,
                                 job_handle,
                                 view_settings: view_settings.clone(),
                             },
@@ -709,14 +700,19 @@ impl ViewFilter {
                     )
                     .await
                     .map_err(|err| (err, bytes))?;
-                    Ok((AttachmentBuilder::new(&bytes).build(), bytes))
+                    let attachment = AttachmentBuilder::new(&bytes).build();
+
+                    Ok(FilterOutput {
+                        attachment,
+                        raw: bytes,
+                        notice: Some("Decrypted content.".into()),
+                    })
                 };
                 let mut job_handle = context.main_loop_handler.job_executor.spawn(
                     "gpg::decrypt".into(),
                     decrypt_fut,
                     IsAsync::Blocking,
                 );
-                let on_success_notice_cb = Arc::new(|| "Decrypted content.".into());
                 let mut retval = Self {
                     filter_invocation: "gpg::decrypt".into(),
                     content_type: att.content_type.clone(),
@@ -733,23 +729,16 @@ impl ViewFilter {
                 if let Ok(Some(job_result)) = try_recv_timeout!(&mut job_handle.chan) {
                     retval.body_text = ViewFilterContent::Running {
                         job_id: job_handle.job_id,
-                        on_success_notice_cb: on_success_notice_cb.clone(),
                         job_handle,
                         view_settings: view_settings.clone(),
                     };
                     retval.event_handler = None;
-                    retval.process_job_result(
-                        Ok(Some(job_result)),
-                        on_success_notice_cb,
-                        view_settings,
-                        context,
-                    );
+                    retval.process_job_result(Ok(Some(job_result)), view_settings, context);
                     return Ok(retval);
                 }
                 return Ok(Self {
                     body_text: ViewFilterContent::Running {
                         job_id: job_handle.job_id,
-                        on_success_notice_cb,
                         job_handle,
                         view_settings: view_settings.clone(),
                     },
@@ -918,7 +907,6 @@ impl ViewFilter {
                 if let ViewFilterContent::Running {
                     job_id: _,
                     mut job_handle,
-                    on_success_notice_cb,
                     view_settings,
                 } = std::mem::replace(
                     &mut self.body_text,
@@ -928,12 +916,7 @@ impl ViewFilter {
                 ) {
                     log::trace!("job_process_event: inside if let ");
                     let job_result = job_handle.chan.try_recv();
-                    self.process_job_result(
-                        job_result,
-                        on_success_notice_cb,
-                        &view_settings,
-                        context,
-                    );
+                    self.process_job_result(job_result, &view_settings, context);
                 }
                 return true;
             }
@@ -949,7 +932,6 @@ impl ViewFilter {
     fn process_job_result(
         &mut self,
         result: std::result::Result<Option<FilterResult>, ::futures::channel::oneshot::Canceled>,
-        on_success_notice_cb: OnSuccessNoticeCb,
         view_settings: &ViewSettings,
         context: &Context,
     ) {
@@ -972,16 +954,21 @@ impl ViewFilter {
                 };
                 self.notice = Some(format!("{} failed", self.filter_invocation).into());
             }
-            Ok(Some(Ok((att, bytes)))) => {
+            Ok(Some(Ok(output))) => {
+                let FilterOutput {
+                    attachment,
+                    raw,
+                    notice,
+                } = output;
                 self.event_handler = None;
                 log::trace!("job_process_event: OK ");
-                match Self::new_attachment(&att, view_settings, context) {
+                match Self::new_attachment(&attachment, view_settings, context) {
                     Ok(mut new_self) => {
                         if self.content_type.is_text_html() {
                             new_self.event_handler = Some(Self::html_process_event);
                         }
-                        new_self.unfiltered = bytes;
-                        new_self.notice = Some(on_success_notice_cb());
+                        new_self.unfiltered = raw;
+                        new_self.notice = notice;
                         *self = new_self;
                     }
                     Err(err) => {
