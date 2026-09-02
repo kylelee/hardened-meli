@@ -55,7 +55,10 @@ pub fn verify(a: Attachment) -> impl Future<Output = Result<()>> {
 
 async fn verify_inner(a: Attachment, cache: Arc<Mutex<BTreeMap<u64, Result<()>>>>) -> Result<()> {
     let mut hasher = DefaultHasher::new();
-    a.hash(&mut hasher);
+    let (data, sig) =
+        melib_pgp::verify_signature(&a).chain_err_summary(|| "Could not verify signature.")?;
+    data.hash(&mut hasher);
+    sig.body().hash(&mut hasher);
     let attachment_hash: u64 = hasher.finish();
 
     {
@@ -66,8 +69,6 @@ async fn verify_inner(a: Attachment, cache: Arc<Mutex<BTreeMap<u64, Result<()>>>
         }
     }
 
-    let (data, sig) =
-        melib_pgp::verify_signature(&a).chain_err_summary(|| "Could not verify signature.")?;
     let mut ctx = Context::new()?;
     let sig = ctx.new_data_mem(sig.body().trim())?;
     let data = ctx.new_data_mem(&data)?;
