@@ -551,7 +551,7 @@ impl EnvelopeView {
         if let Some(u) = self.open_attachment(a_i, context) {
             if path.is_dir() {
                 if let Some(mut filename) = u.filename() {
-                    crate::sanitize_filename(&mut filename);
+                    crate::sanitize_separator(&mut filename);
                     path.push(filename.as_ref());
                 } else {
                     path.push(format!(

@@ -199,8 +199,14 @@ pub fn pipe() -> Result<(OwnedFd, OwnedFd)> {
     })
 }
 
-/// Create a friendly filename by removing control characters and replacing characters that need
-/// escaping.
+/// Remove system path separator from filename
+#[inline(always)]
+pub fn sanitize_separator(value: &mut Cow<'_, str>) {
+    if value.contains(std::path::MAIN_SEPARATOR) {
+        *value = Cow::Owned(value.replace(std::path::MAIN_SEPARATOR, "_"))
+    };
+}
+
 pub fn sanitize_filename(value: &mut Cow<'_, str>) {
     // Replace with <https://docs.rs/regex/latest/regex/macro.regex.html> when we update the regex
     // dependency
@@ -230,9 +236,7 @@ pub fn sanitize_filename(value: &mut Cow<'_, str>) {
         }};
     }
 
-    if value.contains(std::path::MAIN_SEPARATOR) {
-        *value = Cow::Owned(value.replace(std::path::MAIN_SEPARATOR, "_"))
-    };
+    sanitize_separator(value);
 
     replace_all!(regex!(r"(?m)[[:space:]]+"), "_");
     replace_all!(regex!(r"(?m)[[:punct:]]+"), "-");
@@ -299,6 +303,8 @@ mod tests {
         let mut filename = Cow::Borrowed(OK_FILENAME);
         sanitize_filename(&mut filename);
         assert_eq!(filename, Cow::<'static, str>::Borrowed(OK_FILENAME));
+        sanitize_separator(&mut filename);
+        assert_eq!(filename, Cow::<'static, str>::Borrowed(OK_FILENAME));
 
         let mut filename = Cow::Borrowed(PATH_SEP_FILENAME);
         sanitize_filename(&mut filename);
@@ -306,6 +312,14 @@ mod tests {
             filename,
             Cow::<'static, str>::Owned(
                 "meli-meli-issues-712-comment-4492-git-meli-email-org".to_string()
+            )
+        );
+        let mut filename = Cow::Borrowed(PATH_SEP_FILENAME);
+        sanitize_separator(&mut filename);
+        assert_eq!(
+            filename,
+            Cow::<'static, str>::Owned(
+                "meli_meli_issues_712_comment_4492@git.meli-email.org".to_string()
             )
         );
 

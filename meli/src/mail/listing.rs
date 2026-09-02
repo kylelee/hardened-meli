@@ -952,7 +952,7 @@ pub trait MailListingTrait: ListingTrait {
                                         )
                                         .into()
                                     };
-                                    crate::sanitize_filename(&mut filename);
+                                    crate::sanitize_separator(&mut filename);
                                     path.push(filename.as_ref());
                                 }
                                 let mut file = BufWriter::new(
