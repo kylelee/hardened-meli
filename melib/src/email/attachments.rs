@@ -423,62 +423,36 @@ impl std::fmt::Debug for Attachment {
 
 impl std::fmt::Display for Attachment {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let filename = self.filename();
+        if let Some(ref name) = filename {
+            write!(f, "\"{}\", ", name,)?;
+        }
         match self.content_type {
             ContentType::MessageRfc822 => {
                 match Mail::new(self.body.display_bytes(&self.raw).to_vec(), None) {
                     Ok(wrapper) => write!(
                         f,
-                        "{} {} {} [message/rfc822] {}",
+                        "{} {} {} [message/rfc822]",
                         wrapper.subject(),
                         wrapper.field_from_to_string(),
                         wrapper.date_as_str(),
-                        BytesDisplay(self.raw.len()),
-                    ),
-                    Err(err) => write!(
-                        f,
-                        "could not parse: {} [message/rfc822] {}",
-                        err,
-                        BytesDisplay(self.raw.len()),
-                    ),
+                    )?,
+                    Err(err) => write!(f, "could not parse: {} [message/rfc822]", err)?,
                 }
             }
-            ContentType::PGPSignature => write!(f, "pgp signature [{}]", self.mime_type()),
-            ContentType::CMSSignature => write!(f, "S/MIME signature [{}]", self.mime_type()),
+            ContentType::PGPSignature => write!(f, "pgp signature [{}]", self.mime_type())?,
+            ContentType::CMSSignature => write!(f, "S/MIME signature [{}]", self.mime_type())?,
             ContentType::OctetStream { .. } | ContentType::Other { .. } => {
-                if let Some(name) = self.filename() {
-                    write!(
-                        f,
-                        "\"{}\", [{}] {}",
-                        name,
-                        self.mime_type(),
-                        BytesDisplay(self.raw.len())
-                    )
-                } else {
-                    write!(
-                        f,
-                        "Data attachment [{}] {}",
-                        self.mime_type(),
-                        BytesDisplay(self.raw.len())
-                    )
+                if filename.is_none() {
+                    write!(f, "Data attachment ")?;
                 }
+                write!(f, " [{}]", self.mime_type())?
             }
             ContentType::Text { .. } => {
-                if let Some(name) = self.filename() {
-                    write!(
-                        f,
-                        "\"{}\", [{}] {}",
-                        name,
-                        self.mime_type(),
-                        BytesDisplay(self.raw.len())
-                    )
-                } else {
-                    write!(
-                        f,
-                        "Text attachment [{}] {}",
-                        self.mime_type(),
-                        BytesDisplay(self.raw.len())
-                    )
+                if filename.is_none() {
+                    write!(f, "Text attachment ",)?;
                 }
+                write!(f, "[{}]", self.mime_type())?;
             }
             ContentType::Multipart {
                 parts: ref sub_att_vec,
@@ -488,8 +462,9 @@ impl std::fmt::Display for Attachment {
                 "{} attachment with {} parts",
                 self.mime_type(),
                 sub_att_vec.len()
-            ),
+            )?,
         }
+        write!(f, " {}", BytesDisplay(self.raw.len()))
     }
 }
 
