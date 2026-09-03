@@ -354,7 +354,7 @@ pub enum AttachmentDisplay {
     SignedPending {
         inner: Box<Attachment>,
         display: Vec<Self>,
-        handle: JoinHandle<Result<()>>,
+        handle: JoinHandle<Result<Option<String>>>,
         job_id: JobId,
     },
     SignedFailed {
@@ -369,7 +369,7 @@ pub enum AttachmentDisplay {
     SignedVerified {
         inner: Box<Attachment>,
         display: Vec<Self>,
-        description: String,
+        comment: Option<String>,
     },
     EncryptedPending {
         inner: Box<Attachment>,
@@ -424,7 +424,7 @@ impl AttachmentDisplay {
             | Self::SignedVerified {
                 inner,
                 display: _,
-                description: _,
+                comment: _,
             }
             | Self::SignedUnverified { inner, display: _ }
             | Self::EncryptedPending { inner, handle: _ }
@@ -467,7 +467,7 @@ impl AttachmentDisplay {
             | Self::SignedVerified {
                 inner: _,
                 display,
-                description: _,
+                comment: _,
             }
             | Self::SignedUnverified { inner: _, display }
             | Self::EncryptedSuccess {

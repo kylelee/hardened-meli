@@ -24,6 +24,7 @@ convert_to_typedefs! {
     pub fn gpgme_set_protocol(ctx: gpgme_ctx_t, proto: gpgme_protocol_t) -> gpgme_error_t;
     pub fn gpgme_set_armor(ctx: gpgme_ctx_t, yes: ::core::ffi::c_int);
     pub fn gpgme_get_armor(ctx: gpgme_ctx_t) -> ::core::ffi::c_int;
+    pub fn gpgme_set_textmode(ctx: gpgme_ctx_t, yes: ::core::ffi::c_int);
     pub fn gpgme_set_offline(ctx: gpgme_ctx_t, yes: ::core::ffi::c_int);
     pub fn gpgme_get_offline(ctx: gpgme_ctx_t) -> ::core::ffi::c_int;
     pub fn gpgme_set_pinentry_mode(ctx: gpgme_ctx_t, mode: gpgme_pinentry_mode_t) -> gpgme_error_t;
@@ -83,6 +84,7 @@ convert_to_typedefs! {
         cipher: gpgme_data_t,
         plain: gpgme_data_t,
     ) -> gpgme_error_t;
+    pub fn gpgme_op_sign_result(ctx: gpgme_ctx_t) -> gpgme_sign_result_t;
     pub fn gpgme_op_sign_start(
         ctx: gpgme_ctx_t,
         plain: gpgme_data_t,
@@ -107,4 +109,5 @@ convert_to_typedefs! {
     pub fn gpgme_check_version(
         req_version: *const ::core::ffi::c_char,
     ) -> *const ::core::ffi::c_char;
+    pub fn gpgme_hash_algo_name(algo: gpgme_hash_algo_t) -> *const ::core::ffi::c_char;
 }

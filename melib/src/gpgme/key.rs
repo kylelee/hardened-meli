@@ -226,14 +226,14 @@ pub struct InvalidKeyError {
     pub gpgme_error: gpgme_error_t,
 }
 
-pub(super) struct InvalidKeysIter<'a> {
+pub struct InvalidKeysIter<'a> {
     lib: Arc<libloading::Library>,
     ptr: gpgme_invalid_key_t,
     _ph: std::marker::PhantomData<&'a _gpgme_invalid_key>,
 }
 
 impl InvalidKeysIter<'_> {
-    pub(super) fn new(ptr: gpgme_invalid_key_t, lib: Arc<libloading::Library>) -> Self {
+    pub fn new(ptr: gpgme_invalid_key_t, lib: Arc<libloading::Library>) -> Self {
         Self {
             lib,
             ptr,
@@ -260,6 +260,12 @@ impl Iterator for InvalidKeysIter<'_> {
 }
 
 impl std::fmt::Display for InvalidKeyError {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        <Self as std::fmt::Debug>::fmt(self, fmt)
+    }
+}
+
+impl std::fmt::Debug for InvalidKeyError {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
         fmt.debug_struct(crate::identify!(InvalidKeyError))
             .field("Fingerprint", &self.fingerprint)

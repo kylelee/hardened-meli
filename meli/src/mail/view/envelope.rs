@@ -300,9 +300,12 @@ impl EnvelopeView {
                     {
                         if view_settings.auto_verify_signatures.is_true() {
                             let verify_fut = crate::mail::pgp::verify(a.clone());
+                            let process_fut = async move {
+                                crate::mail::pgp::signatures_into_error(verify_fut.await?)
+                            };
                             let handle = main_loop_handler.job_executor.spawn(
                                 "gpg::verify".into(),
-                                verify_fut,
+                                process_fut,
                                 IsAsync::Blocking,
                             );
                             active_jobs.insert(handle.job_id);
@@ -363,7 +366,7 @@ impl EnvelopeView {
                             #[cfg(feature = "gpgme")]
                             {
                                 if view_settings.auto_decrypt.is_true() {
-                                    let decrypt_fut = crate::mail::pgp::decrypt(a.raw().to_vec());
+                                    let decrypt_fut = crate::mail::pgp::decrypt(a.clone());
                                     let handle = main_loop_handler.job_executor.spawn(
                                         "gpg::decrypt".into(),
                                         decrypt_fut,
@@ -1124,7 +1127,7 @@ impl Component for EnvelopeView {
                                             "Could not verify signature: check logs for any errors",
                                         );
                                     }
-                                    Ok(Some(Ok(()))) => {
+                                    Ok(Some(Ok(comment))) => {
                                         succeeded = true;
                                         *d = AttachmentDisplay::SignedVerified {
                                             inner: std::mem::replace(
@@ -1132,7 +1135,7 @@ impl Component for EnvelopeView {
                                                 Box::new(AttachmentBuilder::new(&[]).build()),
                                             ),
                                             display: std::mem::take(display),
-                                            description: String::new(),
+                                            comment,
                                         };
                                     }
                                     Ok(Some(Err(error))) => {

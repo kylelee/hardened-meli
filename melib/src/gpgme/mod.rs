@@ -53,7 +53,7 @@ use smol::{
 };
 
 use crate::{
-    email::pgp::{DecryptionMetadata, Recipient},
+    email::pgp::{DecryptionMetadata, Recipient, SignaturesMetadata},
     error::{Error, ErrorKind, Result, ResultIntoError},
 };
 
@@ -88,6 +88,7 @@ use bindings::*;
 pub mod key;
 pub use key::*;
 pub mod io;
+pub mod sign;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GpgmeFlag {
@@ -491,7 +492,7 @@ impl Context {
         &mut self,
         mut signature: Data,
         mut text: Data,
-    ) -> Result<impl Future<Output = Result<()>> + Send> {
+    ) -> Result<impl Future<Output = Result<SignaturesMetadata>> + Send> {
         unsafe {
             gpgme_error_try(
                 &self.inner.lib,
@@ -556,27 +557,33 @@ impl Context {
                 }
             }))
             .await;
-            log::trace!("done with fut join");
             let rcv = {
                 let io_state_lck = ctx.io_state.lock().unwrap();
                 io_state_lck.receiver.clone()
             };
             let _ = rcv.recv().await;
-            {
-                let verify_result: gpgme_verify_result_t = unsafe {
-                    call!(&ctx.inner.lib, gpgme_op_verify_result)(ctx.inner.ptr.as_ptr())
-                };
-                if verify_result.is_null() {
+            let ret = {
+                let Some(verify_result) = sign::VerifyResult::retrieve(&ctx.inner.lib, &ctx) else {
                     return Err(Error::new(
                         "Unspecified libgpgme error: gpgme_op_verify_result returned NULL.",
                     )
                     .set_kind(ErrorKind::External));
+                };
+                let signatures = verify_result.signatures().collect::<Vec<_>>();
+                if signatures.is_empty() {
+                    return Err(Error::new("No signatures found.").set_kind(ErrorKind::NotFound));
                 }
-            }
+                Ok(SignaturesMetadata { signatures })
+            };
             let io_state_lck = ctx.io_state.lock().unwrap();
-            let ret = io_state_lck.done.lock().unwrap().take().unwrap_or_else(|| {
-                Err(Error::new("Unspecified libgpgme error").set_kind(ErrorKind::Bug))
-            });
+            io_state_lck
+                .done
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    Err(Error::new("Unspecified libgpgme error").set_kind(ErrorKind::Bug))
+                })?;
             ret
         })
     }
@@ -692,18 +699,21 @@ impl Context {
         &mut self,
         sign_keys: Vec<Key>,
         mut text: Data,
-    ) -> Result<impl Future<Output = Result<Vec<u8>>>> {
+        is_binary: bool,
+    ) -> Result<impl Future<Output = Result<(sign::NewSignature, Vec<u8>)>>> {
         if sign_keys.is_empty() {
             return Err(
                 Error::new("gpgme: Call to sign() with zero keys.").set_kind(ErrorKind::Bug)
             );
         }
-        let mut sig: gpgme_data_t = std::ptr::null_mut();
+        let canonical_text_mode = !is_binary;
         unsafe {
-            gpgme_error_try(
-                &self.inner.lib,
-                call!(&self.inner.lib, gpgme_data_new)(&raw mut sig),
-            )?;
+            call!(&self.inner.lib, gpgme_set_textmode)(
+                self.inner.ptr.as_ptr(),
+                canonical_text_mode.into(),
+            );
+        };
+        unsafe {
             call!(&self.inner.lib, gpgme_signers_clear)(self.inner.ptr.as_ptr());
             for k in sign_keys {
                 gpgme_error_try(
@@ -716,27 +726,21 @@ impl Context {
             }
         }
 
+        let mut sig = Data::new(self.inner.lib.clone())?;
         unsafe {
             gpgme_error_try(
                 &self.inner.lib,
                 call!(&self.inner.lib, gpgme_op_sign_start)(
                     self.inner.ptr.as_ptr(),
                     text.inner.as_mut(),
-                    sig,
+                    sig.as_ptr(),
                     gpgme_sig_mode_t::GPGME_SIG_MODE_DETACH,
                 ),
             )?;
         }
-        let mut sig = Data {
-            lib: self.inner.lib.clone(),
-            kind: DataKind::Memory,
-            bytes: Pin::new(vec![]),
-            inner: NonNull::new(sig).ok_or_else(|| {
-                Error::new("internal libgpgme error").set_kind(ErrorKind::LinkedLibrary("gpgme"))
-            })?,
-        };
 
         let ctx = self.clone();
+        let lib = Arc::clone(&self.inner.lib);
         let (done, fut) = self.io_state.done_fut()?;
         Ok(async move {
             futures::future::join_all(fut.iter().map(|fut| {
@@ -797,14 +801,25 @@ impl Context {
                 .lock()
                 .unwrap()
                 .take()
-                .unwrap_or_else(|| Err(Error::new("Unspecified libgpgme error")))?;
+                .unwrap_or_else(|| {
+                    Err(Error::new("Unspecified libgpgme error").set_kind(ErrorKind::External))
+                })?;
+            let sign_result = sign::SignResult::retrieve(&lib, &ctx).unwrap();
+            let mut signatures = sign_result.signatures().collect::<Vec<_>>();
+            // [ref:FIXME]: can there be more than one new signature?
+            let Some(new_sig) = signatures.pop() else {
+                return Err(
+                    Error::new("libgpgme returned no signatures after signing op")
+                        .set_kind(ErrorKind::External),
+                );
+            };
             sig.seek(std::io::SeekFrom::Start(0))
                 .chain_err_summary(|| {
                     "libgpgme error: could not perform seek on signature data object"
                 })?;
             // disjoint-capture-in-closures
             let _ = &text;
-            sig.into_bytes()
+            Ok((new_sig, sig.into_bytes()?))
         })
     }
 
@@ -932,18 +947,14 @@ impl Context {
                 };
                 let mut recipient_iter = (*decrypt_result).recipients;
                 while !recipient_iter.is_null() {
-                    recipients.push(Recipient {
-                        keyid: if !(*recipient_iter).keyid.is_null() {
-                            Some(
-                                CStr::from_ptr((*recipient_iter).keyid)
-                                    .to_string_lossy()
-                                    .to_string(),
-                            )
-                        } else {
-                            None
-                        },
-                        status: gpgme_error_try(&ctx.inner.lib, (*recipient_iter).status),
-                    });
+                    if !(*recipient_iter).keyid.is_null() {
+                        recipients.push(Recipient {
+                            keyid: CStr::from_ptr((*recipient_iter).keyid)
+                                .to_string_lossy()
+                                .to_string(),
+                            status: gpgme_error_try(&ctx.inner.lib, (*recipient_iter).status),
+                        });
+                    }
                     recipient_iter = (*recipient_iter).next;
                 }
             }
@@ -1349,11 +1360,31 @@ pub struct Data {
 }
 
 impl Data {
+    pub fn new(lib: Arc<libloading::Library>) -> Result<Self> {
+        let mut inner: gpgme_data_t = std::ptr::null_mut();
+        unsafe {
+            gpgme_error_try(&lib, call!(&lib, gpgme_data_new)(&raw mut inner))?;
+        }
+        let inner = NonNull::new(inner).ok_or_else(|| {
+            Error::new("internal libgpgme error").set_kind(ErrorKind::LinkedLibrary("gpgme"))
+        })?;
+        Ok(Self {
+            lib,
+            kind: DataKind::Memory,
+            bytes: Pin::new(vec![]),
+            inner,
+        })
+    }
+
     pub fn into_bytes(mut self) -> Result<Vec<u8>> {
         use std::io::Read;
         let mut buf = vec![];
         self.read_to_end(&mut buf)?;
         Ok(buf)
+    }
+
+    pub const fn as_ptr(&self) -> *mut bindings::gpgme_data {
+        self.inner.as_ptr()
     }
 }
 

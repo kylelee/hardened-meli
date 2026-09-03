@@ -498,8 +498,7 @@ impl ViewFilter {
             }
             #[cfg(not(feature = "gpgme"))]
             {
-                let content = att.raw();
-                let bytes = content.trim().to_vec();
+                let unfiltered = att.decode(view_settings.charset.into()).to_vec();
                 return Ok(Self {
                     filter_invocation: String::new(),
                     content_type: att.content_type.clone(),
@@ -519,7 +518,7 @@ impl ViewFilter {
                             })
                             .collect::<Vec<Self>>(),
                     },
-                    unfiltered: bytes,
+                    unfiltered,
                     event_handler: None,
                     id: ComponentId::default(),
                 });
@@ -528,8 +527,7 @@ impl ViewFilter {
             {
                 for a in parts {
                     if a.content_type == "application/pgp-signature" {
-                        let content = att.raw();
-                        let bytes = content.trim().to_vec();
+                        let bytes = att.decode(Default::default()).to_vec();
                         let verify_fut = {
                             let a = Attachment {
                                 content_type: ContentType::Multipart {
@@ -542,13 +540,20 @@ impl ViewFilter {
                             };
                             let att = att.clone();
                             async move {
-                                crate::mail::pgp::verify(att)
+                                let result = crate::mail::pgp::verify(att)
                                     .await
-                                    .map_err(|err| (err, bytes.clone()))?;
+                                    .and_then(crate::mail::pgp::signatures_into_error);
+                                let notice = match result {
+                                    Ok(None) => None,
+                                    Ok(Some(comment)) => {
+                                        Some(format!("Signature: {comment}").into())
+                                    }
+                                    Err(err) => Some(format!("Invalid signature: {err}").into()),
+                                };
                                 Ok(FilterOutput {
                                     attachment: a,
                                     raw: bytes,
-                                    notice: Some("Verified signature".into()),
+                                    notice,
                                 })
                             }
                         };
@@ -566,7 +571,7 @@ impl ViewFilter {
                             body_text: ViewFilterContent::Filtered {
                                 inner: String::new(),
                             },
-                            unfiltered: att.raw().to_vec(),
+                            unfiltered: att.decode(Default::default()).to_vec(),
                             event_handler: None,
                             id: ComponentId::default(),
                         };
@@ -628,14 +633,12 @@ impl ViewFilter {
             {
                 for a in parts {
                     if a.content_type == "application/octet-stream" {
-                        let content = a.raw();
-                        let bytes = content.trim().to_vec();
+                        let bytes = att.decode(Default::default()).to_vec();
+                        let att2 = att.clone();
                         let decrypt_fut = async {
-                            let (_metadata, bytes) = crate::mail::pgp::decrypt(
-                                melib::email::pgp::convert_attachment_to_rfc_spec(&bytes),
-                            )
-                            .await
-                            .map_err(|err| (err, bytes))?;
+                            let (_metadata, bytes) = crate::mail::pgp::decrypt(att2)
+                                .await
+                                .map_err(|err| (err, bytes))?;
                             let attachment = AttachmentBuilder::new(&bytes).build();
                             Ok(FilterOutput {
                                 attachment,
@@ -657,7 +660,7 @@ impl ViewFilter {
                             body_text: ViewFilterContent::Filtered {
                                 inner: String::new(),
                             },
-                            unfiltered: a.raw().to_vec(),
+                            unfiltered: att.decode(Default::default()).to_vec(),
                             event_handler: None,
                             id: ComponentId::default(),
                         };
@@ -695,18 +698,17 @@ impl ViewFilter {
                 && content.trim_end().ends_with("-----END PGP MESSAGE-----")
             {
                 let bytes = content.trim().to_string().into_bytes();
+                let att2 = att.clone();
                 let decrypt_fut = async {
-                    let (_metadata, bytes) = crate::mail::pgp::decrypt(
-                        melib::email::pgp::convert_attachment_to_rfc_spec(&bytes),
-                    )
-                    .await
-                    .map_err(|err| (err, bytes))?;
+                    let (_metadata, bytes) = crate::mail::pgp::decrypt(att2)
+                        .await
+                        .map_err(|err| (err, bytes))?;
                     let attachment = AttachmentBuilder::new(&bytes).build();
 
                     Ok(FilterOutput {
                         attachment,
                         raw: bytes,
-                        notice: Some("Decrypted content.".into()),
+                        notice: Some("Decrypted cleartext content.".into()),
                     })
                 };
                 let mut job_handle = context.main_loop_handler.job_executor.spawn(

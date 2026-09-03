@@ -38,6 +38,7 @@ bindgen \
   --allowlist-function gpgme_get_ctx_flag \
   --allowlist-function gpgme_get_offline \
   --allowlist-function gpgme_get_pinentry_mode \
+  --allowlist-function gpgme_hash_algo_name \
   --allowlist-function gpgme_key_ref \
   --allowlist-function gpgme_key_unref \
   --allowlist-function gpgme_new \
@@ -49,6 +50,7 @@ bindgen \
   --allowlist-function gpgme_op_import_result \
   --allowlist-function gpgme_op_keylist_end \
   --allowlist-function gpgme_op_keylist_start \
+  --allowlist-function gpgme_op_sign_result \
   --allowlist-function gpgme_op_sign_start \
   --allowlist-function gpgme_op_verify_result \
   --allowlist-function gpgme_op_verify_start \
@@ -60,10 +62,11 @@ bindgen \
   --allowlist-function gpgme_set_passphrase_cb \
   --allowlist-function gpgme_set_pinentry_mode \
   --allowlist-function gpgme_set_protocol \
+  --allowlist-function gpgme_set_textmode \
   --allowlist-function gpgme_signers_add \
   --allowlist-function gpgme_signers_clear \
-  --allowlist-function gpgme_strerror_r \
   --allowlist-function gpgme_strerror \
+  --allowlist-function gpgme_strerror_r \
   --no-size_t-is-usize \
   --disable-header-comment \
   --emit-diagnostics \

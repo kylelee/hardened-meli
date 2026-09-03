@@ -28,8 +28,9 @@ use std::{
 
 use melib::{
     email::{
-        attachment_types::{ContentDisposition, ContentType, MultipartType},
-        pgp as melib_pgp, Attachment, AttachmentBuilder,
+        attachment_types::{ContentDisposition, ContentType, MultipartType, Text},
+        pgp::{self as melib_pgp, DecryptionMetadata, Recipient, Signature, SignaturesMetadata},
+        Attachment, AttachmentBuilder,
     },
     error::*,
     gpgme::*,
@@ -38,47 +39,125 @@ use melib::{
 
 use super::AttachmentBoxFuture;
 
-pub async fn decrypt(raw: Vec<u8>) -> Result<(melib_pgp::DecryptionMetadata, Vec<u8>)> {
+/// Decrypts a `multipart/encrypted` or a cleartext encrypted message.
+pub async fn decrypt(a: Attachment) -> Result<(DecryptionMetadata, Vec<u8>)> {
+    let Attachment {
+        content_type:
+            ContentType::Multipart {
+                kind: MultipartType::Encrypted,
+                parts,
+                ..
+            },
+        ..
+    } = a
+    else {
+        if matches!(
+            a.content_type,
+            ContentType::Text {
+                kind: Text::Plain,
+                ..
+            }
+        ) {
+            let content = a.text(Text::Plain);
+            if content
+                .trim_start()
+                .starts_with("-----BEGIN PGP MESSAGE-----")
+                && content.trim_end().ends_with("-----END PGP MESSAGE-----")
+            {
+                // Clear text
+                let octet_stream =
+                    melib::email::pgp::convert_attachment_to_rfc_spec(content.trim().as_bytes());
+                let mut ctx = Context::new()?;
+                let cipher = ctx.new_data_mem(&octet_stream)?;
+                return ctx.decrypt(cipher)?.await;
+            }
+        }
+        return Err(Error::new("No encrypted payload found").set_kind(ErrorKind::ValueError));
+    };
+    let blob = parts
+        .iter()
+        .find(|p| p.content_type == "application/octet-stream")
+        .ok_or_else(|| Error::new("No encrypted payload found").set_kind(ErrorKind::ValueError))?;
+    let decoded_octet_stream = blob.decode(Default::default());
     let mut ctx = Context::new()?;
-    let cipher = ctx.new_data_mem(&raw)?;
+    let cipher = ctx.new_data_mem(&decoded_octet_stream)?;
     ctx.decrypt(cipher)?.await
 }
 
-pub fn verify(a: Attachment) -> impl Future<Output = Result<()>> {
+pub fn verify(a: Attachment) -> impl Future<Output = Result<SignaturesMetadata>> {
     thread_local! {
-        static CACHE: Arc<Mutex<BTreeMap<u64, Result<()>>>> = Arc::new(Mutex::new(BTreeMap::new()));
+        static CACHE: Arc<Mutex<BTreeMap<u64, Result<SignaturesMetadata>>>> = Arc::new(Mutex::new(BTreeMap::new()));
     }
 
-    let hash_mtx = CACHE.with(|cache| cache.clone());
-    verify_inner(a, hash_mtx)
+    let cache = CACHE.with(|cache| cache.clone());
+    async move {
+        let mut hasher = DefaultHasher::new();
+        let (data, sig) =
+            melib_pgp::verify_signature(&a).chain_err_summary(|| "Could not verify signature.")?;
+        data.hash(&mut hasher);
+        sig.body().hash(&mut hasher);
+        let attachment_hash: u64 = hasher.finish();
+
+        {
+            let lck = cache.lock().unwrap();
+            let in_cache: bool = lck.contains_key(&attachment_hash);
+            if in_cache {
+                return lck[&attachment_hash].clone();
+            }
+        }
+
+        let mut ctx = Context::new()?;
+        let sig = ctx.new_data_mem(sig.body().trim())?;
+        let data = ctx.new_data_mem(&data)?;
+
+        let result = ctx.verify(sig, data)?.await;
+        {
+            let mut lck = cache.lock().unwrap();
+            lck.insert(attachment_hash, result.clone());
+        }
+        result
+    }
 }
 
-async fn verify_inner(a: Attachment, cache: Arc<Mutex<BTreeMap<u64, Result<()>>>>) -> Result<()> {
-    let mut hasher = DefaultHasher::new();
-    let (data, sig) =
-        melib_pgp::verify_signature(&a).chain_err_summary(|| "Could not verify signature.")?;
-    data.hash(&mut hasher);
-    sig.body().hash(&mut hasher);
-    let attachment_hash: u64 = hasher.finish();
+pub fn signatures_into_error(metadata: SignaturesMetadata) -> Result<Option<String>> {
+    let mut comment = String::new();
 
-    {
-        let lck = cache.lock().unwrap();
-        let in_cache: bool = lck.contains_key(&attachment_hash);
-        if in_cache {
-            return lck[&attachment_hash].clone();
+    for sig in metadata.signatures.into_iter().rev() {
+        let Signature {
+            summary,
+            cert:
+                Recipient {
+                    keyid: fingerprint,
+                    status,
+                },
+            validity,
+            validity_reason,
+        } = sig;
+        if let Err(err) = status {
+            return Err(Error::new(format!("BAD signature from {fingerprint}"))
+                .set_source(Some(melib::src_err_arc_wrap! { err }))
+                .set_kind(ErrorKind::ValueError));
+        }
+        if let Some(validity_reason) = validity_reason {
+            comment =
+                format!("{comment}good signature by {fingerprint}:{summary}{validity_reason}\n");
+        } else {
+            let validity = validity.string_representation();
+            comment = format!(
+                "{comment}good signature by {fingerprint}{colon}{summary}[{validity}]\n",
+                colon = if summary.is_empty() { "" } else { ":" }
+            );
         }
     }
-
-    let mut ctx = Context::new()?;
-    let sig = ctx.new_data_mem(sig.body().trim())?;
-    let data = ctx.new_data_mem(&data)?;
-
-    let result = ctx.verify(sig, data)?.await;
-    {
-        let mut lck = cache.lock().unwrap();
-        lck.insert(attachment_hash, result.clone());
+    if comment.ends_with('\n') {
+        comment.pop();
     }
-    result
+
+    if comment.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(comment))
 }
 
 pub fn sign_filter(
@@ -108,20 +187,23 @@ pub fn sign_filter(
             let data = ctx.new_data_mem(&melib_pgp::convert_attachment_to_rfc_spec(
                 a.into_raw().as_bytes(),
             ))?;
-            let sig_attachment = Attachment::new(
-                ContentType::PGPSignature,
-                Default::default(),
-                ctx.sign(sign_keys, data)?.await?,
-            );
+            let (sig_metadata, sig_bytes) = ctx.sign(sign_keys, data, false)?.await?;
+            let sig_attachment =
+                Attachment::new(ContentType::PGPSignature, Default::default(), sig_bytes);
             let a: AttachmentBuilder = a.into();
             let parts = vec![a, sig_attachment.into()];
             let boundary = ContentType::make_boundary(&parts);
+
+            let micalg = sig_metadata.micalg().into_bytes();
             Ok(Attachment::new(
                 ContentType::Multipart {
                     boundary: boundary.into_bytes(),
                     kind: MultipartType::Signed,
                     parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
-                    parameters: vec![],
+                    parameters: vec![
+                        (b"micalg".into(), micalg),
+                        (b"protocol".into(), b"\"application/pgp-signature\"".into()),
+                    ],
                 },
                 Default::default(),
                 vec![],
@@ -201,20 +283,22 @@ pub fn encrypt_filter(
                 let data = ctx.new_data_mem(&melib_pgp::convert_attachment_to_rfc_spec(
                     a.into_raw().as_bytes(),
                 ))?;
-                let sig_attachment = Attachment::new(
-                    ContentType::PGPSignature,
-                    Default::default(),
-                    ctx.sign(sign_keys, data)?.await?,
-                );
+                let (sig_metadata, sig_bytes) = ctx.sign(sign_keys, data, false)?.await?;
+                let sig_attachment =
+                    Attachment::new(ContentType::PGPSignature, Default::default(), sig_bytes);
                 let a: AttachmentBuilder = a.into();
                 let parts = vec![a, sig_attachment.into()];
                 let boundary = ContentType::make_boundary(&parts);
+                let micalg = sig_metadata.micalg().into_bytes();
                 Attachment::new(
                     ContentType::Multipart {
                         boundary: boundary.into_bytes(),
                         kind: MultipartType::Signed,
                         parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
-                        parameters: vec![],
+                        parameters: vec![
+                            (b"micalg".into(), micalg),
+                            (b"protocol".into(), b"\"application/pgp-signature\"".into()),
+                        ],
                     },
                     Default::default(),
                     vec![],
@@ -249,7 +333,7 @@ pub fn encrypt_filter(
                     boundary: boundary.into_bytes(),
                     kind: MultipartType::Encrypted,
                     parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
-                    parameters: vec![],
+                    parameters: vec![(b"protocol".into(), b"\"application/pgp-encrypted\"".into())],
                 },
                 Default::default(),
                 vec![],
