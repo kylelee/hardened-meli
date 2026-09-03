@@ -33,7 +33,7 @@ use data_encoding::BASE64_MIME;
 use super::*;
 use crate::{
     email::{
-        attachment_types::{Charset, ContentTransferEncoding, ContentType, MultipartType, Text},
+        attachment_types::{ContentTransferEncoding, ContentType, MultipartType, Text},
         attachments::AttachmentBuilder,
     },
     error::{ErrorKind, ResultIntoError},
@@ -373,8 +373,8 @@ impl Draft {
                 ret.push_str("\r\n");
             }
         } else if self.body.is_empty() && self.attachments.len() == 1 {
-            let attachment = std::mem::take(&mut self.attachments).remove(0);
-            print_attachment(&mut ret, attachment);
+            let attachment = std::mem::take(&mut self.attachments).remove(0).build();
+            ret.push_str(&attachment.into_raw());
         } else {
             let mut parts = Vec::with_capacity(self.attachments.len() + 1);
             let attachments = std::mem::take(&mut self.attachments);
@@ -384,187 +384,22 @@ impl Draft {
                 parts.push(body_attachment);
             }
             parts.extend(attachments);
-            build_multipart(&mut ret, MultipartType::Mixed, &[], parts);
+            let boundary = ContentType::make_boundary(&parts).into();
+            let parts = parts.into_iter().map(Into::into).collect();
+            let mixed_wrapper = AttachmentBuilder {
+                content_type: ContentType::Multipart {
+                    boundary,
+                    kind: MultipartType::Mixed,
+                    parts,
+                    parameters: vec![],
+                },
+                ..AttachmentBuilder::default()
+            }
+            .build();
+            ret.push_str(&mixed_wrapper.into_raw());
         }
 
         Ok(ret)
-    }
-}
-
-fn build_multipart(
-    ret: &mut String,
-    kind: MultipartType,
-    parameters: &[(Vec<u8>, Vec<u8>)],
-    parts: Vec<AttachmentBuilder>,
-) {
-    let boundary = ContentType::make_boundary(&parts);
-    ret.push_str(&format!(
-        r#"Content-Type: {kind}; charset="utf-8"; boundary="{boundary}""#
-    ));
-    if kind == MultipartType::Encrypted {
-        ret.push_str(r#"; protocol="application/pgp-encrypted""#);
-    }
-    for (n, v) in parameters {
-        ret.push_str("; ");
-        ret.push_str(&String::from_utf8_lossy(n));
-        ret.push('=');
-        if v.contains(&b' ') {
-            ret.push('"');
-        }
-        ret.push_str(&String::from_utf8_lossy(v));
-        if v.contains(&b' ') {
-            ret.push('"');
-        }
-    }
-    ret.push_str("\r\n\r\n");
-    /* rfc1341 */
-    ret.push_str(
-        "This is a MIME formatted message with attachments. Use a MIME-compliant client to view \
-         it properly.\r\n",
-    );
-    for sub in parts {
-        if !ret.ends_with("\r\n") {
-            ret.push_str("\r\n");
-        }
-        ret.push_str("--");
-        ret.push_str(&boundary);
-        ret.push_str("\r\n");
-        print_attachment(ret, sub);
-    }
-    if !ret.ends_with("\r\n") {
-        ret.push_str("\r\n");
-    }
-    ret.push_str("--");
-    ret.push_str(&boundary);
-    ret.push_str("--\r\n");
-}
-
-fn print_attachment(ret: &mut String, a: AttachmentBuilder) {
-    match a.content_type {
-        ContentType::Text {
-            kind: Text::Plain,
-            charset: Charset::UTF8,
-            parameters: ref v,
-        } if v.is_empty() => {
-            ret.push_str("Content-Type: text/plain; charset=\"utf-8\"\r\n\r\n");
-            for line in String::from_utf8_lossy(a.raw()).lines() {
-                ret.push_str(line);
-                ret.push_str("\r\n");
-            }
-        }
-        ContentType::Text { .. } => {
-            let mut pop_crlf = false;
-            let raw = a.build().into_raw();
-            for line in raw.lines() {
-                ret.push_str(line);
-                ret.push_str("\r\n");
-                pop_crlf = true;
-            }
-            if pop_crlf && !raw.ends_with("\r\n") {
-                ret.pop();
-                ret.pop();
-            }
-        }
-        ContentType::Multipart {
-            boundary: _,
-            kind,
-            parts,
-            parameters,
-        } => {
-            build_multipart(
-                ret,
-                kind,
-                &parameters,
-                parts
-                    .into_iter()
-                    .map(|s| s.into())
-                    .collect::<Vec<AttachmentBuilder>>(),
-            );
-        }
-        ContentType::MessageRfc822 => {
-            ret.push_str(&format!(
-                "Content-Type: {}; charset=\"utf-8\"\r\n",
-                a.content_type
-            ));
-            ret.push_str("Content-Disposition: attachment\r\n");
-            ret.push_str("\r\n");
-            let mut pop_crlf = false;
-            let raw = String::from_utf8_lossy(a.raw());
-            for line in raw.lines() {
-                ret.push_str(line);
-                ret.push_str("\r\n");
-                pop_crlf = true;
-            }
-            if pop_crlf && !raw.ends_with("\r\n") {
-                ret.pop();
-                ret.pop();
-            }
-        }
-        ContentType::PGPSignature => {
-            ret.push_str(&format!(
-                "Content-Type: {}; charset=\"utf-8\"; name=\"signature.asc\"\r\n",
-                a.content_type
-            ));
-            ret.push_str("Content-Description: Digital signature\r\n");
-            ret.push_str("Content-Disposition: inline\r\n");
-            ret.push_str("\r\n");
-            let mut pop_crlf = false;
-            let raw = String::from_utf8_lossy(a.raw());
-            for line in raw.lines() {
-                ret.push_str(line);
-                ret.push_str("\r\n");
-                pop_crlf = true;
-            }
-            if pop_crlf && !raw.ends_with("\r\n") {
-                ret.pop();
-                ret.pop();
-            }
-        }
-        _ => {
-            let content_transfer_encoding: ContentTransferEncoding = if a.raw().is_ascii() {
-                ContentTransferEncoding::_8Bit
-            } else {
-                ContentTransferEncoding::Base64
-            };
-            if let Some(name) = a.content_type().name() {
-                ret.push_str(&format!(
-                    "Content-Type: {}; name=\"{}\"; charset=\"utf-8\"\r\n",
-                    a.content_type(),
-                    name
-                ));
-            } else {
-                ret.push_str(&format!(
-                    "Content-Type: {}; charset=\"utf-8\"\r\n",
-                    a.content_type()
-                ));
-            }
-            ret.push_str("Content-Disposition: attachment\r\n");
-            ret.push_str(&format!(
-                "Content-Transfer-Encoding: {content_transfer_encoding}\r\n"
-            ));
-            ret.push_str("\r\n");
-            let mut pop_crlf = false;
-            if content_transfer_encoding == ContentTransferEncoding::Base64 {
-                for line in BASE64_MIME.encode(a.raw()).trim().lines() {
-                    ret.push_str(line);
-                    ret.push_str("\r\n");
-                }
-            } else {
-                let raw = String::from_utf8_lossy(a.raw());
-                for line in raw.lines() {
-                    ret.push_str(line);
-                    ret.push_str("\r\n");
-                    pop_crlf = true;
-                }
-                if raw.ends_with("\r\n") {
-                    pop_crlf = false;
-                }
-            }
-            if pop_crlf {
-                ret.pop();
-                ret.pop();
-            }
-        }
     }
 }
 

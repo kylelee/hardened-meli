@@ -727,10 +727,6 @@ impl Attachment {
     pub fn into_raw(&self) -> String {
         let mut ret = String::with_capacity(2 * self.raw.len());
         fn into_raw_helper(a: &Attachment, ret: &mut String) {
-            ret.push_str(&format!(
-                "Content-Transfer-Encoding: {}\r\n",
-                a.content_transfer_encoding
-            ));
             match &a.content_type {
                 ContentType::Text {
                     kind: _,
@@ -738,7 +734,11 @@ impl Attachment {
                     charset,
                 } => {
                     ret.push_str(&format!(
-                        "Content-Type: {}; charset={}",
+                        "Content-Transfer-Encoding: {}\r\n",
+                        a.content_transfer_encoding
+                    ));
+                    ret.push_str(&format!(
+                        "Content-Type: {}; charset=\"{}\"",
                         a.content_type, charset
                     ));
                     for (n, v) in parameters {
@@ -755,7 +755,17 @@ impl Attachment {
                     }
 
                     ret.push_str("\r\n\r\n");
-                    ret.push_str(&String::from_utf8_lossy(a.body()));
+                    let mut pop_crlf = false;
+                    let raw = String::from_utf8_lossy(a.raw());
+                    for line in raw.lines() {
+                        ret.push_str(line);
+                        ret.push_str("\r\n");
+                        pop_crlf = true;
+                    }
+                    if pop_crlf && !raw.ends_with("\r\n") {
+                        ret.pop();
+                        ret.pop();
+                    }
                 }
                 ContentType::Multipart {
                     boundary,
@@ -763,11 +773,14 @@ impl Attachment {
                     parts,
                     parameters,
                 } => {
+                    ret.push_str(&format!(
+                        "Content-Transfer-Encoding: {}\r\n",
+                        a.content_transfer_encoding
+                    ));
                     let boundary = String::from_utf8_lossy(boundary);
-                    ret.push_str(&format!("Content-Type: {kind}; boundary={boundary}"));
-                    if *kind == MultipartType::Signed {
-                        ret.push_str("; micalg=pgp-sha512; protocol=\"application/pgp-signature\"");
-                    }
+                    ret.push_str(&format!(
+                        r#"Content-Type: {kind}; charset="utf-8"; boundary="{boundary}""#
+                    ));
                     for (n, v) in parameters {
                         ret.push_str("; ");
                         ret.push_str(&String::from_utf8_lossy(n));
@@ -780,27 +793,81 @@ impl Attachment {
                             ret.push('"');
                         }
                     }
-                    ret.push_str("\r\n");
+                    ret.push_str("\r\n\r\n");
+                    /* rfc1341 */
+                    ret.push_str(
+                        "This is a MIME formatted message with attachments. Use a MIME-compliant \
+                         client to view it properly.\r\n",
+                    );
 
-                    let boundary_start = format!("\r\n--{boundary}\r\n");
-                    for p in parts {
-                        ret.push_str(&boundary_start);
-                        into_raw_helper(p, ret);
+                    for sub in parts {
+                        if !ret.ends_with("\r\n") {
+                            ret.push_str("\r\n");
+                        }
+                        ret.push_str("--");
+                        ret.push_str(&boundary);
+                        ret.push_str("\r\n");
+                        into_raw_helper(sub, ret);
                     }
                     if !ret.ends_with("\r\n") {
                         ret.push_str("\r\n");
                     }
-                    ret.push_str(&format!("--{boundary}--\r\n\r\n"));
+                    ret.push_str("--");
+                    ret.push_str(&boundary);
+                    ret.push_str("--\r\n");
                 }
                 ContentType::MessageRfc822 => {
-                    ret.push_str(&format!("Content-Type: {}\r\n\r\n", a.content_type));
-                    ret.push_str(&String::from_utf8_lossy(a.body()));
+                    ret.push_str(&format!(
+                        "Content-Transfer-Encoding: {}\r\n",
+                        a.content_transfer_encoding
+                    ));
+                    ret.push_str(&format!(
+                        "Content-Type: {}; charset=\"utf-8\"\r\n",
+                        a.content_type
+                    ));
+                    ret.push_str("Content-Disposition: attachment\r\n");
+                    ret.push_str("\r\n");
+                    let mut pop_crlf = false;
+                    let raw = String::from_utf8_lossy(a.body());
+                    for line in raw.lines() {
+                        ret.push_str(line);
+                        ret.push_str("\r\n");
+                        pop_crlf = true;
+                    }
+                    if pop_crlf && !raw.ends_with("\r\n") {
+                        ret.pop();
+                        ret.pop();
+                    }
                 }
                 ContentType::CMSSignature | ContentType::PGPSignature => {
-                    ret.push_str(&format!("Content-Type: {}\r\n\r\n", a.content_type));
-                    ret.push_str(&String::from_utf8_lossy(a.body()));
+                    ret.push_str(&format!(
+                        "Content-Transfer-Encoding: {}\r\n",
+                        a.content_transfer_encoding
+                    ));
+                    ret.push_str(&format!(
+                        "Content-Type: {}; charset=\"utf-8\"; name=\"signature.asc\"\r\n",
+                        a.content_type
+                    ));
+                    ret.push_str("Content-Description: Digital signature\r\n");
+                    ret.push_str("Content-Disposition: inline\r\n");
+                    ret.push_str("\r\n");
+                    let mut pop_crlf = false;
+                    let raw = String::from_utf8_lossy(a.body());
+                    for line in raw.lines() {
+                        ret.push_str(line);
+                        ret.push_str("\r\n");
+                        pop_crlf = true;
+                    }
+                    if pop_crlf && !raw.ends_with("\r\n") {
+                        ret.pop();
+                        ret.pop();
+                    }
                 }
                 ContentType::OctetStream { name, parameters } => {
+                    ret.push_str(&format!(
+                        "Content-Transfer-Encoding: {}\r\n",
+                        ContentTransferEncoding::Base64
+                    ));
                     if let Some(name) = name {
                         ret.push_str(&format!("Content-Type: {}; name={}", a.content_type, name));
                     } else {
@@ -819,11 +886,79 @@ impl Attachment {
                         }
                     }
                     ret.push_str("\r\n\r\n");
-                    ret.push_str(BASE64_MIME.encode(a.body()).trim());
+                    let mut pop_crlf = false;
+                    let raw = BASE64_MIME.encode(a.body());
+                    for line in raw.lines() {
+                        ret.push_str(line);
+                        ret.push_str("\r\n");
+                        pop_crlf = true;
+                    }
+                    if pop_crlf && !raw.ends_with("\r\n") {
+                        ret.pop();
+                        ret.pop();
+                    }
                 }
-                _ => {
-                    ret.push_str(&format!("Content-Type: {}\r\n\r\n", a.content_type));
-                    ret.push_str(&String::from_utf8_lossy(a.body()));
+                ContentType::Other {
+                    tag: _,
+                    name,
+                    parameters,
+                } => {
+                    let content_transfer_encoding: ContentTransferEncoding = if a.raw().is_ascii() {
+                        ContentTransferEncoding::_8Bit
+                    } else {
+                        ContentTransferEncoding::Base64
+                    };
+                    if let Some(name) = name {
+                        ret.push_str(&format!(
+                            "Content-Type: {}; name=\"{}\"; charset=\"utf-8\"",
+                            a.content_type, name
+                        ));
+                    } else {
+                        ret.push_str(&format!(
+                            "Content-Type: {}; charset=\"utf-8\"",
+                            a.content_type
+                        ));
+                    }
+                    for (n, v) in parameters {
+                        ret.push_str("; ");
+                        ret.push_str(&String::from_utf8_lossy(n));
+                        ret.push('=');
+                        if v.contains(&b' ') {
+                            ret.push('"');
+                        }
+                        ret.push_str(&String::from_utf8_lossy(v));
+                        if v.contains(&b' ') {
+                            ret.push('"');
+                        }
+                    }
+                    ret.push_str("\r\n");
+                    ret.push_str("Content-Disposition: attachment\r\n");
+                    ret.push_str(&format!(
+                        "Content-Transfer-Encoding: {content_transfer_encoding}\r\n"
+                    ));
+                    ret.push_str("\r\n");
+
+                    let mut pop_crlf = false;
+                    if content_transfer_encoding == ContentTransferEncoding::Base64 {
+                        for line in BASE64_MIME.encode(a.raw()).trim().lines() {
+                            ret.push_str(line);
+                            ret.push_str("\r\n");
+                        }
+                    } else {
+                        let raw = String::from_utf8_lossy(a.body());
+                        for line in raw.lines() {
+                            ret.push_str(line);
+                            ret.push_str("\r\n");
+                            pop_crlf = true;
+                        }
+                        if raw.ends_with("\r\n") {
+                            pop_crlf = false;
+                        }
+                    }
+                    if pop_crlf {
+                        ret.pop();
+                        ret.pop();
+                    }
                 }
             }
         }

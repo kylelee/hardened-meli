@@ -165,12 +165,14 @@ Cc: \x0d
 Bcc: \x0d
 Subject: \x0d
 MIME-Version: 1.0\x0d
+Content-Transfer-Encoding: 8bit\x0d
 Content-Type: multipart/mixed; charset=\"utf-8\"; \
          boundary=\"bzz_bzz__bzz__xxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\x0d
 \x0d
 This is a MIME formatted message with attachments. Use a MIME-compliant client to view it \
          properly.\x0d
 --bzz_bzz__bzz__xxxxxxxxxxxxxxxxxxxxxxxxxxxxx\x0d
+Content-Transfer-Encoding: 8bit\x0d
 Content-Type: text/plain; charset=\"utf-8\"\x0d
 \x0d
 αδφαφσαφασ\x0d
