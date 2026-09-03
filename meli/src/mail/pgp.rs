@@ -342,3 +342,221 @@ pub fn encrypt_filter(
         })
     })
 }
+
+#[cfg(test)]
+mod tests {
+    // NOTE: debug stuff with `GPGME_DEBUG=9:/tmp/mygpgme.log` etc.
+
+    use std::{
+        borrow::Cow,
+        ffi::CString,
+        process::{Command, Stdio},
+    };
+
+    use melib::{
+        gpgme::{EngineInfo, Protocol},
+        log, smol,
+        utils::logging::{LogLevel, Logger},
+    };
+    use rusty_fork::rusty_fork_test;
+
+    use super::*;
+
+    // Keys generated with <https://github.com/epilys/gen-rfc9500-gpg-keys>
+
+    const PUBKEY: &[u8] = b"-----BEGIN PGP PUBLIC KEY BLOCK-----\r\n\r\nxsBNBAAAAAABCACw+egZQ6eumJKq3hfKfED4dE/tL4FI5sjqont9ABVI+1GSqyi1\r\nbFBgsRjM0THllIdMbKmJtWwnKW8J+5OgNN8y6Xxv8JmM/Y5vQt2lis0fqXmG8UTz\r\n0VTWdlAXXmhUs6lSADvAaIe4RVrCsZ97L3ZQTryY7JRVcbB4khUN3Gp0yg+801SX\r\nzoFTTa+UGIRLE66jH51aa5VXu99hnv1OiH8tQrjdi8mH6uG/icq4XuIeNWMF32wH\r\nqIOOPvQcWV3M5D2vxJEj702Ku6k9OQXkAo17qRSEonWW4HtLbtmS8He1JNPc/n3d\r\nVUm+fM6NoDXPoLP7j55G9zKyqGtGAWXAj1MTABEBAAHNEHVzZXJAZXhhbXBsZS5v\r\ncmfCwLsEEwEKAG8FggAAAAAJEMwuljyZl1FjRxQAAAAAAB4AIHNhbHRAbm90YXRp\r\nb25zLnNlcXVvaWEtcGdwLm9yZ56lfAkULy8QwPhEcrlasB0N4oBn0im6wT4mwiAT\r\nHZjBFiEErtwR+84tdGv4v3FmzC6WPJmXUWMAAI1tCACHuuzmgEqoIrk3QZaZwReK\r\nzNOs/einaVqItsI38AWLlyruwM+5IBYskBx7EjPk/yBMyWSR0X9WxiBpuXrxcpql\r\nqU8NUYXEEQeo57921ol9FnAWEp2Aqo11O5r26P7XDv+IDj0qX3+uAjSwmH0wJvrH\r\nloWCBooVuEaMX0VeMcuVXzqGZtHMp8DB1sWJMof1Znhrx3N/tAV+RnYdzuhBIgci\r\nUZRQ5MLqrt8ks9fyIAL3btRS2nsBGdyTbzFxVkoxc4yRx2ZiNiB8OlMzGk5YoiOf\r\ntkKM/mF6HTpfppF0CIhuo/q29lUCSpQDmfjksawPq3Z6LGaqw4vsj5fHEo7k47Nu\r\n=1oV4\r\n-----END PGP PUBLIC KEY BLOCK-----\r\n";
+
+    const PRIVKEY: &[u8] = b"-----BEGIN PGP PRIVATE KEY BLOCK-----\r\n\r\nxcLYBAAAAAABCACw+egZQ6eumJKq3hfKfED4dE/tL4FI5sjqont9ABVI+1GSqyi1\r\nbFBgsRjM0THllIdMbKmJtWwnKW8J+5OgNN8y6Xxv8JmM/Y5vQt2lis0fqXmG8UTz\r\n0VTWdlAXXmhUs6lSADvAaIe4RVrCsZ97L3ZQTryY7JRVcbB4khUN3Gp0yg+801SX\r\nzoFTTa+UGIRLE66jH51aa5VXu99hnv1OiH8tQrjdi8mH6uG/icq4XuIeNWMF32wH\r\nqIOOPvQcWV3M5D2vxJEj702Ku6k9OQXkAo17qRSEonWW4HtLbtmS8He1JNPc/n3d\r\nVUm+fM6NoDXPoLP7j55G9zKyqGtGAWXAj1MTABEBAAEAB/9BGIsgz9vbws8f/nUt\r\ny6pyOQY1LiYV1J3OgFl/zwoFQDvvAPoGUYL3Lez7WW9LDOj/WXC68HqJpRnsyBay\r\n9P+sUGmvGwa/73v2vNeeToHIxaOn2RMNw8+62uX20oj5ruP2/5L64Pga9Ze+yWrp\r\n+rlALNX+QfcFvr20e7c20/5sWlHg4gcyqXteRsHL2ybXSFTGtmBK7UY3Nf+QdgRl\r\nV8r5Sb9EiJXCBDLB4JwBTqdWYENPGg874pS6vF1TDmoQIT9TtgN1/ISnVz8q8SFV\r\nhPW0vabU6PnhenjZfne4baShhGR1MYp6EKVhAU7/ojqB7Fbp5BCd74yz95ciP32N\r\nDUNRBADM8eW7kMjpeB6nW+vxC8JS4R6wI6AmDxiHVSpWhj9KZCHoxgC/Uj1ssbCt\r\nvdZb/uSoigN+PRpBXlu5VkjaWgyia1T0pjlIUiw9X4m5SnLv/5UTTVlAzkV1jzCJ\r\ngJCJVliO71dbPkvEw2jP6BPunCUsKwLg35HxqgGTjThoXWC6bwQA3RBXAjgvIys2\r\ngfU3keImF8e/TprLge1I2vbWmV2j6rZCg5r/AS0upii5CvJ5/T5vfJPNgPBy8B/y\r\nRDs+6PJO1GmnlhOkG9JAIPkv0RBZvR0PMBtbp6nTY3yo1lwamBVBfY6rc0sLTzos\r\nZh2aGoLzrHNMQFMGaauORzBFpY5lU50D/AqB2KYYMUqAOvYcBnEfLDmyZv9BTVNH\r\nbR2lKkMYqv5LlvDaBxVfilE02riO4p6BaAdvzXjKeRrGNEKoHNBpOSfYCOM16NjL\r\n8hIZB1CaV3WbT5oY+jp7Mzd57d56RZOE+ERK2uz/7JX9VSsM/LbH9pJibd4e8mik\r\nDS9ntciqOH/3QwrNEHVzZXJAZXhhbXBsZS5vcmfCwLsEEwEKAG8FggAAAAAJEMwu\r\nljyZl1FjRxQAAAAAAB4AIHNhbHRAbm90YXRpb25zLnNlcXVvaWEtcGdwLm9yZ56l\r\nfAkULy8QwPhEcrlasB0N4oBn0im6wT4mwiATHZjBFiEErtwR+84tdGv4v3FmzC6W\r\nPJmXUWMAAI1tCACHuuzmgEqoIrk3QZaZwReKzNOs/einaVqItsI38AWLlyruwM+5\r\nIBYskBx7EjPk/yBMyWSR0X9WxiBpuXrxcpqlqU8NUYXEEQeo57921ol9FnAWEp2A\r\nqo11O5r26P7XDv+IDj0qX3+uAjSwmH0wJvrHloWCBooVuEaMX0VeMcuVXzqGZtHM\r\np8DB1sWJMof1Znhrx3N/tAV+RnYdzuhBIgciUZRQ5MLqrt8ks9fyIAL3btRS2nsB\r\nGdyTbzFxVkoxc4yRx2ZiNiB8OlMzGk5YoiOftkKM/mF6HTpfppF0CIhuo/q29lUC\r\nSpQDmfjksawPq3Z6LGaqw4vsj5fHEo7k47Nu\r\n=tzjb\r\n-----END PGP PRIVATE KEY BLOCK-----\r\n";
+
+    rusty_fork_test! {
+        #[test]
+        /// Test that a generated signature is valid.
+        fn test_gpg_signatures() {
+            run_gpg_signatures();
+        }
+    }
+
+    struct GpgTest {
+        _logger: Logger,
+        tempdir: tempfile::TempDir,
+        gpgme_ctx: melib::gpgme::Context,
+    }
+
+    fn setup() -> Option<GpgTest> {
+        let _logger = Logger::new_with(LogLevel::TRACE, true);
+        let tempdir = tempfile::tempdir().unwrap();
+        {
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var("GNUPGHOME", tempdir.path());
+            }
+
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var("GPG_AGENT_INFO", "");
+            }
+        }
+
+        let mut gpgme_ctx = match melib::gpgme::Context::new() {
+            Ok(v) => v,
+            Err(err) if err.kind.is_not_found() => {
+                log::info!("libgpgme could not be loaded, skipping this test.");
+                return None;
+            }
+            err => err.unwrap(),
+        };
+        let current_engine_info = gpgme_ctx.engine_info().unwrap();
+        let prev_len = current_engine_info.len();
+        let Some(EngineInfo {
+            file_name: Some(engine_file_name),
+            ..
+        }) = current_engine_info
+            .iter()
+            .find(|eng| eng.protocol == Protocol::OpenPGP)
+        else {
+            log::warn!(
+                "WARN: No openpg protocol engine returned from gpgme. Returned protocols: \
+                 {current_engine_info:?}"
+            );
+            return None;
+        };
+        gpgme_ctx
+            .set_engine_info(
+                Protocol::OpenPGP,
+                Some(Cow::Owned(CString::new(engine_file_name.clone()).unwrap())),
+                Some(Cow::Owned(
+                    CString::new(tempdir.path().display().to_string()).unwrap(),
+                )),
+            )
+            .unwrap();
+        let new_engine_info = gpgme_ctx.engine_info().unwrap();
+        // Sanity check:
+        assert_eq!(
+            new_engine_info.len(),
+            prev_len,
+            "new_engine_info was expected to have {} entry/ies but has {}: {:#?}",
+            prev_len,
+            new_engine_info.len(),
+            new_engine_info
+        );
+        // Sanity check:
+        assert_eq!(
+            new_engine_info[0].home_dir,
+            Some(tempdir.path().display().to_string()),
+            "new_engine_info was expected to have temp dir as home_dir but has: {:#?}",
+            new_engine_info[0].home_dir
+        );
+        Some(GpgTest {
+            _logger,
+            tempdir,
+            gpgme_ctx,
+        })
+    }
+
+    fn run_gpg_signatures() {
+        let Some(GpgTest {
+            _logger,
+            tempdir,
+            mut gpgme_ctx,
+        }) = setup()
+        else {
+            return;
+        };
+        // Add public key
+        gpgme_ctx
+            .import_key(gpgme_ctx.new_data_mem(PUBKEY).unwrap())
+            .unwrap();
+
+        // Retrieve public key
+        let pubkey: Key = smol::block_on(gpgme_ctx.keylist(false, None).unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|key| key.fingerprint() == "AEDC11FBCE2D746BF8BF7166CC2E963C99975163")
+            .unwrap();
+
+        let mut draft = melib::Draft::default();
+        draft.set_body("foobar\r\n\r\n".into());
+        draft
+            .try_set_header("From", "user@example.org".into())
+            .unwrap();
+        draft
+            .try_set_header("To", "user@example.org".into())
+            .unwrap();
+
+        let body_attachment: AttachmentBuilder = Attachment::new(
+            ContentType::default(),
+            Default::default(),
+            std::mem::take(&mut draft.body).into_bytes(),
+        )
+        .into();
+
+        // Verify that we cannot use a keypair to sign if we don't have its secret key:
+        let err = smol::block_on((sign_filter(None, vec![pubkey.clone()]).unwrap())(
+            body_attachment.clone(),
+        ))
+        .unwrap_err();
+        assert!(err.summary.starts_with("Unusable secret key"), "{err}");
+
+        // Add private key
+        gpgme_ctx
+            .import_key(gpgme_ctx.new_data_mem(PRIVKEY).unwrap())
+            .unwrap();
+
+        let body: AttachmentBuilder =
+            smol::block_on((sign_filter(None, vec![pubkey]).unwrap())(body_attachment)).unwrap();
+        draft.attachments.insert(0, body);
+        let raw_mail = draft.finalise().unwrap();
+        //eprintln!("{raw_mail}");
+        let mail = melib::Mail::new(raw_mail.into_bytes(), None).expect("Could not parse mail");
+
+        let signatures = smol::block_on(verify(mail.body())).unwrap();
+        signatures_into_error(signatures).unwrap();
+
+        let attachments = mail.body().attachments();
+
+        let sig_bytes = attachments
+            .iter()
+            .find(|a| matches!(a.content_type, ContentType::PGPSignature))
+            .unwrap()
+            .raw();
+        let signed_bytes = attachments
+            .iter()
+            .find(|a| matches!(a.content_type, ContentType::Text { .. }))
+            .unwrap()
+            .raw();
+
+        let sig_file = tempdir.path().join("sig");
+        let signed_file = tempdir.path().join("mime");
+
+        let sig_bytes = sig_bytes.strip_prefix(b"Content-Transfer-Encoding: 8bit\r\nContent-Type: application/pgp-signature; charset=\"utf-8\"; name=\"signature.asc\"\r\nContent-Description: Digital signature\r\nContent-Disposition: inline\r\n\r\n").unwrap().to_vec();
+        let signed_bytes = signed_bytes.to_vec();
+
+        std::fs::write(&sig_file, &sig_bytes).unwrap();
+        std::fs::write(&signed_file, signed_bytes).unwrap();
+
+        if !matches!(Command::new("sh")
+                .arg("-c")
+                .arg("command -v gpg")
+                .stdout(Stdio::null())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null()).output(), Ok(out) if out.status.success())
+        {
+            log::info!("'gpg' binary not found in PATH, skipping verification.");
+            return;
+        }
+        let output = Command::new("gpg")
+            .arg("--verify")
+            .arg(&sig_file)
+            .arg(&signed_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "gpg --verify exited with {output:?}"
+        );
+        _ = tempdir.close();
+    }
+}
