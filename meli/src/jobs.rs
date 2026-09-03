@@ -444,9 +444,12 @@ impl JobExecutor {
                     let mut value = value;
                     loop {
                         smol::Timer::after(value).await;
-                        sender
+                        if sender
                             .send(ThreadEvent::UIEvent(UIEvent::Timer(id)))
-                            .unwrap();
+                            .is_err()
+                        {
+                            break;
+                        }
                         if let Some(interval) = timers.lock().unwrap().get(&id).and_then(|timer| {
                             if timer.interval.as_millis() == 0 && timer.interval.as_secs() == 0 {
                                 None
