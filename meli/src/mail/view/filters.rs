@@ -342,7 +342,8 @@ impl ViewFilter {
         if matches!(
             att.content_type,
             ContentType::Other { .. } | ContentType::OctetStream { .. }
-        ) {
+        ) && att.content_disposition.kind.is_inline()
+        {
             if att.size() <= 1024 * 1024 * 20 {
                 let bytes = att.decode(view_settings.charset.into());
                 if let Ok(text) = String::from_utf8(bytes) {
@@ -784,15 +785,33 @@ impl ViewFilter {
             });
         }
 
+        let (notice, body_text) = if att.content_disposition.kind.is_attachment() {
+            let notice = if let Some(filename) = att.filename() {
+                Some(format!("Attachment \"{filename}\"").into())
+            } else {
+                Some("Attachment".into())
+            };
+            (
+                notice,
+                ViewFilterContent::Filtered {
+                    inner: String::new(),
+                },
+            )
+        } else {
+            (
+                None,
+                ViewFilterContent::Filtered {
+                    inner: att.text(Text::Plain),
+                },
+            )
+        };
         Ok(Self {
             filter_invocation: String::new(),
             content_type: att.content_type.clone(),
             size: att.size(),
-            notice: None,
+            notice,
             headers: vec![],
-            body_text: ViewFilterContent::Filtered {
-                inner: att.text(Text::Plain),
-            },
+            body_text,
             unfiltered: att.decode(view_settings.charset.into()),
             event_handler: None,
             id: ComponentId::default(),
