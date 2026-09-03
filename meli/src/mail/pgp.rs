@@ -374,6 +374,12 @@ mod tests {
         fn test_gpg_signatures() {
             run_gpg_signatures();
         }
+
+        #[test]
+        /// Test that we can encrypt/decrypt
+        fn test_gpg_encryption() {
+            run_gpg_encryption();
+        }
     }
 
     struct GpgTest {
@@ -557,6 +563,147 @@ mod tests {
             output.status.success(),
             "gpg --verify exited with {output:?}"
         );
+        _ = tempdir.close();
+    }
+
+    fn run_gpg_encryption() {
+        let Some(GpgTest {
+            _logger,
+            tempdir,
+            mut gpgme_ctx,
+        }) = setup()
+        else {
+            return;
+        };
+        // Add private key
+        gpgme_ctx
+            .import_key(gpgme_ctx.new_data_mem(PRIVKEY).unwrap())
+            .unwrap();
+
+        // Retrieve public key
+        let pubkey: Key = smol::block_on(gpgme_ctx.keylist(false, None).unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|key| key.fingerprint() == "AEDC11FBCE2D746BF8BF7166CC2E963C99975163")
+            .unwrap();
+
+        {
+            let mut draft = melib::Draft::default();
+            draft.set_body("foobar\r\n\r\n".into());
+            draft
+                .try_set_header("From", "user@example.org".into())
+                .unwrap();
+            draft
+                .try_set_header("To", "user@example.org".into())
+                .unwrap();
+
+            let body_attachment: AttachmentBuilder = Attachment::new(
+                ContentType::default(),
+                Default::default(),
+                std::mem::take(&mut draft.body).into_bytes(),
+            )
+            .into();
+
+            let body: AttachmentBuilder =
+                smol::block_on((encrypt_filter(
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![pubkey.clone()],
+                )
+                .unwrap())(body_attachment.clone()))
+                .unwrap();
+
+            draft.attachments.insert(0, body);
+            let raw_mail = draft.finalise().unwrap();
+            let mail = melib::Mail::new(raw_mail.into_bytes(), None).expect("Could not parse mail");
+
+            let (decrypted_metadata, decrypted) =
+                smol::block_on(decrypt(mail.body())).expect("Could not decrypt email");
+
+            assert_eq!(
+                decrypted_metadata,
+                DecryptionMetadata {
+                    recipients: vec![Recipient {
+                        keyid: "CC2E963C99975163".into(),
+                        status: Ok((),),
+                    },],
+                    file_name: None,
+                    session_key: None,
+                    is_mime: false,
+                }
+            );
+            assert_eq!(
+                body_attachment.build().into_raw(),
+                String::from_utf8_lossy(&decrypted)
+            );
+        }
+        // Do the same thing but this time also sign
+        {
+            let mut draft = melib::Draft::default();
+            draft.set_body("foobar\r\n\r\n".into());
+            draft
+                .try_set_header("From", "user@example.org".into())
+                .unwrap();
+            draft
+                .try_set_header("To", "user@example.org".into())
+                .unwrap();
+            let body_attachment: AttachmentBuilder = Attachment::new(
+                ContentType::default(),
+                Default::default(),
+                std::mem::take(&mut draft.body).into_bytes(),
+            )
+            .into();
+            let body: AttachmentBuilder =
+                smol::block_on((encrypt_filter(
+                    None,
+                    None,
+                    Some(vec![pubkey.clone()]),
+                    None,
+                    vec![pubkey],
+                )
+                .unwrap())(body_attachment.clone()))
+                .unwrap();
+
+            draft.attachments.insert(0, body);
+            let raw_mail = draft.finalise().unwrap();
+            let mail = melib::Mail::new(raw_mail.into_bytes(), None).expect("Could not parse mail");
+
+            let (decrypted_metadata, decrypted) =
+                smol::block_on(decrypt(mail.body())).expect("Could not decrypt email");
+
+            assert_eq!(
+                decrypted_metadata,
+                DecryptionMetadata {
+                    recipients: vec![Recipient {
+                        keyid: "CC2E963C99975163".into(),
+                        status: Ok((),),
+                    },],
+                    file_name: None,
+                    session_key: None,
+                    is_mime: false,
+                }
+            );
+            let decrypted = AttachmentBuilder::new(&decrypted).build();
+            let signatures = smol::block_on(verify(decrypted.clone())).unwrap();
+            signatures_into_error(signatures).unwrap();
+
+            let attachments = decrypted.attachments();
+
+            let signed_bytes = attachments
+                .iter()
+                .find(|a| matches!(a.content_type, ContentType::Text { .. }))
+                .unwrap()
+                .raw();
+
+            assert_eq!(
+                String::from_utf8_lossy(&melib_pgp::convert_attachment_to_rfc_spec(
+                    &body_attachment.build().into_raw().into_bytes()
+                )),
+                String::from_utf8_lossy(&melib_pgp::convert_attachment_to_rfc_spec(signed_bytes))
+            );
+        }
         _ = tempdir.close();
     }
 }
