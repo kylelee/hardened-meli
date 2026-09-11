@@ -306,7 +306,7 @@ impl MailListingTrait for ConversationsListing {
                 .get_env(root_env_hash);
             use melib::search::QueryTrait;
             if let Some(filter_query) = mailbox_settings!(
-                context[&self.cursor_pos.0][&self.cursor_pos.1]
+                context[self.cursor_pos.0][&self.cursor_pos.1]
                     .listing
                     .filter
             )
@@ -668,7 +668,7 @@ impl ConversationsListing {
         coordinates: (AccountHash, MailboxHash),
         context: &Context,
     ) -> Box<Self> {
-        let sort = *mailbox_settings!(context[&coordinates.0][&coordinates.1].listing.sort);
+        let sort = *mailbox_settings!(context[coordinates.0][&coordinates.1].listing.sort);
         Box::new(Self {
             cursor_pos: (coordinates.0, MailboxHash::default(), 0),
             new_cursor_pos: (coordinates.0, coordinates.1, 0),
@@ -703,33 +703,48 @@ impl ConversationsListing {
         from: &[Address],
         threads: &Threads,
         other_subjects: &IndexSet<String>,
-        tags_set: &IndexSet<TagHash>,
+        tags: &IndexSet<TagHash>,
         hash: ThreadHash,
     ) -> EntryStrings {
         let thread = threads.thread_ref(hash);
-        let mut tags = String::new();
+        let mut tags_string = String::new();
         let mut colors = SmallVec::new();
         let account = &context.accounts[&self.cursor_pos.0];
         if account.backend_capabilities.supports_tags {
-            let tags_iter = TagsIterator::new(
-                tags_set.iter(),
-                context,
-                self.cursor_pos.0,
-                self.cursor_pos.1,
-                tags_lck,
-            );
-            for (t, c) in tags_iter {
-                tags.push(' ');
-                tags.push_str(t);
-                tags.push(' ');
-                colors.push(c);
+            for t in tags {
+                if mailbox_settings!(
+                    context[self.cursor_pos.0][&self.cursor_pos.1]
+                        .tags
+                        .ignore_tags
+                )
+                .contains(t)
+                    || account_settings!(context[self.cursor_pos.0].tags.ignore_tags).contains(t)
+                    || context.settings.tags.ignore_tags.contains(t)
+                    || !tags_lck.contains_key(t)
+                {
+                    continue;
+                }
+                tags_string.push(' ');
+                tags_string.push_str(tags_lck.get(t).as_ref().unwrap());
+                tags_string.push(' ');
+                colors.push(
+                    mailbox_settings!(context[self.cursor_pos.0][&self.cursor_pos.1].tags.colors)
+                        .get(t)
+                        .cloned()
+                        .or_else(|| {
+                            account_settings!(context[self.cursor_pos.0].tags.colors)
+                                .get(t)
+                                .cloned()
+                                .or_else(|| context.settings.tags.colors.get(t).cloned())
+                        }),
+                );
             }
-            if !tags.is_empty() {
-                tags.pop();
+            if !tags_string.is_empty() {
+                tags_string.pop();
             }
         }
         let subject = if *mailbox_settings!(
-            context[&self.cursor_pos.0][&self.cursor_pos.1]
+            context[self.cursor_pos.0][&self.cursor_pos.1]
                 .listing
                 .thread_subject_pack
         ) {
@@ -769,7 +784,7 @@ impl ConversationsListing {
                 (self.cursor_pos.0, self.cursor_pos.1),
             ),
             from: FromString(Address::display_name_slice(from, None)),
-            tags: TagString(tags, colors),
+            tags: TagString(tags_string, colors),
             unseen: thread.unseen() > 0,
             highlight_self: false,
         }

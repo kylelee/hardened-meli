@@ -114,9 +114,25 @@ impl CardDeserializer {
                  a `END:VCARD` line.",
             ));
         } else if input.starts_with(HEADER_CRLF) {
-            &input[HEADER_CRLF.len()..input.len() - FOOTER_CRLF.len()]
+            // Slice by the footer variant that actually matched: the gate
+            // accepts bare `FOOTER` tails, and subtracting `FOOTER_CRLF`'s
+            // length there overshoots into the content (char-boundary panic /
+            // truncated value).
+            let footer = if input.ends_with(FOOTER_CRLF) {
+                FOOTER_CRLF
+            } else {
+                FOOTER
+            };
+            &input[HEADER_CRLF.len()..input.len() - footer.len()]
         } else {
-            &input[HEADER_LF.len()..input.len() - FOOTER_LF.len()]
+            // Same mismatch for the LF twin: subtract the *matched* footer
+            // variant's length.
+            let footer = if input.ends_with(FOOTER_LF) {
+                FOOTER_LF
+            } else {
+                FOOTER
+            };
+            &input[HEADER_LF.len()..input.len() - footer.len()]
         };
 
         let mut ret = IndexMap::default();
@@ -402,4 +418,70 @@ fn test_vcard_v4_parse() {
     let parsed2 = CardDeserializer::try_from_str(j).unwrap();
     assert_eq!(parsed2.version(), VCardVersion4::NAME);
     assert_eq!(parsed2.0, contents,);
+}
+
+// Regression tests (CWE-1287) for the header/footer variant-length mismatch in
+// `try_from_str`: inputs ending with the bare `FOOTER` ("END:VCARD", 9 bytes)
+// pass the accept-gate, but the slicing branches subtracted the
+// newline-terminated variant's length (`FOOTER_CRLF` = 11, `FOOTER_LF` = 10),
+// overshooting the end index into the content — a non-char-boundary panic when
+// a multi-byte character sits at the tail, or silent truncation. The slice must
+// use the *actually matched* variant's length in both branches.
+#[test]
+fn test_vcard_v4_multibyte_tail_bare_footer_snowman() {
+    // HEADER_CRLF branch: 3-byte ☃ flush against the bare footer.
+    let j = "BEGIN:VCARD\r\nFN:☃END:VCARD";
+    let parsed = CardDeserializer::try_from_str(j).unwrap();
+    assert_eq!(parsed.0["FN"].value, "☃");
+
+    // HEADER_LF branch: the 27-byte repro.
+    let j = "BEGIN:VCARD\nFN:☃END:VCARD";
+    let parsed = CardDeserializer::try_from_str(j).unwrap();
+    assert_eq!(parsed.0["FN"].value, "☃");
+
+    // Multi-byte char not flush against the footer.
+    let j = "BEGIN:VCARD\r\nFN:a☃END:VCARD";
+    let parsed = CardDeserializer::try_from_str(j).unwrap();
+    assert_eq!(parsed.0["FN"].value, "a☃");
+}
+
+#[test]
+fn test_vcard_v4_multibyte_tail_bare_footer_e_acute() {
+    // HEADER_CRLF branch: end index lands exactly on é's first byte, so the
+    // pre-fix behaviour was silent truncation (FN parsed as "") instead of a
+    // panic; assert the value survives.
+    let j = "BEGIN:VCARD\r\nFN:éEND:VCARD";
+    let parsed = CardDeserializer::try_from_str(j).unwrap();
+    assert_eq!(parsed.0["FN"].value, "é");
+
+    // HEADER_LF branch: end index lands on é's second byte → char-boundary
+    // panic before the fix.
+    let j = "BEGIN:VCARD\nFN:éEND:VCARD";
+    let parsed = CardDeserializer::try_from_str(j).unwrap();
+    assert_eq!(parsed.0["FN"].value, "é");
+}
+
+#[test]
+fn test_vcard_v4_bare_footer_wellformed() {
+    // Bare-footer (no trailing newline) inputs remain accepted and every
+    // content-line value is kept intact, for both newline conventions.
+    for nl in ["\r\n", "\n"] {
+        let j = format!(
+            "BEGIN:VCARD{nl}VERSION:4.0{nl}N:Gump;Forrest;;Mr.;{nl}FN:Forrest \
+             Gump{nl}EMAIL:forrestgump@example.com{nl}END:VCARD"
+        );
+        let parsed = CardDeserializer::try_from_str(&j).unwrap();
+        assert_eq!(parsed.0["FN"].value, "Forrest Gump");
+        assert_eq!(parsed.0["N"].value, "Gump;Forrest;;Mr.;");
+        assert_eq!(parsed.0["EMAIL"].value, "forrestgump@example.com");
+    }
+}
+
+#[test]
+fn test_vcard_malformed_probes_rejected() {
+    // Malformed-input probes: rejected with an error, never a panic.
+    CardDeserializer::try_from_str("").unwrap_err();
+    CardDeserializer::try_from_str("END:VCARD").unwrap_err();
+    CardDeserializer::try_from_str("END:VCARD\r\n").unwrap_err();
+    CardDeserializer::try_from_str("BEGIN:VCARD\r\nEND:VCARD\n").unwrap_err();
 }

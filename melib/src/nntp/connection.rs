@@ -24,7 +24,9 @@ use crate::{
     email::parser::BytesExt,
     error::*,
     log,
-    utils::connections::{std_net::connect as tcp_stream_connect, Connection},
+    utils::connections::{
+        enforce_response_size_limit, std_net::connect as tcp_stream_connect, Connection,
+    },
 };
 extern crate native_tls;
 use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc, time::Instant};
@@ -52,16 +54,6 @@ pub struct NntpStream {
 pub enum MailboxSelection {
     None,
     Select(MailboxHash),
-}
-
-impl MailboxSelection {
-    pub fn take(&mut self) -> Self {
-        std::mem::replace(self, Self::None)
-    }
-}
-
-async fn try_await(cl: impl Future<Output = Result<()>> + Send) -> Result<()> {
-    cl.await
 }
 
 #[derive(Debug)]
@@ -205,14 +197,6 @@ impl NntpStream {
                 .chain_err_summary(|| format!("Could not initiate TLS negotiation to {path}."))?;
             }
         }
-        //ret.send_command(
-        //    format!(
-        //        "LOGIN \"{}\" \"{}\"",
-        //        &server_conf.server_username, &server_conf.server_password
-        //    )
-        //    .as_bytes(),
-        //)
-        //.await?;
         if let Err(err) = ret
             .stream
             .get_ref()
@@ -335,7 +319,8 @@ impl NntpStream {
             match self.stream.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(b) => {
-                    ret.push_str(unsafe { std::str::from_utf8_unchecked(&buf[0..b]) });
+                    ret.push_str(&String::from_utf8_lossy(&buf[0..b]));
+                    enforce_response_size_limit(ret.len())?;
                     if ret.len() > 4 {
                         if ret.starts_with("205 ") {
                             return Err(Error::new(format!("Disconnected: {ret}")));
@@ -390,7 +375,7 @@ impl NntpStream {
     }
 
     pub async fn send_command(&mut self, command: &[u8]) -> Result<()> {
-        if let Err(err) = try_await(async move {
+        if let Err(err) = (async move {
             let command = command.trim();
             self.stream.write_all(command).await?;
             self.stream.write_all(b"\r\n").await?;
@@ -407,7 +392,7 @@ impl NntpStream {
     }
 
     pub async fn send_multiline_data_block(&mut self, data: &[u8]) -> Result<()> {
-        if let Err(err) = try_await(async move {
+        if let Err(err) = (async move {
             let mut ptr = 0;
             while let Some(pos) = data[ptr..].find("\n") {
                 let l = &data[ptr..ptr + pos].trim_end();
@@ -516,9 +501,7 @@ impl NntpConnection {
                 self.uid_store.account_name
             );
         }
-        if let Err(err) =
-            try_await(async { self.stream.as_mut()?.send_command(command).await }).await
-        {
+        if let Err(err) = (async { self.stream.as_mut()?.send_command(command).await }).await {
             self.stream = Err(err.clone());
             log::debug!("NNTP send command error {:?} {err}", err.kind);
             if err.kind.is_network() {
@@ -618,5 +601,79 @@ pub fn command_to_replycodes(c: &str) -> &'static [&'static str] {
         &["206 "]
     } else {
         &[]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::utils::connections::{cap_test_utils, max_server_response_size};
+
+    /// Regression test for the server response size cap in
+    /// [`NntpStream::read_lines`]: a multiline response whose terminating
+    /// `.` line never arrives must produce an error once the cap is reached,
+    /// instead of accumulating unboundedly.
+    #[test]
+    fn test_nntp_read_lines_response_size_cap() {
+        cap_test_utils::assert_completes_within(10, || {
+            let cap = max_server_response_size();
+            let (stream, writer) = cap_test_utils::malicious_server(
+                b"200 never terminating multiline response\r\n",
+                cap.saturating_mul(2),
+            );
+            let mut nntp_stream = NntpStream {
+                stream,
+                extension_use: NntpExtensionUse::default(),
+                current_mailbox: MailboxSelection::None,
+                supports_submission: false,
+            };
+            let mut ret = String::new();
+            let res = smol::block_on(nntp_stream.read_lines(&mut ret, true, &["200 "]));
+            drop(nntp_stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+                ),
+                "unexpected error: {err:?}"
+            );
+            assert!(ret.len() > cap);
+            assert!(
+                ret.len() <= cap + Connection::IO_BUF_SIZE,
+                "accumulation must stay bounded: {} > {}",
+                ret.len(),
+                cap + Connection::IO_BUF_SIZE
+            );
+        });
+    }
+
+    /// C6 regression: server bytes used to be pushed into the `String` via
+    /// `from_utf8_unchecked` (constructive UB). Invalid UTF-8 in an
+    /// otherwise valid reply must now decode lossily to U+FFFD replacement
+    /// characters while the reply code still parses.
+    #[test]
+    fn test_nntp_read_lines_invalid_utf8_degrades_lossy() {
+        cap_test_utils::assert_completes_within(10, || {
+            let (stream, writer) =
+                cap_test_utils::malicious_server(b"100 greeting \xff\xfe\r\n", 17);
+            let mut nntp_stream = NntpStream {
+                stream,
+                extension_use: NntpExtensionUse::default(),
+                current_mailbox: MailboxSelection::None,
+                supports_submission: false,
+            };
+            let mut ret = String::new();
+            let res = smol::block_on(nntp_stream.read_lines(&mut ret, false, &["100 "]));
+            drop(nntp_stream);
+            let _ = writer.join();
+            assert_eq!(res.unwrap(), 100);
+            assert!(
+                ret.contains('\u{FFFD}'),
+                "invalid UTF-8 must decode lossily, ret was {ret:?}"
+            );
+        });
     }
 }

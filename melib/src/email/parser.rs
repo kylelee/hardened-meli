@@ -56,6 +56,36 @@ macro_rules! to_str {
         unsafe { std::str::from_utf8_unchecked($l) }
     }};
 }
+
+/// Returns `true` if `value` contains a `CR` or `LF` byte that is not part
+/// of a valid `RFC5322` folding whitespace sequence (`CR`/`LF`/`CRLF`
+/// immediately followed by `SP` or `HTAB`).
+///
+/// A bare `CR`/`LF`, or a line break not followed by whitespace, would be
+/// re-interpreted as a new header line (or as the end of the header block)
+/// when the value is written into a message and parsed again, enabling
+/// header injection (CWE-93). This predicate guards the layers that handle
+/// header values: the `mailto` parser and
+/// [`Draft::finalise`](crate::email::compose::Draft::finalise).
+pub fn has_unfoldable_newline(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\r' || b == b'\n' {
+            let mut next = i + 1;
+            if b == b'\r' && bytes.get(next) == Some(&b'\n') {
+                next += 1;
+            }
+            match bytes.get(next) {
+                // A line break followed by whitespace is header folding: the
+                // continuation line stays part of the same header value.
+                Some(b' ') | Some(b'\t') => {}
+                _ => return true,
+            }
+        }
+    }
+    false
+}
+
 pub struct ParsingError<I> {
     pub input: I,
     pub error: Cow<'static, str>,
@@ -1051,6 +1081,17 @@ pub mod generic {
             .decode_utf8()
             .map_err(|_| nom::Err::Error((input, "mailto(): Not valid UTF-8.")))
             .and_then(|s| {
+                // RFC6068 forbids CR/LF in mailto URIs; a percent-encoded
+                // %0d/%0a in the address part (e.g. inside a quoted display
+                // name) would otherwise reach the To: header value (CWE-93).
+                // Line breaks that are valid folding whitespace are allowed.
+                if super::has_unfoldable_newline(&s) {
+                    return Err(nom::Err::Error((
+                        input,
+                        "mailto(): CR/LF characters are not allowed in the address part of \
+                         mailto URIs (RFC6068)",
+                    )));
+                }
                 Address::list_try_from(s.as_bytes()).map_err(|_| {
                     nom::Err::Error((input, "mailto(): doesn't start with an address."))
                 })
@@ -1123,6 +1164,26 @@ pub mod generic {
             else {
                 return Err(nom::Err::Error((input, "mailto(): invalid UTF-8.").into()));
             };
+            // RFC6068 forbids CR/LF control characters in mailto hfield
+            // values; percent-encoded %0d/%0a (in any case combination) would
+            // otherwise be decoded into a header value, enabling header
+            // injection (CWE-93). The `body` hfield is exempt: line breaks in
+            // the body are explicitly allowed by RFC6068 §5. Line breaks that
+            // are valid folding whitespace are allowed (real-world mailto
+            // URIs, e.g. Debian BTS, fold long References values).
+            if tag != b"body" && super::has_unfoldable_newline(&value) {
+                return Err(nom::Err::Error(
+                    (
+                        input,
+                        format!(
+                            "mailto(): CR/LF characters are not allowed in the value of \
+                             mailto header `{}` (RFC6068)",
+                            String::from_utf8_lossy(tag)
+                        ),
+                    )
+                        .into(),
+                ));
+            }
             match tag {
                 b"body" if body.is_none() => {
                     body = Some(value);
@@ -1769,11 +1830,23 @@ pub mod attachments {
                     (input, "multipart_parts(): malformed boundary").into(),
                 ));
             }
+            // Progress guarantee: when the bytes preceding the boundary
+            // occurrence are not `--`, the slice below lands on the same
+            // occurrence on the next iteration and would spin forever
+            // (CWE-835). Bail out instead.
+            let prev_len = input.len();
             offset += b_start - 2;
             input = &input[b_start - 2..];
             if &input[0..2] == b"--" {
                 offset += 2 + boundary.len();
                 input = &input[2 + boundary.len()..];
+                if input.is_empty() {
+                    // Dash-boundary at EOF with no line ending: indexing
+                    // `input[0]` below would be out of bounds (CWE-1287).
+                    return Err(nom::Err::Error(
+                        (input, "multipart_parts(): found EOF").into(),
+                    ));
+                }
                 if input[0] == b'\n' {
                     offset += 1;
                     input = &input[1..];
@@ -1785,6 +1858,9 @@ pub mod attachments {
                 }
                 break;
             }
+            if input.len() >= prev_len {
+                break;
+            }
         }
 
         loop {
@@ -1794,7 +1870,7 @@ pub mod attachments {
                 ));
             }
             if let Some(end) = input.find(boundary) {
-                if &input[end - 2..end] != b"--" {
+                if end < 2 || &input[end - 2..end] != b"--" {
                     return Err(nom::Err::Error(
                         (input, "multipart_parts(): malformed boundary").into(),
                     ));
@@ -1805,9 +1881,11 @@ pub mod attachments {
                         length: end - 4,
                     });
                 } else {
+                    // `end == 2` (empty part, no line ending before the
+                    // boundary) used to underflow `end - 3` (CWE-1287).
                     ret.push(StrBuilder {
                         offset,
-                        length: end - 3,
+                        length: end.saturating_sub(3),
                     });
                 }
                 offset += end + boundary.len();
@@ -1851,9 +1929,16 @@ pub mod attachments {
                         (input, "parts_f(): malformed boundary").into(),
                     ));
                 }
+                // Progress guarantee: same CWE-835 guard as in
+                // `multipart_parts` above.
+                let prev_len = input.len();
                 input = &input[b_start - 2..];
                 if &input[0..2] == b"--" {
                     input = &input[2 + boundary.len()..];
+                    if input.is_empty() {
+                        // Same CWE-1287 guard as in `multipart_parts` above.
+                        return Err(nom::Err::Error((input, "parts_f(): found EOF").into()));
+                    }
                     if input[0] == b'\n' {
                         input = &input[1..];
                     } else if input[0..].starts_with(b"\r\n") {
@@ -1863,19 +1948,24 @@ pub mod attachments {
                     }
                     break;
                 }
+                if input.len() >= prev_len {
+                    break;
+                }
             }
             loop {
                 if input.len() < boundary.len() + 4 {
                     return Err(nom::Err::Error((input, "parts_f(): found EOF").into()));
                 }
                 if let Some(end) = input.find(boundary) {
-                    if &input[end - 2..end] != b"--" {
+                    if end < 2 || &input[end - 2..end] != b"--" {
                         return Err(nom::Err::Error((input, "parts_f(): found EOF").into()));
                     }
                     if input[..end - 2].ends_with(b"\r\n") {
                         ret.push(&input[..end - 4]);
                     } else {
-                        ret.push(&input[..end - 3]);
+                        // Same `end == 2` empty-part underflow guard as in
+                        // `multipart_parts` above (CWE-1287).
+                        ret.push(&input[..end.saturating_sub(3)]);
                     }
                     input = &input[end + boundary.len()..];
                     if input.len() < 2

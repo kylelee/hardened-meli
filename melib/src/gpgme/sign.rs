@@ -90,7 +90,6 @@ impl NewSignature {
 }
 
 pub struct NewSignaturesIter<'a> {
-    #[allow(unused)]
     lib: Arc<libloading::Library>,
     ptr: gpgme_new_signature_t,
     _ph: std::marker::PhantomData<&'a _gpgme_new_signature>,
@@ -169,7 +168,6 @@ impl VerifyResult {
 }
 
 pub struct SignaturesIter<'a> {
-    #[allow(unused)]
     lib: Arc<libloading::Library>,
     ptr: gpgme_signature_t,
     _ph: std::marker::PhantomData<&'a _gpgme_signature>,

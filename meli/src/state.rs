@@ -1379,11 +1379,6 @@ impl State {
     /// - `Some(false)` if the child is still running.
     pub fn try_wait_on_main_child(&mut self) -> Option<bool> {
         let child = self.child.as_mut()?;
-        // // The check on whether the embedded process is alive is done on input, so
-        // // forward an input of '\0' to get the embedded terminal to notice its
-        // // child is dead.
-        // // [ref:TODO]: replace with a "PidExited" event or similar.
-        // self.rcv_event(UIEvent::EmbeddedInput((Key::Null, vec![0])));
         match child.try_wait() {
             Ok(false) => Some(false),
             ws @ Ok(true) | ws @ Err(_) => {

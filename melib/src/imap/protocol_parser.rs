@@ -212,27 +212,6 @@ pub enum ResponseCode {
     /// the charsets that are supported by this implementation.
     Badcharset(Option<String>),
 
-    /// Followed by a list of capabilities. This can appear in the initial `OK`
-    /// or `PREAUTH` response to transmit an initial capabilities list. This
-    /// makes it unnecessary for a client to send a separate `CAPABILITY`
-    /// command if it recognizes this response.
-    Capability,
-
-    /// The human-readable text represents an error in parsing the `[RFC-2822]`
-    /// header or `[MIME-IMB]` headers of a message in the mailbox.
-    Parse(String),
-
-    /// Followed by a parenthesized list of flags, indicates which of the known
-    /// flags the client can change permanently. Any flags that are in the
-    /// `FLAGS` untagged response, but not the `PERMANENTFLAGS` list, can not be
-    /// set permanently. If the client attempts to `STORE` a flag that is
-    /// not in the `PERMANENTFLAGS` list, the server will either ignore the
-    /// change or store the state change for the remainder of the current
-    /// session only. The `PERMANENTFLAGS` list can also include the special
-    /// flag `\*`, which indicates that it is possible to create new
-    /// keywords by attempting to store those flags in the mailbox.
-    Permanentflags(String),
-
     /// The mailbox is selected read-only, or its access while selected has
     /// changed from read-write to read-only.
     ReadOnly,
@@ -268,9 +247,6 @@ impl std::fmt::Display for ResponseCode {
                 fmt,
                 "Given charset is not supported by this server. Supported ones are: {s}"
             ),
-            Capability => write!(fmt, "Capability response"),
-            Parse(s) => write!(fmt, "Server error in parsing message headers: {s}"),
-            Permanentflags(s) => write!(fmt, "Mailbox supports these flags: {s}"),
             ReadOnly => write!(fmt, "This mailbox is selected read-only."),
             ReadWrite => write!(fmt, "This mailbox is selected with read-write permissions."),
             Trycreate => write!(
@@ -1275,19 +1251,87 @@ pub fn byte_flags(input: &[u8]) -> IResult<&[u8], (Flag, Vec<String>)> {
  *  "<B27397-0100000@cac.washington.edu>")
  */
 
+/// Mode of the generic ENVELOPE field tolerance layer for the nstring
+/// fields (date, subject, in-reply-to, message-id).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnvelopeFieldTolerance {
+    /// Each field must be a single valid nstring (quoted string, literal
+    /// or `NIL`).
+    Strict,
+    /// A field that strict parsing cannot represent as a single nstring
+    /// falls back to its raw bytes: the run of adjacent quoted strings and
+    /// unquoted atoms is concatenated into one value (see
+    /// [`quoted_or_nil_concat`]).
+    RawBytesFallback,
+}
+
+/// Parse one ENVELOPE nstring field (date, subject, in-reply-to,
+/// message-id) in the given [`EnvelopeFieldTolerance`] mode.
+///
+/// This is the string-field half of the generic ENVELOPE field tolerance
+/// layer; the address-field half is `sanitize_envelope_address_field`,
+/// which validates/normalizes/substitutes every address field after
+/// parsing in both modes.
+#[inline]
+fn envelope_nstring_field(
+    input: &[u8],
+    tolerance: EnvelopeFieldTolerance,
+) -> IResult<&[u8], Option<Vec<u8>>> {
+    match tolerance {
+        EnvelopeFieldTolerance::Strict => quoted_or_nil(input),
+        EnvelopeFieldTolerance::RawBytesFallback => quoted_or_nil_concat(input),
+    }
+}
+
 pub fn envelope(input: &[u8]) -> IResult<&[u8], Envelope> {
+    // Generic ENVELOPE field tolerance layer: parse every field strictly
+    // first; only if some field fails strict parsing, retry the whole
+    // ENVELOPE once in raw-bytes-fallback mode. In fallback mode every
+    // nstring field that is not a single valid nstring is captured as its
+    // raw bytes up to the field boundary (reported once per field through
+    // a bounded `log::debug!` line), while a truncated literal hard-fails
+    // so its declared bytes cannot drift into the next field (see
+    // `quoted_or_nil_concat`). Inputs that strict parsing accepts keep
+    // their exact strict values; the fallback only runs where the strict
+    // parse had no result (hard parse failure). This generalizes the
+    // multi-token tolerance originally added for QQ Mail message-ids to
+    // all ENVELOPE fields.
+    //
+    // The layer is isomorphic to the address-field first line of defense
+    // (`sanitize_envelope_address_field` below): there every field is
+    // validated, normalized and substituted with a placeholder after
+    // parsing, in both modes. The nstring fields need no such stages
+    // because they are cache-safe by construction (see the note on
+    // `quoted_or_nil_concat`).
+    match envelope_with_tolerance(input, EnvelopeFieldTolerance::Strict) {
+        Ok(ret) => Ok(ret),
+        Err(strict_err) => envelope_with_tolerance(input, EnvelopeFieldTolerance::RawBytesFallback)
+            .or(Err(strict_err)),
+    }
+}
+
+fn envelope_with_tolerance(
+    input: &[u8],
+    tolerance: EnvelopeFieldTolerance,
+) -> IResult<&[u8], Envelope> {
     const WS: &[u8] = b"\r\n\t ";
     let (input, _) = tag("(")(input)?;
     let (input, _) = opt(is_a(WS))(input)?;
-    let (input, date) = quoted_or_nil(input)?;
+    let (input, date) = envelope_nstring_field(input, tolerance)?;
     let (input, _) = opt(is_a(WS))(input)?;
-    let (input, subject) = quoted_or_nil(input)?;
+    let (input, subject) = envelope_nstring_field(input, tolerance)?;
+    // Bounded lossy subject prefix used as context in address sanitization
+    // error logs.
+    let subject_context: String = subject
+        .as_deref()
+        .map(|s| String::from_utf8_lossy(s).chars().take(48).collect())
+        .unwrap_or_default();
     let (input, _) = opt(is_a(WS))(input)?;
     let (input, from) = envelope_addresses(input)?;
     let (input, _) = opt(is_a(WS))(input)?;
-    let (input, _sender) = envelope_addresses(input)?;
+    let (input, sender) = envelope_addresses(input)?;
     let (input, _) = opt(is_a(WS))(input)?;
-    let (input, _reply_to) = envelope_addresses(input)?;
+    let (input, reply_to) = envelope_addresses(input)?;
     let (input, _) = opt(is_a(WS))(input)?;
     let (input, to) = envelope_addresses(input)?;
     let (input, _) = opt(is_a(WS))(input)?;
@@ -1295,11 +1339,23 @@ pub fn envelope(input: &[u8]) -> IResult<&[u8], Envelope> {
     let (input, _) = opt(is_a(WS))(input)?;
     let (input, bcc) = envelope_addresses(input)?;
     let (input, _) = opt(is_a(WS))(input)?;
-    let (input, in_reply_to) = quoted_or_nil(input)?;
+    let (input, in_reply_to) = envelope_nstring_field(input, tolerance)?;
     let (input, _) = opt(is_a(WS))(input)?;
-    let (input, message_id) = quoted_or_nil(input)?;
+    let (input, message_id) = envelope_nstring_field(input, tolerance)?;
     let (input, _) = opt(is_a(WS))(input)?;
     let (input, _) = tag(")")(input)?;
+
+    // Validate every address field so that a poisoned field can never enter
+    // the cache in a non-roundtrip-safe form. `Sender`/`Reply-To` are not
+    // stored in `Envelope`, but they are sanitized anyway for uniform
+    // diagnostics.
+    let from = sanitize_envelope_address_field("From", &subject_context, from);
+    let _ = sanitize_envelope_address_field("Sender", &subject_context, sender);
+    let _ = sanitize_envelope_address_field("Reply-To", &subject_context, reply_to);
+    let to = sanitize_envelope_address_field("To", &subject_context, to);
+    let cc = sanitize_envelope_address_field("Cc", &subject_context, cc);
+    let bcc = sanitize_envelope_address_field("Bcc", &subject_context, bcc);
+
     Ok((
         input,
         ({
@@ -1492,6 +1548,128 @@ pub fn envelope_address(input: &[u8]) -> IResult<&[u8], AddressValue> {
     }
 }
 
+/// Placeholder spec for address fields that cannot be represented in a
+/// cache-safe form: the `.invalid` TLD is reserved by RFC 2606, so this can
+/// never be a real deliverable address.
+const INVALID_ADDRESS_PLACEHOLDER_SPEC: &str = "invalid@invalid.invalid";
+
+/// Bound on how much of an unfixable address is embedded in the placeholder
+/// display name and error log.
+const INVALID_ADDRESS_CONTEXT_LIMIT: usize = 120;
+
+/// Check whether `addr` survives the display string round-trip performed on
+/// `Address` values by the sqlite3 cache.
+///
+/// `Address` values are serialized via their `Display` form and strictly
+/// re-parsed on load (see the serde impls in `email::address`), so an
+/// address whose display form does not re-parse poisons the cache row that
+/// stores it (the `FromSqlConversionFailure` defect observed on real QQ
+/// Mail envelopes, e.g. display string `"recipients:" <recipients:@qq.com>`).
+///
+/// Successful re-parse is the exact cache-failure predicate; the re-parsed
+/// value is not always byte-equal to the original because the strict parser
+/// un-quotes quoted local parts when reconstructing the addr-spec.
+fn address_display_roundtrips(addr: &Address) -> bool {
+    Address::try_from(addr.to_string().as_str()).is_ok()
+}
+
+/// Quote the local part of an addr-spec, e.g. `recipients:@qq.com` becomes
+/// `"recipients:"@qq.com`, escaping `\` and `"` inside.
+///
+/// Returns `None` when the spec has an empty local part or no non-empty
+/// host, i.e. when quoting the local part cannot produce a valid spec.
+fn quote_address_spec_local_part(address_spec: &str) -> Option<String> {
+    let (local_part, host) = address_spec.rsplit_once('@')?;
+    if local_part.is_empty() || host.is_empty() {
+        return None;
+    }
+    let local_part = local_part.replace('\\', "\\\\").replace('"', "\\\"");
+    Some(format!("\"{local_part}\"@{host}"))
+}
+
+/// Convert `addr` into a form that passes [`address_display_roundtrips`]
+/// while keeping its content human-readable, or `None` if impossible.
+fn normalize_address_for_roundtrip(addr: &Address) -> Option<Address> {
+    match addr {
+        Address::Mailbox(m) => {
+            let address_spec = quote_address_spec_local_part(&m.address_spec)?;
+            let candidate = Address::new(m.display_name.as_deref(), address_spec);
+            address_display_roundtrips(&candidate).then_some(candidate)
+        }
+        Address::Group(g) => {
+            let mut mailbox_list = Vec::with_capacity(g.mailbox_list.len());
+            for member in &g.mailbox_list {
+                mailbox_list.push(normalize_address_for_roundtrip(member)?);
+            }
+            let display_name = if g
+                .display_name
+                .as_bytes()
+                .iter()
+                .any(|b| b"()<>[]:;@\\,.\"".contains(b))
+            {
+                let escaped = g.display_name.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"{escaped}\"")
+            } else {
+                g.display_name.to_string()
+            };
+            let candidate = Address::new_group(display_name, mailbox_list);
+            address_display_roundtrips(&candidate).then_some(candidate)
+        }
+    }
+}
+
+/// Build a placeholder address for an unfixable field: cache-safe, obviously
+/// not a real address, and keeping the original raw value visible in the
+/// display name portion for diagnosability.
+fn invalid_address_placeholder(original: &Address) -> Address {
+    let raw = original
+        .to_string()
+        .chars()
+        .take(INVALID_ADDRESS_CONTEXT_LIMIT)
+        .collect::<String>();
+    Address::new(
+        Some(format!("[invalid address: {raw}]")),
+        INVALID_ADDRESS_PLACEHOLDER_SPEC,
+    )
+}
+
+/// Validate the addresses of one ENVELOPE address field and normalize or
+/// substitute them so that they can never fail the cache round-trip.
+///
+/// Valid addresses are returned unchanged; fixable ones are normalized by
+/// quoting the local part of their addr-spec; unfixable ones are replaced
+/// with a placeholder and reported via `log::error!` naming the field and
+/// the envelope subject (no credentials can appear in these fields).
+fn sanitize_envelope_address_field(
+    field: &'static str,
+    subject: &str,
+    addresses: Option<SmallVec<[Address; 1]>>,
+) -> Option<SmallVec<[Address; 1]>> {
+    let mut addresses = addresses?;
+    for addr in addresses.iter_mut() {
+        if address_display_roundtrips(addr) {
+            continue;
+        }
+        if let Some(normalized) = normalize_address_for_roundtrip(addr) {
+            *addr = normalized;
+            continue;
+        }
+        let raw = addr
+            .to_string()
+            .chars()
+            .take(INVALID_ADDRESS_CONTEXT_LIMIT)
+            .collect::<String>();
+        log::error!(
+            "IMAP ENVELOPE: could not represent the address of the {} field in a \
+             cache-safe form; substituted a placeholder. Original address: `{raw}`. \
+             Envelope subject: `{subject}`",
+            field
+        );
+        *addr = invalid_address_placeholder(addr);
+    }
+    Some(addresses)
+}
+
 // Read a literal ie a byte sequence prefixed with a tag containing its length
 // delimited in {}s
 pub fn literal(input: &[u8]) -> IResult<&[u8], &[u8]> {
@@ -1565,6 +1743,117 @@ pub fn quoted_or_nil(input: &[u8]) -> IResult<&[u8], Option<Vec<u8>>> {
     utils::nil_to_none(quoted)(input.ltrim())
 }
 
+/// Parse an ENVELOPE nstring field with a raw-bytes fallback for non-nstring shapes, concatenating adjacent tokens.
+///
+/// The strict IMAP grammar cannot represent every value servers emit as a
+/// single nstring, so this falls back to the field's raw bytes and
+/// concatenates a run of adjacent quoted strings and unquoted atoms into one
+/// value.
+///
+/// This is the raw-bytes fallback of the generic ENVELOPE field tolerance
+/// layer (see `EnvelopeFieldTolerance::RawBytesFallback`). Parsing proceeds
+/// in stages:
+///
+/// 1. A strict [`quoted_or_nil`] attempt provides the seed (a quoted
+///    string, `NIL` or a literal).
+/// 2. If strict parsing fails and the input starts with `{`, the field is
+///    parsed via [`literal`] instead. A truncated or malformed literal is a
+///    hard error, so a literal's declared bytes can never drift into the
+///    next envelope field.
+/// 3. Otherwise the seed is the raw bytes up to the first ASCII whitespace
+///    or `)` (a leading `"` is part of the value). A structurally missing
+///    field (nothing before `)` or end of input) is an error instead of
+///    fabricating a value. The fallback is reported once per field through
+///    a bounded (48 bytes) `log::debug!` line.
+/// 4. Any immediately-adjacent (no whitespace between them) quoted strings
+///    and unquoted atoms are concatenated onto the seed.
+///
+/// Some servers (e.g. QQ Mail) relay a message-id whose local part is
+/// itself a quoted string containing `@`, e.g.
+/// `"<605067.JavaMail."billing@example.com"@example.center>"`, which is
+/// not a single valid quoted string in the IMAP grammar; the same shape
+/// can occur in any ENVELOPE nstring field.
+///
+/// Known limitation: because the stage 3 boundary scan stops only at
+/// whitespace and `)`, a quote mismatch can still make a field absorb
+/// adjacent tokens across whitespace. An unterminated quote followed by
+/// whitespace and another token is separated correctly, but pathological
+/// quote pairing across fields can conflate values; the regression pins
+/// `test_imap_envelope_fallback_does_not_conflate_adjacent_fields` and
+/// `test_imap_envelope_raw_bytes_fallback_literal_guard` document the
+/// behavior guaranteed today.
+///
+/// The concatenated value is stored in a [`MessageID`](crate::email::MessageID),
+/// which serializes as a plain string and deserializes without strict
+/// re-parsing, so unlike address fields it can never fail the cache
+/// display-string round-trip; `test_imap_envelope_message_id_survives_cache_serde_roundtrip`
+/// pins that invariant.
+#[inline]
+pub fn quoted_or_nil_concat(input: &[u8]) -> IResult<&[u8], Option<Vec<u8>>> {
+    // Stage 1: strict nstring seed (unchanged behavior).
+    let (mut input, mut seed, fallback) = match quoted_or_nil(input) {
+        Ok((rest, Some(v))) => (rest, v, false),
+        Ok((rest, None)) => return Ok((rest, None)),
+        Err(_) => {
+            // Stage 2: literal guard. `literal()` does not ltrim internally,
+            // so the trimmed slice must be passed explicitly. A truncated or
+            // malformed literal is an immediate error: its declared bytes
+            // must never drift into the next envelope field.
+            let trimmed = input.ltrim();
+            if trimmed.first() == Some(&b'{') {
+                let (rest, bytes) = literal(trimmed)?;
+                (rest, bytes.to_vec(), true)
+            } else {
+                // Stage 3: raw-bytes boundary scan seed. The stop set is
+                // ASCII whitespace and `)` only; a leading `"` is part of
+                // the value.
+                let end = trimmed
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace() || *b == b')')
+                    .unwrap_or(trimmed.len());
+                if end == 0 {
+                    return Err(nom::Err::Error(
+                        (
+                            trimmed,
+                            "quoted_or_nil_concat(): structurally missing field",
+                        )
+                            .into(),
+                    ));
+                }
+                (&trimmed[end..], trimmed[..end].to_vec(), true)
+            }
+        }
+    };
+    if fallback {
+        log::debug!(
+            "IMAP ENVELOPE nstring field fell back to raw bytes (non-RFC compliant server?): {:?}",
+            String::from_utf8_lossy(&seed[..seed.len().min(48)])
+        );
+    }
+    // Stage 4: absorb immediately-adjacent (no whitespace) subsequent tokens.
+    loop {
+        match input.first() {
+            Some(&b'"') => match quoted(input) {
+                Ok((rest, part)) => {
+                    seed.extend_from_slice(&part);
+                    input = rest;
+                }
+                Err(_) => break,
+            },
+            Some(&b) if !b.is_ascii_whitespace() && b != b')' && b != b'"' => {
+                let end = input
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace() || *b == b')' || *b == b'"')
+                    .unwrap_or(input.len());
+                seed.extend_from_slice(&input[..end]);
+                input = &input[end..];
+            }
+            _ => break,
+        }
+    }
+    Ok((input, Some(seed)))
+}
+
 pub fn uid_fetch_envelopes_response<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<(UID, Option<(Flag, Vec<String>)>, Envelope)>> {
@@ -1587,12 +1876,17 @@ pub fn uid_fetch_envelopes_response<'a>(
             ))(input.ltrim())?;
             let (input, _) = tag(" ENVELOPE ")(input)?;
             let (input, env) = envelope(input.ltrim())?;
-            let (input, _) = tag("BODYSTRUCTURE ")(input)?;
-            let (input, has_attachments) = bodystructure_has_attachments(input)?;
+            // BODYSTRUCTURE is optional: it is not requested when
+            // `fetch_body_structure` is disabled, in which case
+            // `has_attachments` keeps its default (`false`).
+            let (input, has_attachments) = opt(preceded(
+                tag("BODYSTRUCTURE "),
+                bodystructure_has_attachments,
+            ))(input.ltrim())?;
             let (input, _) = tag(")\r\n")(input)?;
             Ok((input, {
                 let mut env = env;
-                env.set_has_attachments(has_attachments);
+                env.set_has_attachments(has_attachments.unwrap_or(false));
                 (uid_flags.0, uid_flags.1, env)
             }))
         },

@@ -211,21 +211,19 @@ impl Secret {
                             Err(err) => Err(Error::new(format!(
                                 "Command `{command}` returned non-UTF-8 bytes"
                             ))
+                            // Do not embed captured stdout: it may contain the secret.
                             .set_details(format!(
-                                "stdout was: {stdout:?}",
-                                stdout = String::from_utf8_lossy(&output.stdout)
+                                "stdout was not valid UTF-8 ({len} bytes)",
+                                len = output.stdout.len()
                             ))
                             .set_source(Some(crate::src_err_arc_wrap! { err }))
                             .set_kind(ErrorKind::External)),
                         }
                     } else {
                         Err(Error::new(format!("Could not execute command `{command}`"))
-                            .set_details(format!(
-                                "Exit status: {status} stdout: {stdout:?} stderr: {stderr:?}",
-                                status = output.status,
-                                stdout = String::from_utf8_lossy(&output.stdout),
-                                stderr = String::from_utf8_lossy(&output.stderr)
-                            ))
+                            // Do not embed captured stdout/stderr: they may contain the
+                            // secret. Report only the exit status.
+                            .set_details(format!("{status}", status = output.status))
                             .set_kind(ErrorKind::External))
                     }
                 }),
@@ -574,5 +572,80 @@ impl<'de> Deserialize<'de> for Secret {
         }
 
         deserializer.deserialize_any(SecretVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Secret;
+
+    const MARKER: &str = "SECRETMARKER123";
+    // Shell-assembled so the command string echoed in error summaries never
+    // contains the marker verbatim; only the captured stdout/stderr do.
+    const MARKER_SHELL: &str = "'SECRETMAR''KER123'";
+
+    fn assert_marker_absent(display: &str, debug: &str) {
+        assert!(
+            !display.contains(MARKER),
+            "marker leaked into error Display: {display}"
+        );
+        assert!(
+            !debug.contains(MARKER),
+            "marker leaked into error Debug: {debug}"
+        );
+    }
+
+    #[test]
+    fn test_password_command_nonzero_exit_error_excludes_output() {
+        let secret = Secret::Evaluate {
+            command: format!("echo {MARKER_SHELL}; echo {MARKER_SHELL} >&2; exit 3"),
+            store_in_memory: true,
+        };
+        let err = secret.value().unwrap_err();
+        let display = err.to_string();
+        assert_marker_absent(&display, &format!("{err:?}"));
+        assert!(
+            display.contains("exit status: 3"),
+            "expected exit status in error: {display}"
+        );
+        assert!(
+            display.contains("command"),
+            "expected command identity in error: {display}"
+        );
+    }
+
+    #[test]
+    fn test_password_command_success_returns_output() {
+        let secret = Secret::Evaluate {
+            command: format!("echo {MARKER_SHELL}"),
+            store_in_memory: true,
+        };
+        assert_eq!(secret.value().unwrap(), MARKER);
+    }
+
+    #[test]
+    fn test_password_command_non_utf8_error_excludes_stdout() {
+        let secret = Secret::Evaluate {
+            command: "printf 'SECRETMAR''KER123\\377'".to_string(),
+            store_in_memory: true,
+        };
+        let err = secret.value().unwrap_err();
+        assert_marker_absent(&err.to_string(), &format!("{err:?}"));
+    }
+
+    #[test]
+    fn test_password_command_non_utf8_error_bounded() {
+        let secret = Secret::Evaluate {
+            // 200000 invalid UTF-8 bytes; error must not embed them.
+            command: "head -c 200000 /dev/zero | tr '\\0' '\\377'".to_string(),
+            store_in_memory: true,
+        };
+        let err = secret.value().unwrap_err();
+        let display = err.to_string();
+        assert!(
+            display.len() < 300,
+            "error should stay bounded, got {} bytes: {display}",
+            display.len()
+        );
     }
 }

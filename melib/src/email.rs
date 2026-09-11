@@ -188,6 +188,16 @@ impl Deref for Mail {
     }
 }
 
+fn strip_mbox_from_line(bytes: &[u8]) -> &[u8] {
+    if bytes.starts_with(b"From ") {
+        /* Attempt to recover if message includes the mbox From label as first line */
+        if let Some(offset) = bytes.find(b"\n") {
+            return &bytes[offset + 1..];
+        }
+    }
+    bytes
+}
+
 impl Mail {
     pub fn new(bytes: Vec<u8>, flags: Option<Flag>) -> Result<Self> {
         Ok(Self {
@@ -201,14 +211,7 @@ impl Mail {
     }
 
     pub fn bytes(&self) -> &[u8] {
-        let mut bytes = self.bytes.as_slice();
-        if bytes.starts_with(b"From ") {
-            /* Attempt to recover if message includes the mbox From label as first line */
-            if let Some(offset) = bytes.find(b"\n") {
-                bytes = &bytes[offset + 1..];
-            }
-        }
-        bytes
+        strip_mbox_from_line(self.bytes.as_slice())
     }
 
     pub fn body(&self) -> Attachment {
@@ -332,13 +335,8 @@ impl Envelope {
         self.hash
     }
 
-    pub fn populate_headers(&mut self, mut bytes: &[u8]) -> Result<()> {
-        if bytes.starts_with(b"From ") {
-            /* Attempt to recover if message includes the mbox From label as first line */
-            if let Some(offset) = bytes.find(b"\n") {
-                bytes = &bytes[offset + 1..];
-            }
-        }
+    pub fn populate_headers(&mut self, bytes: &[u8]) -> Result<()> {
+        let bytes = strip_mbox_from_line(bytes);
         let (headers, body) = match parser::mail(bytes) {
             Ok(v) => v,
             Err(e) => {

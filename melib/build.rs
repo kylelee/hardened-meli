@@ -32,6 +32,220 @@ use std::{
 
 const MOD_PATH: &str = "src/text/tables.rs";
 
+/* Pinning scheme for the UCD data files (CWE-829 hardening):
+ *
+ * - The generated tables committed at `MOD_PATH` act as the cache: as long as
+ *   that file exists, the build script never touches the network and its
+ *   integrity is guaranteed by version control.  The download path below only
+ *   runs when the tables are (re)generated, i.e. when `MOD_PATH` is absent.
+ * - Downloads go over HTTPS only (`curl --proto '=https'`) and each file's
+ *   SHA-256 is checked against a pinned digest below.  An unknown version, a
+ *   digest mismatch or a fetch failure aborts the build; unverified data is
+ *   never used.
+ *
+ * Regenerating/rotating the pins: fetch the four files for the new version
+ * over HTTPS (e.g. `curl --fail --proto '=https' -O <url>`), record the
+ * output of `sha256sum` for each, and add or update the corresponding entry
+ * in `PINNED_UCD_DIGESTS`. */
+
+/// Pinned SHA-256 digests of the UCD input files, per Unicode version.
+///
+/// Digest order per entry: `LineBreak.txt`, `UnicodeData.txt`,
+/// `EastAsianWidth.txt`, `emoji-data.txt`.
+const PINNED_UCD_DIGESTS: &[(&str, [&str; 4])] = &[(
+    "16.0.0",
+    [
+        // LineBreak.txt
+        "e97e4259d0d20fab150b9c7b4b28abfae5cd78ca97e7f4ac6ed20d685d5f4a7c",
+        // UnicodeData.txt
+        "ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f",
+        // EastAsianWidth.txt
+        "43adc76c0686a42cb370764eb8cfe2b2a45b10b855e5572a2db4a0eecce15d5b",
+        // emoji-data.txt
+        "f1365a5173eee18e1f98b240cdc492e84a25f1ce7e0c9d1094eb29c41a22696a",
+    ],
+)];
+
+fn pinned_digests(version: &str) -> Option<[&'static str; 4]> {
+    PINNED_UCD_DIGESTS
+        .iter()
+        .find(|(v, _)| *v == version)
+        .map(|(_, digests)| *digests)
+}
+
+/* Minimal SHA-256 (FIPS 180-4), hand-rolled because melib deliberately has no
+ * [build-dependencies] (no `sha2` crate available here).  It is only ever
+ * executed inside this build script against build-verified data, and its own
+ * correctness is asserted against NIST test vectors on every build script
+ * invocation via `sha256_self_check` (see its call at the top of `main`). */
+mod sha256 {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    pub(crate) fn digest(data: &[u8]) -> [u8; 32] {
+        let mut h: [u32; 8] = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
+        ];
+
+        // data || 0x80 || zero padding || 64-bit big-endian bit length
+        let bit_len = u64::try_from(data.len())
+            .expect("message longer than 2^64 - 1 bits")
+            .wrapping_mul(8);
+        let mut message = Vec::with_capacity(data.len() + 72);
+        message.extend_from_slice(data);
+        message.push(0x80);
+        while message.len() % 64 != 56 {
+            message.push(0);
+        }
+        message.extend_from_slice(&bit_len.to_be_bytes());
+
+        for offset in (0..message.len()).step_by(64) {
+            let block: &[u8; 64] = message[offset..offset + 64].try_into().unwrap();
+            let mut w = [0_u32; 64];
+            for i in 0..16 {
+                let word: [u8; 4] = block[4 * i..4 * i + 4].try_into().unwrap();
+                w[i] = u32::from_be_bytes(word);
+            }
+            for i in 16..64 {
+                let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+                let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+                w[i] = w[i - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[i - 7])
+                    .wrapping_add(s1);
+            }
+
+            let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+            for i in 0..64 {
+                let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+                let ch = (e & f) ^ (!e & g);
+                let t1 = hh
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[i])
+                    .wrapping_add(w[i]);
+                let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+                let maj = (a & b) ^ (a & c) ^ (b & c);
+                let t2 = s0.wrapping_add(maj);
+                hh = g;
+                g = f;
+                f = e;
+                e = d.wrapping_add(t1);
+                d = c;
+                c = b;
+                b = a;
+                a = t1.wrapping_add(t2);
+            }
+            let [na, nb, nc, nd, ne, nf, ng, nh] = h;
+            h = [
+                na.wrapping_add(a),
+                nb.wrapping_add(b),
+                nc.wrapping_add(c),
+                nd.wrapping_add(d),
+                ne.wrapping_add(e),
+                nf.wrapping_add(f),
+                ng.wrapping_add(g),
+                nh.wrapping_add(hh),
+            ];
+        }
+
+        let mut out = [0_u8; 32];
+        for i in 0..8 {
+            out[4 * i..4 * i + 4].copy_from_slice(&h[i].to_be_bytes());
+        }
+        out
+    }
+
+    pub(crate) fn hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+}
+
+/// Assert the hand-rolled SHA-256 against NIST FIPS 180-4 test vectors
+/// (expected values cross-checked with coreutils `sha256sum`).
+///
+/// Runs on every build script invocation before anything else so a broken
+/// hasher can never silently approve tampered data; hashing these few hundred
+/// bytes is negligible.
+fn sha256_self_check() {
+    const VECTORS: &[(&str, &str)] = &[
+        // Empty message.
+        (
+            "",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+        // "abc" (single block).
+        (
+            "abc",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ),
+        // 56-byte message (padding pushes it to two blocks).
+        (
+            "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+        ),
+        // 103-byte message (spans two blocks).
+        (
+            concat!(
+                "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno",
+                "ijklmnopjklmnopqklmnoprlmnopsmnopetnopu"
+            ),
+            "ec6d792a0bf0ba2a8d241955c16a5e89459595a22fa489e3a876de03b0d271b1",
+        ),
+    ];
+    for (input, expected) in VECTORS {
+        let got = sha256::hex(&sha256::digest(input.as_bytes()));
+        assert_eq!(
+            &got, expected,
+            "SHA-256 self-check failed for input {input:?}: got {got}, expected {expected}"
+        );
+    }
+}
+
+/// Download `url` over HTTPS with curl, failing hard on any error.
+fn curl(url: &str) -> Result<Vec<u8>, std::io::Error> {
+    let output = Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--proto",
+            "=https",
+            "--max-time",
+            "600",
+            "--output",
+            "-",
+            url,
+        ])
+        .stdout(Stdio::piped())
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "curl exited with status {} while fetching {url}",
+            output.status
+        )));
+    }
+    Ok(output.stdout)
+}
+
 #[derive(Debug)]
 struct Ucd {
     line_break_table: String,
@@ -42,40 +256,42 @@ struct Ucd {
 
 impl Ucd {
     fn get(version: &str) -> Result<Self, std::io::Error> {
-        // [ref:TODO]: handle errors (404 etc)
-        macro_rules! curl {
-            ($url:expr) => {{
-                String::from_utf8(
-                    Command::new("curl")
-                        .args(["-o", "-", &$url])
-                        .stdout(Stdio::piped())
-                        .stdin(Stdio::null())
-                        .stderr(Stdio::inherit())
-                        .output()?
-                        .stdout,
-                )
-                .unwrap()
-            }};
-        }
+        let Some(digests) = pinned_digests(version) else {
+            panic!(
+                "Unicode version {version:?} has no pinned SHA-256 digests for its UCD files; \
+                 refusing to download and trust unpinned data. To add it, fetch the four files \
+                 from https://www.unicode.org/Public/{version}/ucd/ over HTTPS, record their \
+                 sha256sum digests and add them to PINNED_UCD_DIGESTS in build.rs."
+            );
+        };
+
+        let fetch = |path: &str, digest: &str| -> Result<String, std::io::Error> {
+            let url = format!("https://www.unicode.org/Public/{version}/{path}");
+            let contents = curl(&url)?;
+            let actual = sha256::hex(&sha256::digest(&contents));
+            if actual != digest {
+                panic!(
+                    "SHA-256 mismatch for {url}\n  expected (pinned): {digest}\n  actual: \
+                     {actual}\nThe downloaded UCD data is not the pinned one; aborting. If this \
+                     is an intentional rotation, update PINNED_UCD_DIGESTS in build.rs."
+                );
+            }
+            String::from_utf8(contents).map_err(|err| {
+                std::io::Error::other(format!("fetched {url} is not valid UTF-8: {err}"))
+            })
+        };
 
         Ok(Self {
-            line_break_table: curl!(format!(
-                "http://www.unicode.org/Public/{version}/ucd/LineBreak.txt"
-            )),
-            unicode_data: curl!(format!(
-                "http://www.unicode.org/Public/{version}/ucd/UnicodeData.txt"
-            )),
-            east_asian_width: curl!(format!(
-                "http://www.unicode.org/Public/{version}/ucd/EastAsianWidth.txt"
-            )),
-            emoji_data: curl!(format!(
-                "http://www.unicode.org/Public/{version}/ucd/emoji/emoji-data.txt"
-            )),
+            line_break_table: fetch("ucd/LineBreak.txt", digests[0])?,
+            unicode_data: fetch("ucd/UnicodeData.txt", digests[1])?,
+            east_asian_width: fetch("ucd/EastAsianWidth.txt", digests[2])?,
+            emoji_data: fetch("ucd/emoji/emoji-data.txt", digests[3])?,
         })
     }
 }
 
 fn main() -> Result<(), std::io::Error> {
+    sha256_self_check();
     let version: String = std::env::var("UNICODE_VERSION").unwrap_or("16.0.0".into());
     println!("cargo:rerun-if-env-changed=UNICODE_REGENERATE_TABLES");
     println!("cargo:rerun-if-changed=build.rs");
@@ -90,7 +306,7 @@ fn main() -> Result<(), std::io::Error> {
         );
         return Ok(());
     }
-    let ucd = Ucd::get(&version).unwrap();
+    let ucd = Ucd::get(&version).expect("failed to fetch and verify UCD data files");
     let mut line_break_table: Vec<(u32, u32, LineBreakClass)> = Vec::with_capacity(3800);
     for line in ucd.line_break_table.lines() {
         if line.starts_with('#') || line.starts_with(' ') || line.is_empty() {

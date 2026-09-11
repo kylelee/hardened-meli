@@ -403,6 +403,54 @@ fn test_imap_fetch_response() {
 }
 
 #[test]
+fn test_imap_uid_fetch_envelopes_response_optional_bodystructure() {
+    // With `fetch_body_structure = false`, servers reply without a
+    // BODYSTRUCTURE item; the parser must accept both shapes. When the
+    // item is absent, `has_attachments` stays at its default (`false`).
+    #[rustfmt::skip]
+    let with_bodystructure: &[u8] = b"* 198 FETCH (UID 7608 FLAGS (\\Seen) ENVELOPE (\"Fri, 24 Jun 2011 10:09:10 +0000\" \"xxxx/xxxx\" ((\"xx@xx.com\" NIL \"xx\" \"xx.com\")) NIL NIL ((\"xx@xx\" NIL \"xx\" \"xx.com\")) NIL NIL NIL \"<xx@xx.com>\") BODYSTRUCTURE ((\"text\" \"plain\" (\"charset\" \"us-ascii\") NIL NIL \"7BIT\" 5 1)(\"image\" \"png\" (\"name\" \"x.png\") \"<x.png>\" \"x.png\" \"base64\" 1918 (\"attachment\" (\"filename\" \"x.png\")) NIL NIL) \"mixed\"))\r\n";
+    let (rest, v) = uid_fetch_envelopes_response(with_bodystructure).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].0, 7608);
+    assert_eq!(v[0].1, Some((Flag::SEEN, vec![])));
+    assert!(v[0].2.has_attachments());
+
+    #[rustfmt::skip]
+    let without_bodystructure: &[u8] = b"* 198 FETCH (UID 7608 FLAGS (\\Seen) ENVELOPE (\"Fri, 24 Jun 2011 10:09:10 +0000\" \"xxxx/xxxx\" ((\"xx@xx.com\" NIL \"xx\" \"xx.com\")) NIL NIL ((\"xx@xx\" NIL \"xx\" \"xx.com\")) NIL NIL NIL \"<xx@xx.com>\"))\r\n";
+    let (rest, v) = uid_fetch_envelopes_response(without_bodystructure).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].0, 7608);
+    assert!(!v[0].2.has_attachments());
+}
+
+#[test]
+fn test_imap_fetch_responses_without_bodystructure() {
+    // Same response shape, parsed with the generic `fetch_responses` used
+    // by the fetch/resync code paths.
+    #[rustfmt::skip]
+    let without_bodystructure: &[u8] = b"* 198 FETCH (UID 7608 FLAGS (\\Seen) ENVELOPE (\"Fri, 24 Jun 2011 10:09:10 +0000\" \"xxxx/xxxx\" ((\"xx@xx.com\" NIL \"xx\" \"xx.com\")) NIL NIL ((\"xx@xx\" NIL \"xx\" \"xx.com\")) NIL NIL NIL \"<xx@xx.com>\") BODY[HEADER.FIELDS (REFERENCES)] {2}\r\n\r\n)\r\n";
+    let (rest, v, _) = fetch_responses(without_bodystructure).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].uid, Some(7608));
+    assert!(v[0].envelope.is_some());
+    assert!(!v[0].bodystructure);
+    assert!(!v[0].envelope.as_ref().unwrap().has_attachments());
+
+    // The light `RequiredResponses` set (what
+    // `common_attributes_light()` requests) must accept the response,
+    // while a set containing `FETCH_BODYSTRUCTURE` must reject it.
+    let light = RequiredResponses::FETCH_UID
+        | RequiredResponses::FETCH_FLAGS
+        | RequiredResponses::FETCH_ENVELOPE
+        | RequiredResponses::FETCH_REFERENCES;
+    assert!(light.check(without_bodystructure));
+    assert!(!(light | RequiredResponses::FETCH_BODYSTRUCTURE).check(without_bodystructure));
+}
+
+#[test]
 fn test_imap_search() {
     assert_eq!(search_results(b"* SEARCH\r\n").map(|(_, v)| v), Ok(vec![]));
     assert_eq!(
@@ -492,6 +540,21 @@ fn test_imap_select_response() {
 fn test_imap_envelope() {
     let input: &[u8] = b"(\"Fri, 24 Jun 2011 10:09:10 +0000\" \"xxxx/xxxx\" ((\"xx@xx.com\" NIL \"xx\" \"xx.com\")) NIL NIL ((\"xx@xx\" NIL \"xx\" \"xx.com\")) ((\"'xx, xx'\" NIL \"xx.xx\" \"xx.com\") (\"xx.xx@xx.com\" NIL \"xx.xx\" \"xx.com\") (\"'xx'\" NIL \"xx.xx\" \"xx.com\") (\"'xx xx'\" NIL \"xx.xx\" \"xx.com\") (\"xx.xx@xx.com\" NIL \"xx.xx\" \"xx.com\")) NIL NIL \"<xx@xx.com>\")";
     _ = envelope(input).unwrap();
+}
+
+#[test]
+fn test_imap_envelope_qq_mail_quoted_local_part_message_id() {
+    // QQ Mail relays a Message-ID header with a quoted local part, e.g.
+    // `<605067.JavaMail."billing@example.com"@example.center>`, as several
+    // adjacent quoted strings in the ENVELOPE, which is not a single valid
+    // nstring. The parser must accept it and concatenate the parts.
+    let input: &[u8] = b"(\"Wed, 20 May 2026 12:34:30 +0800\" \"subject\" ((\"name\" NIL \"user\" \"example.com\")) NIL NIL ((\"name\" NIL \"user\" \"example.com\")) NIL NIL \"<reply.\"l@p\"@d>\" \"<605067.8696.JavaMail.\"billing@example.com\"@example.center.na620>\")";
+    let (rest, env) = envelope(input).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(
+        env.message_id().to_string(),
+        "605067.8696.JavaMail.billing@example.com@example.center.na620"
+    );
 }
 
 #[test]
@@ -595,4 +658,304 @@ fn test_imap_envelope_address() {
         envelope_addresses(b"((NIL NIL \"Mohamed\" NIL))").unwrap(),
         (&[][..], Some(smallvec::smallvec![]))
     );
+}
+
+/// Module providing a global log-capture facility for asserting on
+/// `log::error!` output in tests.
+///
+/// The buffer is append-only: tests snapshot a mark before acting and read
+/// only the entries appended since, so parallel tests can never consume
+/// each other's entries. Assertions must still filter by a unique marker
+/// (e.g. the envelope subject) because other tests may append in between.
+mod sanitize_log {
+    use std::sync::{Mutex, Once};
+
+    static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static INIT: Once = Once::new();
+
+    struct CaptureLogger;
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.level() <= log::Level::Error
+        }
+
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                if let Ok(mut captured) = CAPTURED.lock() {
+                    captured.push(format!("{}", record.args()));
+                }
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    pub(super) fn init() {
+        INIT.call_once(|| {
+            let _ = log::set_boxed_logger(Box::new(CaptureLogger));
+            log::set_max_level(log::LevelFilter::Error);
+        });
+    }
+
+    pub(super) fn mark() -> usize {
+        CAPTURED.lock().map(|captured| captured.len()).unwrap_or(0)
+    }
+
+    pub(super) fn since(mark: usize) -> Vec<String> {
+        CAPTURED
+            .lock()
+            .map(|captured| captured[mark.min(captured.len())..].to_vec())
+            .unwrap_or_default()
+    }
+}
+
+/// Assert the cache-safety invariant for every address of an [`Envelope`]
+/// produced by the ENVELOPE parser.
+///
+/// The sqlite3 cache serializes `Address` values via their `Display` form
+/// and strictly re-parses them on load (the asymmetry behind the T8 report
+/// §7.1 defect), so the display string of every address must re-parse, and
+/// the whole envelope must survive the serde round-trip.
+///
+/// Note on precision: the strict parser un-quotes quoted local parts when
+/// reconstructing the addr-spec (e.g. `"recipients:"@qq.com` re-parses to
+/// spec `recipients:@qq.com`), so the re-parsed value is not always
+/// byte-equal to the original; successful re-parse plus the content
+/// assertions in the dedicated tests below is the exact cache-failure
+/// predicate.
+fn assert_addresses_cache_roundtrip_safe(env: &Envelope) {
+    let mut all: Vec<&Address> = Vec::new();
+    all.extend(env.from.iter());
+    all.extend(env.to.iter());
+    all.extend(env.cc.iter());
+    all.extend(env.bcc.iter());
+    for addr in all {
+        let display = addr.to_string();
+        Address::try_from(display.as_str()).unwrap_or_else(|err| {
+            panic!("address display form `{display}` does not re-parse: {err}")
+        });
+    }
+    let blob = serde_json::to_vec(env).unwrap();
+    serde_json::from_slice::<Envelope>(&blob).unwrap_or_else(|err| {
+        panic!("envelope does not survive the cache serde round-trip: {err}")
+    });
+}
+
+#[test]
+fn test_imap_envelope_addresses_cache_roundtrip_invariant() {
+    // Battery of real-world-shaped ENVELOPE inputs: valid addresses must
+    // stay untouched, poisoned ones must be normalized or substituted, and
+    // the invariant must hold for ALL of them.
+    let inputs: &[&[u8]] = &[
+        // plain valid
+        b"(\"Fri, 24 Jun 2011 10:09:10 +0000\" \"s\" ((\"xx\" NIL \"xx\" \"xx.com\")) NIL NIL ((\"xx\" NIL \"xx\" \"xx.com\")) NIL NIL NIL \"<xx@xx.com>\")",
+        // dotted local parts, quoted display name with specials, unicode
+        b"(\"date\" \"s\" ((\"J\xC3\xB6rg T. Doe\" NIL \"xx.yy\" \"example.com\") (\"'weird, name'\" NIL \"a.b.c\" \"x.com\")) NIL NIL NIL NIL NIL NIL NIL)",
+        // T8 real-world poison: display `"recipients:" <recipients:@qq.com>`
+        b"(\"date\" \"s\" ((\"recipients:\" NIL \"recipients:\" \"qq.com\")) NIL NIL ((\"user\" NIL \"user\" \"example.com\")) NIL NIL NIL \"<m@example.com>\")",
+        // empty local part
+        b"(\"date\" \"s\" ((\"recipients:\" NIL \"\" \"qq.com\")) NIL NIL NIL NIL NIL NIL NIL)",
+        // empty host
+        b"(\"date\" \"s\" ((\"recipients:\" NIL \"recipients\" \"\")) NIL NIL NIL NIL NIL NIL NIL)",
+        // host with an embedded space: not fixable by quoting the local part
+        b"(\"date\" \"s\" ((\"recipients:\" NIL \"recipients\" \"qq .com\")) NIL NIL NIL NIL NIL NIL NIL)",
+        // group whose name contains a special character
+        b"(\"date\" \"s\" ((NIL NIL \"A Group:x\" NIL)(\"Ed Jones\" NIL \"c\" \"example.com\")(NIL NIL NIL NIL)) NIL NIL NIL NIL NIL NIL NIL)",
+        // local part with an embedded control byte
+        b"(\"date\" \"s\" ((\"n\" NIL \"a\x00b\" \"x.com\")) NIL NIL NIL NIL NIL NIL NIL)",
+        // T1 split-token message-id envelope
+        b"(\"Wed, 20 May 2026 12:34:30 +0800\" \"subject\" ((\"name\" NIL \"user\" \"example.com\")) NIL NIL ((\"name\" NIL \"user\" \"example.com\")) NIL NIL \"<reply.\"l@p\"@d>\" \"<605067.8696.JavaMail.\"billing@example.com\"@example.center.na620>\")",
+    ];
+    for input in inputs {
+        let (rest, env) = envelope(input).unwrap();
+        assert!(rest.is_empty(), "unparsed trailing bytes: {rest:?}");
+        assert_addresses_cache_roundtrip_safe(&env);
+    }
+
+    // Truncated/garbage input must fail parsing (or parse into something
+    // safe) without panicking.
+    envelope(b"(\"date\" \"s\" ((\"a\" NIL \"b\"").unwrap_err();
+    envelope(b"").unwrap_err();
+    let _ = envelope(b"(\x00\x01\x02\xff");
+}
+
+#[test]
+fn test_imap_envelope_poison_address_normalized_to_quoted_local_part() {
+    // The T8 real-world poison display string `"recipients:" <recipients:@qq.com>`
+    // must be normalized to the quoted-local-part form, content preserved.
+    let input: &[u8] = b"(\"Wed, 20 May 2026 12:34:30 +0800\" \"subject\" ((\"recipients:\" NIL \"recipients:\" \"qq.com\")) NIL NIL ((\"user\" NIL \"user\" \"example.com\")) NIL NIL NIL \"<m@example.com>\")";
+    let (rest, env) = envelope(input).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(env.from.len(), 1);
+    let addr = env.from.first().unwrap();
+    assert_eq!(addr.get_display_name(), Some("recipients:"));
+    assert_eq!(addr.get_email(), "\"recipients:\"@qq.com");
+    // valid addresses in the same envelope stay untouched
+    assert_eq!(
+        env.to.first().unwrap(),
+        &Address::new(Some("user"), "user@example.com")
+    );
+    // normalization is deterministic
+    let (_, env_second) = envelope(input).unwrap();
+    assert_eq!(addr, env_second.from.first().unwrap());
+    assert_addresses_cache_roundtrip_safe(&env);
+}
+
+#[test]
+fn test_imap_envelope_unfixable_address_replaced_with_placeholder() {
+    sanitize_log::init();
+    let mark = sanitize_log::mark();
+    // Empty local part cannot be represented in a cache-safe form.
+    let input: &[u8] =
+        b"(\"date\" \"t13-unfixable\" ((\"recipients:\" NIL \"\" \"qq.com\")) NIL NIL NIL NIL NIL NIL NIL)";
+    let (rest, env) = envelope(input).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(env.from.len(), 1);
+    let addr = env.from.first().unwrap();
+    assert_eq!(addr.get_email(), "invalid@invalid.invalid");
+    // original raw value stays visible for diagnosability
+    assert_eq!(
+        addr.get_display_name(),
+        Some("[invalid address: \"recipients:\" <@qq.com>]")
+    );
+    assert_addresses_cache_roundtrip_safe(&env);
+    let logs = sanitize_log::since(mark);
+    assert!(
+        logs.iter().any(|l| l.contains("From field")
+            && l.contains("t13-unfixable")
+            && l.contains("<@qq.com>")),
+        "expected an error log naming the From field, the subject and the original value, got {logs:?}"
+    );
+}
+
+#[test]
+fn test_imap_envelope_all_address_fields_sanitized() {
+    sanitize_log::init();
+    // An unfixable poisoned address (host with an embedded space) is placed
+    // in each of the six ENVELOPE address field positions in turn; every
+    // field must route through validation.
+    let valid: &str = "((\"user\" NIL \"user\" \"example.com\"))";
+    let poison: &str = "((\"recipients:\" NIL \"recipients\" \"qq .com\"))";
+    for (field, position) in [
+        ("From", 0usize),
+        ("Sender", 1),
+        ("Reply-To", 2),
+        ("To", 3),
+        ("Cc", 4),
+        ("Bcc", 5),
+    ] {
+        let mark = sanitize_log::mark();
+        let subject = format!("t13-route-{field}");
+        let mut fields: Vec<&str> = vec![valid; 6];
+        fields[position] = poison;
+        let input = format!(
+            "(\"date\" \"{subject}\" {} {} {} {} {} {} NIL NIL)",
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5]
+        );
+        let (rest, env) = envelope(input.as_bytes()).unwrap();
+        assert!(
+            rest.is_empty(),
+            "unparsed trailing bytes for {field}: {rest:?}"
+        );
+        match field {
+            "From" | "To" | "Cc" | "Bcc" => {
+                let addr = match field {
+                    "From" => env.from.first(),
+                    "To" => env.to.first(),
+                    "Cc" => env.cc.first(),
+                    _ => env.bcc.first(),
+                }
+                .unwrap();
+                assert_eq!(addr.get_email(), "invalid@invalid.invalid", "{field}");
+            }
+            // `Sender`/`Reply-To` are not stored in `Envelope`; routing is
+            // observable only through the error log.
+            _ => {}
+        }
+        assert_addresses_cache_roundtrip_safe(&env);
+        let logs = sanitize_log::since(mark);
+        assert!(
+            logs.iter()
+                .any(|l| l.contains(&format!("{field} field")) && l.contains(&subject)),
+            "expected an error log naming the {field} field and subject `{subject}`, got {logs:?}"
+        );
+    }
+}
+
+#[test]
+fn test_imap_envelope_message_id_survives_cache_serde_roundtrip() {
+    // `MessageID` serializes as a plain string and deserializes via
+    // `MessageID::new` (no strict re-parse), so message-ids — including the
+    // split-token concatenations accepted by the T1 tolerance patch — can
+    // never fail the cache round-trip. This pins that invariant.
+    let input: &[u8] = b"(\"Wed, 20 May 2026 12:34:30 +0800\" \"subject\" ((\"name\" NIL \"user\" \"example.com\")) NIL NIL ((\"name\" NIL \"user\" \"example.com\")) NIL NIL \"<reply.\"l@p\"@d>\" \"<605067.8696.JavaMail.\"billing@example.com\"@example.center.na620>\")";
+    let (rest, env) = envelope(input).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(
+        env.message_id().to_string(),
+        "605067.8696.JavaMail.billing@example.com@example.center.na620"
+    );
+    let blob = serde_json::to_vec(&env).unwrap();
+    let env_deserialized: Envelope = serde_json::from_slice(&blob).unwrap();
+    assert_eq!(
+        env_deserialized.message_id().to_string(),
+        "605067.8696.JavaMail.billing@example.com@example.center.na620"
+    );
+}
+
+#[test]
+fn test_imap_envelope_raw_bytes_fallback_atom_first_message_id() {
+    // A message-id relayed as a single unquoted atom (no enclosing quotes)
+    // is not a valid IMAP nstring, so strict parsing fails. The raw-bytes
+    // fallback stage must accept it and store the atom verbatim; until then
+    // the whole ENVELOPE fails to parse (TDD red light).
+    let input: &[u8] = b"(\"Wed, 20 May 2026 12:34:30 +0800\" \"subject\" ((\"name\" NIL \"user\" \"example.com\")) NIL NIL ((\"name\" NIL \"user\" \"example.com\")) NIL NIL NIL 605067.JavaMail.billing@example.com@example.center)";
+    let (rest, env) = envelope(input).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(
+        env.message_id().to_string(),
+        "605067.JavaMail.billing@example.com@example.center"
+    );
+}
+
+#[test]
+fn test_imap_envelope_raw_bytes_fallback_unterminated_quote_message_id() {
+    // A message-id whose quote is never closed cannot be scanned as a
+    // quoted string. The raw-bytes fallback must store the raw bytes up to
+    // the field boundary, leading `"` included (`set_message_id` only trims
+    // whitespace); until then the ENVELOPE fails to parse (TDD red light).
+    let input: &[u8] = b"(\"Wed, 20 May 2026 12:34:30 +0800\" \"subject\" ((\"name\" NIL \"user\" \"example.com\")) NIL NIL ((\"name\" NIL \"user\" \"example.com\")) NIL NIL NIL \"<605067.JavaMail.)";
+    let (rest, env) = envelope(input).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(env.message_id().to_string(), "\"<605067.JavaMail.");
+}
+
+#[test]
+fn test_imap_envelope_raw_bytes_fallback_literal_guard() {
+    // Characterization pin of the current `quoted_or_nil_concat` behavior:
+    // a literal whose declared length exceeds the available input must
+    // terminate with an error (the guard must not raw-scan a truncated
+    // literal), while a valid literal is consumed as a single value with
+    // the remaining input returned untouched.
+    quoted_or_nil_concat(b"{13}\r\n605067.JavaM").unwrap_err();
+    let (rest, value) = quoted_or_nil_concat(b"{12}\r\n605067.JavaM)").unwrap();
+    assert_eq!(rest, &b")"[..]);
+    assert_eq!(value.as_deref(), Some(&b"605067.JavaM"[..]));
+}
+
+#[test]
+fn test_imap_envelope_fallback_does_not_conflate_adjacent_fields() {
+    // Two adjacent malformed nstring fields must be captured independently:
+    // in-reply-to is the unterminated quoted token `"<abc`, message-id is
+    // the bare atom `<m@example.com>` (unquoted, so the closing-quote scan
+    // of `quoted()` cannot pair in-reply-to's dangling quote with it and
+    // conflate both fields into one value). The in-reply-to assertion goes
+    // through `other_headers()` because a bad-shape value never parses into
+    // `env.in_reply_to()`.
+    let input: &[u8] = b"(\"Wed, 20 May 2026 12:34:30 +0800\" \"subject\" ((\"name\" NIL \"user\" \"example.com\")) NIL NIL ((\"name\" NIL \"user\" \"example.com\")) NIL NIL \"<abc <m@example.com>)";
+    let (rest, env) = envelope(input).unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(&env.other_headers()[HeaderName::IN_REPLY_TO], "\"<abc");
+    assert_eq!(env.message_id().to_string(), "m@example.com");
 }

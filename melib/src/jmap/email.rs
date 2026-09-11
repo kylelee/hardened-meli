@@ -647,34 +647,6 @@ impl EmailFilterCondition {
 
 impl FilterTrait<EmailObject> for EmailFilterCondition {}
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum MessageProperty {
-    ThreadId,
-    MailboxIds,
-    Keywords,
-    Size,
-    ReceivedAt,
-    IsUnread,
-    IsFlagged,
-    IsAnswered,
-    IsDraft,
-    HasAttachment,
-    From,
-    To,
-    Cc,
-    Bcc,
-    ReplyTo,
-    Subject,
-    SentAt,
-    Preview,
-    Id,
-    BlobId,
-    MessageId,
-    InReplyTo,
-    Sender,
-}
-
 impl From<crate::search::Query> for Filter<EmailFilterCondition, EmailObject> {
     fn from(val: crate::search::Query) -> Self {
         let mut ret = Self::Condition(EmailFilterCondition::new());

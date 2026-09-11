@@ -26,7 +26,6 @@ use std::{
 };
 
 use futures::lock::Mutex as FutureMutex;
-use isahc::AsyncReadResponseExt;
 use serde::Serialize;
 use serde_json::Value;
 use smallvec::SmallVec;
@@ -42,8 +41,8 @@ use crate::{
         email::{EmailFilterCondition, EmailGet, EmailObject, EmailQuery},
         filters::Filter,
         mailbox::{MailboxGet, MailboxObject},
-        methods::{Get, GetResponse, MethodResponse, Query, QueryResponse},
-        objects::{Id, Object, State},
+        methods::{Get, GetResponse, MethodResponse, Query},
+        objects::{Object, State},
         JmapConnection, Store,
     },
     Flag, LazyCountSet, MailboxHash,
@@ -206,44 +205,6 @@ pub async fn get_mailboxes(
         }
     }
     Ok(ret)
-}
-
-pub async fn get_message_list(
-    conn: &mut JmapConnection,
-    mailbox: &JmapMailbox,
-) -> Result<Vec<Id<EmailObject>>> {
-    let mail_account_id = conn.session_guard().await?.mail_account_id();
-    let email_call: EmailQuery = EmailQuery::new(
-        Query::new()
-            .account_id(mail_account_id)
-            .filter(Some(Filter::Condition(
-                EmailFilterCondition::new().in_mailbox(Some(mailbox.id.clone())),
-            )))
-            .position(0),
-    )
-    .collapse_threads(false);
-
-    let mut req = Request::new(conn.request_no.clone());
-    req.add_call(&email_call).await;
-
-    let res_text = conn
-        .post_async(None, serde_json::to_string(&req)?)
-        .await?
-        .text()
-        .await?;
-
-    let mut v: MethodResponse = match deserialize_from_str(&res_text) {
-        Err(err) => {
-            _ = conn.store.online_status.set(None, Err(err.clone())).await;
-            return Err(err);
-        }
-        Ok(s) => s,
-    };
-    conn.store.online_status.update_timestamp(None).await;
-    let m = QueryResponse::<EmailObject>::try_from(v.method_responses.remove(0))?;
-    let QueryResponse::<EmailObject> { ids, .. } = m;
-    conn.last_method_response = Some(res_text);
-    Ok(ids)
 }
 
 pub struct EmailFetcher {

@@ -6,6 +6,7 @@ target/
 **/*.rs.bk
 .gdb_history
 *.log
+log
 
 __pycache__/
 *.py[cod]
@@ -18,3 +19,8 @@ debian/meli/
 
 # CLion IDE
 .idea
+
+# AI
+.omo
+.codegraph
+log

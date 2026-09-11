@@ -114,6 +114,17 @@ html_filter = "w3m -I utf-8 -T text/html -o display_link_number=1"
 
 The HTML of the e-mail is piped into `html_filter`'s standard input.
 
+`meli` also ships a bundled sanitizer binary, `meli_sanitize_html`, which is 
+built and installed alongside `meli`. It sanitizes HTML with an allow-list, 
+removing scripts and dangerous links before rendering:
+
+```toml
+[pager]
+html_filter = 'meli_sanitize_html | w3m -T text/html'
+```
+
+That is, the HTML is sanitized first, then handed over to `w3m` for rendering.
+
 ## Externally refreshing e-mail accounts
 
 If your account's syncing is handled by an external tool, you can use the 

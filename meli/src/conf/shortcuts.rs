@@ -112,13 +112,6 @@ macro_rules! shortcut_key_values {
         }
 
         impl $name {
-            /// Returns a shortcut's description
-            pub fn key_desc(&self, key: &str) -> &'static str {
-                match key {
-                    $(stringify!($fname) => $fdesc),*,
-                        _ => unreachable!()
-                }
-            }
             /// Returns a hashmap of all shortcuts and their values
             pub fn key_values(&self) -> IndexMap<&'static str, Key> {
                 [
@@ -159,8 +152,8 @@ macro_rules! shortcut_key_values {
 shortcut_key_values! { "listing",
     /// Shortcut listing for a mail listing.
     pub struct ListingShortcuts {
-        scroll_up |> "Scroll up list." |> Key::Char('k'),
-        scroll_down |> "Scroll down list." |> Key::Char('j'),
+        scroll_up |> "Scroll up list." |> Key::Up,
+        scroll_down |> "Scroll down list." |> Key::Down,
         new_mail |> "Start new mail draft in new tab." |>  Key::Char('m'),
         next_account |> "Go to next account." |> Key::Char('H'),
         next_mailbox |> "Go to next mailbox." |> Key::Char('J'),
@@ -194,8 +187,8 @@ shortcut_key_values! { "listing",
 shortcut_key_values! { "contact-list",
     /// Shortcut listing for the contact list view
     pub struct ContactListShortcuts {
-        scroll_up |> "Scroll up list." |> Key::Char('k'),
-        scroll_down |> "Scroll down list." |> Key::Char('j'),
+        scroll_up |> "Scroll up list." |> Key::Up,
+        scroll_down |> "Scroll down list." |> Key::Down,
         create_contact |> "Create new contact." |> Key::Char('c'),
         edit_contact |> "Edit contact under cursor." |> Key::Char('e'),
         export_contact |> "Export contact under cursor to .vcf." |> Key::Char('E'),
@@ -212,8 +205,8 @@ shortcut_key_values! { "pager",
     pub struct PagerShortcuts {
         page_down |> "Go to next pager page." |>  Key::PageDown,
         page_up |> "Go to previous pager page." |>  Key::PageUp,
-        scroll_down |> "Scroll down pager." |> Key::Char('j'),
-        scroll_up |> "Scroll up pager." |> Key::Char('k'),
+        scroll_down |> "Scroll down pager." |> Key::Down,
+        scroll_up |> "Scroll up pager." |> Key::Up,
         select_filter |> "Select content filter." |> Key::Char('f')
     }
 }
@@ -227,8 +220,8 @@ shortcut_key_values! { "general",
         next_tab |> "Go to the next tab." |> Key::Char('T'),
         scroll_right |> "Generic scroll right (catch-all setting)" |> Key::Char('l'),
         scroll_left |> "Generic scroll left (catch-all setting)" |>Key::Char('h'),
-        scroll_up |> "Generic scroll up (catch-all setting)" |> Key::Char('k'),
-        scroll_down |> "Generic scroll down (catch-all setting)" |> Key::Char('j'),
+        scroll_up |> "Generic scroll up (catch-all setting)" |> Key::Up,
+        scroll_down |> "Generic scroll down (catch-all setting)" |> Key::Down,
         next_page |> "Go to next page. (catch-all setting)" |> Key::PageDown,
         prev_page |> "Go to previous page. (catch-all setting)" |> Key::PageUp,
         home_page |> "Go to first page. (catch-all setting)" |> Key::Home,
@@ -246,8 +239,8 @@ shortcut_key_values! { "composing",
     pub struct ComposingShortcuts {
         edit |> "Edit." |> Key::Char('e'),
         send_mail |> "Deliver draft to mailer." |> Key::Char('s'),
-        scroll_up |> "Change field focus." |> Key::Char('k'),
-        scroll_down |> "Change field focus." |> Key::Char('j'),
+        scroll_up |> "Change field focus." |> Key::Up,
+        scroll_down |> "Change field focus." |> Key::Down,
         reset_date |> "Reset date to current time." |> Key::F(1),
         reset_body |> "Reset body to default template." |> Key::F(2),
     }
@@ -275,14 +268,16 @@ shortcut_key_values! { "envelope-view",
 
 shortcut_key_values! { "thread-view",
     pub struct ThreadViewShortcuts {
-        scroll_up |> "Scroll up list." |> Key::Char('k'),
-        scroll_down |> "Scroll down list." |> Key::Char('j'),
+        scroll_up |> "Scroll up list." |> Key::Up,
+        scroll_down |> "Scroll down list." |> Key::Down,
         collapse_subtree |> "collapse thread branches." |> Key::Char('h'),
         next_page |> "Go to next page." |> Key::PageDown,
         prev_page |> "Go to previous page." |> Key::PageUp,
         reverse_thread_order |> "reverse thread order." |> Key::Ctrl('r'),
         toggle_mailview |> "toggle mail view visibility." |> Key::Char('p'),
         toggle_threadview |> "toggle thread view visibility." |> Key::Char('t'),
-        toggle_layout |> "Toggle between horizontal and vertical layout." |> Key::Char(' ')
+        toggle_layout |> "Toggle between horizontal and vertical layout." |> Key::Char(' '),
+        focus_left |> "Focus or enlarge the thread list pane." |> Key::Left,
+        focus_right |> "Focus or enlarge the mail view pane." |> Key::Right
     }
 }

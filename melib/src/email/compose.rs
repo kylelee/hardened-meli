@@ -343,6 +343,15 @@ impl Draft {
             }
         }
         for (k, v) in self.headers.deref() {
+            // Chokepoint: every entry path (mailto links, unsubscribe
+            // auto-send, replies, the manual editor) funnels through here;
+            // reject header-injecting CR/LF loudly (CWE-93).
+            if parser::has_unfoldable_newline(v) {
+                return Err(Error::new(format!(
+                    "refusing to finalise: CR/LF in header value of {k}"
+                ))
+                .set_kind(ErrorKind::ValueError));
+            }
             if v.is_ascii() {
                 ret.push_str(&format!("{k}: {v}\r\n"));
             } else {

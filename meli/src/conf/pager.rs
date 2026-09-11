@@ -41,7 +41,7 @@ pub struct PagerSettings {
     pub pager_stop: bool,
 
     /// Always show headers when scrolling.
-    /// Default: true
+    /// Default: false
     #[serde(
         default = "false_val",
         alias = "sticky-headers",

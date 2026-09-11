@@ -112,13 +112,6 @@ impl ContactList {
         }
     }
 
-    pub fn for_account(pos: usize, context: &Context) -> Self {
-        Self {
-            account_pos: pos,
-            ..Self::new(context)
-        }
-    }
-
     fn initialize(&mut self, context: &Context) {
         self.data_columns.clear();
         let account = &context.accounts[self.account_pos];

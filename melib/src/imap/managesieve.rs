@@ -93,6 +93,7 @@ impl ManageSieveConnection {
                 event_consumer,
                 server_conf.timeout,
                 false,
+                true,
             )
         });
         Ok(Self {
@@ -107,10 +108,6 @@ impl ManageSieveConnection {
                 true,
             ),
         })
-    }
-
-    pub async fn havespace(&self) -> Result<()> {
-        Ok(())
     }
 
     pub async fn putscript(&mut self, script_name: &[u8], script: &[u8]) -> Result<()> {
@@ -239,10 +236,6 @@ impl ManageSieveConnection {
             )
             .into()),
         }
-    }
-
-    pub async fn renamescript(&self) -> Result<()> {
-        Ok(())
     }
 }
 

@@ -202,7 +202,7 @@ pub mod query_parser {
             whitespace_wrap(match_literal("on:")),
             whitespace_wrap(date()),
         )
-        .map(Query::After)
+        .map(Query::On)
     }
 
     fn smaller<'a>() -> impl Parser<'a, Query> {
@@ -659,6 +659,25 @@ mod tests {
         assert_eq!(
             Ok(("", Flags(vec!["f".to_string()]))),
             query().parse_complete("tags:f")
+        );
+    }
+
+    /// Regression: `on:<date>` used to be mapped to `Query::After`, so
+    /// `Query::On` was never constructed and the `on:` alias silently
+    /// behaved like `after:` (strictly greater-than) instead of matching
+    /// the whole calendar day. It must now produce a `Query::On` value.
+    #[test]
+    fn test_query_on_parses_to_on_variant() {
+        let (rest, q) = query().parse_complete("on:2024-01-01").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            matches!(q, Query::On(_)),
+            "`on:` must parse to Query::On, got {q:?}"
+        );
+        assert_ne!(
+            query().parse_complete("on:2024-01-01"),
+            query().parse_complete("after:2024-01-01"),
+            "`on:` must not alias `after:`"
         );
     }
 }

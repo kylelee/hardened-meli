@@ -188,8 +188,8 @@ You can find all valid shortcuts for the current UI state you are in.
 │                                                           █│
 │       PageDown  page_down                                 █│
 │         PageUp  page_up                                    │
-│              j  scroll_down                                │
-│              k  scroll_up                                  │
+│           Down  scroll_down                                │
+│             Up  scroll_up                                  │
 │                                                            │
 │  view mail                                                 │
 │                                                            │
@@ -234,16 +234,16 @@ Press
 to toggle the sidebars visibility.
 .Pp
 Press
-.Shortcut Left listing focus_right
+.Shortcut Left listing focus_left
 to switch focus on the sidebar menu.
 Press
-.Shortcut Right listing focus_left
+.Shortcut Right listing focus_right
 to switch focus on the e\-mail list.
 .Pp
 On the e\-mail list, press
-.Shortcut k listing scroll_up
+.Shortcut Up listing scroll_up
 to scroll up, and
-.Shortcut j listing scroll_down
+.Shortcut Down listing scroll_down
 to scroll down.
 Press
 .Shortcut Enter listing open_entry
@@ -270,9 +270,9 @@ to exit it.
 .Ed
 .sp
 Press
-.Shortcut k listing scroll_up
+.Shortcut Up listing scroll_up
 to scroll up, and
-.Shortcut j listing scroll_down
+.Shortcut Down listing scroll_down
 to scroll down.
 .Pp
 Press
@@ -295,9 +295,9 @@ See
 for details.
 .Pp
 You can increase the sidebar's width with
-.Shortcut Ctrl\-p listing increase_sidebar
+.Shortcut Ctrl\-f listing increase_sidebar
 and decrease with
-.ShortcutPeriod Ctrl\-o listing decrease_sidebar
+.ShortcutPeriod Ctrl\-d listing decrease_sidebar
 \&.
 .Bd -ragged
 .Sy The status bar.
@@ -513,9 +513,9 @@ Scroll with the following:
 .It Go to previous pager page
 .Shortcut PageUp pager page_up
 .It Scroll down pager.
-.Shortcut j pager scroll_down
+.Shortcut Down pager scroll_down
 .It Scroll up pager.
-.Shortcut k pager scroll_up
+.Shortcut Up pager scroll_up
 .El
 .sp
 All scrolling shortcuts can be prefixed with a number modifier
@@ -525,7 +525,7 @@ which will act as a multiplier.
 The pager can enter a special
 .Em url
 mode which will prefix all detected hyperlinks and e\-mail addresses with a number inside square brackets
-.ShortcutPeriod u pager toggle_url_mode
+.ShortcutPeriod u envelope_view toggle_url_mode
 \&.
 Writing down a chosen number as a number modifier
 .Tg number-modifier

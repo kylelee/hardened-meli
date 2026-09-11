@@ -512,8 +512,17 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
     fn refresh(&mut self, mailbox_hash: MailboxHash) -> ResultFuture<()>;
     fn watch(&mut self) -> ResultStream<BackendEvent>;
     fn mailboxes(&mut self) -> ResultFuture<HashMap<MailboxHash, Mailbox>>;
-    fn envelope_bytes_by_hash(&mut self, hash: EnvelopeHash) -> ResultFuture<Vec<u8>>;
 
+    /// Forces a fresh fetch of the account's mailboxes from the
+    /// backend, bypassing any in-memory or offline-cache copies.
+    fn refresh_mailboxes(&mut self) -> ResultFuture<HashMap<MailboxHash, Mailbox>> {
+        Err(
+            Error::new("refresh_mailboxes not supported in this backend.")
+                .set_kind(ErrorKind::NotSupported),
+        )
+    }
+
+    fn envelope_bytes_by_hash(&mut self, hash: EnvelopeHash) -> ResultFuture<Vec<u8>>;
     fn save(
         &mut self,
         bytes: Vec<u8>,

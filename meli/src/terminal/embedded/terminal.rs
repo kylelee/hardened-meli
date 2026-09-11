@@ -288,14 +288,6 @@ impl EmbeddedGrid {
         }
     }
 
-    #[inline]
-    pub fn buffer_mut(&mut self) -> &mut CellBuffer {
-        match self.screen_buffer {
-            ScreenBuffer::Normal => self.normal_screen.grid_mut(),
-            ScreenBuffer::Alternate => self.alternate_screen.grid_mut(),
-        }
-    }
-
     pub fn set_terminal_size(&mut self, new_val: (usize, usize)) {
         if new_val == self.terminal_size && self.initialized {
             return;

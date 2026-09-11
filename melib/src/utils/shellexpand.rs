@@ -319,27 +319,9 @@ pub mod impls {
         Completions::Entries(entries)
     }
 
-    trait AsBytesExt {
-        fn as_bytes_ext(&self) -> &[u8];
-    }
-
-    impl AsBytesExt for [u8] {
-        #[inline]
-        fn as_bytes_ext(&self) -> &[u8] {
-            self
-        }
-    }
-
-    impl AsBytesExt for OsStr {
-        #[inline]
-        fn as_bytes_ext(&self) -> &[u8] {
-            self.as_bytes()
-        }
-    }
-
     trait TrimExt {
         fn ext_trim_prefix<'s>(&'s self, prefix: &Self) -> &'s Self;
-        fn ext_starts_with<B: AsBytesExt + ?Sized>(&self, prefix: &B) -> bool;
+        fn ext_starts_with(&self, prefix: &OsStr) -> bool;
     }
 
     impl TrimExt for OsStr {
@@ -358,9 +340,8 @@ pub mod impls {
         }
 
         #[inline]
-        fn ext_starts_with<B: AsBytesExt + ?Sized>(&self, prefix: &B) -> bool {
-            let prefix = prefix.as_bytes_ext();
-            self.as_bytes().starts_with(prefix)
+        fn ext_starts_with(&self, prefix: &OsStr) -> bool {
+            self.as_bytes().starts_with(prefix.as_bytes())
         }
     }
 }

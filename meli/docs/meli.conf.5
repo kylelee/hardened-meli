@@ -455,6 +455,13 @@ Keep mail headers in an
 .Sy sqlite3
 database.
 .Pq Em true \" default value
+.It Ic fetch_body_structure Ar boolean
+.Pq Em optional
+Fetch the
+.Em BODYSTRUCTURE
+of each message in order to detect attachments when listing mailboxes.
+Disabling this makes the initial fetch of large mailboxes faster, but the attachment indicator will not appear until a message is opened.
+.Pq Em true \" default value
 .It Ic use_idle Ar boolean
 .Pq Em optional
 Use
@@ -1247,10 +1254,10 @@ Generic scroll left (catch-all setting)
 .Pq Em h \" default value
 .It Ic scroll_up
 Generic scroll up (catch-all setting)
-.Pq Em k \" default value
+.Pq Em Up \" default value
 .It Ic scroll_down
 Generic scroll down (catch-all setting)
-.Pq Em j \" default value
+.Pq Em Down \" default value
 .It Ic next_page
 Go to next page.
 (catch-all setting)
@@ -1290,10 +1297,10 @@ Scroll to previous search result.
 .Bl -tag -width 36n
 .It Ic scroll_up
 Scroll up list.
-.Pq Em k \" default value
+.Pq Em Up \" default value
 .It Ic scroll_down
 Scroll down list.
-.Pq Em j \" default value
+.Pq Em Down \" default value
 .It Ic next_page
 Go to next page.
 .Pq Em PageDown \" default value
@@ -1389,10 +1396,10 @@ Go to previous page.
 .Pq Em PageUp \" default value
 .It Ic scroll_down
 Scroll down pager.
-.Pq Em j \" default value
+.Pq Em Down \" default value
 .It Ic scroll_up
 Scroll up pager.
-.Pq Em k \" default value
+.Pq Em Up \" default value
 .It Ic select_filter
 Select content filter.
 .Pq Em f \" default value
@@ -1406,10 +1413,10 @@ setting.
 .Bl -tag -width 36n
 .It Ic scroll_up
 Scroll up list.
-.Pq Em k \" default value
+.Pq Em Up \" default value
 .It Ic scroll_down
 Scroll down list.
-.Pq Em j \" default value
+.Pq Em Down \" default value
 .It Ic create_contact
 Create new contact.
 .Pq Em c \" default value
@@ -1447,10 +1454,10 @@ Deliver draft to mailer
 .Pq Em s \" default value
 .It Ic scroll_up
 Change field focus.
-.Pq Em k \" default value
+.Pq Em Up \" default value
 .It Ic scroll_down
 Change field focus.
-.Pq Em j \" default value
+.Pq Em Down \" default value
 .It Ic reset_date
 Reset date to current time.
 .Pq Em F1 \" default value
@@ -1529,18 +1536,23 @@ Force attachment charset for decoding.
 .Bl -tag -width 36n
 .It Ic scroll_up
 Scroll up list.
-.Pq Em k \" default value
+The mail view follows the selection.
+While the thread view is in the split layout, thread-view navigation keys and the general home_page, end_page and open_entry shortcuts act on the thread list before the embedded mail view; when a dialog is open in the mail view (charset selector, URL prompt, contact selector), the mail view keeps its keys.
+.Pq Em Up \" default value
 .It Ic scroll_down
 Scroll down list.
-.Pq Em j \" default value
+The mail view follows the selection.
+.Pq Em Down \" default value
 .It Ic collapse_subtree
 collapse thread branches.
 .Pq Em h \" default value
 .It Ic next_page
 Go to next page.
+The mail view follows the selection.
 .Pq Em PageDown \" default value
 .It Ic prev_page
 Go to previous page.
+The mail view follows the selection.
 .Pq Em PageUp \" default value
 .It Ic reverse_thread_order
 reverse thread order.
@@ -1551,6 +1563,16 @@ toggle mail view visibility.
 .It Ic toggle_threadview
 toggle thread view visibility.
 .Pq Em t \" default value
+.It Ic focus_left
+Focus or enlarge the thread list pane.
+At the mail detail state, return to the split layout; at the split or thread-list-only state, leave the thread view and refocus the mail listing.
+In a single-mail thread, leave the view directly from the mail detail state.
+.Pq Em Left \" default value
+.It Ic focus_right
+Focus or enlarge the mail view pane.
+Move the focus rightward and open the entry currently selected in the thread list: from the thread-list state, show the split layout; from the split layout, focus the mail detail.
+The mail detail state is the terminal stop of the pane chain; the key stays consumed.
+.Pq Em Right \" default value
 .It Ic toggle_layout
 Toggle between horizontal and vertical layout.
 .Pq Em Space \" default value
@@ -1662,6 +1684,15 @@ Always show headers when scrolling.
 .Pq Em optional
 Pipe html attachments through this filter before display
 .Pq Em none \" default value
+.Pp
+meli ships with the
+.Li meli_sanitize_html
+helper binary that sanitizes HTML (allow-list based) before rendering; a typical usage is piping its output to
+.Xr w3m 1 :
+.Bd -literal
+[pager]
+html_filter = 'meli_sanitize_html | w3m -T text/html'
+.Ed
 .It Ic html_open Ar String
 .Pq Em optional
 A command to open html files.
@@ -1867,7 +1898,7 @@ Character to show in the divider space between mail view and listing.
 .It Ic thread_layout Ar "auto" | "vertical" | "horizontal"
 Force specific layout in thread view.
 The layout can also be toggled at runtime with the
-.Li listing.toggle_layout
+.Li thread_view.toggle_layout
 shortcut.
 .Pq Em "auto"
 .It Ic sort Ar ( SortField, SortOrder )
@@ -1993,9 +2024,6 @@ Set UI colors for tags
 .It Ic ignore_tags Ar Array String
 .Pq Em optional
 Hide tags (not the tagged messages themselves)
-.It Ic rename Ar hash table String[String]
-.Pq Em optional
-Rename the tag when shown in the UI (not used as an alias any other way).
 .El
 .sp
 Example:
@@ -2012,7 +2040,6 @@ colors = { signed="#Ff6600", replied="DeepSkyBlue4", draft="#f00", replied="8" }
   [accounts.dummy.mailboxes]
   # per mailbox override:
   "INBOX" = { tags.ignore_tags=["inbox", ] }
-  "Project" = { tags.rename = { "bug" = "🐜" } }
 .Ed
 .\"
 .\"

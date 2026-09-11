@@ -68,6 +68,15 @@ pub struct JmapConnection {
     pub last_method_response: Option<String>,
 }
 
+/// Maximum number of redirects followed manually per request before giving
+/// up with an error.
+const MAX_REDIRECTS: usize = 5;
+
+/// HTTP status codes whose responses are treated as redirects.
+fn is_redirect_status(status: http::StatusCode) -> bool {
+    matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
+}
+
 impl JmapConnection {
     pub fn new(server_conf: &JmapServerConf, store: Arc<Store>) -> Result<Self> {
         let client = HttpClient::builder()
@@ -85,7 +94,13 @@ impl JmapConnection {
             })
             .tcp_nodelay()
             .tcp_keepalive(Duration::new(60 * 9, 0))
-            .redirect_policy(RedirectPolicy::Limit(10));
+            // Redirects are followed manually, see [`MAX_REDIRECTS`]. isahc
+            // automatic redirect following must stay disabled: it re-sends
+            // credentials to cross-origin redirect targets (curl engine auth
+            // via CURLOPT_HTTPAUTH set by `.authentication()`, and default
+            // headers re-attached by isahc's `DefaultHeaders` interceptor),
+            // see [`JmapConnection::redirect_target`].
+            .redirect_policy(RedirectPolicy::None);
         let client = if let Some(dur) = server_conf.timeout.filter(|dur| *dur != Duration::ZERO) {
             client
                 .timeout(dur)
@@ -726,13 +741,101 @@ impl JmapConnection {
         Ok(res_text)
     }
 
+    /// Decide whether `response` to a request sent to `request_url` should be
+    /// followed as a redirect.
+    ///
+    /// Returns `Ok(None)` if the response is not a followable redirect and
+    /// should be processed as-is, `Ok(Some(url))` if the request may be
+    /// re-issued to `url`, and `Err` if the redirect must not be followed.
+    ///
+    /// Redirects are only followed when the target has the same origin
+    /// (scheme, host and port) as `original_url`. This check happens before
+    /// the redirected request is issued, so credentials (Bearer token via
+    /// default headers, or Basic via curl engine authentication) can never
+    /// reach a different origin.
+    fn redirect_target(
+        &self,
+        original_url: &Url,
+        request_url: &Url,
+        response: &isahc::Response<isahc::AsyncBody>,
+    ) -> Result<Option<Url>> {
+        if !is_redirect_status(response.status()) {
+            return Ok(None);
+        }
+        let Some(location) = response.headers().get(http::header::LOCATION) else {
+            return Ok(None);
+        };
+        let location = String::from_utf8_lossy(location.as_bytes());
+        let mut target = match Url::parse(&location) {
+            Ok(url) => url,
+            Err(url::ParseError::RelativeUrlWithoutBase) => request_url
+                .join(&location)
+                .map_err(|err| self.redirect_error(request_url, &location, &err.to_string()))?,
+            Err(err) => return Err(self.redirect_error(request_url, &location, &err.to_string())),
+        };
+        // Never honor credentials embedded in the redirect target itself.
+        _ = target.set_username("");
+        _ = target.set_password(None);
+        if target.origin() != original_url.origin() {
+            return Err(Error::new(format!(
+                "JMAP request to {request_url} was redirected to {target}, which is of a \
+                 different origin (scheme/host/port) than {}. Refusing to follow the redirect \
+                 in order to protect authentication credentials.",
+                self.server_conf.server_url
+            ))
+            .set_kind(ErrorKind::Network(NetworkErrorKind::ProtocolViolation)));
+        }
+        Ok(Some(target))
+    }
+
+    fn redirect_error(&self, request_url: &Url, location: &str, err: &str) -> Error {
+        Error::new(format!(
+            "Could not resolve redirect location {location:?} of URL {request_url} when \
+             connecting to JMAP server {}: {err}",
+            self.server_conf.server_url
+        ))
+        .set_kind(ErrorKind::Network(NetworkErrorKind::ProtocolViolation))
+    }
+
     pub async fn get_async(&self, url: &Url) -> Result<isahc::Response<isahc::AsyncBody>> {
-        let mut resp = if cfg!(feature = "jmap-trace") {
-            let res = self.client.get_async(url.as_str()).await;
-            log::trace!("get_async(): url `{}` response {:?}", url, res);
-            res?
-        } else {
-            self.client.get_async(url.as_str()).await?
+        let mut request_url = url.clone();
+        let mut redirects_followed = 0_usize;
+        let mut resp = loop {
+            let resp = if cfg!(feature = "jmap-trace") {
+                let res = self.client.get_async(request_url.as_str()).await;
+                log::trace!("get_async(): url `{}` response {:?}", request_url, res);
+                res?
+            } else {
+                self.client.get_async(request_url.as_str()).await?
+            };
+            let next_url = match self.redirect_target(url, &request_url, &resp) {
+                Ok(None) => break resp,
+                Ok(Some(next_url)) => next_url,
+                Err(err) => {
+                    _ = self
+                        .store
+                        .online_status
+                        .set(Some(Instant::now()), Err(err.clone()))
+                        .await;
+                    return Err(err);
+                }
+            };
+            redirects_followed += 1;
+            if redirects_followed > MAX_REDIRECTS {
+                let err = Error::new(format!(
+                    "Too many redirects (limit is {MAX_REDIRECTS}) when connecting to JMAP \
+                     server endpoint {}",
+                    self.server_conf.server_url
+                ))
+                .set_kind(ErrorKind::Network(NetworkErrorKind::TooManyRedirects));
+                _ = self
+                    .store
+                    .online_status
+                    .set(Some(Instant::now()), Err(err.clone()))
+                    .await;
+                return Err(err);
+            }
+            request_url = next_url;
         };
         if !resp.status().is_success() {
             let kind: crate::error::NetworkErrorKind = resp.status().into();
@@ -764,11 +867,52 @@ impl JmapConnection {
                 String::from_utf8_lossy(&request)
             );
         }
-        let mut resp = if let Some(api_url) = api_url {
-            self.client.post_async(api_url.as_str(), request).await?
-        } else {
-            let api_url = self.session_guard().await?.api_url.clone();
-            self.client.post_async(api_url.as_str(), request).await?
+        let original_url = match api_url {
+            Some(api_url) => api_url.clone(),
+            None => (*self.session_guard().await?.api_url).clone(),
+        };
+        let mut request_url = original_url.clone();
+        let mut redirects_followed = 0_usize;
+        // 301/302/303 responses switch the method to GET, mimicking
+        // curl/isahc redirect behavior; 307/308 preserve it.
+        let mut method_is_get = false;
+        let mut resp = loop {
+            let resp = if method_is_get {
+                self.client.get_async(request_url.as_str()).await?
+            } else {
+                self.client
+                    .post_async(request_url.as_str(), request.clone())
+                    .await?
+            };
+            let next_url = match self.redirect_target(&original_url, &request_url, &resp) {
+                Ok(None) => break resp,
+                Ok(Some(next_url)) => next_url,
+                Err(err) => {
+                    _ = self
+                        .store
+                        .online_status
+                        .set(Some(Instant::now()), Err(err.clone()))
+                        .await;
+                    return Err(err);
+                }
+            };
+            redirects_followed += 1;
+            if redirects_followed > MAX_REDIRECTS {
+                let err = Error::new(format!(
+                    "Too many redirects (limit is {MAX_REDIRECTS}) when connecting to JMAP \
+                     server endpoint {}",
+                    self.server_conf.server_url
+                ))
+                .set_kind(ErrorKind::Network(NetworkErrorKind::TooManyRedirects));
+                _ = self
+                    .store
+                    .online_status
+                    .set(Some(Instant::now()), Err(err.clone()))
+                    .await;
+                return Err(err);
+            }
+            method_is_get |= matches!(resp.status().as_u16(), 301..=303);
+            request_url = next_url;
         };
         if !resp.status().is_success() {
             let kind: crate::error::NetworkErrorKind = resp.status().into();

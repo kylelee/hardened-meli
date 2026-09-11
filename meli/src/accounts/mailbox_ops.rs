@@ -208,7 +208,16 @@ impl Account {
                                 .set_job_success(job_id, false);
                             return;
                         }
-                        let mailboxes_job = self.backend.lock().unwrap().mailboxes();
+                        // `refresh_mailboxes` errs at construction time only
+                        // when unsupported (NotSupported); fall back to
+                        // cache-first `mailboxes()` then.
+                        let mailboxes_job = {
+                            let mut backend = self.backend.lock().unwrap();
+                            match backend.refresh_mailboxes() {
+                                Ok(job) => Ok(job),
+                                Err(_) => backend.mailboxes(),
+                            }
+                        };
                         if let Ok(mailboxes_job) = mailboxes_job {
                             let handle = self.main_loop_handler.job_executor.spawn(
                                 "list-mailboxes".into(),
@@ -227,6 +236,47 @@ impl Account {
                                 Some("Loaded mailboxes.".into()),
                             ),
                         ));
+                    }
+                }
+            }
+            MailboxJobRequest::RefreshMailboxes { ref mut handle } => {
+                if let Ok(Some(mailboxes)) = handle.chan.try_recv() {
+                    match mailboxes {
+                        Ok(mailboxes) => {
+                            self.reconcile_mailboxes(mailboxes);
+                        }
+                        Err(err) if err.is_recoverable() => {
+                            // Not retried here; the next `IsOnline`
+                            // `Uninit`/`Err` -> `True` transition
+                            // re-reconciles.
+                            log::warn!(
+                                "Account `{}`: refreshing the mailbox list failed: {err}",
+                                self.name
+                            );
+                            self.main_loop_handler
+                                .job_executor
+                                .set_job_success(job_id, false);
+                        }
+                        Err(err) => {
+                            self.main_loop_handler.send(ThreadEvent::UIEvent(
+                                UIEvent::Notification {
+                                    title: Some(self.name.to_string().into()),
+                                    source: Some(err.clone()),
+                                    body: err.to_string().into(),
+                                    kind: Some(NotificationType::Error(err.kind)),
+                                },
+                            ));
+                            self.main_loop_handler.send(ThreadEvent::UIEvent(
+                                UIEvent::AccountStatusChange(
+                                    self.hash,
+                                    Some(err.to_string().into()),
+                                ),
+                            ));
+                            self.is_online.set_err(err);
+                            self.main_loop_handler
+                                .job_executor
+                                .set_job_success(job_id, false);
+                        }
                     }
                 }
             }

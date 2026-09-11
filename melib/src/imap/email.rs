@@ -56,6 +56,34 @@ pub fn common_attributes() -> (RequiredResponses, MacroOrMessageDataItemNames<'s
     )
 }
 
+/// Same as [`common_attributes`] minus the `BODYSTRUCTURE` item.
+///
+/// Used when `fetch_body_structure` is disabled: skipping the body
+/// structure of every message makes the first full fetch of large
+/// mailboxes much cheaper, at the cost of `Envelope::has_attachments`
+/// staying `false` until the message itself is fetched.
+pub fn common_attributes_light() -> (RequiredResponses, MacroOrMessageDataItemNames<'static>) {
+    (
+        RequiredResponses::FETCH_UID
+            | RequiredResponses::FETCH_FLAGS
+            | RequiredResponses::FETCH_ENVELOPE
+            | RequiredResponses::FETCH_REFERENCES,
+        MacroOrMessageDataItemNames::MessageDataItemNames(vec![
+            MessageDataItemName::Uid,
+            MessageDataItemName::Flags,
+            MessageDataItemName::Envelope,
+            MessageDataItemName::BodyExt {
+                section: Some(Section::HeaderFields(
+                    None,
+                    Vec1::from(AString::from(Atom::unvalidated("REFERENCES"))),
+                )),
+                partial: None,
+                peek: true,
+            },
+        ]),
+    )
+}
+
 /// Convert [`Flag`](crate::email::Flag) into a list of
 /// [`imap_codec::imap_types::flag::Flag`].
 ///

@@ -37,6 +37,44 @@ enum EnvelopeViewMessage {
     PipeAttachmentExit(Result<std::process::Output>),
 }
 
+/// Schemes that are handed to the system url launcher without asking the user
+/// for confirmation first.
+const DEFAULT_LAUNCHABLE_SCHEMES: &[&str] = &["http", "https", "mailto"];
+
+/// Extract the scheme of `url`, if it has a syntactically valid one.
+///
+/// Follows RFC 3986 §3.1: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` before
+/// the first `:`. Schemes are case-insensitive; the original casing is
+/// returned unchanged.
+pub fn url_scheme(url: &str) -> Option<&str> {
+    let (scheme, _rest) = url.split_once(':')?;
+    let mut chars = scheme.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+        return None;
+    }
+    Some(scheme)
+}
+
+/// Whether `url` may be handed to the system url launcher without an extra
+/// confirmation prompt.
+///
+/// Only `http`, `https` and `mailto` (compared case-insensitively) launch
+/// directly; anything else — e.g. `file:`, `gopher:` or an application
+/// specific scheme — is dispatched by the launcher to whatever handler the
+/// desktop environment has registered for it, so the user is asked first.
+/// `mailto` is exempt because composing a message for it is already gated by
+/// the List-Unsubscribe/header-injection protections.
+pub fn is_default_launchable_scheme(url: &str) -> bool {
+    url_scheme(url).is_some_and(|scheme| {
+        DEFAULT_LAUNCHABLE_SCHEMES
+            .iter()
+            .any(|s| scheme.eq_ignore_ascii_case(s))
+    })
+}
+
 /// Envelope view, with sticky headers, a pager for the body, and
 /// subviews for more menus.
 ///
@@ -63,6 +101,8 @@ pub struct EnvelopeView {
     pub headers_no: usize,
     pub headers_cursor: usize,
     pub force_charset: Option<Box<UIDialog<Option<Charset>>>>,
+    pub launch_url_dialog: Option<Box<UIConfirmationDialog>>,
+    pub pending_launch_url: Option<String>,
     pub view_settings: ViewSettings,
     pub active_jobs: HashSet<JobId>,
     pub main_loop_handler: MainLoopHandler,
@@ -105,6 +145,8 @@ impl EnvelopeView {
             force_draw_headers: false,
             options: ViewOptions::default(),
             force_charset: None,
+            launch_url_dialog: None,
+            pending_launch_url: None,
             attachment_tree: String::new(),
             attachment_paths: vec![],
             body,
@@ -136,6 +178,70 @@ impl EnvelopeView {
         ret.attachment_paths = attachment_paths;
 
         ret
+    }
+
+    pub(crate) fn has_active_modal(&self) -> bool {
+        self.launch_url_dialog.is_some() || self.force_charset.is_some() || self.subview.is_some()
+    }
+
+    /// Test-only mirror of the `change_charset` branch's selector
+    /// construction, with a minimal single-entry list.
+    #[cfg(test)]
+    pub(crate) fn set_force_charset_modal_for_tests(&mut self, context: &Context) {
+        if self.force_charset.is_some() {
+            return;
+        }
+        let entries = vec![(Some(Charset::UTF8), Charset::UTF8.to_string())];
+        self.force_charset = Some(Box::new(Selector::new(
+            "select charset to force",
+            entries,
+            true,
+            Some(Box::new(
+                move |id: ComponentId, results: &[Option<Charset>]| {
+                    Some(UIEvent::FinishedUIDialog(id, Box::new(results.to_vec())))
+                },
+            )),
+            context,
+        )));
+    }
+
+    /// Hand `url` unchanged to the configured system url launcher.
+    fn launch_url(&self, url: &str, context: &mut Context) {
+        let url_launcher =
+            self.view_settings
+                .url_launcher
+                .as_deref()
+                .unwrap_or(if cfg!(target_os = "macos") {
+                    "open"
+                } else {
+                    "xdg-open"
+                });
+        match Command::new(url_launcher)
+            .arg(url)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => {
+                context
+                    .children
+                    .entry(url_launcher.to_string().into())
+                    .or_default()
+                    .push(ForkedProcess::Generic {
+                        id: url_launcher.to_string().into(),
+                        command: Some(format!("{url_launcher} {url}").into()),
+                        child,
+                    });
+            }
+            Err(err) => {
+                context.replies.push_back(UIEvent::Notification {
+                    title: Some(format!("Failed to launch {url_launcher:?}").into()),
+                    body: err.to_string().into(),
+                    source: Some(err.into()),
+                    kind: Some(NotificationType::Error(melib::ErrorKind::External)),
+                });
+            }
+        }
     }
 
     fn attachment_to_display_helper(
@@ -1079,6 +1185,9 @@ impl Component for EnvelopeView {
         if let Some(ref mut s) = self.force_charset {
             s.draw(grid, area, context);
         }
+        if let Some(ref mut s) = self.launch_url_dialog {
+            s.draw(grid, area, context);
+        }
 
         // Draw number command buffer at the bottom right corner:
 
@@ -1294,6 +1403,35 @@ impl Component for EnvelopeView {
                 }
             }
             (None, _) => {}
+        }
+
+        if let Some(dialog_id) = self.launch_url_dialog.as_ref().map(|s| s.id()) {
+            match event {
+                UIEvent::FinishedUIDialog(id, result) if *id == dialog_id => {
+                    self.launch_url_dialog = None;
+                    let confirmed = result.downcast_ref::<bool>().copied().unwrap_or(false);
+                    if confirmed {
+                        if let Some(url) = self.pending_launch_url.take() {
+                            self.launch_url(&url, context);
+                        }
+                    }
+                    self.set_dirty(true);
+                    return true;
+                }
+                UIEvent::ComponentUnrealize(id) if *id == dialog_id => {
+                    self.launch_url_dialog = None;
+                    self.pending_launch_url = None;
+                    self.set_dirty(true);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(ref mut s) = self.launch_url_dialog {
+            if s.process_event(event, context) {
+                return true;
+            }
         }
 
         let shortcuts = &self.shortcuts(context);
@@ -1712,9 +1850,9 @@ impl Component for EnvelopeView {
                 let Some(lidx) = context.cmd_buf_clear() else {
                     return true;
                 };
-                let links = &self.links;
-                let (_kind, url) = {
-                    if let Some(l) = links.get(lidx).map(|l| (l.kind, l.value.as_ref())) {
+                let url = {
+                    let links = &self.links;
+                    if let Some(l) = links.get(lidx).map(|l| l.value.to_string()) {
                         l
                     } else {
                         context.replies.push_back(UIEvent::Notification {
@@ -1727,38 +1865,27 @@ impl Component for EnvelopeView {
                     }
                 };
 
-                let url_launcher = self.view_settings.url_launcher.as_deref().unwrap_or(
-                    if cfg!(target_os = "macos") {
-                        "open"
-                    } else {
-                        "xdg-open"
-                    },
-                );
-                match Command::new(url_launcher)
-                    .arg(url)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .spawn()
-                {
-                    Ok(child) => {
-                        context
-                            .children
-                            .entry(url_launcher.to_string().into())
-                            .or_default()
-                            .push(ForkedProcess::Generic {
-                                id: url_launcher.to_string().into(),
-                                command: Some(format!("{url_launcher} {url}").into()),
-                                child,
-                            });
-                    }
-                    Err(err) => {
-                        context.replies.push_back(UIEvent::Notification {
-                            title: Some(format!("Failed to launch {url_launcher:?}").into()),
-                            body: err.to_string().into(),
-                            source: Some(err.into()),
-                            kind: Some(NotificationType::Error(melib::ErrorKind::External)),
-                        });
-                    }
+                if is_default_launchable_scheme(&url) {
+                    self.launch_url(&url, context);
+                } else {
+                    /* The launcher would dispatch a non-default scheme to
+                     * whatever handler the desktop environment has registered
+                     * for it, so ask the user first. The dialog shows the
+                     * exact URL and scheme that will be passed on. */
+                    let scheme = url_scheme(&url).unwrap_or("none");
+                    let entry = format!("Open URL with scheme `{scheme}`: {url}");
+                    self.pending_launch_url = Some(url);
+                    self.launch_url_dialog = Some(Box::new(UIConfirmationDialog::new(
+                        "Confirm opening URL",
+                        vec![(true, entry)],
+                        /* only one choice */
+                        true,
+                        Some(Box::new(move |id: ComponentId, result: bool| {
+                            Some(UIEvent::FinishedUIDialog(id, Box::new(result)))
+                        })),
+                        context,
+                    )));
+                    self.set_dirty(true);
                 }
                 return true;
             }
@@ -1921,6 +2048,7 @@ impl Component for EnvelopeView {
             || self.pager.is_dirty()
             || self.subview.as_ref().map(|p| p.is_dirty()).unwrap_or(false)
             || matches!(self.force_charset, Some(ref s) if s.is_dirty())
+            || matches!(self.launch_url_dialog, Some(ref s) if s.is_dirty())
     }
 
     fn set_dirty(&mut self, value: bool) {
@@ -1930,6 +2058,9 @@ impl Component for EnvelopeView {
             s.set_dirty(value);
         }
         if let Some(ref mut s) = self.force_charset {
+            s.set_dirty(value);
+        }
+        if let Some(ref mut s) = self.launch_url_dialog {
             s.set_dirty(value);
         }
     }

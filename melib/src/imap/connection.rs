@@ -21,6 +21,7 @@
 
 use std::{
     borrow::Cow,
+    collections::{BTreeMap, HashMap},
     convert::TryFrom,
     fmt::Write,
     future::Future,
@@ -70,11 +71,14 @@ use crate::{
             SelectResponse,
         },
         search::ToImapSearch,
-        Capabilities, ImapServerConf, UIDStore, UID,
+        sync::cache::ImapCache,
+        Capabilities, ImapServerConf, MessageSequenceNumber, UIDStore, UID, UIDVALIDITY,
     },
     text::Truncate,
     utils::{
-        connections::{std_net::connect as tcp_stream_connect, Connection},
+        connections::{
+            enforce_response_size_limit, std_net::connect as tcp_stream_connect, Connection,
+        },
         futures::timeout,
     },
     LogLevel,
@@ -168,6 +172,39 @@ pub struct ImapStream {
     pub protocol: ImapProtocol,
     pub current_mailbox: MailboxSelection,
     pub timeout: Option<Duration>,
+}
+
+/// Log/trace representation of an IMAP command body, tagged with its
+/// command id.
+///
+/// Credential-carrying variants (`LOGIN` with the password, `AUTHENTICATE`
+/// with a SASL initial response) are replaced with a redacted placeholder,
+/// unconditionally in every build profile. `Secret`'s `Debug` impl only
+/// redacts in release builds (`not(debug_assertions)`), so formatting a
+/// credential-carrying body with `{:?}` would print plaintext secrets in
+/// debug builds — both into the trace log and into the BAD/NO "Last sent
+/// command was:" notice that reaches the UI (see `read_response`).
+fn command_repr(cmd_id: usize, body: &CommandBody<'_>) -> String {
+    let body_repr = match body {
+        CommandBody::Login { .. } => "LOGIN ..".to_string(),
+        CommandBody::Authenticate { .. } => "AUTHENTICATE ..".to_string(),
+        _ => format!("{body:?}"),
+    };
+    format!("M{cmd_id} {body_repr}")
+}
+
+/// Same redaction as [`command_repr`], for raw command lines passed to
+/// `send_command_raw` (a raw `AUTHENTICATE` line carries the SASL initial
+/// response inline).
+fn raw_command_repr(cmd_id: usize, command: &[u8]) -> String {
+    let body_repr = if command.starts_with(b"LOGIN") {
+        "LOGIN ..".to_string()
+    } else if command.starts_with(b"AUTHENTICATE") {
+        "AUTHENTICATE ..".to_string()
+    } else {
+        String::from_utf8_lossy(command).into_owned()
+    };
+    format!("M{cmd_id} {body_repr}")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -371,6 +408,11 @@ pub struct ImapConnection {
     pub sync_policy: SyncPolicy,
     pub uid_store: Arc<UIDStore>,
     pub send_state_changes: bool,
+    /// For each mailbox, the `UIDVALIDITY` for which its `msn_index` was
+    /// restored from the persistent cache during this connection's
+    /// lifetime. While it matches the current `UIDVALIDITY`, the redundant
+    /// `UID SEARCH 1:*` refresh in `examine_mailbox` is skipped.
+    msn_index_cache_uidvalidity: HashMap<MailboxHash, UIDVALIDITY>,
 }
 
 impl ImapStream {
@@ -832,6 +874,7 @@ impl ImapStream {
                 Ok(0) => break,
                 Ok(b) => {
                     ret.extend_from_slice(&buf[0..b]);
+                    enforce_response_size_limit(ret.len())?;
                     if let Some(mut pos) = ret[last_line_idx..].rfind("\r\n") {
                         if ret[last_line_idx..].starts_with(b"* BYE") {
                             return Err(Error::new("Disconnected"));
@@ -905,12 +948,9 @@ impl ImapStream {
             match self.protocol {
                 ImapProtocol::IMAP { .. } => {
                     self.last_cmd.clear();
-                    _ = write!(&mut self.last_cmd, "M{} {:?}", self.cmd_id, command.body);
-                    if matches!(command.body, CommandBody::Login { .. }) {
-                        imap_log!(trace, self, "sent: M{} LOGIN ..", self.cmd_id);
-                    } else {
-                        imap_log!(trace, self, "sent: M{} {:?}", self.cmd_id, command.body);
-                    }
+                    let repr = command_repr(self.cmd_id, &command.body);
+                    _ = write!(&mut self.last_cmd, "{repr}");
+                    imap_log!(trace, self, "sent: {}", repr);
                 }
                 ImapProtocol::ManageSieve => {}
             }
@@ -943,14 +983,9 @@ impl ImapStream {
                 match self.protocol {
                     ImapProtocol::IMAP { .. } => {
                         self.last_cmd.clear();
-                        if !command.starts_with(b"LOGIN") {
-                            let command = String::from_utf8_lossy(command);
-                            imap_log!(trace, self, "sent: M{} {}", self.cmd_id, command);
-                            _ = write!(&mut self.last_cmd, "M{} {command}", self.cmd_id);
-                        } else {
-                            imap_log!(trace, self, "sent: M{} LOGIN ..", self.cmd_id);
-                            _ = write!(&mut self.last_cmd, "M{} LOGIN ..", self.cmd_id);
-                        }
+                        let repr = raw_command_repr(self.cmd_id, command);
+                        imap_log!(trace, self, "sent: {}", repr);
+                        _ = write!(&mut self.last_cmd, "{repr}");
                     }
                     ImapProtocol::ManageSieve => {}
                 }
@@ -998,6 +1033,7 @@ impl ImapConnection {
             },
             uid_store,
             send_state_changes,
+            msn_index_cache_uidvalidity: HashMap::default(),
         }
     }
 
@@ -1404,8 +1440,81 @@ impl ImapConnection {
             .map(|i| i.is_empty())
             .unwrap_or(true)
         {
-            self.create_uid_msn_cache(mailbox_hash, 1, &select_response)
-                .await?;
+            // The MSN index is not in memory; try restoring it from the
+            // persistent cache before falling back to `UID SEARCH 1:*`.
+            let mut restored_from_cache = false;
+            {
+                let mut uid_store = Arc::clone(&self.uid_store);
+                match uid_store.load_msn_index(mailbox_hash, select_response.uidvalidity) {
+                    Ok(Some(cached_msn_index)) if !cached_msn_index.is_empty() => {
+                        let msn_index: BTreeMap<MessageSequenceNumber, UID> = cached_msn_index
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(msn, uid)| uid.map(|uid| (msn, uid)))
+                            .collect();
+                        self.uid_store
+                            .msn_index
+                            .lock()
+                            .unwrap()
+                            .insert(mailbox_hash, msn_index);
+                        self.msn_index_cache_uidvalidity
+                            .insert(mailbox_hash, select_response.uidvalidity);
+                        restored_from_cache = true;
+                        imap_log!(
+                            trace,
+                            self,
+                            "restored msn_index of mailbox {} from cache",
+                            mailbox_hash
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        imap_log!(
+                            warn,
+                            self,
+                            "IMAP cache error: could not load msn_index of mailbox {}. Reason: {}",
+                            mailbox_hash,
+                            err
+                        );
+                    }
+                }
+            }
+            if !restored_from_cache {
+                self.create_uid_msn_cache(mailbox_hash, 1, &select_response)
+                    .await?;
+                // Persist the freshly built index so that the next session
+                // can skip this `UID SEARCH`.
+                let msn_index_vec: Vec<Option<UID>> = {
+                    let msn_index_lck = self.uid_store.msn_index.lock().unwrap();
+                    match msn_index_lck.get(&mailbox_hash) {
+                        Some(index) if !index.is_empty() => {
+                            let mut vec =
+                                vec![None; index.keys().next_back().copied().unwrap_or(0) + 1];
+                            for (&msn, &uid) in index.iter() {
+                                if let Some(slot) = vec.get_mut(msn) {
+                                    *slot = Some(uid);
+                                }
+                            }
+                            vec
+                        }
+                        _ => Vec::new(),
+                    }
+                };
+                let mut uid_store = Arc::clone(&self.uid_store);
+                if let Err(err) = uid_store.store_msn_index(
+                    mailbox_hash,
+                    select_response.uidvalidity,
+                    &msn_index_vec,
+                ) {
+                    imap_log!(
+                        warn,
+                        self,
+                        "IMAP cache error: could not store msn_index of mailbox {}. Reason: {}",
+                        mailbox_hash,
+                        err
+                    );
+                }
+            }
         }
         Ok(select_response)
     }
@@ -1419,10 +1528,6 @@ impl ImapConnection {
         if let (
             true,
             MailboxSelection::Examine {
-                mailbox_hash: _,
-                latest_response,
-            }
-            | MailboxSelection::Select {
                 mailbox_hash: _,
                 latest_response,
             },
@@ -1469,8 +1574,15 @@ impl ImapConnection {
             .map(|i| i.is_empty())
             .unwrap_or(true)
         {
-            self.create_uid_msn_cache(mailbox_hash, 1, &select_response)
-                .await?;
+            // The refresh search is redundant when the in-memory index was
+            // restored from the persistent cache for the currently valid
+            // `UIDVALIDITY`.
+            if self.msn_index_cache_uidvalidity.get(&mailbox_hash)
+                != Some(&select_response.uidvalidity)
+            {
+                self.create_uid_msn_cache(mailbox_hash, 1, &select_response)
+                    .await?;
+            }
         }
         Ok(select_response)
     }
@@ -1528,6 +1640,8 @@ impl ImapConnection {
         _select_response: &SelectResponse,
     ) -> Result<()> {
         debug_assert!(low > 0);
+        // A search rebuild replaces any cache-restored index.
+        self.msn_index_cache_uidvalidity.remove(&mailbox_hash);
         self.send_command(CommandBody::search(
             None,
             SearchKey::SequenceSet(SequenceSet::try_from(low..)?).into(),
@@ -1570,10 +1684,6 @@ impl From<ImapConnection> for ImapBlockingConnection {
 }
 
 impl ImapBlockingConnection {
-    pub fn into_conn(self) -> ImapConnection {
-        self.conn
-    }
-
     pub fn err(&self) -> Option<&Error> {
         self.err.as_ref()
     }
@@ -1624,6 +1734,12 @@ async fn read(
         }
         Ok(b) => {
             result.extend_from_slice(&buf[0..b]);
+            if let Err(size_err) = enforce_response_size_limit(result.len()) {
+                *err = Some(size_err);
+                *break_flag = true;
+                *prev_failure = Some(SystemTime::now());
+                return None;
+            }
             *break_flag = false;
             *prev_failure = None;
         }
@@ -1753,5 +1869,216 @@ impl ImapConnection {
             }
         }
         Err(Error::new(String::from_utf8_lossy(&response).to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{
+        backends::{AccountHash, BackendEventConsumer, IsSubscribedFn},
+        utils::connections::{cap_test_utils, max_server_response_size},
+    };
+
+    /// Regression test for the server response size cap in
+    /// [`ImapStream::read_lines`]: a malicious server that dribbles
+    /// untagged responses forever (never sending the tagged command
+    /// completion) must produce an error once the cap is reached, instead of
+    /// accumulating unboundedly. Adapted from the 256 MiB pipe accounting
+    /// demo of the original audit finding.
+    #[test]
+    fn test_imap_read_lines_response_size_cap() {
+        cap_test_utils::assert_completes_within(10, || {
+            let cap = max_server_response_size();
+            let (stream, writer) =
+                cap_test_utils::malicious_server(b"* 1 EXISTS\r\n", cap.saturating_mul(2));
+            let mut imap_stream = ImapStream {
+                cmd_id: 1,
+                last_cmd: String::new(),
+                id: Cow::Borrowed("cap-test"),
+                stream,
+                protocol: ImapProtocol::default(),
+                current_mailbox: MailboxSelection::None,
+                timeout: Some(Duration::from_secs(60)),
+            };
+            let mut ret = Vec::new();
+            let res = smol::block_on(imap_stream.read_lines(&mut ret, Some(b"M1 "), true));
+            drop(imap_stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+                ),
+                "unexpected error: {err:?}"
+            );
+            assert!(ret.len() > cap);
+            assert!(
+                ret.len() <= cap + Connection::IO_BUF_SIZE,
+                "accumulation must stay bounded: {} > {}",
+                ret.len(),
+                cap + Connection::IO_BUF_SIZE
+            );
+        });
+    }
+
+    /// Regression test for the server response size cap in
+    /// [`ImapBlockingConnection::read_line`]: a server that announces a
+    /// huge IMAP literal (`{4294967295}\r\n`) and then dribbles the literal
+    /// body without ever terminating the line must produce an error once
+    /// the cap is reached, instead of accumulating unboundedly.
+    #[test]
+    fn test_imap_blocking_read_line_response_size_cap() {
+        cap_test_utils::assert_completes_within(10, || {
+            let cap = max_server_response_size();
+            let (stream, writer) = cap_test_utils::malicious_server(
+                b"* 1 FETCH (BODY[] {4294967295}\r\nA",
+                cap.saturating_mul(2),
+            );
+            let uid_store: Arc<UIDStore> = Arc::new(UIDStore::new(
+                IsSubscribedFn::default(),
+                AccountHash::from_bytes(b"test".as_slice()),
+                "test".to_string().into(),
+                BackendEventConsumer::new(Arc::new(|_, _| {})),
+                None,
+                false,
+                false,
+            ));
+            let server_conf = ImapServerConf {
+                server_hostname: "localhost".to_string(),
+                server_username: String::new(),
+                server_password: String::new(),
+                server_port: 143,
+                use_starttls: false,
+                use_tls: false,
+                danger_accept_invalid_certs: false,
+                protocol: ImapProtocol::default(),
+                timeout: None,
+            };
+            let mut conn = ImapConnection::new_connection(
+                &server_conf,
+                Cow::Borrowed("cap-test"),
+                uid_store,
+                false,
+            );
+            conn.stream = Ok(ImapStream {
+                cmd_id: 1,
+                last_cmd: String::new(),
+                id: Cow::Borrowed("cap-test"),
+                stream,
+                protocol: ImapProtocol::default(),
+                current_mailbox: MailboxSelection::None,
+                timeout: None,
+            });
+            let mut blocking_conn: ImapBlockingConnection = conn.into();
+            let line = smol::block_on(blocking_conn.read_line());
+            let err = blocking_conn.err().cloned();
+            drop(blocking_conn);
+            let _ = writer.join();
+            assert!(line.is_none());
+            let err = err.expect("error must be recorded on the connection");
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+                ),
+                "unexpected error: {err:?}"
+            );
+        });
+    }
+
+    // W2-T9 (CWE-532): `last_cmd`/trace formatting must never contain
+    // credential material. Pre-fix, `write!(last_cmd, "M{} {:?}",
+    // command.body)` leaked the LOGIN password and the AUTHENTICATE SASL-IR
+    // token in debug builds (`Secret`'s `Debug` impl only redacts when
+    // `debug_assertions` is off). All dummy secrets below are synthetic and
+    // exist only inside these tests.
+
+    #[test]
+    fn test_command_repr_login_redacted() {
+        let password = AString::try_from("SYNTHETIC-hunter2-PASSWORD").unwrap();
+        let body = CommandBody::Login {
+            username: AString::try_from("synthetic_user").unwrap(),
+            password: Secret::new(password),
+        };
+        let repr = command_repr(7, &body);
+        assert!(repr.contains("LOGIN .."), "expected placeholder: {repr}");
+        assert!(
+            !repr.contains("SYNTHETIC-hunter2-PASSWORD"),
+            "password leaked into formatted command: {repr}"
+        );
+        assert_eq!(repr, "M7 LOGIN ..");
+    }
+
+    #[test]
+    fn test_command_repr_authenticate_ir_redacted() {
+        let ir: &[u8] = b"user=synthetic_user\x01auth=Bearer SYNTHETIC_TOKEN_9f8e7d\x01\x01";
+        let body = CommandBody::authenticate_with_ir(AuthMechanism::XOAuth2, ir);
+        let repr = command_repr(11, &body);
+        assert!(
+            repr.contains("AUTHENTICATE .."),
+            "expected placeholder: {repr}"
+        );
+        assert!(
+            !repr.contains("SYNTHETIC_TOKEN_9f8e7d"),
+            "SASL-IR token leaked into formatted command: {repr}"
+        );
+        assert!(
+            !repr.contains("auth=Bearer"),
+            "SASL-IR payload text leaked into formatted command: {repr}"
+        );
+        assert_eq!(repr, "M11 AUTHENTICATE ..");
+    }
+
+    #[test]
+    fn test_command_repr_authenticate_without_ir_redacted() {
+        let body = CommandBody::authenticate(AuthMechanism::Plain);
+        let repr = command_repr(3, &body);
+        assert_eq!(repr, "M3 AUTHENTICATE ..");
+    }
+
+    #[test]
+    fn test_command_repr_authenticate_ir_malformed_bytes_no_panic() {
+        for ir in [
+            &b"\x00\xff\xfe\r\nAUTH"[..],
+            b"\x01\x02\x03",
+            &[0x80u8, 0xff, 0x7f, 0x00],
+        ] {
+            let body = CommandBody::authenticate_with_ir(AuthMechanism::Plain, ir);
+            let repr = command_repr(5, &body);
+            assert_eq!(repr, "M5 AUTHENTICATE ..");
+        }
+    }
+
+    #[test]
+    fn test_command_repr_non_auth_unchanged() {
+        let body = CommandBody::Capability;
+        assert_eq!(command_repr(7, &body), format!("M7 {body:?}"));
+        let body = CommandBody::Select {
+            mailbox: Mailbox::try_from("INBOX").unwrap(),
+            parameters: Vec::default(),
+        };
+        assert_eq!(command_repr(8, &body), format!("M8 {body:?}"));
+    }
+
+    #[test]
+    fn test_raw_command_repr_login_and_authenticate_redacted() {
+        let repr = raw_command_repr(2, b"LOGIN synthetic_user SYNTHETIC-hunter2-PASSWORD");
+        assert_eq!(repr, "M2 LOGIN ..");
+        assert!(!repr.contains("SYNTHETIC-hunter2-PASSWORD"));
+        let repr = raw_command_repr(4, b"AUTHENTICATE PLAIN dGVzdA==");
+        assert_eq!(repr, "M4 AUTHENTICATE ..");
+        assert!(!repr.contains("dGVzdA=="));
+    }
+
+    #[test]
+    fn test_raw_command_repr_non_auth_unchanged() {
+        assert_eq!(raw_command_repr(9, b"CAPABILITY"), "M9 CAPABILITY");
+        assert_eq!(
+            raw_command_repr(1, b"LIST \"\" \"*\" RETURN (STATUS (MESSAGES UNSEEN))"),
+            "M1 LIST \"\" \"*\" RETURN (STATUS (MESSAGES UNSEEN))"
+        );
     }
 }

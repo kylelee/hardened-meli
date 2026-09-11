@@ -464,16 +464,10 @@ impl From<io::Error> for Error {
             // more intelligent than a hardcoded string `contains`.
             // <https://github.com/sfackler/rust-openssl/blob/538a5cb737e8d83085553cac01643820dc7ff205/openssl/src/ssl/error.rs#L100-L123>
             ErrorKind::Network(NetworkErrorKind::InvalidTLSConnection)
+        } else if let Some(errno) = err.raw_os_error() {
+            ErrorKind::OSError(Errno::from_raw(errno))
         } else {
-            let from_kind = ErrorKind::from(err.kind());
-            if matches!(from_kind, ErrorKind::Platform) {
-                match err.raw_os_error() {
-                    Some(errno) => ErrorKind::OSError(Errno::from_raw(errno)),
-                    None => from_kind,
-                }
-            } else {
-                from_kind
-            }
+            err.kind().into()
         };
         Self::from_inner(Arc::new(err)).set_kind(kind)
     }

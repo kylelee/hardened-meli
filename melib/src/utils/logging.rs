@@ -141,6 +141,41 @@ enum Writer {
     File(BufWriter<std::fs::File>),
 }
 
+/// Open (creating if necessary) the log file for appending.
+///
+/// The file holds account names, subjects, errors and (on trace builds)
+/// protocol flows, so its mode is restricted to `0600` on unix, like every
+/// other file meli creates.
+fn open_log_file(path: &std::path::Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .append(true) /* writes will append to a file instead of overwriting previous contents */
+        .create(true) /* a new file will be created if the file does not yet already exist. */
+        .read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // A fresh file is created 0600 atomically; umask can only clear
+        // bits and 0600 has no group/other bits to clear.
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // `OpenOptions::mode()` only applies to newly created files; enforce
+        // the mode idempotently so a log left behind by an older meli with
+        // default 0644 is tightened on reopen. Uses the file handle (fchmod),
+        // not the path, to avoid racing a path swap.
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(0o600);
+        file.set_permissions(permissions)?;
+    }
+    Ok(file)
+}
+
 impl std::ops::Deref for Writer {
     type Target = dyn std::io::Write;
 
@@ -216,10 +251,7 @@ impl Logger {
             fn __inline_err_wrap() -> Result<(PathBuf, File), Box<dyn std::error::Error>> {
                 let data_dir = xdg::BaseDirectories::with_prefix("meli")?;
                 let path = data_dir.place_data_file("meli.log")?;
-                let log_file = OpenOptions::new().append(true) /* writes will append to a file instead of overwriting previous contents */
-                    .create(true) /* a new file will be created if the file does not yet already exist.*/
-                    .read(true)
-                    .open(&path)?;
+                let log_file = open_log_file(&path)?;
                 Ok((path, log_file))
             }
             let (path, log_file) =
@@ -277,16 +309,7 @@ impl Logger {
         let path = path.expand(); // expand shell stuff
         let mut dest = self.dest.lock().unwrap();
         *dest = FileOutput {
-            writer: Writer::File(BufWriter::new(
-                OpenOptions::new()
-                    /* writes will append to a file instead of overwriting previous contents */
-                    .append(true)
-                    /* a new file will be created if the file does not yet already exist. */
-                    .create(true)
-                    .read(true)
-                    .open(&path)
-                    .unwrap(),
-            )),
+            writer: Writer::File(BufWriter::new(open_log_file(&path).unwrap())),
             path,
         };
     }
@@ -417,5 +440,30 @@ impl Log for Logger {
             .lock()
             .ok()
             .and_then(|mut w| w.writer.flush().ok());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_log_file_mode_is_restricted_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let path = temp_dir.path().join("meli.log");
+
+        drop(open_log_file(&path).unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "fresh log file mode was {mode:o}");
+
+        // A log left behind by an older meli with default 0644 must be
+        // tightened when reopened.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(open_log_file(&path).unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "reopened log file mode was {mode:o}");
     }
 }

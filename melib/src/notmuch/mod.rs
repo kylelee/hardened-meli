@@ -329,31 +329,6 @@ impl DbConnection {
         )
     }
 
-    /// Return mail root path of database as a [`NotmuchDirectory`].
-    ///
-    /// This function might return `None` if the directory is not in the
-    /// database yet, for example if the database has no emails.
-    pub fn root_directory(&self) -> Result<Option<NotmuchDirectory>> {
-        let mut ptr = std::ptr::null_mut();
-        let path = self.mail_root()?;
-        unsafe {
-            try_call!(
-                self.lib,
-                (self.lib.database_get_directory())(
-                    self.inner.lock().unwrap().as_mut(),
-                    path.as_ptr(),
-                    &raw mut ptr
-                )
-            )
-        }?;
-        Ok(NonNull::new(ptr).map(|inner| NotmuchDirectory {
-            lib: self.lib.clone(),
-            path,
-            db: self.inner.clone(),
-            inner,
-        }))
-    }
-
     /// Return path of database as a [`NotmuchDirectory`].
     ///
     /// This function might return `None` if the directory is not in the
@@ -417,7 +392,6 @@ impl Drop for DbConnection {
 
 #[derive(Debug)]
 pub struct NotmuchDb {
-    #[allow(dead_code)]
     lib: Arc<NotmuchLibrary>,
     mailboxes: Arc<RwLock<HashMap<MailboxHash, NotmuchMailbox>>>,
     snapshot: Arc<RwLock<Snapshot>>,
@@ -425,10 +399,8 @@ pub struct NotmuchDb {
     mailbox_index: Arc<RwLock<HashMap<EnvelopeHash, SmallVec<[MailboxHash; 16]>>>>,
     collection: Collection,
     path: PathBuf,
-    _account_name: Arc<str>,
     account_hash: AccountHash,
     event_consumer: BackendEventConsumer,
-    save_messages_to: Option<PathBuf>,
 }
 
 impl NotmuchDb {
@@ -592,8 +564,6 @@ impl NotmuchDb {
             })),
             collection,
             mailboxes: Arc::new(RwLock::new(mailboxes)),
-            save_messages_to: None,
-            _account_name: s.name.to_string().into(),
             account_hash,
             event_consumer,
         }))
@@ -932,7 +902,6 @@ impl MailBackend for NotmuchDb {
                 self.lib.clone(),
                 true,
             )?),
-            lib: self.lib.clone(),
             hash,
             index: self.index.clone(),
         };
@@ -947,11 +916,7 @@ impl MailBackend for NotmuchDb {
         flags: Option<Flag>,
     ) -> ResultFuture<()> {
         // [ref:FIXME]: call notmuch_database_index_file ?
-        let path = self
-            .save_messages_to
-            .as_ref()
-            .unwrap_or(&self.path)
-            .to_path_buf();
+        let path = self.path.clone();
         crate::maildir::MaildirType::save_to_mailbox(path, bytes, flags)?;
         Ok(Box::pin(async { Ok(()) }))
     }
@@ -1188,8 +1153,6 @@ struct NotmuchOp {
     hash: EnvelopeHash,
     index: Arc<RwLock<HashMap<EnvelopeHash, CString>>>,
     database: Arc<DbConnection>,
-    #[allow(dead_code)]
-    lib: Arc<NotmuchLibrary>,
 }
 
 impl NotmuchOp {

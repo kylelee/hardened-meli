@@ -1,5 +1,5 @@
 /*
- * meli - bin.rs
+ * meli - main.rs
  *
  * Copyright 2017-2018 Manos Pitsidianakis
  *
@@ -22,7 +22,7 @@
 //! Command line client binary.
 //!
 //! This crate contains the frontend stuff of the application. The application
-//! entry way on `src/bin.rs` creates an event loop and passes input to a
+//! entry way on `src/main.rs` creates an event loop and passes input to a
 //! thread.
 //!
 //! The mail handling stuff is done in the `melib` crate which includes all
@@ -78,8 +78,6 @@ fn run_app(mut opt: Opt) -> Result<()> {
         state = subcommands::view(path, sender, receiver.clone())?;
     } else {
         state = State::new(None, sender, receiver.clone())?;
-        // #[cfg(feature = "svgscreenshot")]
-        // state.register_component(Box::new(svg::SVGScreenshotFilter::new()));
         let window = Box::new(Tabbed::new(
             vec![
                 Box::new(listing::Listing::new(&mut state.context)),

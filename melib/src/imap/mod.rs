@@ -183,6 +183,7 @@ pub struct UIDStore {
     pub is_online: Arc<Mutex<(SystemTime, Result<()>)>>,
     pub event_consumer: BackendEventConsumer,
     pub timeout: Option<Duration>,
+    pub fetch_body_structure: bool,
 }
 
 impl UIDStore {
@@ -193,6 +194,7 @@ impl UIDStore {
         event_consumer: BackendEventConsumer,
         timeout: Option<Duration>,
         keep_offline_cache: bool,
+        fetch_body_structure: bool,
     ) -> Self {
         Self {
             account_hash,
@@ -219,6 +221,7 @@ impl UIDStore {
             ))),
             event_consumer,
             timeout,
+            fetch_body_structure,
         }
     }
 
@@ -388,17 +391,28 @@ impl MailBackend for ImapType {
 
     fn fetch(&mut self, mailbox_hash: MailboxHash) -> ResultStream<Vec<Envelope>> {
         let mut state = FetchState {
-            stage: FetchStage::ResyncCache,
+            // Start with the offline cache (stale-while-revalidate): the
+            // placeholder `max_uid` is corrected by `lastseenuid()` on
+            // the first `chunk()` call; with no cache the stage moves to
+            // `ResyncCache` immediately, which is the pre-change
+            // behavior.
+            stage: FetchStage::CacheFirst {
+                max_uid: 0,
+                batch: 0,
+            },
             connection: self.connection.clone(),
             mailbox_hash,
             uid_store: self.uid_store.clone(),
             batch_size: 2_500,
             cache_batch_size: 95_000,
-            response: Vec::with_capacity(8 * 1024),
+            cache_served_offline: false,
         };
 
         Ok(Box::pin(try_fn_stream(|emitter| async move {
-            let id = state.connection.lock().await?.id.clone();
+            // Do not touch the main connection lock here: while a held
+            // connection (e.g. an in-flight `is_online` attempt) blocks,
+            // the offline cache must still be served immediately.
+            let account_name = state.uid_store.account_name.clone();
             {
                 let f = &state.uid_store.mailboxes.lock().await[&mailbox_hash];
                 f.set_warm(true);
@@ -421,7 +435,7 @@ impl MailBackend for ImapType {
                 let res = state.chunk().await.inspect_err(|err| {
                     log::trace!(
                         "{} fetch chunk at stage {:?} err {:?}",
-                        id,
+                        account_name,
                         state.stage,
                         err
                     );
@@ -443,60 +457,42 @@ impl MailBackend for ImapType {
     }
 
     fn mailboxes(&mut self) -> ResultFuture<HashMap<MailboxHash, Mailbox>> {
-        let uid_store = self.uid_store.clone();
+        let mut uid_store = self.uid_store.clone();
         let connection = self.connection.clone();
         Ok(Box::pin(async move {
             {
                 let mailboxes = uid_store.mailboxes.lock().await;
                 if !mailboxes.is_empty() {
-                    return Ok(mailboxes
-                        .iter()
-                        .map(|(h, f)| (*h, Box::new(Clone::clone(f)) as Mailbox))
-                        .collect());
+                    return Ok(Self::as_backend_mailboxes(&mailboxes));
                 }
             }
-            let new_mailboxes = Self::imap_mailboxes(&connection).await?;
-            let mut mailboxes = uid_store.mailboxes.lock().await;
-            *mailboxes = new_mailboxes;
-            for m in mailboxes.values_mut() {
-                log::trace!(
-                    "mailbox: {} is_subscribed: {}",
-                    m.path(),
-                    (uid_store.is_subscribed)(m.path())
-                );
-                if (uid_store.is_subscribed)(m.path()) {
-                    m.set_is_subscribed(true)?;
+            match uid_store.load_mailbox_list() {
+                Ok(Some(cached)) => {
+                    let mut mailboxes = uid_store.mailboxes.lock().await;
+                    *mailboxes = cached;
+                    Self::postprocess_mailboxes(&uid_store, &mut mailboxes)?;
+                    return Ok(Self::as_backend_mailboxes(&mailboxes));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log::error!(
+                        "{}: could not load cached mailbox list, falling back to network \
+                         LIST/LSUB: {err}",
+                        uid_store.account_name
+                    );
                 }
             }
-            /*
-            let mut invalid_configs = vec![];
-            for m in mailboxes.values() {
-                if m.is_subscribed() != (self.is_subscribed)(m.path()) {
-                    invalid_configs.push((m.path(), m.is_subscribed()));
-                }
-            }
-            if !invalid_configs.is_empty() {
-                let mut err_string = format!("{}: ", self.account_name);
-                for (m, server_value) in invalid_configs.iter() {
-                    err_string.extend(format!(
-                            "Mailbox `{}` is {}subscribed on server but {}subscribed in your configuration. These settings have to match.\n",
-                            if *server_value { "" } else { "not " },
-                            if *server_value { "not " } else { "" },
-                            m
-                ).chars());
-                }
-                return Err(Error::new(err_string));
-            }
-            mailboxes.retain(|_, f| (self.is_subscribed)(f.path()));
-            */
-            let keys = mailboxes.keys().cloned().collect::<HashSet<MailboxHash>>();
-            for f in mailboxes.values_mut() {
-                f.children.retain(|c| keys.contains(c));
-            }
-            Ok(mailboxes
-                .iter()
-                .map(|(h, f)| (*h, Box::new(Clone::clone(f)) as Mailbox))
-                .collect())
+            let mailboxes = Self::network_mailboxes(&mut uid_store, &connection).await?;
+            Ok(Self::as_backend_mailboxes(&mailboxes))
+        }))
+    }
+
+    fn refresh_mailboxes(&mut self) -> ResultFuture<HashMap<MailboxHash, Mailbox>> {
+        let mut uid_store = self.uid_store.clone();
+        let connection = self.connection.clone();
+        Ok(Box::pin(async move {
+            let mailboxes = Self::network_mailboxes(&mut uid_store, &connection).await?;
+            Ok(Self::as_backend_mailboxes(&mailboxes))
         }))
     }
 
@@ -1345,6 +1341,7 @@ impl ImapType {
         } else {
             Some(Duration::from_secs(timeout))
         };
+        let fetch_body_structure: bool = get_conf_val!(s["fetch_body_structure"], true)?;
         let use_connection_pool = get_conf_val!(s["use_connection_pool"], true)?;
         let server_conf = ImapServerConf {
             server_hostname: server_hostname.to_string(),
@@ -1377,6 +1374,7 @@ impl ImapType {
                 event_consumer,
                 server_conf.timeout,
                 keep_offline_cache,
+                fetch_body_structure,
             )
         });
         let connection = ImapConnection::new_connection(
@@ -1453,15 +1451,6 @@ impl ImapType {
                     if input.trim().eq_ignore_ascii_case("logout") {
                         break;
                     }
-                    /*
-                    if input.trim() == "IDLE" {
-                        let mut iter = ImapBlockingConnection::from(conn);
-                        while let Some(line) = iter.next() {
-                            imap_log!(trace, "out: {}", unsafe { std::str::from_utf8_unchecked(&line) });
-                        }
-                        conn = iter.into_conn();
-                    }
-                    */
                     println!("S: {}", String::from_utf8_lossy(&res));
                 }
                 Err(error) => println!("error: {error}"),
@@ -1566,6 +1555,83 @@ impl ImapType {
         Ok(mailboxes)
     }
 
+    fn as_backend_mailboxes(
+        mailboxes: &HashMap<MailboxHash, ImapMailbox>,
+    ) -> HashMap<MailboxHash, Mailbox> {
+        mailboxes
+            .iter()
+            .map(|(h, f)| (*h, Box::new(Clone::clone(f)) as Mailbox))
+            .collect()
+    }
+
+    /// Applies local subscription settings to each mailbox and drops
+    /// children entries pointing to nonexistent mailboxes, in place.
+    fn postprocess_mailboxes(
+        uid_store: &UIDStore,
+        mailboxes: &mut HashMap<MailboxHash, ImapMailbox>,
+    ) -> Result<()> {
+        for m in mailboxes.values_mut() {
+            log::trace!(
+                "mailbox: {} is_subscribed: {}",
+                m.path(),
+                (uid_store.is_subscribed)(m.path())
+            );
+            if (uid_store.is_subscribed)(m.path()) {
+                m.set_is_subscribed(true)?;
+            }
+        }
+        /*
+        let mut invalid_configs = vec![];
+        for m in mailboxes.values() {
+            if m.is_subscribed() != (self.is_subscribed)(m.path()) {
+                invalid_configs.push((m.path(), m.is_subscribed()));
+            }
+        }
+        if !invalid_configs.is_empty() {
+            let mut err_string = format!("{}: ", self.account_name);
+            for (m, server_value) in invalid_configs.iter() {
+                err_string.extend(format!(
+                        "Mailbox `{}` is {}subscribed on server but {}subscribed in your configuration. These settings have to match.\n",
+                        if *server_value { "" } else { "not " },
+                        if *server_value { "not " } else { "" },
+                        m
+            ).chars());
+            }
+            return Err(Error::new(err_string));
+        }
+        mailboxes.retain(|_, f| (self.is_subscribed)(f.path()));
+        */
+        let keys = mailboxes.keys().cloned().collect::<HashSet<MailboxHash>>();
+        for f in mailboxes.values_mut() {
+            f.children.retain(|c| keys.contains(c));
+        }
+        Ok(())
+    }
+
+    /// Forces a network `LIST`/`LSUB` roundtrip via
+    /// [`Self::imap_mailboxes`], replaces the in-memory mailbox map
+    /// with the result after applying [`Self::postprocess_mailboxes`],
+    /// and persists it in the offline cache (best-effort).
+    async fn network_mailboxes(
+        uid_store: &mut Arc<UIDStore>,
+        connection: &Arc<ConnectionMutex>,
+    ) -> Result<HashMap<MailboxHash, ImapMailbox>> {
+        let new_mailboxes = Self::imap_mailboxes(connection).await?;
+        let mailboxes = {
+            let mut mailboxes = uid_store.mailboxes.lock().await;
+            *mailboxes = new_mailboxes;
+            Self::postprocess_mailboxes(uid_store, &mut mailboxes)?;
+            mailboxes.clone()
+        };
+        if let Err(err) = uid_store.save_mailbox_list(&mailboxes) {
+            log::warn!(
+                "{}: could not save mailbox list to offline cache: {err}",
+                uid_store.account_name
+            );
+        }
+        Ok(mailboxes)
+    }
+
     pub fn validate_config(s: &mut AccountSettings) -> Result<()> {
         let mut keys: HashSet<&'static str> = Default::default();
         macro_rules! get_conf_val {
@@ -1653,6 +1719,7 @@ impl ImapType {
         get_conf_val!(s["use_auth_anonymous"], false)?;
         get_conf_val!(s["use_id"], false)?;
         let _timeout = get_conf_val!(s["timeout"], 16_u64)?;
+        let _fetch_body_structure = get_conf_val!(s["fetch_body_structure"], true)?;
         get_conf_val!(s["use_connection_pool"], true)?;
         let extra_keys = s
             .extra

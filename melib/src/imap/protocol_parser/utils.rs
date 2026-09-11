@@ -32,10 +32,3 @@ pub fn nil_to_none<'i, T>(
 ) -> impl FnMut(&'i [u8]) -> IResult<&'i [u8], Option<T>> {
     alt((map(tag("NIL"), |_| None), map(parser, Some)))
 }
-
-#[inline]
-pub fn nil_to_default<'i, T: Default>(
-    parser: fn(&'i [u8]) -> IResult<&'i [u8], T>,
-) -> impl FnMut(&'i [u8]) -> IResult<&'i [u8], T> {
-    alt((map(tag("NIL"), |_| T::default()), parser))
-}

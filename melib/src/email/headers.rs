@@ -54,8 +54,8 @@ pub use standards::{Protocol, Standard, StandardHeader, Status};
 /// Can be indexed by:
 ///
 /// - `usize` which is the order of insertion.
-/// - `&[u8]`, which panics if it's not a valid header value.
-/// - `&str`, which also panics if it's not a valid header value.
+/// - `&[u8]`, which panics if it's not a valid header name.
+/// - `&str`, which also panics if it's not a valid header name.
 /// - [`HeaderName`], which is guaranteed to be valid.
 ///
 /// # Panics

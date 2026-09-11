@@ -21,7 +21,7 @@
 
 use crate::jmap::{
     email::EmailAddress,
-    methods::{Changes, Get, Set},
+    methods::{Get, Set},
     objects::{Id, Object},
     protocol::Method,
 };
@@ -98,10 +98,6 @@ pub type IdentityGet = Get<Identity>;
 
 impl Method<Identity> for IdentityGet {
     const NAME: &'static str = "Identity/get";
-}
-pub type IdentityChanges = Changes<Identity>;
-impl Method<Identity> for IdentityChanges {
-    const NAME: &'static str = "Identity/changes";
 }
 
 // [ref:TODO]: implement `forbiddenFrom` error for Identity/set.

@@ -154,7 +154,6 @@ pub struct MeliTask {
 pub struct JobMetadata {
     id: JobId,
     desc: Cow<'static, str>,
-    timer: bool,
     started: UnixTimestamp,
     finished: FinishedTimestamp,
     succeeded: bool,
@@ -167,10 +166,6 @@ impl JobMetadata {
 
     pub fn description(&self) -> &str {
         &self.desc
-    }
-
-    pub fn is_timer(&self) -> bool {
-        self.timer
     }
 
     pub fn started(&self) -> UnixTimestamp {
@@ -344,7 +339,6 @@ impl JobExecutor {
                 started: datetime::now(),
                 finished: finished.clone(),
                 succeeded: true,
-                timer: false,
             },
         );
 

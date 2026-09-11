@@ -1,20 +1,35 @@
 # meli  ![Established, created in 2017](https://img.shields.io/badge/Est.-2017-blue) ![Minimum Supported Rust Version](https://img.shields.io/badge/MSRV-1.85.0-blue) [![GitHub license](https://img.shields.io/github/license/meli/meli)](https://github.com/meli/meli/blob/master/COPYING) [![Crates.io](https://img.shields.io/crates/v/meli)](https://crates.io/crates/meli) [![IRC channel](https://img.shields.io/badge/irc.oftc.net-%23meli-blue)](ircs://irc.oftc.net:6697/%23meli)
 
-**BSD/Linux/macos terminal email client with support for multiple accounts and Maildir / mbox / notmuch / IMAP / JMAP / NNTP (Usenet).**
+**English** | [简体中文](./README.zh-CN.md)
 
-Try an [old, outdated but online and interactive web demo](https://meli-email.org/wasm2.html "online interactive web demo") powered by WebAssembly!
+**A security-hardened and UX-optimized version of meli — BSD/Linux/macos terminal email client with support for multiple accounts and Maildir / mbox / notmuch / IMAP / JMAP / NNTP (Usenet).**
 
-* Say hello on `#meli` on OFTC IRC, or,
-* [`#meli:matrix.org`](https://matrix.to/#/#meli:matrix.org) Matrix bridge (if operational)
-* [Mailing lists](https://lists.meli-email.org/)
-* Main repository <https://git.meli-email.org/meli/meli> Report bugs and/or feature requests in [meli's issue tracker](https://git.meli-email.org/meli/meli/issues "meli gitea issue tracker")<details><summary>Official git mirrors</summary>
-  - <https://codeberg.org/meli/meli>
-  - <https://github.com/meli/meli>
-  - <https://gitlab.com/meli-project/meli>
-  </details>
+Hardened and based on <https://github.com/meli/meli> <https://gitlab.com/meli-project/meli>
+
+## Highlights
+
+This repository is a security-hardened and UX-optimized fork of meli: on top of the original it received a full code audit, hardening and refactoring, plus several real-world usability improvements. Three core highlights:
+
+### 1. Security hardening: four lines of defense against e-mail attacks
+
+A comprehensive code audit and refactor of the original meli fixed 18 audit findings (including 3 HIGH: mailcap command injection, mailto CRLF header injection, and RFC2047 display-name reply hijacking) and removed ~1500 lines of dead code while deduplicating logic. Against malformed/hostile e-mail content (such as QQ Mail's unescaped quoted Message-IDs, empty local-part sender addresses, and script-laden HTML bodies), four lines of defense were designed, layer upon layer:
+
+1. **Parse tolerance**: when an IMAP ENVELOPE field fails strict parsing, it automatically falls back to raw-bytes parsing — any single malformed field can no longer abort the fetch of an entire mailbox;
+2. **Ingestion sanitization**: address fields (From/Sender/Reply-To/To/Cc/Bcc) are validated and normalized before being written to the cache; fixable ones are automatically quoted and re-verified, unfixable ones are replaced with a safe placeholder — new data can never produce "poison rows";
+3. **Visible quarantine**: legacy poisoned cache rows no longer trigger a whole-database reset; they are quarantined row by row into an `invalid_envelopes` table and shown as visible placeholder e-mails (with error-detail headers), self-healing after the server re-fetch — eliminating "one poison e-mail nukes the entire cache".
+4. **Sanitize HTML**: HTML e-mail bodies are cleaned by the bundled `meli_sanitize_html` filter before rendering — an allow-list sanitizer built and installed alongside `meli`, which keeps only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view; enable it with `html_filter = 'meli_sanitize_html | w3m -T text/html'`.
+
+### 2. UX: browse the whole mailbox with the arrow keys
+
+Thread view navigation was fully strengthened: **Up/Down** move through the thread list while the mail body on the right switches live; **Left/Right** shift and enlarge focus between the thread-list and mail-view panes, forming a complete arrow-key navigation chain — the entire mailbox can be browsed with arrow keys alone.
+
+### 3. UX: cache-first, near-instant startup
+
+IMAP startup is now fully cache-first: the mail list and bodies are rendered immediately from the local sqlite cache (stale-while-revalidate, with network deltas syncing silently in the background); the mailbox folder list is persisted to the cache so startup no longer waits for an online check; combined with STATUS counter short-circuiting (RFC 4549) and MSN index persistence, full-scan commands are eliminated from startup. Measured on a real account (QQ Mail INBOX, ~5000 messages): warm-start wait dropped from minutes to seconds (median ~2.7 s, best ~1 s).
 
 **Table of contents**:
 
+- [Highlights](#highlights)
 - [Install](#install)
 - [Build](#build)
   - [Cargo Compile-time Features](#cargo-compile-time-features)
@@ -27,65 +42,16 @@ Try an [old, outdated but online and interactive web demo](https://meli-email.or
 
 ## Install
 
-<a href="https://repology.org/project/meli/versions">
-  <img src="https://repology.org/badge/vertical-allrepos/meli.svg" alt="Packaging status table by repology.org" align="right">
-</a>
+- Cargo install by source code
 
-- Crates.io with `cargo` on all supported systems and architectures <https://crates.io/crates/meli>
-
-  ![Crates.io](https://img.shields.io/crates/v/meli)
+  Install from git repository:
   ```sh
-  cargo install meli
+  cargo install --git https://github.com/kylelee/hardened-meli meli meli_sanitize_html
   ```
-  Install latest development snapshot from git repository:
-  ```sh
-  cargo install --git https://git.meli-email.org/meli/meli.git meli
-  ```
-- Official Debian (and Debian derivatives) packages <https://packages.debian.org/trixie/meli>
-
-  ![Debian 13 package](https://repology.org/badge/version-for-repo/debian_13/meli.svg) ![Ubuntu 25.04 package](https://repology.org/badge/version-for-repo/ubuntu_25_04/meli.svg) ![Raspbian Testing package](https://repology.org/badge/version-for-repo/raspbian_testing/meli.svg)
-  ```sh
-  apt install meli
-  ```
-- AUR (archlinux) <https://aur.archlinux.org/packages/meli>
-
-  ![AUR package](https://repology.org/badge/version-for-repo/aur/meli.svg)
-- OpenSUSE <https://build.opensuse.org/package/show/openSUSE:Factory/meli>
-
-  ![openSUSE Tumbleweed package](https://repology.org/badge/version-for-repo/opensuse_tumbleweed/meli.svg)
-- Alpine Linux <https://pkgs.alpinelinux.org/packages?name=meli>
-
-  ![Alpine Linux Edge package](https://repology.org/badge/version-for-repo/alpine_edge/meli.svg)
-  ```sh
-  apk install meli
-  ```
-- NetBSD with pkgsrc <https://pkgsrc.se/mail/meli>
-
-  ![pkgsrc current package](https://repology.org/badge/version-for-repo/pkgsrc_current/meli.svg)
-- OpenBSD ports <https://openports.pl/path/mail/meli>
-
-  ![OpenBSD port](https://repology.org/badge/version-for-repo/openbsd/meli.svg)
-- macOS with
-  - Homebrew <https://formulae.brew.sh/formula/meli>
-
-    ![Homebrew package](https://repology.org/badge/version-for-repo/homebrew/meli.svg)
-    ```sh
-    brew install meli
-    ```
-  - MacPorts <https://ports.macports.org/port/meli/>
-
-    ![MacPorts package](https://repology.org/badge/version-for-repo/macports/meli.svg)
-    ```sh
-    port install meli
-    ```
-- Nix with Nixpkgs <https://search.nixos.org/packages?query=meli>
-
-  ![nixpkgs unstable package](https://repology.org/badge/version-for-repo/nix_unstable/meli.svg)
-- [Pre-built debian package, static binaries](https://github.com/meli/meli/releases/ "github releases for meli") for <code>amd64</code>, <code>arm64</code> architectures
 
 ## Build
 
-Run `make` or `cargo build --release --bin meli`.
+Run `make` or `cargo build --release`.
 
 See `make help` output for information on how to use the `Makefile`.
 
@@ -207,6 +173,7 @@ See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)
 
 HTML rendering is achieved using [w3m](https://github.com/tats/w3m) by default.
 You can use the `pager.html_filter` setting to override this (for more details you can consult [`meli.conf(5)`](./meli/docs/meli.conf.5)).
+meli also ships a bundled sanitizer, `meli_sanitize_html`, which sanitizes the HTML first (allow-list based, removing scripts and dangerous links) before rendering; enable it with `html_filter = 'meli_sanitize_html | w3m -T text/html'`.
 
 
 ## Documentation
