@@ -615,30 +615,12 @@ impl EnvelopeView {
         lidx: usize,
         context: &mut Context,
     ) -> Option<&'_ melib::Attachment> {
-        if let Some(path) = self
+        if self
             .attachment_paths
             .get(lidx)
-            .filter(|path| !path.is_empty())
+            .is_some_and(|path| !path.is_empty())
         {
-            let first = path[0];
-            let root_attachment = &self.display[first];
-            fn find_attachment<'a>(
-                a: &'a AttachmentDisplay,
-                path: &[usize],
-            ) -> Option<&'a melib::Attachment> {
-                if path.is_empty() {
-                    return Some(a.attachment());
-                }
-                if let Some(parts) = a.as_multipart() {
-                    let first = path[0];
-                    if first < parts.len() {
-                        return find_attachment(&parts[first], &path[1..]);
-                    }
-                }
-                None
-            }
-
-            let ret = find_attachment(root_attachment, &path[1..]);
+            let ret = self.lookup_attachment(lidx);
             if lidx == 0 {
                 return ret.filter(|a| {
                     a.content_disposition.kind.is_attachment() || a.content_type == "message/rfc822"
@@ -654,6 +636,35 @@ impl EnvelopeView {
             kind: None,
         });
         None
+    }
+
+    /// Look up the attachment at list index `lidx` by walking its display
+    /// tree path, without `open_attachment`'s lidx==0 filtering or
+    /// not-found notification side effect.
+    fn lookup_attachment(&self, lidx: usize) -> Option<&melib::Attachment> {
+        let path = self
+            .attachment_paths
+            .get(lidx)
+            .filter(|path| !path.is_empty())?;
+        let first = path[0];
+        let root_attachment = &self.display[first];
+        fn find_attachment<'a>(
+            a: &'a AttachmentDisplay,
+            path: &[usize],
+        ) -> Option<&'a melib::Attachment> {
+            if path.is_empty() {
+                return Some(a.attachment());
+            }
+            if let Some(parts) = a.as_multipart() {
+                let first = path[0];
+                if first < parts.len() {
+                    return find_attachment(&parts[first], &path[1..]);
+                }
+            }
+            None
+        }
+
+        find_attachment(root_attachment, &path[1..])
     }
 
     pub fn body_text(&self) -> &str {
@@ -732,6 +743,140 @@ impl EnvelopeView {
                 kind: None,
             });
         }
+    }
+
+    /// Save all attachment-like parts under a fresh `meli-<title>` directory
+    /// inside `dir`, defaulting to the user's `~/Downloads` when `None`.
+    pub(super) fn save_all_attachments_to(
+        &self,
+        context: &mut Context,
+        dir: Option<&std::path::Path>,
+    ) {
+        let mut title = self.mail.subject();
+        crate::sanitize_filename(&mut title);
+        if title.trim().is_empty() {
+            title = "untitled".into();
+        }
+        let title = truncate_middle(&title, 128, 240);
+
+        let mut attachments = Vec::new();
+        for idx in 0..self.attachment_paths.len() {
+            if self.attachment_paths[idx].is_empty() {
+                continue;
+            }
+            let Some(att) = self.lookup_attachment(idx) else {
+                continue;
+            };
+            // `Attachment::filename` ignores `Content-Disposition.filename`
+            // for inline parts, so consult the disposition as well.
+            let is_attachment_like = att.content_disposition.kind.is_attachment()
+                || att.content_type == "message/rfc822"
+                || (att.content_disposition.kind.is_inline()
+                    && (att.filename().is_some() || att.content_disposition.filename.is_some()));
+            if is_attachment_like {
+                attachments.push((idx, att));
+            }
+        }
+
+        if attachments.is_empty() {
+            context.replies.push_back(UIEvent::Notification {
+                title: None,
+                source: None,
+                body: "No attachments to save.".into(),
+                kind: Some(NotificationType::Info),
+            });
+            return;
+        }
+
+        let downloads = dir
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("~/Downloads").expand());
+        let mut dir = downloads.join(format!("meli-{title}"));
+        let mut n = 1;
+        while dir.exists() {
+            n += 1;
+            dir = downloads.join(format!("meli-{title}-{n}"));
+        }
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            context.replies.push_back(UIEvent::Notification {
+                title: Some(format!("Failed to create directory at {}", dir.display()).into()),
+                body: err.to_string().into(),
+                source: Some(err.into()),
+                kind: Some(NotificationType::Error(melib::ErrorKind::External)),
+            });
+            return;
+        }
+
+        let mut saved = 0;
+        let mut failed = 0;
+        let mut used_names = std::collections::HashSet::new();
+        for (idx, att) in attachments {
+            let mut filename = att
+                .filename()
+                .or_else(|| {
+                    att.content_disposition
+                        .filename
+                        .as_deref()
+                        .map(std::borrow::Cow::from)
+                })
+                .map(|mut f| {
+                    crate::sanitize_separator(&mut f);
+                    f
+                })
+                .unwrap_or_else(|| {
+                    format!("meli_attachment_{idx}_{}", Uuid::new_v4().as_simple()).into()
+                });
+            if !used_names.insert(filename.to_string()) {
+                let duplicate = filename.to_string();
+                let (stem, dot_ext) = duplicate
+                    .rsplit_once('.')
+                    .map(|(stem, ext)| (stem.to_string(), format!(".{ext}")))
+                    .unwrap_or((duplicate, String::new()));
+                let mut dedup = 1;
+                loop {
+                    let candidate = format!("{stem}_{dedup}{dot_ext}");
+                    if used_names.insert(candidate.clone()) {
+                        filename = candidate.into();
+                        break;
+                    }
+                    dedup += 1;
+                }
+            }
+            let path = dir.join(filename.as_ref());
+            match save_attachment(&path, &att.decode(self.view_settings.charset.into())) {
+                Err(err) => {
+                    log::error!("Failed to save attachment at {}: {err}", path.display());
+                    failed += 1;
+                }
+                Ok(()) => {
+                    saved += 1;
+                }
+            }
+        }
+
+        context.replies.push_back(UIEvent::Notification {
+            title: None,
+            source: None,
+            body: if failed == 0 {
+                format!("Saved {saved} attachment(s) to {}", dir.display())
+            } else {
+                format!(
+                    "Saved {saved} of {} attachments to {}; {failed} failed, see logs",
+                    saved + failed,
+                    dir.display()
+                )
+            }
+            .into(),
+            kind: if failed == 0 {
+                Some(NotificationType::Info)
+            } else {
+                Some(NotificationType::Error(melib::ErrorKind::External))
+            },
+        });
+    }
+
+    fn save_all_attachments(&self, context: &mut Context) {
+        self.save_all_attachments_to(context, None);
     }
 }
 
@@ -1603,6 +1748,10 @@ impl Component for EnvelopeView {
                 self.save_attachment(a_i, path, context);
                 return true;
             }
+            UIEvent::Action(View(ViewAction::SaveAllAttachments)) => {
+                self.save_all_attachments(context);
+                return true;
+            }
             UIEvent::Action(View(ViewAction::SaveAttachment(
                 a_i,
                 FileAction::FilePicker(ref command),
@@ -1943,6 +2092,14 @@ impl Component for EnvelopeView {
                     context,
                 )));
                 self.dirty = true;
+                return true;
+            }
+            UIEvent::Input(ref key)
+                if shortcut!(
+                    key == shortcuts[Shortcuts::ENVELOPE_VIEW]["save_all_attachments"]
+                ) =>
+            {
+                self.save_all_attachments(context);
                 return true;
             }
             UIEvent::IntraComm {

@@ -85,6 +85,7 @@ fn test_command_parser_all() {
         "import fpath mpath",
         "close  ",
         "go 5",
+        "save-all-attachment",
     ] {
         parse_command(cmd.as_bytes()).unwrap_or_else(|err| panic!("{cmd} failed {err}"));
     }
@@ -131,6 +132,23 @@ fn test_command_parser_all() {
             given: 2,
             __func__: "reindex",
             inner: "".into(),
+        }
+        .to_string(),
+    );
+    assert_eq!(
+        parse_command(b"save-all-attachment").unwrap(),
+        View(ViewAction::SaveAllAttachments),
+    );
+    assert_eq!(
+        parse_command(b"save-all-attachment extra")
+            .unwrap_err()
+            .to_string(),
+        WrongNumberOfArguments {
+            too_many: true,
+            takes: (0, Some(0)),
+            given: 1,
+            __func__: "save_all_attachment",
+            inner: "needs at least 0 arguments.".into(),
         }
         .to_string(),
     );

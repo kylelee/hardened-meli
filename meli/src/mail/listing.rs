@@ -2198,14 +2198,24 @@ impl Component for Listing {
                 UIEvent::Input(ref k)
                     if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]) =>
                 {
+                    // Right opens the sidebar-selected entry, mirroring
+                    // `open_mailbox` (Enter); previously it only shifted focus,
+                    // so the stale/default mailbox stayed open.
+                    self.cursor_pos = self.menu_cursor_pos;
+                    self.change_account(context);
                     self.focus = ListingFocus::Mailbox;
+                    self.ratio = self.prev_ratio;
+                    self.set_dirty(true);
                     context
                         .replies
                         .push_back(UIEvent::StatusEvent(StatusEvent::ScrollUpdate(
                             ScrollUpdate::End(self.id),
                         )));
-                    self.ratio = self.prev_ratio;
-                    self.set_dirty(true);
+                    context
+                        .replies
+                        .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
+                            self.status(context),
+                        )));
                     return true;
                 }
                 UIEvent::Input(ref k)
@@ -3609,4 +3619,306 @@ pub enum ListingMessage {
         go_to_first_unread: bool,
     },
     UpdateView,
+}
+
+#[cfg(test)]
+mod listing_menu_tests {
+    use std::sync::OnceLock;
+
+    use melib::{
+        backends::{
+            AccountHash, BackendMailbox, Mailbox, MailboxHash, MailboxPermissions,
+            SpecialUsageMailbox,
+        },
+        Result,
+    };
+
+    use super::*;
+    use crate::{
+        accounts::{build_mailboxes_order, MailboxEntry, MailboxStatus},
+        components::Component,
+        conf::{composing::SendMail, FileMailboxConf},
+        terminal::Key,
+        types::UIEvent,
+        Context,
+    };
+
+    #[derive(Debug)]
+    struct TestMailbox {
+        hash: MailboxHash,
+        name: String,
+    }
+
+    impl BackendMailbox for TestMailbox {
+        fn hash(&self) -> MailboxHash {
+            self.hash
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        // Each mailbox must have a distinct path: `build_mailboxes_order`
+        // sorts by path, so a shared hardcoded path would make both entries
+        // compare equal and leave the INBOX-first detection ambiguous.
+        fn path(&self) -> &str {
+            &self.name
+        }
+
+        fn children(&self) -> &[MailboxHash] {
+            &[]
+        }
+
+        fn clone(&self) -> Mailbox {
+            Box::new(Self {
+                hash: self.hash,
+                name: self.name.clone(),
+            })
+        }
+
+        fn special_usage(&self) -> SpecialUsageMailbox {
+            SpecialUsageMailbox::Normal
+        }
+
+        fn parent(&self) -> Option<MailboxHash> {
+            None
+        }
+
+        fn permissions(&self) -> MailboxPermissions {
+            MailboxPermissions::default()
+        }
+
+        fn is_subscribed(&self) -> bool {
+            true
+        }
+
+        fn set_is_subscribed(&mut self, _: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_special_usage(&mut self, _: SpecialUsageMailbox) -> Result<()> {
+            Ok(())
+        }
+
+        fn count(&self) -> Result<(usize, usize)> {
+            Ok((0, 0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Shared HOME for the mock contexts below. Environment variables are
+    /// process-global, so parallel tests must not race each other by pointing
+    /// them at tempdirs that get deleted while another test constructs its
+    /// `Context` (which reads `MELI_CONFIG`/XDG vars).
+    fn shared_test_home() -> &'static tempfile::TempDir {
+        static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+        HOME.get_or_init(|| {
+            let tempdir = tempfile::tempdir().unwrap();
+            std::env::set_var("HOME", tempdir.path());
+            std::env::set_var("XDG_CONFIG_HOME", tempdir.path().join(".config"));
+            std::env::set_var(
+                "XDG_DATA_HOME",
+                tempdir.path().join(".local").join(".share"),
+            );
+            tempdir
+        })
+    }
+
+    fn mock_context() -> Context {
+        // Retry: parallel suites (conf tests) also overwrite the process-global
+        // `MELI_CONFIG`, which can make `Settings::new()` inside `new_mock` fail
+        // spuriously.
+        let mut ctx = None;
+        for _ in 0..3 {
+            if let Ok(candidate) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Context::new_mock(shared_test_home())
+            })) {
+                ctx = Some(candidate);
+                break;
+            }
+        }
+        let mut ctx = ctx.unwrap_or_else(|| Context::new_mock(shared_test_home()));
+        // The default `send_mail` (`ShellCommand("false")`) races: the child can
+        // exit before meli finishes writing the message to its stdin, panicking
+        // with a broken pipe. An empty command makes `Account::send` return a
+        // deterministic error without spawning anything.
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        ctx.accounts[&account_hash].settings.send_mail = SendMail::ShellCommand(String::new());
+        ctx
+    }
+
+    /// Register two mailboxes (`INBOX`, `Archive`) on the mock account and
+    /// rebuild the account's mailbox tree/order.
+    ///
+    /// `Listing::new` snapshots the account entries via `list_mailboxes`, so
+    /// the mailboxes must be registered before it is called. The
+    /// INBOX-first comparator in `build_mailboxes_order` guarantees the order
+    /// `INBOX` (index 0), `Archive` (index 1).
+    fn register_two_mailboxes(context: &mut Context) -> (AccountHash, MailboxHash, MailboxHash) {
+        let account_hash = *context.accounts.iter().next().unwrap().0;
+        let account = context.accounts.get_mut(&account_hash).unwrap();
+        for name in ["INBOX", "Archive"] {
+            let mailbox_hash = MailboxHash::from_bytes(name.as_bytes());
+            account.mailbox_entries.insert(
+                mailbox_hash,
+                MailboxEntry::new(
+                    MailboxStatus::Available,
+                    name.to_string(),
+                    Box::new(TestMailbox {
+                        hash: mailbox_hash,
+                        name: name.to_string(),
+                    }),
+                    FileMailboxConf::default(),
+                ),
+            );
+        }
+        build_mailboxes_order(
+            &mut account.tree,
+            &account.mailbox_entries,
+            &mut account.mailboxes_order,
+        );
+        (
+            account_hash,
+            MailboxHash::from_bytes(b"INBOX"),
+            MailboxHash::from_bytes(b"Archive"),
+        )
+    }
+
+    #[test]
+    fn listing_menu_focus_right_opens_selected_mailbox() {
+        let mut ctx = mock_context();
+        // Pin the shortcuts this test drives so that a `MELI_CONFIG` template
+        // drift cannot change what the keys mean.
+        ctx.settings.shortcuts.listing.focus_left = Key::Left;
+        ctx.settings.shortcuts.listing.focus_right = Key::Right;
+        ctx.settings.shortcuts.listing.scroll_up = Key::Up;
+        ctx.settings.shortcuts.listing.scroll_down = Key::Down;
+        let (account_hash, _inbox_hash, archive_hash) = register_two_mailboxes(&mut ctx);
+        let mut listing = Listing::new(&mut ctx);
+        assert_eq!(
+            listing.cursor_pos.menu,
+            MenuEntryCursor::Mailbox(0),
+            "precondition: INBOX is the open mailbox"
+        );
+
+        listing.process_event(&mut UIEvent::Input(Key::Left), &mut ctx);
+        assert_eq!(listing.focus, ListingFocus::Menu);
+
+        listing.process_event(&mut UIEvent::Input(Key::Down), &mut ctx);
+        assert_eq!(
+            listing.menu_cursor_pos.menu,
+            MenuEntryCursor::Mailbox(1),
+            "Down must move the menu cursor to Archive without opening it"
+        );
+
+        let consumed = listing.process_event(&mut UIEvent::Input(Key::Right), &mut ctx);
+        assert!(consumed);
+        assert_eq!(listing.focus, ListingFocus::Mailbox);
+        assert_eq!(
+            listing.cursor_pos.menu,
+            MenuEntryCursor::Mailbox(1),
+            "focus_right must adopt the sidebar-selected mailbox (Archive)"
+        );
+        assert_eq!(
+            listing.component.coordinates(),
+            (account_hash, archive_hash),
+            "focus_right must open the sidebar-selected mailbox"
+        );
+    }
+
+    #[test]
+    fn listing_menu_focus_right_at_status_opens_status() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.listing.focus_left = Key::Left;
+        ctx.settings.shortcuts.listing.focus_right = Key::Right;
+        ctx.settings.shortcuts.listing.scroll_up = Key::Up;
+        ctx.settings.shortcuts.listing.scroll_down = Key::Down;
+        register_two_mailboxes(&mut ctx);
+        let mut listing = Listing::new(&mut ctx);
+
+        listing.process_event(&mut UIEvent::Input(Key::Left), &mut ctx);
+        assert_eq!(listing.focus, ListingFocus::Menu);
+
+        listing.menu_cursor_pos.menu = MenuEntryCursor::Status;
+        let consumed = listing.process_event(&mut UIEvent::Input(Key::Right), &mut ctx);
+        assert!(consumed);
+        assert_eq!(listing.focus, ListingFocus::Mailbox);
+        assert!(
+            listing.status.is_some(),
+            "focus_right at the Status entry must open the account status view"
+        );
+    }
+}
+
+struct TagsIterator<'envelope, 'context> {
+    context: &'context Context,
+    account_hash: AccountHash,
+    mailbox_hash: MailboxHash,
+    tags: &'context BTreeMap<melib::TagHash, String>,
+    iter: indexmap::set::Iter<'envelope, melib::TagHash>,
+}
+
+impl<'envelope, 'context> TagsIterator<'envelope, 'context> {
+    #[inline]
+    fn new(
+        iter: indexmap::set::Iter<'envelope, melib::TagHash>,
+        context: &'context Context,
+        account_hash: AccountHash,
+        mailbox_hash: MailboxHash,
+        tags: &'context BTreeMap<melib::TagHash, String>,
+    ) -> Self {
+        Self {
+            context,
+            account_hash,
+            mailbox_hash,
+            tags,
+            iter,
+        }
+    }
+}
+
+impl<'envelope, 'context> Iterator for TagsIterator<'envelope, 'context> {
+    type Item = (&'context str, Option<Color>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Self {
+            ref account_hash,
+            ref mailbox_hash,
+            tags,
+            context,
+            ref mut iter,
+        } = self;
+        let mut t = iter.next()?;
+        while mailbox_settings!(context[*account_hash][mailbox_hash].tags.ignore_tags).contains(t)
+            || account_settings!(context[*account_hash].tags.ignore_tags).contains(t)
+            || context.settings.tags.ignore_tags.contains(t)
+            || !tags.contains_key(t)
+        {
+            t = iter.next()?;
+        }
+        let color = mailbox_settings!(context[*account_hash][mailbox_hash].tags.colors)
+            .get(t)
+            .cloned()
+            .or_else(|| {
+                account_settings!(context[*account_hash].tags.colors)
+                    .get(t)
+                    .cloned()
+                    .or_else(|| context.settings.tags.colors.get(t).cloned())
+            });
+        let s = if let Some(s) =
+            mailbox_settings!(context[*account_hash][mailbox_hash].tags.rename).get(t)
+        {
+            s.as_str()
+        } else {
+            tags.get(t)?.as_str()
+        };
+        Some((s, color))
+    }
 }

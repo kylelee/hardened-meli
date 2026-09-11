@@ -665,7 +665,12 @@ impl Attachment {
 
     fn get_text_recursive(&self, kind: &Text, text: &mut Vec<u8>) {
         match self.content_type {
-            ContentType::Text { .. } | ContentType::PGPSignature | ContentType::CMSSignature => {
+            ContentType::Text {
+                kind: ref a_kind, ..
+            } if a_kind == kind => {
+                text.extend(self.decode(Default::default()));
+            }
+            ContentType::PGPSignature | ContentType::CMSSignature => {
                 text.extend(self.decode(Default::default()));
             }
             ContentType::Multipart {
@@ -1275,5 +1280,57 @@ mod tests {
         // Two replacement characters for the two truncated multibyte
         // sequences.
         assert_eq!(String::from_utf8_lossy(raw).matches('\u{FFFD}').count(), 2);
+    }
+
+    /// Regression test for upstream 4ca86e2a ("melib/email: check text
+    /// `content_type` in `get_text_recursive()`"): a `multipart/mixed`
+    /// container with one inline `text/plain` and one inline `text/html`
+    /// subpart must yield only the subpart matching the requested kind.
+    /// Before the fix, the generic multipart arm recursed into every
+    /// inline text leaf regardless of kind, so both bodies leaked into
+    /// `Attachment::text`'s result.
+    #[test]
+    fn test_multipart_mixed_text_kind_selection() {
+        let raw_mail = r#"Content-Type: multipart/mixed; boundary="T3_mixed_bnd"
+
+preamble
+--T3_mixed_bnd
+Content-Type: text/plain; charset="utf-8"
+Content-Disposition: inline
+
+PLAINBODY
+--T3_mixed_bnd
+Content-Type: text/html; charset="utf-8"
+Content-Disposition: inline
+
+<p>HTMLBODY</p>
+--T3_mixed_bnd--"#;
+
+        let body = AttachmentBuilder::new(raw_mail.as_bytes()).build();
+        assert!(
+            matches!(
+                body.content_type(),
+                ContentType::Multipart {
+                    kind: MultipartType::Mixed,
+                    ..
+                }
+            ),
+            "unexpected top-level content type: {}",
+            body.content_type()
+        );
+
+        let plain = body.text(Text::Plain);
+        assert!(plain.contains("PLAINBODY"), "plain body missing: {plain:?}");
+        assert!(
+            !plain.contains("HTMLBODY"),
+            "html body leaked into plain text: {plain:?}"
+        );
+
+        let html = body.text(Text::Html);
+        assert!(html.contains("HTMLBODY"), "html body missing: {html:?}");
+        assert!(
+            !html.contains("PLAINBODY"),
+            "plain body leaked into html text: {html:?}"
+        );
     }
 }

@@ -67,10 +67,13 @@ pub struct PagerSettings {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub named_filters: IndexMap<String, String>,
 
-    /// A command to pipe html output before displaying it in a pager
-    /// Default: None
+    /// A command to pipe html output before displaying it in a pager.
+    ///
+    /// Defaults to the bundled sanitizer pipeline, which strips scripts and
+    /// dangerous links before rendering. Set it to an empty value to opt out
+    /// and render with plain w3m.
     #[serde(
-        default = "none",
+        default = "default_html_filter",
         deserialize_with = "non_empty_opt_string",
         alias = "html-filter"
     )]
@@ -134,7 +137,7 @@ impl Default for PagerSettings {
             pager_ratio: 80,
             filter: None,
             named_filters: IndexMap::default(),
-            html_filter: None,
+            html_filter: default_html_filter(),
             html_open: None,
             format_flowed: true,
             split_long_lines: true,

@@ -482,6 +482,11 @@ Alternatives(&[to_stream!(One(Literal("add-attachment")), One(Filepath)), to_str
 Alternatives(&[to_stream!(One(Literal("save-attachment")), One(AttachmentIndexValue), One(Filepath)), to_stream!(One(Literal("save-attachment-picker")))]))],
                   parser: parser::save_attachment
                 },
+                { tags: ["save-all-attachment"],
+                  desc: "save-all-attachment",
+                  tokens: &[One(Literal("save-all-attachment"))],
+                  parser: parser::save_all_attachment
+                },
                 { tags: ["export-mail "],
                   desc: "export-mail PATH",
                   tokens: &[One(Literal("export-mail")), One(Filepath)],

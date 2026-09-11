@@ -17,7 +17,7 @@ A comprehensive code audit and refactor of the original meli fixed 18 audit find
 1. **Parse tolerance**: when an IMAP ENVELOPE field fails strict parsing, it automatically falls back to raw-bytes parsing — any single malformed field can no longer abort the fetch of an entire mailbox;
 2. **Ingestion sanitization**: address fields (From/Sender/Reply-To/To/Cc/Bcc) are validated and normalized before being written to the cache; fixable ones are automatically quoted and re-verified, unfixable ones are replaced with a safe placeholder — new data can never produce "poison rows";
 3. **Visible quarantine**: legacy poisoned cache rows no longer trigger a whole-database reset; they are quarantined row by row into an `invalid_envelopes` table and shown as visible placeholder e-mails (with error-detail headers), self-healing after the server re-fetch — eliminating "one poison e-mail nukes the entire cache".
-4. **Sanitize HTML**: HTML e-mail bodies are cleaned by the bundled `meli_sanitize_html` filter before rendering — an allow-list sanitizer built and installed alongside `meli`, which keeps only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view; enable it with `html_filter = 'meli_sanitize_html | w3m -T text/html'`.
+4. **Sanitize HTML**: HTML e-mail bodies are cleaned by the bundled `meli_sanitize_html` filter before rendering — an allow-list sanitizer built and installed alongside `meli`, which keeps only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view; this is enabled by default via `pager.html_filter`.
 
 ### 2. UX: browse the whole mailbox with the arrow keys
 
@@ -49,6 +49,15 @@ IMAP startup is now fully cache-first: the mail list and bodies are rendered imm
   cargo install --git https://github.com/kylelee/hardened-meli meli meli_sanitize_html
   ```
 
+### Runtime dependencies
+
+[w3m](https://github.com/tats/w3m) is required to safely view HTML e-mail
+content: HTML mail is sanitized by the bundled `meli_sanitize_html` and then
+rendered with `w3m` by default. Install it with your system package manager,
+e.g. `sudo apt install w3m` on Debian/Ubuntu or `sudo dnf install w3m` on
+Fedora. Without it, viewing HTML mail fails with an error notice and falls
+back to the raw source.
+
 ## Build
 
 Run `make` or `cargo build --release`.
@@ -64,14 +73,15 @@ For detailed building instructions, see [`BUILD.md`](./BUILD.md)
 The contents of the `default` feature are:
 
 ```toml
-default = ["sqlite3", "notmuch", "smtp", "dbus-notifications", "gpgme", "cli-docs", "jmap", "static"]
+default = ["sqlite3", "notmuch", "smtp", "http", "dbus-notifications", "gpgme", "cli-docs", "jmap", "static"]
 ```
 
 A list of all the features and a description for each follows:
 
 | Feature flag                                                  | Dependencies                                                                                 | Notes                                                                                                                                                                                             |
 |---------------------------------------------------------------|----------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| <a name="notmuch-feature">`notmuch`</a>                       | `maildir` feature                                                                            | Provides the *notmuch* backend                                                                                                                                                                    |
+| <a name="http-feature">`http`</a>                       | `melib` `http` feature                                                                       | Provides the HTTP client (via `melib`, used by the JMAP backend)                                                                   |
+| <a name="notmuch-feature">`notmuch`</a>                       | `maildir` feature                                                                            | Provides the *notmuch* backend                                                                                                    |
 | <a name="jmap-feature">`jmap`</a>                             | `http` feature, `url` crate with `serde` feature                                             | Provides the *JMAP* backend                                                                                                                                                                       |
 | <a name="smtp-feature">`smtp`</a>                             | `tls` feature                                                                                | Integrated async *SMTP* client                                                                                                                                                                    |
 | <a name="sqlite3-feature">`sqlite3`</a>                       | `rusqlite` crate with `bundled-full` feature                                                 | Used in caches                                                                                                                                                                                    |
@@ -166,14 +176,18 @@ See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)
 - view text/html attachments through an html filter command (w3m by default)
 - pipe attachments/mail to stuff
 - use external attachment file picker instead of typing in an attachment's full path
+- save all attachments of the viewed mail to ~/Downloads/meli-<subject> with one command or keystroke (default `C-s`)
 - GPG signing, encryption, signing + encryption
 - GPG signature verification
 
 ### HTML Rendering
 
-HTML rendering is achieved using [w3m](https://github.com/tats/w3m) by default.
-You can use the `pager.html_filter` setting to override this (for more details you can consult [`meli.conf(5)`](./meli/docs/meli.conf.5)).
-meli also ships a bundled sanitizer, `meli_sanitize_html`, which sanitizes the HTML first (allow-list based, removing scripts and dangerous links) before rendering; enable it with `html_filter = 'meli_sanitize_html | w3m -T text/html'`.
+HTML mail is sanitized by default: meli pipes it through the bundled
+`meli_sanitize_html` sanitizer (allow-list based, removing scripts and
+dangerous links) and renders it with [w3m](https://github.com/tats/w3m).
+Override or disable this with the `pager.html_filter` setting (set it to `''`
+to render with plain w3m without sanitizing); for more details consult
+[`meli.conf(5)`](./meli/docs/meli.conf.5).
 
 
 ## Documentation

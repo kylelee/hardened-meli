@@ -1530,6 +1530,10 @@ impl ImapConnection {
             MailboxSelection::Examine {
                 mailbox_hash: _,
                 latest_response,
+            }
+            | MailboxSelection::Select {
+                mailbox_hash: _,
+                latest_response,
             },
         ) = (
             !force,
