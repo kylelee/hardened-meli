@@ -17,7 +17,7 @@ A comprehensive code audit and refactor of the original meli fixed 18 audit find
 1. **Parse tolerance**: when an IMAP ENVELOPE field fails strict parsing, it automatically falls back to raw-bytes parsing — any single malformed field can no longer abort the fetch of an entire mailbox;
 2. **Ingestion sanitization**: address fields (From/Sender/Reply-To/To/Cc/Bcc) are validated and normalized before being written to the cache; fixable ones are automatically quoted and re-verified, unfixable ones are replaced with a safe placeholder — new data can never produce "poison rows";
 3. **Visible quarantine**: legacy poisoned cache rows no longer trigger a whole-database reset; they are quarantined row by row into an `invalid_envelopes` table and shown as visible placeholder e-mails (with error-detail headers), self-healing after the server re-fetch — eliminating "one poison e-mail nukes the entire cache".
-4. **Sanitize HTML**: HTML e-mail bodies are cleaned by the bundled `meli_sanitize_html` filter before rendering — an allow-list sanitizer built and installed alongside `meli`, which keeps only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view; this is enabled by default via `pager.html_filter`.
+4. **Sanitize HTML**: HTML e-mail bodies are cleaned by the bundled `meli_sanitize_html` filter before rendering — an allow-list sanitizer built and installed alongside `meli`, which keeps only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view; enable it with `html_filter = 'meli_sanitize_html | w3m -T text/html'`.
 
 ### 2. UX: browse the whole mailbox with the arrow keys
 
@@ -184,7 +184,8 @@ See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)
 
 HTML mail is sanitized by default: meli pipes it through the bundled
 `meli_sanitize_html` sanitizer (allow-list based, removing scripts and
-dangerous links) and renders it with [w3m](https://github.com/tats/w3m).
+dangerous links) and renders it with [w3m](https://github.com/tats/w3m);
+enable it with `html_filter = 'meli_sanitize_html | w3m -T text/html'`.
 Override or disable this with the `pager.html_filter` setting (set it to `''`
 to render with plain w3m without sanitizing); for more details consult
 [`meli.conf(5)`](./meli/docs/meli.conf.5).
