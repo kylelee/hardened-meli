@@ -464,10 +464,16 @@ impl From<io::Error> for Error {
             // more intelligent than a hardcoded string `contains`.
             // <https://github.com/sfackler/rust-openssl/blob/538a5cb737e8d83085553cac01643820dc7ff205/openssl/src/ssl/error.rs#L100-L123>
             ErrorKind::Network(NetworkErrorKind::InvalidTLSConnection)
-        } else if let Some(errno) = err.raw_os_error() {
-            ErrorKind::OSError(Errno::from_raw(errno))
         } else {
-            err.kind().into()
+            let from_kind = ErrorKind::from(err.kind());
+            if matches!(from_kind, ErrorKind::Platform) {
+                match err.raw_os_error() {
+                    Some(errno) => ErrorKind::OSError(Errno::from_raw(errno)),
+                    None => from_kind,
+                }
+            } else {
+                from_kind
+            }
         };
         Self::from_inner(Arc::new(err)).set_kind(kind)
     }
@@ -664,5 +670,47 @@ impl From<xdg::BaseDirectoriesError> for Error {
         Self::new("Could not detect XDG directories for user")
             .set_source(Some(std::sync::Arc::new(Box::new(err))))
             .set_kind(ErrorKind::NotSupported)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for upstream meli commit `2b7c2123` ("classify
+    /// errors by `ErrorKind` before falling back to raw errno").
+    ///
+    /// `From<io::Error>` used to check `err.raw_os_error()` before
+    /// `err.kind()`, so any io error carrying an errno landed in the generic
+    /// `OSError` bucket instead of the buckets derived from the
+    /// `From<io::ErrorKind> for ErrorKind` mapping table:
+    ///
+    /// - ECONNRESET (`io::Error::from_raw_os_error(104)`): std reports
+    ///   `io::ErrorKind::ConnectionReset`, which the mapping classifies as
+    ///   `ErrorKind::Network(NetworkErrorKind::ConnectionFailed)`; the raw
+    ///   errno fallback must not override this classification.
+    /// - ENOENT (`io::Error::from_raw_os_error(2)`): std reports
+    ///   `io::ErrorKind::NotFound`, which the mapping's catch-all arm leaves
+    ///   as `ErrorKind::Platform`; here the raw errno fallback still applies
+    ///   and the error must land in the `ErrorKind::OSError` bucket.
+    #[test]
+    fn test_io_error_kind_classification_before_errno() {
+        let conn_reset = Error::from(io::Error::from_raw_os_error(104)); // ECONNRESET
+        assert!(
+            conn_reset.kind.is_network(),
+            "ECONNRESET must classify as Network via io::ErrorKind::ConnectionReset, got {}",
+            conn_reset.kind
+        );
+        assert!(matches!(
+            conn_reset.kind,
+            ErrorKind::Network(NetworkErrorKind::ConnectionFailed)
+        ));
+
+        let not_found = Error::from(io::Error::from_raw_os_error(2)); // ENOENT
+        assert!(
+            matches!(not_found.kind, ErrorKind::OSError(_)),
+            "ENOENT maps to Platform via the catch-all arm, so it must fall back to OSError, got {}",
+            not_found.kind
+        );
     }
 }

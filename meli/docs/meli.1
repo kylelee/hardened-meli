@@ -241,6 +241,26 @@ Example usage with
 :
 .D1 save-attachment-picker 3 vifm --choose-dir - --delimiter ''
 .Pp
+You can save all attachments of the currently viewed mail automatically
+with the following command:
+.Command save\-all\-attachment
+The attachments are saved with their original filenames in the directory
+.Pa ~/Downloads/meli\- Ns Ar subject
+where
+.Ar subject
+is the mail's sanitized subject, elided in the middle and truncated to at
+most 128 characters (which can be further constrained by the file system's
+byte limit).
+If the target directory already exists, a numeric suffix is appended.
+When saving is finished, a notification displays the target directory.
+By default this command is also bound to the
+.Aq C-s
+shortcut, configurable as the
+.Ic save_all_attachments
+setting of the
+.Em envelope\-view
+shortcuts section in
+.Xr meli.conf 5 .
 You can pipe individual attachments to binaries with the following command:
 .Command pipe\-attachment Ar INDEX Ar binary Ar ARGS
 Example usage with the

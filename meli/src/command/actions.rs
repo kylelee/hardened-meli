@@ -107,6 +107,7 @@ pub enum ViewAction {
     Pipe(String, Vec<String>),
     Filter(Option<String>),
     SaveAttachment(usize, FileAction),
+    SaveAllAttachments,
     PipeAttachment(usize, String, Vec<String>),
     ExportMail(String),
     ExportThread(String),

@@ -31,8 +31,8 @@ use std::{
 use crate::{
     conf::{
         shortcuts::{
-            ComposingShortcuts, ContactListShortcuts, GeneralShortcuts, ListingShortcuts,
-            PagerShortcuts, ThreadViewShortcuts,
+            ComposingShortcuts, ContactListShortcuts, EnvelopeViewShortcuts, GeneralShortcuts,
+            ListingShortcuts, PagerShortcuts, ThreadViewShortcuts,
         },
         themes::*,
         FileSettings,
@@ -203,6 +203,93 @@ focus_right = "Right"
         thread_view.get("focus_right"),
         Some(&Key::Right),
         "focus_right must parse from [shortcuts.thread-view]"
+    );
+
+    if let Err(err) = tempdir.close() {
+        eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+
+#[test]
+fn test_conf_save_all_attachments_shortcut_parse() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = format!(
+        r#"
+[accounts.shortcut-test]
+root_mailbox = "{}"
+format = "maildir"
+send_mail = 'false'
+identity = "username@hostname.local"
+
+[shortcuts.envelope-view]
+save_all_attachments = "C-s"
+"#,
+        tempdir.path().display()
+    );
+
+    let new_file = ConfigFile::new(&config, &tempdir).unwrap();
+    let config = FileSettings::validate(new_file.path.clone(), true)
+        .expect("could not parse envelope-view save_all_attachments shortcut config");
+
+    let env_view = config.shortcuts.envelope_view.key_values();
+    assert_eq!(
+        env_view.get("save_all_attachments"),
+        Some(&Key::Ctrl('s')),
+        "save_all_attachments must parse from [shortcuts.envelope-view] as C-s"
+    );
+
+    let defaults = EnvelopeViewShortcuts::default().key_values();
+    assert_eq!(
+        defaults.get("save_all_attachments"),
+        Some(&Key::Ctrl('s')),
+        "save_all_attachments must default to C-s"
+    );
+
+    if let Err(err) = tempdir.close() {
+        eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+
+#[test]
+fn test_conf_html_filter_defaults_to_sanitizer() {
+    use crate::conf::pager::PagerSettings;
+
+    let defaults = PagerSettings::default();
+    assert_eq!(
+        defaults.html_filter.as_deref(),
+        Some("meli_sanitize_html | w3m -T text/html"),
+        "html_filter must default to the bundled sanitizer pipeline"
+    );
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let base = format!(
+        r#"
+[accounts.filter-test]
+root_mailbox = "{}"
+format = "maildir"
+send_mail = 'false'
+identity = "username@hostname.local"
+"#,
+        tempdir.path().display()
+    );
+
+    // Absent [pager] section: the sanitized pipeline is the effective default.
+    let new_file = ConfigFile::new(&base, &tempdir).unwrap();
+    let config = FileSettings::validate(new_file.path.clone(), true).unwrap();
+    assert_eq!(
+        config.pager.html_filter.as_deref(),
+        Some("meli_sanitize_html | w3m -T text/html"),
+        "absent html_filter must resolve to the sanitized default"
+    );
+
+    // An explicitly empty value opts out of sanitizing (falls back to plain
+    // w3m rendering at runtime).
+    let new_file = ConfigFile::new(&format!("{base}\n[pager]\nhtml_filter = ''\n"), &tempdir)
+        .unwrap();
+    let config = FileSettings::validate(new_file.path.clone(), true).unwrap();
+    assert_eq!(
+        config.pager.html_filter, None,
+        "empty html_filter must opt out of the sanitized default"
     );
 
     if let Err(err) = tempdir.close() {

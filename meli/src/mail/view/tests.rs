@@ -22,7 +22,10 @@ use std::{borrow::Cow, path::Path};
 
 use super::MailView;
 use crate::{
-    command::{actions::Action, MailingListAction},
+    command::{
+        actions::{Action, ViewAction},
+        MailingListAction,
+    },
     components::Component,
     conf::composing::SendMail,
     melib::{Attachment, AttachmentBuilder, Envelope, Mail},
@@ -569,4 +572,271 @@ fn go_to_url_allowlisted_scheme_launches_directly() {
             "{url:?} must be passed to the launcher byte-identically"
         );
     }
+}
+
+/// MIME payload of the shared multipart/mixed fixture: a text/plain body
+/// part plus an `application/pdf` attachment and an inline `image/png` part
+/// carrying a filename (both count as attachments for the batch save).
+const ATTACHMENTS_MULTIPART_BODY: &str = "MIME-Version: 1.0\r\n\
+     Content-Type: multipart/mixed; boundary=\"=_b\"\r\n\
+     \r\n\
+     --=_b\r\n\
+     Content-Type: text/plain; charset=utf-8\r\n\
+     \r\n\
+     body text\r\n\
+     --=_b\r\n\
+     Content-Type: application/pdf; name=\"report.pdf\"\r\n\
+     Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+     \r\n\
+     %PDF-fake\r\n\
+     --=_b\r\n\
+     Content-Type: image/png\r\n\
+     Content-Disposition: inline; filename=\"inline-image.png\"\r\n\
+     \r\n\
+     PNG-fake\r\n\
+     --=_b--\r\n";
+
+/// Construct an `EnvelopeView` for an arbitrary raw MIME payload `body`
+/// (everything from `MIME-Version:` onward) under the given Subject and
+/// Message-ID, following the `url_envelope_view` construction pattern.
+fn attachments_envelope_view(
+    context: &Context,
+    subject: &str,
+    message_id: &str,
+    body: &str,
+) -> EnvelopeView {
+    let bytes = format!(
+        "From: a@b.example\r\nTo: c@d.example\r\nSubject: {subject}\r\nMessage-ID: \
+         <{message_id}>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n{body}"
+    );
+    let mail = Mail::new(bytes.into_bytes(), None).expect("could not parse test mail");
+    EnvelopeView::new(mail, None, None, None, context.main_loop_handler.clone())
+}
+
+/// Fire the `save-all-attachments` view action at `view`, like the parsed
+/// user command would.
+fn trigger_save_all_attachments(view: &mut EnvelopeView, context: &mut Context) {
+    let mut event = UIEvent::Action(Action::View(ViewAction::SaveAllAttachments));
+    _ = view.process_event(&mut event, context);
+}
+
+/// End-to-end happy path: `save-all-attachments` on a multipart mail with
+/// one attachment and one inline-with-filename part must write both into a
+/// single fresh `~/Downloads/meli-<subject>` directory with 0o600 files and
+/// exactly one summary notification. The 200-CJK-char Subject exercises the
+/// component-level truncation caps (≤128 chars, ≤240 bytes).
+#[test]
+fn save_all_attachments_happy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut ctx = mock_context();
+    let subject = format!("{}-one", "请".repeat(200));
+    let view = attachments_envelope_view(
+        &ctx,
+        &subject,
+        "save-all-1@x.example",
+        ATTACHMENTS_MULTIPART_BODY,
+    );
+    // Drive the destination-injection seam directly: deriving the path from
+    // the process-global HOME races with sibling suites that flip HOME. The
+    // seam takes the Downloads root itself, so pass the known fresh path.
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+    view.save_all_attachments_to(&mut ctx, Some(&downloads));
+
+    let matches: Vec<String> = std::fs::read_dir(&downloads)
+        .expect("Downloads must exist after a successful save")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("meli-请") && name.contains("-one"))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one output directory for this subject, got {matches:?}"
+    );
+    let dir_name = matches[0].as_str();
+    assert!(
+        dir_name.len() <= 255,
+        "full directory name must stay under the filesystem limit: {dir_name:?}"
+    );
+    let component = dir_name
+        .strip_prefix("meli-")
+        .expect("name starts with the meli- prefix");
+    let component = component
+        .rsplit_once('-')
+        .filter(|(_, digits)| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+        .map_or(component, |(stem, _)| stem);
+    assert!(
+        component.chars().count() <= 128,
+        "title component must hold at most 128 chars, got {}",
+        component.chars().count()
+    );
+    assert!(
+        component.len() <= 240,
+        "title component must hold at most 240 bytes, got {}",
+        component.len()
+    );
+    assert!(
+        component.contains("..."),
+        "truncated title must contain the ellipsis, got {component:?}"
+    );
+    let dir = downloads.join(dir_name);
+
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .expect("output directory must be readable")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        vec!["inline-image.png".to_string(), "report.pdf".to_string()],
+        "exactly the two attachment-like parts must be saved"
+    );
+    for (file, marker) in [
+        ("report.pdf", "%PDF-fake"),
+        ("inline-image.png", "PNG-fake"),
+    ] {
+        let path = dir.join(file);
+        let content = std::fs::read(&path).unwrap();
+        assert!(
+            String::from_utf8_lossy(&content).contains(marker),
+            "{file} must contain {marker:?}"
+        );
+        let mode = PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions());
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "{file} must be readable/writable by owner only"
+        );
+    }
+
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Notification { body, .. }
+                if body.contains("Downloads") && body.contains("Saved 2 attachment(s)"))),
+        "a single summary notification must report the save location, got {replies:?}"
+    );
+}
+
+/// A mail with no attachment-like parts (single-part text/plain) must
+/// produce the "No attachments to save." notification and must not create
+/// any output directory.
+#[test]
+fn save_all_attachments_no_attachments() {
+    let mut ctx = mock_context();
+    let mut view = attachments_envelope_view(
+        &ctx,
+        "plain-no-att-two",
+        "save-all-2@x.example",
+        "MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nplain body \
+         two\r\n",
+    );
+    // This test keeps the full process_event dispatch (Action→arm wiring);
+    // the no-attachments path returns before touching any directory, so the
+    // absence check can use a fresh tempdir without pinning HOME.
+    let fresh = tempfile::tempdir().unwrap();
+    let downloads = fresh.path().join("Downloads");
+
+    trigger_save_all_attachments(&mut view, &mut ctx);
+
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Notification { body, .. }
+                if body.as_ref() == "No attachments to save.")),
+        "expected the no-attachments notification, got {replies:?}"
+    );
+    let no_dir = std::fs::read_dir(&downloads)
+        .map(|entries| {
+            entries.flatten().all(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("meli-plain")
+            })
+        })
+        .unwrap_or(true);
+    assert!(
+        no_dir,
+        "no output directory may be created when there is nothing to save"
+    );
+}
+
+#[test]
+fn save_all_attachments_shortcut() {
+    // The default Ctrl-s envelope-view shortcut must dispatch the same batch
+    // save as the `save-all-attachment` command through the real input path.
+    let mut ctx = mock_context();
+    let mut view = attachments_envelope_view(
+        &ctx,
+        "shortcut-five",
+        "save-all-5@x.example",
+        ATTACHMENTS_MULTIPART_BODY,
+    );
+
+    let mut event = UIEvent::Input(Key::Ctrl('s'));
+    _ = view.process_event(&mut event, &mut ctx);
+
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Notification { body, .. }
+            if body.contains("Saved 2 attachment(s)"))),
+        "Ctrl-s must trigger the save-all-attachments summary notification, got {replies:?}"
+    );
+}
+
+/// When `~/Downloads/meli-<title>` already exists, the batch save must move
+/// to the `-2` suffixed directory instead of writing into the occupied one.
+#[test]
+fn save_all_attachments_dir_conflict() {
+    let mut ctx = mock_context();
+    let view = attachments_envelope_view(
+        &ctx,
+        "conflict-three",
+        "save-all-3@x.example",
+        ATTACHMENTS_MULTIPART_BODY,
+    );
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+    std::fs::create_dir_all(downloads.join("meli-conflict-three")).unwrap();
+    view.save_all_attachments_to(&mut ctx, Some(&downloads));
+
+    let dir = downloads.join("meli-conflict-three-2");
+    assert!(dir.is_dir(), "save must land in the -2 suffixed directory");
+    let content =
+        std::fs::read(dir.join("report.pdf")).expect("report.pdf must be in the -2 directory");
+    assert!(String::from_utf8_lossy(&content).contains("%PDF-fake"));
+    assert!(dir.join("inline-image.png").is_file());
+}
+
+/// An inline part with a filename sitting at tree position 0 (a
+/// single-part, non-multipart mail) must be saved: the enumeration must
+/// find it even though `open_attachment`'s lidx==0 filter would drop it.
+#[test]
+fn save_all_attachments_solo_inline() {
+    let mut ctx = mock_context();
+    let view = attachments_envelope_view(
+        &ctx,
+        "solo-inline-four",
+        "save-all-4@x.example",
+        "MIME-Version: 1.0\r\nContent-Type: image/png; name=\"solo.png\"\r\n\
+         Content-Disposition: inline; filename=\"solo.png\"\r\n\r\nSOLO-fake\r\n",
+    );
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+    view.save_all_attachments_to(&mut ctx, Some(&downloads));
+
+    let content = std::fs::read(downloads.join("meli-solo-inline-four").join("solo.png"))
+        .expect("the inline part at tree position 0 must be saved as solo.png");
+    assert!(
+        String::from_utf8_lossy(&content).contains("SOLO-fake"),
+        "saved solo.png must contain the fixture body"
+    );
 }

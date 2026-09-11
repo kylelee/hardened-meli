@@ -1376,7 +1376,7 @@ Toggle visibility of side menu in mail list.
 Switch focus on the left.
 .Pq Em Left \" default value
 .It Ic focus_right
-Switch focus on the right.
+Open the entry selected in the sidebar and switch focus on the right.
 .Pq Em Right \" default value
 .It Ic exit_entry
 Exit e-mail entry.
@@ -1515,6 +1515,11 @@ Forward email.
 .It Ic return_to_normal_view
 Return to envelope if viewing raw source or attachment.
 .Pq Em r \" default value
+.It Ic save_all_attachments
+Save all attachments of the currently viewed mail with the
+.Ic save\-all\-attachment
+command.
+.Pq Em C-s \" default value
 .It Ic toggle_expand_headers
 Expand extra headers (References and others)
 .Pq Em h \" default value
@@ -1681,17 +1686,18 @@ Default values are shown in parentheses.
 Always show headers when scrolling.
 .Pq Em false \" default value
 .It Ic html_filter Ar String
-.Pq Em optional
-Pipe html attachments through this filter before display
-.Pq Em none \" default value
+Pipe html attachments through this filter before display.
+.Pq Em meli_sanitize_html | w3m -T text/html \" default value
 .Pp
-meli ships with the
+By default HTML is piped through the bundled
 .Li meli_sanitize_html
-helper binary that sanitizes HTML (allow-list based) before rendering; a typical usage is piping its output to
-.Xr w3m 1 :
+helper binary, which sanitizes HTML (allow-list based) by stripping scripts
+and dangerous links before rendering with
+.Xr w3m 1 .
+Set it to an empty value to render with plain w3m without sanitizing:
 .Bd -literal
 [pager]
-html_filter = 'meli_sanitize_html | w3m -T text/html'
+html_filter = ''
 .Ed
 .It Ic html_open Ar String
 .Pq Em optional
@@ -2024,6 +2030,9 @@ Set UI colors for tags
 .It Ic ignore_tags Ar Array String
 .Pq Em optional
 Hide tags (not the tagged messages themselves)
+.It Ic rename Ar hash table String[String]
+.Pq Em optional
+Rename the tag when shown in the UI (not used as an alias any other way).
 .El
 .sp
 Example:
@@ -2040,6 +2049,7 @@ colors = { signed="#Ff6600", replied="DeepSkyBlue4", draft="#f00", replied="8" }
   [accounts.dummy.mailboxes]
   # per mailbox override:
   "INBOX" = { tags.ignore_tags=["inbox", ] }
+  "Project" = { tags.rename = { "bug" = "🐜" } }
 .Ed
 .\"
 .\"

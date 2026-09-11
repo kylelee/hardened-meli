@@ -142,6 +142,7 @@ pub fn view(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
         filter,
         pipe,
         save_attachment,
+        save_all_attachment,
         pipe_attachment,
         export_mail,
         export_thread,
@@ -964,6 +965,15 @@ pub fn save_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, 
             ))
         },
     ))(input)
+}
+
+pub fn save_all_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, save_all_attachment};
+    let (input, _) = tag("save-all-attachment")(input.trim())?;
+    arg_chk!(start check, input);
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input)?;
+    Ok((input, Ok(View(SaveAllAttachments))))
 }
 
 pub fn pipe_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandError>> {

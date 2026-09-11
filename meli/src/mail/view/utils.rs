@@ -37,6 +37,64 @@ pub fn save_attachment(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Middle-truncate `input` under the given char and byte caps.
+///
+/// When the input already fits it is returned as-is; otherwise the head
+/// and the tail are kept and joined with a literal `"..."`. Char and byte
+/// caps are honored per character along UTF-8 boundaries, so the result
+/// is always valid UTF-8.
+pub fn truncate_middle(input: &str, max_chars: usize, max_bytes: usize) -> Cow<'_, str> {
+    if input.chars().count() <= max_chars && input.len() <= max_bytes {
+        return Cow::Borrowed(input);
+    }
+    // The ASCII ellipsis costs 3 chars and 3 bytes on both budgets.
+    let chars_budget = max_chars.saturating_sub(3);
+    let bytes_budget = max_bytes.saturating_sub(3);
+    if chars_budget == 0 || bytes_budget == 0 {
+        // Degenerate budgets leave no room for an ellipsis: degrade to
+        // plain head truncation under both caps (misuse guard; the
+        // production call sites never pass such budgets).
+        let mut end = 0;
+        let mut bytes = 0;
+        for (chars, (i, c)) in input.char_indices().enumerate() {
+            let c_len = c.len_utf8();
+            if chars >= max_chars || bytes + c_len > max_bytes {
+                break;
+            }
+            bytes += c_len;
+            end = i + c_len;
+        }
+        return Cow::Borrowed(&input[..end]);
+    }
+    let head_chars = chars_budget / 2;
+    let tail_chars = chars_budget - head_chars;
+    let head_bytes = bytes_budget / 2;
+    let tail_bytes = bytes_budget - head_bytes;
+    let mut head_end = 0;
+    let mut bytes = 0;
+    for (chars, (i, c)) in input.char_indices().enumerate() {
+        let c_len = c.len_utf8();
+        if chars >= head_chars || bytes + c_len > head_bytes {
+            break;
+        }
+        bytes += c_len;
+        head_end = i + c_len;
+    }
+    let mut tail_start = input.len();
+    let mut bytes = 0;
+    for (chars, (i, c)) in input.char_indices().rev().enumerate() {
+        let c_len = c.len_utf8();
+        if chars >= tail_chars || bytes + c_len > tail_bytes {
+            break;
+        }
+        bytes += c_len;
+        tail_start = i;
+    }
+    let head = &input[..head_end];
+    let tail = &input[tail_start..];
+    Cow::Owned(format!("{head}...{tail}"))
+}
+
 /// Parse the `Exec` value of a freedesktop.org desktop entry into arguments,
 /// following the quoting rules of the Desktop Entry Specification, §7 "The
 /// Exec key": arguments are separated by unquoted whitespace; double quotes
@@ -335,5 +393,75 @@ mod tests {
             "v /tmp/file".to_string(),
             desktop_exec_to_command("v \"%f\"", "/tmp/file".to_string(), false)
         );
+    }
+
+    #[test]
+    fn truncate_middle_short_borrowed() {
+        assert!(matches!(truncate_middle("", 128, 240), Cow::Borrowed("")));
+        assert_eq!(
+            truncate_middle("short subject.txt", 128, 240),
+            "short subject.txt"
+        );
+        assert!(matches!(
+            truncate_middle("short subject.txt", 128, 240),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn truncate_middle_ascii_128_kept() {
+        let input = "a".repeat(128);
+        assert_eq!(truncate_middle(&input, 128, 240), input);
+    }
+
+    #[test]
+    fn truncate_middle_ascii_200() {
+        let input = "a".repeat(200);
+        let result = truncate_middle(&input, 128, 240);
+        assert_eq!(result.chars().count(), 128);
+        assert!(result.starts_with(&input[..62]));
+        assert!(result.ends_with(&input[137..]));
+        assert_eq!(result.find("..."), Some(62));
+    }
+
+    #[test]
+    fn truncate_middle_cjk_200() {
+        let input = "请".repeat(200);
+        let result = truncate_middle(&input, 128, 240);
+        assert!(result.chars().count() <= 128);
+        assert!(result.len() <= 240);
+        assert!(result.contains("..."));
+        assert!(result.starts_with('请'));
+        assert!(result.ends_with('请'));
+    }
+
+    #[test]
+    fn truncate_middle_mixed_emoji_cjk() {
+        let input = "😀甲请𝄞".repeat(50);
+        let result = truncate_middle(&input, 128, 240);
+        let Ok(_) = String::from_utf8(result.as_bytes().to_vec()) else {
+            panic!("truncate_middle produced invalid UTF-8: {result:?}");
+        };
+        assert!(result.chars().count() <= 128);
+        assert!(result.len() <= 240);
+    }
+
+    #[test]
+    fn truncate_middle_zero_budget() {
+        // Degenerate budgets must not panic; the longest prefix fitting
+        // zero chars is the empty string.
+        assert!(truncate_middle("abc", 0, 0).is_empty());
+    }
+
+    #[test]
+    fn truncate_middle_byte_cap_only() {
+        // 240 bytes / 80 chars: within both caps, returned untouched.
+        let fits = "请".repeat(80);
+        assert!(matches!(truncate_middle(&fits, 128, 240), Cow::Borrowed(_)));
+        // 243 bytes but still 81 <= 128 chars: only the byte cap trips.
+        let one_over = "请".repeat(81);
+        let result = truncate_middle(&one_over, 128, 240);
+        assert!(result.len() <= 240);
+        assert!(result.contains("..."));
     }
 }

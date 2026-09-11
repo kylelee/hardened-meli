@@ -19,7 +19,7 @@
 1. **解析容错**：IMAP ENVELOPE 字段严格解析失败时，自动回退到原始字节兜底解析——任何单个畸形字段都不会中止整个邮箱的拉取；
 2. **摄入净化**：地址字段（From/Sender/Reply-To/To/Cc/Bcc）写入缓存前统一校验与归一化，可修复的自动加引号修复并复验，不可修复的替换为安全占位符——新数据永远不会产生"毒行"；
 3. **可见隔离**：历史遗留的坏缓存行不再触发整库重置，而是逐行隔离到 `invalid_envelopes` 表，以占位邮件可见呈现（附错误详情头），服务器重取后自动自愈——杜绝"一封毒邮件核弹整个缓存"。
-4. **HTML 清洗**：HTML 邮件正文渲染前先经内置的 `meli_sanitize_html` 过滤器清洗——白名单式过滤（与 `meli` 一同构建安装），仅保留安全的结构标签与 http/https/mailto 链接，脚本、样式、事件属性、注释及 `javascript:`/`data:` 等危险 URL 一律剔除，恶意 HTML 邮件再也无法向渲染视图夹带脚本或跟踪链接；通过 `html_filter = 'meli_sanitize_html | w3m -T text/html'` 启用。
+4. **HTML 清洗**：HTML 邮件正文渲染前先经内置的 `meli_sanitize_html` 过滤器清洗——白名单式过滤（与 `meli` 一同构建安装），仅保留安全的结构标签与 http/https/mailto 链接，脚本、样式、事件属性、注释及 `javascript:`/`data:` 等危险 URL 一律剔除，恶意 HTML 邮件再也无法向渲染视图夹带脚本或跟踪链接；该防护通过 `pager.html_filter` 默认启用。
 
 ### 2. 用户体验：方向键上下左右浏览邮箱全部内容
 
@@ -51,6 +51,13 @@ IMAP 启动全面改为缓存优先（cache-first）：邮件列表与正文先�
   cargo install --git https://github.com/kylelee/hardened-meli meli meli_sanitize_html
   ```
 
+### 运行时依赖
+
+安全浏览 HTML 邮件内容需要安装 [w3m](https://github.com/tats/w3m)：HTML 邮件默认先经内置的
+`meli_sanitize_html` 清洗，再交给 `w3m` 渲染。请用系统包管理器安装，例如 Debian/Ubuntu 上
+`sudo apt install w3m`，Fedora 上 `sudo dnf install w3m`。缺少 w3m 时查看 HTML 邮件会提示
+错误并回退显示原始内容。
+
 ## 构建
 
 运行 `make` 或 `cargo build --release`。
@@ -66,13 +73,14 @@ IMAP 启动全面改为缓存优先（cache-first）：邮件列表与正文先�
 `default` feature 的内容为：
 
 ```toml
-default = ["sqlite3", "notmuch", "smtp", "dbus-notifications", "gpgme", "cli-docs", "jmap", "static"]
+default = ["sqlite3", "notmuch", "smtp", "http", "dbus-notifications", "gpgme", "cli-docs", "jmap", "static"]
 ```
 
 全部 feature 及其说明如下：
 
 | Feature 标志                                                 | 依赖                                                                                         | 说明                                                                                                                                                                                              |
 |--------------------------------------------------------------|----------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| <a name="http-feature">`http`</a>                            | `melib` 的 `http` feature                                                                    | 提供 HTTP 客户端（经 `melib`，供 JMAP 后端使用）                                                                                                                                                  |
 | <a name="notmuch-feature">`notmuch`</a>                      | `maildir` feature                                                                            | 提供 *notmuch* 后端                                                                                                                                                                               |
 | <a name="jmap-feature">`jmap`</a>                            | `http` feature、启用 `serde` feature 的 `url` crate                                          | 提供 *JMAP* 后端                                                                                                                                                                                  |
 | <a name="smtp-feature">`smtp`</a>                            | `tls` feature                                                                                | 内置异步 *SMTP* 客户端                                                                                                                                                                            |
@@ -165,14 +173,14 @@ MELI_CONFIG=./test_config cargo run
 - 通过 html 过滤命令查看 text/html 附件（默认 w3m）
 - 附件/邮件可通过管道交给外部程序
 - 使用外部附件文件选择器，无需手动输入附件完整路径
+- 一条命令或一个快捷键（默认 `C-s`）即可把当前邮件的全部附件保存到 `~/Downloads/meli-<subject>`
 - GPG 签名、加密、签名 + 加密
 - GPG 签名验证
 
 ### HTML 渲染
 
-HTML 渲染默认使用 [w3m](https://github.com/tats/w3m)。
-你可以通过 `pager.html_filter` 设置覆盖（详见 [`meli.conf(5)`](./meli/docs/meli.conf.5)）。
-meli 还内置了 `meli_sanitize_html` 清洗器；可通过 `html_filter = 'meli_sanitize_html | w3m -T text/html'` 启用（先用白名单清洗 HTML、移除脚本和危险链接，再交给 w3m 渲染）。
+HTML 邮件默认先经内置的 `meli_sanitize_html` 清洗器（白名单式，移除脚本和危险链接），再交给 [w3m](https://github.com/tats/w3m) 渲染。
+可通过 `pager.html_filter` 设置覆盖或关闭（设为 `''` 即不经清洗直接用 w3m 渲染）；详见 [`meli.conf(5)`](./meli/docs/meli.conf.5)。
 
 
 ## 文档

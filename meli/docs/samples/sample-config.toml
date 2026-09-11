@@ -91,9 +91,10 @@
 #
 #[pager]
 #filter = "COLUMNS=72 /usr/local/bin/pygmentize -l email"
-## Sanitize HTML mail with the bundled meli_sanitize_html filter before
-## rendering it with w3m (requires w3m installed):
-#html_filter = 'meli_sanitize_html | w3m -T text/html'
+## HTML mail is sanitized by default with the bundled meli_sanitize_html
+## filter before rendering with w3m (requires both binaries in PATH).
+## Set html_filter = '' to render with plain w3m without sanitizing:
+#html_filter = ''
 #pager_context = 0 # default, optional
 #sticky_headers = true # default, optional
 #
@@ -130,6 +131,11 @@
 #scroll_down = 'j'
 #page_up = "PageUp"
 #page_down = "PageDown"
+#
+##Envelope view defaults
+#
+#[shortcuts.envelope-view]
+#save_all_attachments = "C-s"
 #
 #[composing]
 #editor_command = 'vim +/^$' # optional, by default $EDITOR is used.
