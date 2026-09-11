@@ -451,7 +451,7 @@ impl ListingTrait for PlainListing {
                 }
                 context.dirty_areas.push_back(new_area);
             }
-            if *account_settings!(context[&self.cursor_pos.0].listing.relative_list_indices) {
+            if *account_settings!(context[self.cursor_pos.0].listing.relative_list_indices) {
                 self.draw_relative_numbers(grid, area, top_idx);
                 context.dirty_areas.push_back(area);
             }
@@ -474,7 +474,7 @@ impl ListingTrait for PlainListing {
         /* copy table columns */
         self.data_columns
             .draw(grid, top_idx, self.cursor_pos.2, grid.bounds_iter(area));
-        if *account_settings!(context[&self.cursor_pos.0].listing.relative_list_indices) {
+        if *account_settings!(context[self.cursor_pos.0].listing.relative_list_indices) {
             self.draw_relative_numbers(grid, area, top_idx);
         }
         /* apply each row colors separately */
@@ -638,7 +638,7 @@ impl PlainListing {
         context: &Context,
     ) -> Box<Self> {
         let color_cache = ColorCache::new(context, IndexStyle::Plain);
-        let sort = *mailbox_settings!(context[&coordinates.0][&coordinates.1].listing.sort);
+        let sort = *mailbox_settings!(context[coordinates.0][&coordinates.1].listing.sort);
         Box::new(Self {
             cursor_pos: (AccountHash::default(), MailboxHash::default(), 0),
             new_cursor_pos: (coordinates.0, coordinates.1, 0),
@@ -672,18 +672,33 @@ impl PlainListing {
         let account = &context.accounts[&self.cursor_pos.0];
         if account.backend_capabilities.supports_tags {
             let tags_lck = account.collection.tag_index.read().unwrap();
-            let tags_iter = TagsIterator::new(
-                e.tags().iter(),
-                context,
-                self.cursor_pos.0,
-                self.cursor_pos.1,
-                &tags_lck,
-            );
-            for (t, c) in tags_iter {
+            for t in e.tags().iter() {
+                if mailbox_settings!(
+                    context[self.cursor_pos.0][&self.cursor_pos.1]
+                        .tags
+                        .ignore_tags
+                )
+                .contains(t)
+                    || account_settings!(context[self.cursor_pos.0].tags.ignore_tags).contains(t)
+                    || context.settings.tags.ignore_tags.contains(t)
+                    || !tags_lck.contains_key(t)
+                {
+                    continue;
+                }
                 tags.push(' ');
-                tags.push_str(t);
+                tags.push_str(tags_lck.get(t).as_ref().unwrap());
                 tags.push(' ');
-                colors.push(c);
+                colors.push(
+                    mailbox_settings!(context[self.cursor_pos.0][&self.cursor_pos.1].tags.colors)
+                        .get(t)
+                        .cloned()
+                        .or_else(|| {
+                            account_settings!(context[self.cursor_pos.0].tags.colors)
+                                .get(t)
+                                .cloned()
+                                .or_else(|| context.settings.tags.colors.get(t).cloned())
+                        }),
+                );
             }
             if !tags.is_empty() {
                 tags.pop();
@@ -730,7 +745,7 @@ impl PlainListing {
             SmallVec::new(),
         );
         let should_highlight_self = mailbox_settings!(
-            context[&self.cursor_pos.0][&self.cursor_pos.1]
+            context[self.cursor_pos.0][&self.cursor_pos.1]
                 .listing
                 .highlight_self
         )
@@ -740,7 +755,7 @@ impl PlainListing {
             .account
             .main_identity_address();
         let highlight_self_colwidth: usize = mailbox_settings!(
-            context[&self.cursor_pos.0][&self.cursor_pos.1]
+            context[self.cursor_pos.0][&self.cursor_pos.1]
                 .listing
                 .highlight_self_flag
         )
@@ -767,7 +782,7 @@ impl PlainListing {
             let envelope: EnvelopeRef = context.accounts[&self.cursor_pos.0].collection.get_env(i);
             use melib::search::QueryTrait;
             if let Some(filter_query) = mailbox_settings!(
-                context[&self.cursor_pos.0][&self.cursor_pos.1]
+                context[self.cursor_pos.0][&self.cursor_pos.1]
                     .listing
                     .filter
             )
@@ -902,7 +917,7 @@ impl PlainListing {
 
             {
                 let mut area_col_0 = columns[0].area().nth_row(idx);
-                if !*account_settings!(context[&self.cursor_pos.0].listing.relative_list_indices) {
+                if !*account_settings!(context[self.cursor_pos.0].listing.relative_list_indices) {
                     area_col_0 = area_col_0.skip_cols(columns[0].grid_mut().write_string(
                         itoa_buffer.format(idx),
                         row_attr.fg,
@@ -983,7 +998,7 @@ impl PlainListing {
                 if strings.highlight_self {
                     let (x, _) = columns[3].grid_mut().write_string(
                         mailbox_settings!(
-                            context[&self.cursor_pos.0][&self.cursor_pos.1]
+                            context[self.cursor_pos.0][&self.cursor_pos.1]
                                 .listing
                                 .highlight_self_flag
                         )
@@ -1043,14 +1058,14 @@ impl PlainListing {
                         None,
                         None,
                     );
-                    for c in columns[4].grid().row_iter(area_col_4, 0..(x + 2), 0) {
+                    for c in columns[4].grid().row_iter(area_col_4, 0..(x + 1), 0) {
                         columns[4].grid_mut()[c]
                             .set_bg(color)
                             .set_keep_fg(true)
                             .set_keep_bg(true)
                             .set_keep_attrs(true);
                     }
-                    area_col_4 = area_col_4.skip_cols(x + 2);
+                    area_col_4 = area_col_4.skip_cols(x + 1);
                 }
                 for c in columns[4].grid().row_iter(area_col_4, 0..min_width.4, 0) {
                     columns[4].grid_mut()[c]
@@ -1188,7 +1203,7 @@ impl PlainListing {
             if strings.highlight_self {
                 let (x, _) = columns[3].grid_mut().write_string(
                     mailbox_settings!(
-                        context[&self.cursor_pos.0][&self.cursor_pos.1]
+                        context[self.cursor_pos.0][&self.cursor_pos.1]
                             .listing
                             .highlight_self_flag
                     )

@@ -26,7 +26,7 @@ use super::{
     component::{fold_line, write_component},
     icalendar::{ICalendar, *},
     parse_component,
-    parser::{ParseErrorReason, Parser},
+    parser::{ParseErrorReason, Parser, MAX_COMPONENT_NESTING_DEPTH},
     util::*,
     vcard::Vcard,
 };
@@ -286,6 +286,56 @@ fn test_vobject_mismatched_begin_end_tags_returns_error() {
     } else {
         panic!("Got unexpected result {result:?}");
     }
+}
+
+#[test]
+fn test_vobject_deep_nesting_returns_depth_error() {
+    // Regression test for unbounded recursion (CWE-674): 10k nested
+    // components used to overflow the stack and abort the process.
+    const DEPTH: usize = 10_000;
+    let mut input = String::new();
+    for _ in 0..DEPTH {
+        input.push_str("BEGIN:X\r\n");
+    }
+    for _ in 0..DEPTH {
+        input.push_str("END:X\r\n");
+    }
+
+    let (tx, rx) = channel();
+    ::std::thread::spawn(move || {
+        let mut p = Parser::new(&input);
+        let _ = tx.send(p.consume_component());
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(result, Err(ParseErrorReason::NestingTooDeep)),
+        "Got unexpected result {result:?}"
+    );
+}
+
+#[test]
+fn test_vobject_component_nesting_depth_boundary() {
+    // Nesting exactly at the cap parses; one level past it is rejected.
+    let build = |depth: usize| {
+        let mut input = String::new();
+        for _ in 0..depth {
+            input.push_str("BEGIN:X\r\n");
+        }
+        for _ in 0..depth {
+            input.push_str("END:X\r\n");
+        }
+        input
+    };
+
+    let at_cap = Parser::new(&build(MAX_COMPONENT_NESTING_DEPTH)).consume_component();
+    assert!(at_cap.is_ok(), "unexpected error at cap depth: {at_cap:?}");
+
+    let past_cap = Parser::new(&build(MAX_COMPONENT_NESTING_DEPTH + 1)).consume_component();
+    assert!(
+        matches!(past_cap, Err(ParseErrorReason::NestingTooDeep)),
+        "Got unexpected result {past_cap:?}"
+    );
 }
 
 #[test]

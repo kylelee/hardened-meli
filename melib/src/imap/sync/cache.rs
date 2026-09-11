@@ -19,7 +19,12 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::{convert::TryFrom, path::Path};
+use std::{
+    collections::HashMap,
+    convert::TryFrom,
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 use super::*;
 use crate::{
@@ -67,6 +72,63 @@ pub struct CachedState {
     pub highestmodseq: Option<ModSequence>,
 }
 
+/// `(MESSAGES, UNSEEN, UIDNEXT)` counters of a mailbox `STATUS` response.
+pub type CachedStatus = (Option<UID>, Option<UID>, Option<UID>);
+
+/// Cached snapshot of an `ImapMailbox`'s identity.
+///
+/// Message counts (`exists`/`unseen`), the `select` state, the `warm` flag
+/// and `permissions` are deliberately not part of the snapshot; they are
+/// rebuilt by later `SELECT`/resync operations.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CachedImapMailbox {
+    pub hash: MailboxHash,
+    pub imap_path: String,
+    pub path: String,
+    pub name: String,
+    pub parent: Option<MailboxHash>,
+    pub children: Vec<MailboxHash>,
+    pub separator: u8,
+    pub usage: SpecialUsageMailbox,
+    pub no_select: bool,
+    pub is_subscribed: bool,
+}
+
+impl From<&ImapMailbox> for CachedImapMailbox {
+    fn from(m: &ImapMailbox) -> Self {
+        Self {
+            hash: m.hash,
+            imap_path: m.imap_path.clone(),
+            path: m.path.clone(),
+            name: m.name.clone(),
+            parent: m.parent,
+            children: m.children.clone(),
+            separator: m.separator,
+            usage: *m.usage.read().unwrap_or_else(|e| e.into_inner()),
+            no_select: m.no_select,
+            is_subscribed: m.is_subscribed,
+        }
+    }
+}
+
+impl From<CachedImapMailbox> for ImapMailbox {
+    fn from(m: CachedImapMailbox) -> Self {
+        Self {
+            hash: m.hash,
+            imap_path: m.imap_path,
+            path: m.path,
+            name: m.name,
+            parent: m.parent,
+            children: m.children,
+            separator: m.separator,
+            usage: Arc::new(RwLock::new(m.usage)),
+            no_select: m.no_select,
+            is_subscribed: m.is_subscribed,
+            ..Self::default()
+        }
+    }
+}
+
 /// Helper function for ignoring cache misses with
 /// `.or_else(ignore_not_found)?`.
 #[inline(always)]
@@ -81,7 +143,55 @@ pub trait ImapCache: Send + std::fmt::Debug {
     fn reset(&mut self) -> Result<()>;
     fn mailbox_state(&mut self, mailbox_hash: MailboxHash) -> Result<Option<CachedState>>;
 
+    /// Returns the persisted list of mailboxes of the account, if any.
+    ///
+    /// Message counts, `select` state, the `warm` flag and `permissions`
+    /// are not part of the persisted snapshot; they are rebuilt by later
+    /// `SELECT`/resync operations.
+    fn load_mailbox_list(&mut self) -> Result<Option<HashMap<MailboxHash, ImapMailbox>>>;
+
+    /// Persists the list of mailboxes of the account, replacing any
+    /// previously stored list.
+    fn save_mailbox_list(&mut self, mailboxes: &HashMap<MailboxHash, ImapMailbox>) -> Result<()>;
+
     fn lastseenuid(&mut self, mailbox_hash: MailboxHash) -> Result<Option<UID>>;
+
+    /// Records the `(MESSAGES, UNSEEN, UIDNEXT)` counters of a mailbox as
+    /// returned by a `STATUS` command, to be used as the baseline of the next
+    /// quick synchronization check.
+    fn record_status(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        messages: Option<UID>,
+        unseen: Option<UID>,
+        uidnext: Option<UID>,
+    ) -> Result<()>;
+
+    /// Returns the `(MESSAGES, UNSEEN, UIDNEXT)` counters recorded with
+    /// [`ImapCache::record_status`], if any.
+    fn cached_status(&mut self, mailbox_hash: MailboxHash) -> Result<Option<CachedStatus>>;
+
+    /// Returns the persisted `msn_index` of a mailbox, if it was stored
+    /// with the given `UIDVALIDITY`.
+    ///
+    /// The returned vector is indexed by zero-based message sequence
+    /// number, with `None` for missing entries. Storing an empty index
+    /// is equivalent to storing nothing (`load` returns `None`).
+    fn load_msn_index(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        uidvalidity: UIDVALIDITY,
+    ) -> Result<Option<Vec<Option<UID>>>>;
+
+    /// Persists the `msn_index` of a mailbox for the given
+    /// `UIDVALIDITY`, replacing any previously stored index of the
+    /// mailbox.
+    fn store_msn_index(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        uidvalidity: UIDVALIDITY,
+        msn_index: &[Option<UID>],
+    ) -> Result<()>;
 
     fn find_envelope(
         &mut self,
@@ -159,6 +269,32 @@ impl ImapCache for Arc<UIDStore> {
         Ok(None)
     }
 
+    fn load_mailbox_list(&mut self) -> Result<Option<HashMap<MailboxHash, ImapMailbox>>> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.load_mailbox_list();
+        }
+        Ok(None)
+    }
+
+    fn save_mailbox_list(&mut self, mailboxes: &HashMap<MailboxHash, ImapMailbox>) -> Result<()> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.save_mailbox_list(mailboxes);
+        }
+        Ok(())
+    }
+
     fn lastseenuid(&mut self, mailbox_hash: MailboxHash) -> Result<Option<UID>> {
         if !self.keep_offline_cache.load(Ordering::SeqCst) {
             return Ok(None);
@@ -170,6 +306,73 @@ impl ImapCache for Arc<UIDStore> {
             return cache_handle.lastseenuid(mailbox_hash);
         }
         Ok(None)
+    }
+
+    fn record_status(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        messages: Option<UID>,
+        unseen: Option<UID>,
+        uidnext: Option<UID>,
+    ) -> Result<()> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.record_status(mailbox_hash, messages, unseen, uidnext);
+        }
+        Ok(())
+    }
+
+    fn cached_status(&mut self, mailbox_hash: MailboxHash) -> Result<Option<CachedStatus>> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.cached_status(mailbox_hash);
+        }
+        Ok(None)
+    }
+
+    fn load_msn_index(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        uidvalidity: UIDVALIDITY,
+    ) -> Result<Option<Vec<Option<UID>>>> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.load_msn_index(mailbox_hash, uidvalidity);
+        }
+        Ok(None)
+    }
+
+    fn store_msn_index(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        uidvalidity: UIDVALIDITY,
+        msn_index: &[Option<UID>],
+    ) -> Result<()> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.store_msn_index(mailbox_hash, uidvalidity, msn_index);
+        }
+        Ok(())
     }
 
     fn find_envelope(

@@ -178,7 +178,6 @@ pub fn expand_config(conf_path: &Path) -> Result<String> {
 define(`include', `builtin_include(substr($1,1,decr(decr(len($1)))))dnl')dnl
 "#;
         let mut contents = String::new();
-        contents.clear();
         let mut file = std::fs::File::open(conf_path)?;
         file.read_to_string(&mut contents)?;
 

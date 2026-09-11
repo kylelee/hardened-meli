@@ -394,42 +394,10 @@ impl SubjectPrefix for &str {
     }
 
     fn strip_prefixes(&mut self) -> &mut Self {
-        let result = {
-            let mut slice = self.trim();
-            loop {
-                if slice.starts_with("RE: ")
-                    || slice.starts_with("Re: ")
-                    || slice.starts_with("FW: ")
-                    || slice.starts_with("Fw: ")
-                {
-                    slice = &slice["RE: ".len()..];
-                    continue;
-                }
-                if slice.starts_with("FWD: ")
-                    || slice.starts_with("Fwd: ")
-                    || slice.starts_with("fwd: ")
-                {
-                    slice = &slice["FWD: ".len()..];
-                    continue;
-                }
-                if slice.starts_with(' ') || slice.starts_with('\t') || slice.starts_with('\r') {
-                    // [ref:FIXME]: just trim whitespace
-                    slice = &slice[1..];
-                    continue;
-                }
-                if slice.starts_with('[')
-                    && !(slice.starts_with("[PATCH") || slice.starts_with("[RFC"))
-                {
-                    if let Some(pos) = slice.find(']') {
-                        slice = &slice[pos + 1..];
-                        continue;
-                    }
-                }
-                break;
-            }
-            slice
-        };
-        *self = result;
+        let s = *self;
+        let mut bytes = s.as_bytes();
+        <&[u8] as SubjectPrefix>::strip_prefixes(&mut bytes);
+        *self = std::str::from_utf8(bytes).unwrap_or(s);
         self
     }
 

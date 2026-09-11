@@ -84,20 +84,6 @@ impl Color {
         })
     }
 
-    pub fn from_byte(val: u8) -> Self {
-        match val {
-            0x00 => Self::Black,
-            0x01 => Self::Red,
-            0x02 => Self::Green,
-            0x03 => Self::Yellow,
-            0x04 => Self::Blue,
-            0x05 => Self::Magenta,
-            0x06 => Self::Cyan,
-            0x07 => Self::White,
-            _ => Self::Default,
-        }
-    }
-
     pub fn write_fg(self, stdout: &mut crate::StateStdout) -> std::io::Result<()> {
         use std::io::Write;
         match self {

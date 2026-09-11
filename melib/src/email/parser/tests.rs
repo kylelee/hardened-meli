@@ -24,6 +24,7 @@ use crate::email::{
     address::*,
     parser::{
         address::*,
+        attachments,
         dates::rfc5322_date,
         encodings::*,
         generic::{comment, phrase2, unstructured},
@@ -742,4 +743,249 @@ fn test_email_parser_bytesext_trait() {
     );
     assert!(!BytesExt::is_quoted(TO_REPLACE));
     assert!(BytesExt::is_quoted(b"\"aaa\"".as_ref()));
+}
+
+// C8a: the multipart boundary twin loops (`multipart_parts` and `parts`,
+// i.e. `parts_f`) must always terminate and never panic on hostile input
+// (CWE-835 non-termination, CWE-1287 out-of-bounds/underflow). Regression
+// tests promoted from the audit scratch examples `melib/examples/{c8_hang,
+// c8a_oob}.rs`.
+
+const C8A_BOUNDARY: &[u8] = b"BOUND";
+
+/// Run `f` on a worker thread bounded by `limit`, mirroring the
+/// `assert_completes_within` harness of the connection size-cap tests: a
+/// parser hang fails the test deterministically within `limit` instead of
+/// wedging the test binary; a panic inside `f` is surfaced as this test's
+/// failure. On timeout the worker is leaked (a hung parser thread cannot be
+/// killed safely); acceptable in a failing test since the process exits
+/// right after.
+fn assert_completes_within<T: Send + 'static>(
+    limit: std::time::Duration,
+    label: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let _worker = std::thread::Builder::new()
+        .name(format!("c8a_{label}"))
+        .spawn(move || {
+            let _ = sender.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+        })
+        .expect("failed to spawn C8a worker thread");
+    match receiver.recv_timeout(limit) {
+        Ok(Ok(value)) => value,
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(_) => panic!(
+            "{label}: parser did not complete within {limit:?} \
+             (C8a/CWE-835 non-termination regression)"
+        ),
+    }
+}
+
+#[test]
+fn test_multipart_parts_first_loop_terminates() {
+    // Pre-fix: a boundary occurrence NOT preceded by `--` made the first
+    // loop slice to the exact same position forever (100% CPU hang). The
+    // canonical 113-byte repro mail (headers + first hang form) lives in
+    // `meli/tests/test_c8a_parts_poc.rs`; here the bodies are fed directly
+    // to both twin loops.
+    let hang_forms: &[(&[u8], bool)] = &[
+        // (body, parts() outcome): the alt fallback needs a `--` to skip to;
+        // without one parts() errors out too.
+        (b"\r\nBOUND\r\nmore text\r\n--BOUND--\r\n", true),
+        (b"xxBOUND", false),
+        (b"body text\r\nBOUND\r\n--BOUND--\r\n", true),
+    ];
+    for (body, parts_ok) in hang_forms {
+        let multipart = assert_completes_within(
+            std::time::Duration::from_secs(10),
+            "multipart_parts hang form",
+            || attachments::multipart_parts(body, C8A_BOUNDARY),
+        );
+        // Break without a dash-boundary -> the second loop's `--` prefix
+        // check rejects the same occurrence: graceful parse failure.
+        multipart.unwrap_err();
+        let parts = assert_completes_within(
+            std::time::Duration::from_secs(10),
+            "parts_f hang form",
+            || attachments::parts(body, C8A_BOUNDARY),
+        );
+        // parts_f errors out; the `parts()` alt fallback then yields an
+        // empty parts list (or Err when there is no `--` to skip to), so
+        // the hostile mail degrades to "no parts".
+        if *parts_ok {
+            assert_eq!(
+                parts.expect("parts() fallback must accept hang forms").1,
+                Vec::<&[u8]>::new()
+            );
+        } else {
+            parts.unwrap_err();
+        }
+    }
+    // Control forms that already terminate (Err paths), must stay fast:
+    attachments::multipart_parts(b"BOUND", C8A_BOUNDARY).unwrap_err();
+    attachments::parts(b"BOUND", C8A_BOUNDARY).unwrap_err();
+    attachments::multipart_parts(b"--BOUN", C8A_BOUNDARY).unwrap_err();
+    attachments::parts(b"--BOUN", C8A_BOUNDARY).unwrap_err();
+}
+
+#[test]
+fn test_multipart_parts_truncated_forms_no_panic() {
+    // Three panic classes, each reachable in BOTH twin loops pre-fix:
+    // (a) body ends exactly at a dash-boundary with EOF (no CRLF, no
+    //     closing `--`): `input[0]` out of bounds after consuming
+    //     `--<boundary>`. `--BOUND\r\n` and `--BOUND--` never panicked.
+    // (b) empty part (no line ending between the first boundary's CRLF and
+    //     the next boundary): `end - 3` underflow with end == 2.
+    // (c) part content starting with the boundary bytes: `&input[end - 2..end]`
+    //     underflow with end < 2.
+    let panic_forms: &[(&[u8], &str)] = &[
+        (b"--BOUND" as &[u8], "(a) bare dash-boundary at EOF"),
+        (b"x\r\n--BOUND", "(a) preamble then dash-boundary at EOF"),
+        (
+            b"preamble\r\n--BOUND",
+            "(a) preamble then dash-boundary at EOF",
+        ),
+        (
+            b"--BOUND\r\n--BOUND--\r\n",
+            "(b) empty part before closing boundary",
+        ),
+        (
+            b"--BOUND\r\n--BOUND--",
+            "(b) empty part, truncated epilogue",
+        ),
+        (
+            b"--BOUND\r\nBOUND-prefix line\r\n--BOUND--\r\n",
+            "(c) part content starts with boundary bytes",
+        ),
+    ];
+    for (body, label) in panic_forms {
+        for f in [
+            (format!("multipart_parts {label}"), 0),
+            (format!("parts_f {label}"), 1),
+        ] {
+            let (name, which) = f;
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match which {
+                0 => {
+                    let _ = attachments::multipart_parts(body, C8A_BOUNDARY);
+                }
+                _ => {
+                    let _ = attachments::parts(body, C8A_BOUNDARY);
+                }
+            }));
+            if let Err(payload) = &r {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string payload".into());
+                eprintln!("[{name}]: PANIC: {msg}");
+            }
+            assert!(r.is_ok(), "{name}: panicked (C8a/CWE-1287 regression)");
+        }
+    }
+    // Must-not-panic family (never panicked pre-fix; behavior freeze):
+    let calm_forms: &[&[u8]] = &[
+        b"--BOUND\r\n",
+        b"--BOUND--",
+        b"--BOUND\r\n--BOUND",
+        b"BOUND",
+        b"--BOUN",
+    ];
+    for body in calm_forms {
+        let _ = attachments::multipart_parts(body, C8A_BOUNDARY);
+        let _ = attachments::parts(body, C8A_BOUNDARY);
+    }
+}
+
+#[test]
+fn test_multipart_parts_hostile_outcomes() {
+    // Pin post-fix outcomes for the hostile forms so regressions cannot
+    // hide behind a mere "did not panic" (misleading-success class).
+    // (a) dash-boundary at EOF -> Err; parts() falls back to empty list.
+    attachments::multipart_parts(b"x\r\n--BOUND", C8A_BOUNDARY).unwrap_err();
+    assert_eq!(
+        attachments::parts(b"x\r\n--BOUND", C8A_BOUNDARY)
+            .expect("parts() fallback must accept truncated boundary")
+            .1,
+        Vec::<&[u8]>::new()
+    );
+    // (b) empty part -> one empty part, not a panic.
+    assert_eq!(
+        attachments::parts(b"--BOUND\r\n--BOUND--\r\n", C8A_BOUNDARY)
+            .unwrap()
+            .1,
+        vec![b"" as &[u8]]
+    );
+    assert_eq!(
+        attachments::parts(b"--BOUND\r\n\r\n--BOUND--\r\n", C8A_BOUNDARY)
+            .unwrap()
+            .1,
+        vec![b"" as &[u8]]
+    );
+    // (c) boundary-prefixed part content -> parts_f Err, fallback empty.
+    assert_eq!(
+        attachments::parts(b"--BOUND\r\nBOUND-x\r\n--BOUND--\r\n", C8A_BOUNDARY)
+            .expect("parts() fallback must accept boundary-prefixed content")
+            .1,
+        Vec::<&[u8]>::new()
+    );
+    attachments::multipart_parts(b"--BOUND\r\nBOUND-x\r\n--BOUND--\r\n", C8A_BOUNDARY).unwrap_err();
+}
+
+#[test]
+fn test_multipart_parts_clean_two_part_freeze() {
+    // Behavior freeze: regular two-part multiparts must parse to the exact
+    // same part bytes as before the C8a hardening.
+    let lf_body: &[u8] = b"preamble\n--BOUND\nContent-Type: text/plain\n\nfirst \
+                           part\n--BOUND\nContent-Type: text/plain\n\nsecond \
+                           part\n--BOUND--\n";
+    let expected: Vec<&[u8]> = vec![
+        b"Content-Type: text/plain\n\nfirst part".as_slice(),
+        b"Content-Type: text/plain\n\nsecond part".as_slice(),
+    ];
+
+    let (rest, parts) = attachments::parts(lf_body, C8A_BOUNDARY).unwrap();
+    assert_eq!(parts, expected);
+    assert_eq!(rest, b"--\n");
+
+    let (rest, builders) = attachments::multipart_parts(lf_body, C8A_BOUNDARY).unwrap();
+    let rendered: Vec<&[u8]> = builders
+        .iter()
+        .map(|sb| &lf_body[sb.offset..sb.offset + sb.length])
+        .collect();
+    assert_eq!(rendered, expected);
+    assert_eq!(rest, b"--\n");
+
+    // CRLF variant: parts_f (via parts()) continues after a `\r\n`
+    // terminator and yields both parts byte-identically. NOTE (pre-existing
+    // twin asymmetry, deliberately frozen): multipart_parts' second loop
+    // breaks after the first part for CRLF bodies; not a C8a defect.
+    let crlf_body: &[u8] = b"preamble\r\n--BOUND\r\nContent-Type: text/plain\r\n\r\nfirst \
+                             part\r\n--BOUND\r\nContent-Type: text/plain\r\n\r\nsecond \
+                             part\r\n--BOUND--\r\n";
+    let (rest, parts) = attachments::parts(crlf_body, C8A_BOUNDARY).unwrap();
+    assert_eq!(
+        parts,
+        vec![
+            b"Content-Type: text/plain\r\n\r\nfirst part".as_slice(),
+            b"Content-Type: text/plain\r\n\r\nsecond part".as_slice(),
+        ]
+    );
+    assert_eq!(rest, b"--\r\n");
+
+    let (rest, builders) = attachments::multipart_parts(crlf_body, C8A_BOUNDARY).unwrap();
+    let rendered: Vec<&[u8]> = builders
+        .iter()
+        .map(|sb| &crlf_body[sb.offset..sb.offset + sb.length])
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![b"Content-Type: text/plain\r\n\r\nfirst part".as_slice()]
+    );
+    // Rest = everything after the second boundary line's `BOUND` token.
+    assert_eq!(
+        rest,
+        b"\r\nContent-Type: text/plain\r\n\r\nsecond part\r\n--BOUND--\r\n".as_slice()
+    );
 }

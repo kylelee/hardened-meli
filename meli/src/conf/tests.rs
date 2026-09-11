@@ -29,8 +29,15 @@ use std::{
 };
 
 use crate::{
-    conf::{themes::*, FileSettings},
-    terminal::Color,
+    conf::{
+        shortcuts::{
+            ComposingShortcuts, ContactListShortcuts, GeneralShortcuts, ListingShortcuts,
+            PagerShortcuts, ThreadViewShortcuts,
+        },
+        themes::*,
+        FileSettings,
+    },
+    terminal::{Color, Key},
 };
 
 pub struct ConfigFile {
@@ -161,6 +168,71 @@ fn test_conf_config_parse() {
 
     if let Err(err) = tempdir.close() {
         eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+
+#[test]
+fn test_conf_thread_view_focus_shortcuts_parse() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = format!(
+        r#"
+[accounts.focus-test]
+root_mailbox = "{}"
+format = "maildir"
+send_mail = 'false'
+identity = "username@hostname.local"
+
+[shortcuts.thread-view]
+focus_left = "Left"
+focus_right = "Right"
+"#,
+        tempdir.path().display()
+    );
+
+    let new_file = ConfigFile::new(&config, &tempdir).unwrap();
+    let config = FileSettings::validate(new_file.path.clone(), true)
+        .expect("could not parse thread-view focus shortcuts config");
+
+    let thread_view = config.shortcuts.thread_view.key_values();
+    assert_eq!(
+        thread_view.get("focus_left"),
+        Some(&Key::Left),
+        "focus_left must parse from [shortcuts.thread-view]"
+    );
+    assert_eq!(
+        thread_view.get("focus_right"),
+        Some(&Key::Right),
+        "focus_right must parse from [shortcuts.thread-view]"
+    );
+
+    if let Err(err) = tempdir.close() {
+        eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+
+/// Arrow keys are the default vertical navigation everywhere: every
+/// shortcut section's `scroll_up`/`scroll_down` defaults to `Up`/`Down`,
+/// not `k`/`j`.
+#[test]
+fn test_conf_arrow_navigation_defaults() {
+    for (section, values) in [
+        ("listing", ListingShortcuts::default().key_values()),
+        ("contact-list", ContactListShortcuts::default().key_values()),
+        ("pager", PagerShortcuts::default().key_values()),
+        ("general", GeneralShortcuts::default().key_values()),
+        ("composing", ComposingShortcuts::default().key_values()),
+        ("thread-view", ThreadViewShortcuts::default().key_values()),
+    ] {
+        assert_eq!(
+            values.get("scroll_up"),
+            Some(&Key::Up),
+            "{section}.scroll_up must default to Up"
+        );
+        assert_eq!(
+            values.get("scroll_down"),
+            Some(&Key::Down),
+            "{section}.scroll_down must default to Down"
+        );
     }
 }
 

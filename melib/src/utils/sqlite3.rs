@@ -192,7 +192,6 @@ impl DatabaseDescription {
 
                 Ok(Some(conn))
             };
-            inner_fn().unwrap();
             match inner_fn() {
                 Ok(None) => continue,
                 Ok(Some(conn)) => return Ok(conn),
@@ -242,5 +241,54 @@ impl FromSql for Envelope {
         let b: Vec<u8> = FromSql::column_result(value)?;
 
         serde_json::from_slice(&b).map_err(|e| FromSqlError::Other(Box::new(e)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_open_or_create_db_runs_init_script_exactly_once() {
+        const INIT_SCRIPT: &str =
+            "CREATE TABLE IF NOT EXISTS x (id INTEGER); INSERT INTO x VALUES (42);";
+        let dir = tempfile::tempdir().unwrap();
+        let db = DatabaseDescription {
+            name: "test_init_once",
+            identifier: None,
+            application_prefix: "meli_test",
+            directory: Some(dir.path().to_path_buf().into()),
+            init_script: Some(INIT_SCRIPT),
+            version: 1,
+        };
+        let conn = db.open_or_create_db().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM x", params![], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "init_script must execute exactly once");
+    }
+
+    #[test]
+    fn test_open_or_create_db_error_is_graceful() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the database path makes `Connection::open` fail
+        // without any prior side effect; the error must surface as `Err`,
+        // not a panic, and the path must not be replaced by a file.
+        std::fs::create_dir(dir.path().join("test_err_db")).unwrap();
+        let db = DatabaseDescription {
+            name: "test_err_db",
+            identifier: None,
+            application_prefix: "meli_test",
+            directory: Some(dir.path().to_path_buf().into()),
+            init_script: None,
+            version: 1,
+        };
+        let err = db.open_or_create_db().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Could not open or create database"),
+            "expected graceful open error, got: {err}"
+        );
+        assert!(dir.path().join("test_err_db").is_dir());
     }
 }

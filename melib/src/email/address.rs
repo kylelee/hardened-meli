@@ -22,6 +22,7 @@
 //! Email addresses. Parsing functions are in
 //! [`crate::email::parser::address`].
 use std::{
+    borrow::Cow,
     collections::HashSet,
     convert::TryFrom,
     hash::{Hash, Hasher},
@@ -96,6 +97,26 @@ pub enum Address {
     Group(GroupAddress),
 }
 
+/// Strip `C0` control characters (including `CR`/`LF`) from a display name.
+///
+/// Display names are display data: control characters in them cannot be
+/// rendered legitimately, but if they survive into a header value (e.g. a
+/// decoded `RFC2047` encoded word containing `CRLF`) they enable header
+/// injection (CWE-93). Scrubbing them at the storage boundary (the
+/// constructors below) means every consumer gets a sanitized value.
+///
+/// `HTAB` is exempt: it is valid folding whitespace inside a phrase and
+/// stripping it would glue words together.
+fn sanitize_display_name(display_name: &str) -> Cow<'_, str> {
+    if display_name.bytes().any(|b| b < 0x20 && b != b'\t') {
+        display_name
+            .replace(|c: char| c < '\u{20}' && c != '\t', "")
+            .into()
+    } else {
+        display_name.into()
+    }
+}
+
 impl Address {
     #[inline(always)]
     fn new_inner(display_name: Option<Box<str>>, address_spec: Box<str>) -> Self {
@@ -110,7 +131,13 @@ impl Address {
     /// See [`MailboxAddress]` type.
     #[inline(always)]
     pub fn new<A: Into<String>, B: Into<String>>(display_name: Option<A>, address_spec: B) -> Self {
-        let display_name = display_name.map(Into::into).filter(|s| !s.is_empty());
+        let display_name = display_name
+            .map(Into::into)
+            .map(|s| match sanitize_display_name(&s) {
+                Cow::Borrowed(_) => s,
+                Cow::Owned(scrubbed) => scrubbed,
+            })
+            .filter(|s: &String| !s.is_empty());
         let address_spec = address_spec.into();
         Self::new_inner(display_name.map(Into::into), address_spec.into())
     }
@@ -120,7 +147,11 @@ impl Address {
     /// See [`GroupAddress]` type.
     #[inline(always)]
     pub fn new_group<T: Into<String>>(display_name: T, mailbox_list: Vec<Self>) -> Self {
-        let display_name = display_name.into();
+        let display_name: String = display_name.into();
+        let display_name = match sanitize_display_name(&display_name) {
+            Cow::Borrowed(_) => display_name,
+            Cow::Owned(scrubbed) => scrubbed,
+        };
         Self::Group(GroupAddress {
             display_name: display_name.into(),
             mailbox_list,
@@ -336,7 +367,6 @@ pub fn fmt_mailbox(
     address_spec: &str,
     f: &mut std::fmt::Formatter,
 ) -> std::fmt::Result {
-    // [ref:FIXME]: do proper string escaping; we need a string escaping trait
     if let Some(display_name) = display_name {
         let display_name = display_name
             .strip_prefix('"')
@@ -345,12 +375,17 @@ pub fn fmt_mailbox(
         let must_be_quoted = b"()<>[]:;@\\,.\""
             .iter()
             .any(|b| display_name.as_bytes().contains(b));
-        let must_be_escaped = display_name.as_bytes().contains(&b'"');
-        if must_be_escaped {
-            let display_name = display_name.replace("\"", "\\\"");
-            write!(f, "\"{display_name}\" <{address_spec}>")
-        } else if must_be_quoted {
-            write!(f, "\"{display_name}\" <{address_spec}>")
+        if must_be_quoted {
+            // RFC5322 quoted-string: `"` and `\` may appear inside the quotes
+            // only as quoted-pairs, so escape them with a backslash.
+            let mut escaped = String::with_capacity(display_name.len() + 2);
+            for c in display_name.chars() {
+                if c == '"' || c == '\\' {
+                    escaped.push('\\');
+                }
+                escaped.push(c);
+            }
+            write!(f, "\"{escaped}\" <{address_spec}>")
         } else {
             write!(f, "{display_name} <{address_spec}>")
         }

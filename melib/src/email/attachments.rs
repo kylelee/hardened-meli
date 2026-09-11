@@ -39,6 +39,26 @@ use crate::{
 /// representation in its second argument.
 pub type Filter<'a> = Box<dyn FnMut(&Attachment, &mut Vec<u8>) + 'a>;
 
+/// Whether `b` is a legal byte of an RFC2045 `token`: any US-ASCII CHAR
+/// except SPACE, CTLs and tspecials `()<>@,;:\"/[]?=`.
+fn is_rfc2045_token_byte(b: u8) -> bool {
+    (0x21..=0x7e).contains(&b) && !b"()<>@,;:\\\"/[]?=".contains(&b)
+}
+
+/// Maximum `multipart/*` nesting depth the attachment builder recurses
+/// into.
+///
+/// Real mails nest multiparts less than ten levels deep, so anything
+/// beyond that is pathological rather than legitimate. Without a bound, a
+/// small crafted message walks the stack pointer into its guard page and
+/// aborts the process (CWE-674; the resulting SIGABRT cannot be caught
+/// with `catch_unwind`), with empirical overflow thresholds of roughly
+/// 375 levels in debug builds and 1900 in release builds on a 2 MiB
+/// stack. 100 sits far above legitimate nesting and far below those
+/// thresholds; past it, the remaining subtree is kept as a single
+/// `application/octet-stream` leaf attachment.
+const MAX_MULTIPART_NESTING_DEPTH: usize = 100;
+
 #[derive(Default)]
 /// Options for decoding an [`Attachment`].
 pub struct DecodeOptions<'att> {
@@ -182,8 +202,35 @@ impl AttachmentBuilder {
     }
 
     pub fn set_content_type_from_bytes(&mut self, value: &[u8]) -> &mut Self {
+        self.set_content_type_from_bytes_with_depth(value, 0)
+    }
+
+    /// [`Self::set_content_type_from_bytes`] with `depth` being the
+    /// multipart nesting level of this attachment (the root is 0).
+    fn set_content_type_from_bytes_with_depth(&mut self, value: &[u8], depth: usize) -> &mut Self {
         match parser::attachments::content_type(value) {
             Ok((_, (ct, cst, params))) => {
+                // Reject type/subtype tokens made of bytes outside the
+                // RFC2045 `token` set; otherwise hostile header bytes
+                // (SPACE, CTLs, tspecials, non-ASCII) could reach downstream
+                // string interpolations such as mailcap `%t`. Only leading
+                // and trailing whitespace (RFC OWS around `;`) is tolerated;
+                // whitespace inside a token is rejected.
+                let (ct, cst) = (ct.trim_ascii(), cst.trim_ascii());
+                if ct.is_empty()
+                    || cst.is_empty()
+                    || ct
+                        .iter()
+                        .chain(cst.iter())
+                        .any(|b| !is_rfc2045_token_byte(*b))
+                {
+                    log::debug!(
+                        "invalid content type token(s) in content_type: {:?}",
+                        String::from_utf8_lossy(value)
+                    );
+                    self.content_type = ContentType::default();
+                    return self;
+                }
                 if ct.eq_ignore_ascii_case(b"multipart") {
                     let mut boundary = None;
                     for (n, v) in &params {
@@ -193,7 +240,19 @@ impl AttachmentBuilder {
                         }
                     }
                     if let Some(boundary) = boundary {
-                        let parts = Self::parts(self.body(), boundary);
+                        if depth >= MAX_MULTIPART_NESTING_DEPTH {
+                            log::debug!(
+                                "multipart nesting depth {} exceeded; treating remaining \
+                                 subtree as application/octet-stream",
+                                MAX_MULTIPART_NESTING_DEPTH
+                            );
+                            self.content_type = ContentType::OctetStream {
+                                name: None,
+                                parameters: Vec::new(),
+                            };
+                            return self;
+                        }
+                        let parts = Self::parts_with_depth(self.body(), boundary, depth + 1);
 
                         let boundary = boundary.to_vec();
                         self.content_type = ContentType::Multipart {
@@ -305,6 +364,12 @@ impl AttachmentBuilder {
     }
 
     pub fn parts(raw: &[u8], boundary: &[u8]) -> Vec<Attachment> {
+        Self::parts_with_depth(raw, boundary, 0)
+    }
+
+    /// [`Self::parts`] with `depth` being the multipart nesting level of
+    /// the parts constructed from `raw`.
+    fn parts_with_depth(raw: &[u8], boundary: &[u8], depth: usize) -> Vec<Attachment> {
         if raw.is_empty() {
             return Vec::new();
         }
@@ -333,7 +398,7 @@ impl AttachmentBuilder {
                     };
                     for (name, value) in headers {
                         if name == HeaderName::CONTENT_TYPE {
-                            builder.set_content_type_from_bytes(value);
+                            builder.set_content_type_from_bytes_with_depth(value, depth);
                         } else if name == HeaderName::CONTENT_TRANSFER_ENCODING {
                             builder.set_content_transfer_encoding(ContentTransferEncoding::from(
                                 value,
@@ -350,7 +415,7 @@ impl AttachmentBuilder {
                 log::debug!(
                     "error {:?}\n\traw: {:?}\n\tboundary: {:?}",
                     a,
-                    std::str::from_utf8(raw).unwrap(),
+                    String::from_utf8_lossy(raw),
                     boundary
                 );
                 Vec::new()
@@ -520,6 +585,20 @@ impl Attachment {
     /* Call on the body of a multipart/mixed Envelope to check if there are
      * attachments without completely parsing them */
     pub fn check_if_has_attachments_quick(bytes: &[u8], boundary: &[u8]) -> bool {
+        Self::check_if_has_attachments_quick_with_depth(bytes, boundary, 0)
+    }
+
+    /// [`Self::check_if_has_attachments_quick`] bounded by
+    /// [`MAX_MULTIPART_NESTING_DEPTH`]; past the cap the scan stops
+    /// descending instead of recursing on hostile nesting.
+    fn check_if_has_attachments_quick_with_depth(
+        bytes: &[u8],
+        boundary: &[u8],
+        depth: usize,
+    ) -> bool {
+        if depth >= MAX_MULTIPART_NESTING_DEPTH {
+            return false;
+        }
         if bytes.is_empty() {
             return false;
         }
@@ -563,7 +642,11 @@ impl Attachment {
                             None
                         })
                     {
-                        if Self::check_if_has_attachments_quick(body, boundary) {
+                        if Self::check_if_has_attachments_quick_with_depth(
+                            body,
+                            boundary,
+                            depth + 1,
+                        ) {
                             return true;
                         }
                     }
@@ -582,12 +665,7 @@ impl Attachment {
 
     fn get_text_recursive(&self, kind: &Text, text: &mut Vec<u8>) {
         match self.content_type {
-            ContentType::Text {
-                kind: ref a_kind, ..
-            } if a_kind == kind => {
-                text.extend(self.decode(Default::default()));
-            }
-            ContentType::PGPSignature | ContentType::CMSSignature => {
+            ContentType::Text { .. } | ContentType::PGPSignature | ContentType::CMSSignature => {
                 text.extend(self.decode(Default::default()));
             }
             ContentType::Multipart {
@@ -1164,5 +1242,38 @@ impl StrBuilder {
 
     pub fn display_bytes<'a>(&self, b: &'a [u8]) -> &'a [u8] {
         &b[self.offset..(self.offset + self.length)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: the parser-error branch of
+    /// [`AttachmentBuilder::parts_with_depth`] logs the raw bytes; the format
+    /// arguments of `log::debug!` are evaluated only when the runtime maximum
+    /// level permits, so the level is raised to Debug around the call. No
+    /// logger needs to be installed: the global fallback logger discards
+    /// records.
+    #[test]
+    fn test_parts_err_arm_debug_log_with_invalid_utf8_does_not_panic() {
+        // No `b` and no `-` anywhere, so `parts_f` cannot find a starting
+        // boundary and the `--`-prefixed fallback also fails: the error arm
+        // (and its log line) is reached. The bytes are not valid UTF-8.
+        let raw: &[u8] = b"m\xC3na\xE7ao";
+        // The invalid bytes are deliberate; silence rustc's static proof of it.
+        #[allow(invalid_from_utf8)]
+        std::str::from_utf8(raw).unwrap_err();
+        assert!(!raw.iter().any(|&b| b == b'b' || b == b'-'));
+
+        let prev_level = log::max_level();
+        log::set_max_level(log::LevelFilter::Debug);
+        let parts = AttachmentBuilder::parts(raw, b"b");
+        log::set_max_level(prev_level);
+
+        assert!(parts.is_empty());
+        // Two replacement characters for the two truncated multibyte
+        // sequences.
+        assert_eq!(String::from_utf8_lossy(raw).matches('\u{FFFD}').count(), 2);
     }
 }

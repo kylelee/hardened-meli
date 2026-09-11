@@ -355,13 +355,6 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
         self.buttons.push(val);
     }
 
-    pub fn push_choices(&mut self, (field_name, value): (F, Vec<Cow<'static, str>>)) {
-        self.field_name_max_length = self.field_name_max_length.max(field_name.as_ref().len());
-        self.layout.push(field_name.clone());
-        self.fields
-            .insert(field_name, Field::Choice(value, 0, ComponentId::default()));
-    }
-
     pub fn push_cl(&mut self, (field_name, value, auto): (F, String, AutoCompleteFn)) {
         self.field_name_max_length = self.field_name_max_length.max(field_name.as_ref().len());
         self.layout.push(field_name.clone());
@@ -394,10 +387,6 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
 
     pub fn values_mut(&mut self) -> &mut IndexMap<F, Field> {
         &mut self.fields
-    }
-
-    pub fn layout_mut(&mut self) -> &mut Vec<F> {
-        &mut self.layout
     }
 
     pub fn collect(self) -> IndexMap<F, Field> {
@@ -693,10 +682,6 @@ where
     pub fn push(&mut self, value: (Cow<'static, str>, T)) {
         self.layout.push(value.0.clone());
         self.buttons.insert(value.0, value.1);
-    }
-
-    pub fn is_resolved(&self) -> bool {
-        self.result.is_some()
     }
 
     pub fn result(&mut self) -> Option<T> {

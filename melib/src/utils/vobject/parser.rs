@@ -40,9 +40,22 @@ pub enum ParseErrorReason {
     ExpectedBegin,
     //#[error("mismatched tags: BEGIN:{} vs END:{}", _0, _1)]
     MismatchedTag(String, String),
+    //#[error("component nesting deeper than {}", MAX_COMPONENT_NESTING_DEPTH)]
+    NestingTooDeep,
 }
 
 type ParseResult<T> = Result<T, ParseErrorReason>;
+
+/// Maximum allowed nesting depth of components (`BEGIN:`/`END:` pairs) in
+/// [`Parser::consume_component`].
+///
+/// Real-world vCard and iCalendar data nests only a handful of levels (e.g.
+/// `VCALENDAR` → `VEVENT` → `VALARM`, well below five), so a cap of 64 leaves
+/// generous headroom for legitimate input while bounding recursion: without
+/// it, deeply nested `BEGIN` lines drive [`Parser::consume_component`] into
+/// unbounded recursion that aborts the process with a stack overflow
+/// (CWE-674), which callers cannot catch.
+pub(crate) const MAX_COMPONENT_NESTING_DEPTH: usize = 64;
 
 pub struct Parser<'s> {
     pub input: &'s str,
@@ -285,6 +298,16 @@ impl<'s> Parser<'s> {
     }
 
     pub fn consume_component(&mut self) -> ParseResult<Component> {
+        self.consume_component_with_depth(0)
+    }
+
+    /// [`Self::consume_component`] with `depth` being the component nesting
+    /// level of the component about to be consumed (the root is 0).
+    fn consume_component_with_depth(&mut self, depth: usize) -> ParseResult<Component> {
+        if depth >= MAX_COMPONENT_NESTING_DEPTH {
+            return Err(ParseErrorReason::NestingTooDeep);
+        }
+
         let start_pos = self.pos;
         let mut property = self.consume_property()?;
         if property.name != "BEGIN" {
@@ -300,7 +323,9 @@ impl<'s> Parser<'s> {
             property = self.consume_property()?;
             if property.name == "BEGIN" {
                 self.pos = previous_pos;
-                component.subcomponents.push(self.consume_component()?);
+                component
+                    .subcomponents
+                    .push(self.consume_component_with_depth(depth + 1)?);
             } else if property.name == "END" {
                 if property.raw_value != component.name {
                     self.pos = start_pos;

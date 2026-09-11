@@ -37,6 +37,22 @@ pub mod sqlite3_cache;
 #[cfg(test)]
 mod tests;
 
+/// Quick synchronization check of [RFC4549](https://datatracker.ietf.org/doc/rfc4549/)
+/// Section 4.3.2: whether a `STATUS` response matches the cached
+/// UIDVALIDITY and the `(MESSAGES, UNSEEN, UIDNEXT)` counters recorded with
+/// [`ImapCache::record_status`].
+///
+/// Missing items (`None`) compare equal to each other; a missing UIDVALIDITY
+/// never matches.
+fn status_unchanged(
+    status: &protocol_parser::StatusResponse,
+    cached_uidvalidity: UIDVALIDITY,
+    cached_status: cache::CachedStatus,
+) -> bool {
+    status.uidvalidity == Some(cached_uidvalidity)
+        && (status.messages, status.unseen, status.uidnext) == cached_status
+}
+
 impl ImapConnection {
     pub async fn resync(&mut self, mailbox_hash: MailboxHash) -> Result<Option<Vec<Envelope>>> {
         if matches!(self.sync_policy, SyncPolicy::None) {
@@ -48,10 +64,11 @@ impl ImapConnection {
         }
 
         match self.sync_policy {
-            SyncPolicy::None => Ok(None),
             SyncPolicy::Basic => self.resync_basic(mailbox_hash).await,
             SyncPolicy::Condstore => self.resync_condstore(mailbox_hash).await,
             SyncPolicy::CondstoreQresync => self.resync_condstoreqresync(mailbox_hash).await,
+            // `SyncPolicy::None` returns early above.
+            _ => Ok(None),
         }
     }
 
@@ -92,7 +109,59 @@ impl ImapConnection {
         ) else {
             return Ok(None);
         };
+        let mailbox_path = {
+            let f = &self.uid_store.mailboxes.lock().await[&mailbox_hash];
+            f.imap_path().to_string()
+        };
         let mut response = Vec::with_capacity(1024);
+
+        // Quick synchronization check (RFC4549 Section 4.3.2): if the mailbox
+        // STATUS counters are unchanged since the last recorded values, no
+        // message was added, removed or had its flags changed, so the UID
+        // FETCHes below can be skipped entirely.
+        //
+        // The item order matches the declaration order of the items in
+        // `protocol_parser::status_response`'s `permutation` parsers, because
+        // that parser only accepts this order; a response that can't be
+        // parsed simply disables the quick check for this run.
+        self.send_command(CommandBody::status(
+            mailbox_path.as_str(),
+            [
+                StatusDataItemName::Messages,
+                StatusDataItemName::UidNext,
+                StatusDataItemName::UidValidity,
+                StatusDataItemName::Unseen,
+            ]
+            .as_slice(),
+        )?)
+        .await?;
+        self.read_response(&mut response, RequiredResponses::STATUS)
+            .await?;
+        match (
+            protocol_parser::status_response(response.as_slice())
+                .ok()
+                .map(|(_, s)| s),
+            self.uid_store.cached_status(mailbox_hash)?,
+        ) {
+            (Some(status), Some(cached_status))
+                if status_unchanged(&status, cached_uidvalidity, cached_status) =>
+            {
+                log::trace!(
+                    "resync_basic: STATUS counters of mailbox {mailbox_path} are unchanged; \
+                     skipping FLAGS resync"
+                );
+                return Ok(Some(vec![]));
+            }
+            (None, _) => {
+                log::trace!(
+                    "resync_basic: could not parse STATUS response of mailbox {mailbox_path}: \
+                     {}",
+                    String::from_utf8_lossy(&response)
+                );
+            }
+            _ => {}
+        }
+
         let select_response = self
             .select_mailbox(mailbox_hash, &mut response, true)
             .await?;
@@ -105,13 +174,9 @@ impl ImapConnection {
         self.uid_store
             .update_mailbox(mailbox_hash, &select_response)?;
 
-        let (mailbox_path, mailbox_exists, unseen) = {
+        let (mailbox_exists, unseen) = {
             let f = &self.uid_store.mailboxes.lock().await[&mailbox_hash];
-            (
-                f.imap_path().to_string(),
-                f.exists.clone(),
-                f.unseen.clone(),
-            )
+            (f.exists.clone(), f.unseen.clone())
         };
         let mut refresh_events = vec![];
 
@@ -124,7 +189,11 @@ impl ImapConnection {
 
         // Step 2i. Create events
 
-        let (required_responses, attributes) = crate::imap::email::common_attributes();
+        let (required_responses, attributes) = if self.uid_store.fetch_body_structure {
+            crate::imap::email::common_attributes()
+        } else {
+            crate::imap::email::common_attributes_light()
+        };
         self.send_command(CommandBody::fetch(lastseenuid + 1.., attributes, true)?)
             .await?;
         self.read_response(&mut response, required_responses)
@@ -308,6 +377,35 @@ impl ImapConnection {
         for (_uid, ev) in refresh_events {
             self.add_refresh_event(ev);
         }
+        // Record the final STATUS counters as the baseline for the quick
+        // synchronization check at the start of the next resync. If the
+        // response can't be parsed, skip recording; the next resync will run
+        // the full flow again.
+        self.send_command(CommandBody::status(
+            mailbox_path.as_str(),
+            [
+                StatusDataItemName::Messages,
+                StatusDataItemName::UidNext,
+                StatusDataItemName::Unseen,
+            ]
+            .as_slice(),
+        )?)
+        .await?;
+        self.read_response(&mut response, RequiredResponses::STATUS)
+            .await?;
+        if let Ok((_, status)) = protocol_parser::status_response(response.as_slice()) {
+            self.uid_store.record_status(
+                mailbox_hash,
+                status.messages,
+                status.unseen,
+                status.uidnext,
+            )?;
+        } else {
+            log::trace!(
+                "resync_basic: could not parse STATUS response of mailbox {mailbox_path}: {}",
+                String::from_utf8_lossy(&response)
+            );
+        }
         // Step 6. Return new envelopes
         Ok(Some(new_envelopes))
     }
@@ -415,7 +513,11 @@ impl ImapConnection {
             //       "SEARCH MODSEQ <cached-value>".
 
             // 2. tag1 UID FETCH <lastseenuid+1>:* <descriptors>
-            let (required_responses, macro_or_item_names) = crate::imap::email::common_attributes();
+            let (required_responses, macro_or_item_names) = if self.uid_store.fetch_body_structure {
+                crate::imap::email::common_attributes()
+            } else {
+                crate::imap::email::common_attributes_light()
+            };
             self.send_command(CommandBody::Fetch {
                 sequence_set: ((lastseenuid + 1)..).try_into()?,
                 macro_or_item_names,
@@ -636,9 +738,8 @@ impl ImapConnection {
 
     /// Resync with `CONDSTORE` and `QRESYNC` Extension
     ///
-    /// Re-sync IMAP state by following the strategy described in
-    /// [RFC7162](https://datatracker.ietf.org/doc/rfc7162/) "Quick Flag Changes Resynchronization (CONDSTORE) and Quick
-    /// Mailbox Resynchronization (QRESYNC)"
+    /// Not implemented yet: this currently delegates to the `CONDSTORE` resync
+    /// strategy ([`Self::resync_condstore`]).
     pub async fn resync_condstoreqresync(
         &mut self,
         mailbox_hash: MailboxHash,

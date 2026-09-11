@@ -128,10 +128,6 @@ impl CellBuffer {
         }
     }
 
-    pub fn set_cols(&mut self, new_cols: usize) {
-        self.cols = new_cols;
-    }
-
     /// Constructs a new `CellBuffer` with the given number of columns and rows,
     /// using the given `cell` as a blank.
     pub fn new(default_cell: Cell, area: Area) -> Self {
@@ -156,24 +152,6 @@ impl CellBuffer {
         }
     }
 
-    pub fn new_with_context(default_cell: Option<Cell>, area: Area, context: &Context) -> Self {
-        let default_cell = default_cell.unwrap_or_else(|| {
-            let mut ret = Cell::default();
-            let theme_default = crate::conf::value(context, "theme_default");
-            ret.set_fg(theme_default.fg)
-                .set_bg(theme_default.bg)
-                .set_attrs(theme_default.attrs);
-            ret
-        });
-        Self {
-            ascii_drawing: context.settings.terminal.ascii_drawing,
-            force_text_presentation: context.settings.terminal.use_text_presentation(),
-            use_color: context.settings.terminal.use_color(),
-            draw_hyperlinks: context.settings.terminal.draw_hyperlinks(),
-            ..Self::new(default_cell, area)
-        }
-    }
-
     pub fn set_force_text_presentation(&mut self, new_val: bool) -> &mut Self {
         self.force_text_presentation = new_val;
         self
@@ -181,10 +159,6 @@ impl CellBuffer {
 
     pub fn set_ascii_drawing(&mut self, new_val: bool) {
         self.ascii_drawing = new_val;
-    }
-
-    pub fn set_use_color(&mut self, new_val: bool) {
-        self.use_color = new_val;
     }
 
     pub fn set_tab_width(&mut self, new_val: u8) {
@@ -500,10 +474,6 @@ impl CellBuffer {
 
     pub fn tag_table(&self) -> &BTreeMap<u64, FormatTag> {
         &self.tag_table
-    }
-
-    pub fn tag_table_mut(&mut self) -> &mut BTreeMap<u64, FormatTag> {
-        &mut self.tag_table
     }
 
     pub fn insert_tag(&mut self, tag: FormatTag) -> u64 {
@@ -1988,14 +1958,6 @@ impl From<ThemeAttribute> for FormatTag {
             attrs: Some(attrs),
             priority: 0,
         }
-    }
-}
-
-impl FormatTag {
-    #[inline(always)]
-    pub fn set_priority(mut self, new_val: u8) -> Self {
-        self.priority = new_val;
-        self
     }
 }
 

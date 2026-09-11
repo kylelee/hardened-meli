@@ -31,6 +31,13 @@ pub enum FetchStage {
         max_uid: UID,
         batch: usize,
     },
+    /// Serve the offline cache before any network round-trip
+    /// (stale-while-revalidate); `max_uid` is a placeholder until the
+    /// first `chunk()` call corrects it with `lastseenuid()`.
+    CacheFirst {
+        max_uid: UID,
+        batch: usize,
+    },
     ResyncCache,
     FreshFetch {
         max_uid: UID,
@@ -46,7 +53,9 @@ pub struct FetchState {
     pub uid_store: Arc<UIDStore>,
     pub batch_size: usize,
     pub cache_batch_size: usize,
-    pub response: Vec<u8>,
+    /// Whether the `CacheFirst` stage already emitted the cached
+    /// envelopes to the stream. Later stages must not serve them again.
+    pub cache_served_offline: bool,
 }
 
 impl FetchState {
@@ -79,7 +88,7 @@ impl FetchState {
                         .connection
                         .lock()
                         .await?
-                        .select_mailbox(self.mailbox_hash, &mut self.response, false)
+                        .init_mailbox(self.mailbox_hash)
                         .await?;
                     if let Err(err) = self
                         .uid_store
@@ -190,9 +199,117 @@ impl FetchState {
                         }
                     }
                 }
+                FetchStage::CacheFirst { max_uid, batch } => {
+                    // stale-while-revalidate: serve the offline cache
+                    // before any network round-trip so the UI can render
+                    // immediately; the `ResyncCache` stage that follows
+                    // reconciles with the server.
+                    let max_uid = if batch == 0 {
+                        match self.lastseenuid() {
+                            Ok(Some(max_uid)) => max_uid,
+                            Ok(None) => {
+                                self.stage = FetchStage::ResyncCache;
+                                continue;
+                            }
+                            Err(err) => {
+                                log::error!(
+                                    "{} IMAP cache error: could not fetch cache. Reason: {}",
+                                    self.uid_store.account_name,
+                                    err
+                                );
+                                // Only log; resetting the database is left
+                                // to the `FromCache` error path.
+                                self.stage = FetchStage::ResyncCache;
+                                continue;
+                            }
+                        }
+                    } else {
+                        max_uid
+                    };
+                    let cache_batch_size = if batch == 0 {
+                        500
+                    } else {
+                        self.cache_batch_size
+                    };
+                    let res = self.cached_envs_offline(max_uid, cache_batch_size).await;
+                    match res {
+                        Ok(Some(cached_payload)) => {
+                            self.stage = match max_uid.saturating_sub(cache_batch_size) {
+                                0 => FetchStage::ResyncCache,
+                                max_uid => FetchStage::CacheFirst {
+                                    max_uid,
+                                    batch: batch + 1,
+                                },
+                            };
+                            self.cache_served_offline = true;
+                            let (mailbox_exists, unseen) = {
+                                let f = &self.uid_store.mailboxes.lock().await[&self.mailbox_hash];
+                                (Arc::clone(&f.exists), Arc::clone(&f.unseen))
+                            };
+                            unseen.lock().unwrap().insert_existing_set(
+                                cached_payload
+                                    .iter()
+                                    .filter_map(|env| {
+                                        if !env.is_seen() {
+                                            Some(env.hash())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect(),
+                            );
+                            mailbox_exists.lock().unwrap().insert_existing_set(
+                                cached_payload.iter().map(|env| env.hash()).collect::<_>(),
+                            );
+                            return Ok(cached_payload);
+                        }
+                        Ok(None) => {
+                            self.stage = FetchStage::ResyncCache;
+                            continue;
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "{} IMAP cache error: could not fetch cache. Reason: {}",
+                                self.uid_store.account_name,
+                                err
+                            );
+                            // Only log; resetting the database is left to
+                            // the `FromCache` error path.
+                            self.stage = FetchStage::ResyncCache;
+                            continue;
+                        }
+                    }
+                }
                 FetchStage::ResyncCache => {
                     let mut conn = self.connection.lock().await?;
-                    let select_response = conn.init_mailbox(self.mailbox_hash).await?;
+                    let select_response = match conn.init_mailbox(self.mailbox_hash).await {
+                        Ok(select_response) => select_response,
+                        Err(err)
+                            if self.cache_served_offline
+                                && (err.kind.is_network()
+                                    || err.kind.is_timeout()
+                                    || err.kind.is_oserror()) =>
+                        {
+                            // The offline cache was already emitted by the
+                            // `CacheFirst` stage; a network-ish failure to
+                            // reach the server ends the stream gracefully
+                            // instead of failing the mailbox. All other
+                            // errors (authentication, protocol, etc.)
+                            // propagate.
+                            imap_log!(
+                                error,
+                                conn,
+                                "IMAP error: could not connect to resync {} after serving the \
+                             offline cache. Reason: {}",
+                                self.uid_store.account_name,
+                                err
+                            );
+                            self.stage = FetchStage::Finished;
+                            return Ok(Vec::new());
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    let mut resync_res: Option<Vec<Envelope>> = None;
                     match self
                         .uid_store
                         .update_mailbox(self.mailbox_hash, &select_response)
@@ -214,13 +331,38 @@ impl FetchState {
                         }
                         Ok(()) => {
                             let mailbox_hash = self.mailbox_hash;
-                            let res = conn.resync(mailbox_hash).await;
-                            if let Ok(Some(payload)) = res {
-                                self.stage = FetchStage::InitialCache;
-                                resync_payload = Some(payload);
-                                continue;
+                            match conn.resync(mailbox_hash).await {
+                                Ok(Some(payload)) => resync_res = Some(payload),
+                                Ok(None) => {}
+                                Err(err) => {
+                                    if self.cache_served_offline {
+                                        imap_log!(
+                                            error,
+                                            conn,
+                                            "IMAP error: could not resync {} after serving \
+                                             the offline cache. Reason: {}",
+                                            self.uid_store.account_name,
+                                            err
+                                        );
+                                    }
+                                }
                             }
                         }
+                    }
+                    if self.cache_served_offline {
+                        // The cached envelopes were already emitted by the
+                        // `CacheFirst` stage: emit only what the resync
+                        // fetched (if anything) and finish. Falling
+                        // through to `InitialCache`/`FromCache` (or the
+                        // `InitialFresh` fresh fetch fallback) would emit
+                        // the same envelopes a second time.
+                        self.stage = FetchStage::Finished;
+                        return Ok(resync_res.unwrap_or_default());
+                    }
+                    if let Some(payload) = resync_res {
+                        self.stage = FetchStage::InitialCache;
+                        resync_payload = Some(payload);
+                        continue;
                     }
                     self.stage = FetchStage::InitialFresh;
                     continue;
@@ -233,7 +375,7 @@ impl FetchState {
                         ref uid_store,
                         batch_size,
                         cache_batch_size: _,
-                        ref mut response,
+                        cache_served_offline: _,
                     } = self;
                     let mailbox_hash = *mailbox_hash;
                     let mut our_unseen: BTreeSet<EnvelopeHash> = BTreeSet::default();
@@ -251,10 +393,12 @@ impl FetchState {
                         return Ok(Vec::new());
                     }
                     let mut conn = connection.lock().await?;
+                    let mut response = Vec::with_capacity(8 * 1024);
                     let mut max_uid_left = max_uid;
 
                     let mut envelopes = Vec::with_capacity(*batch_size);
-                    conn.examine_mailbox(mailbox_hash, response, false).await?;
+                    conn.examine_mailbox(mailbox_hash, &mut response, false)
+                        .await?;
                     if max_uid_left > 0 {
                         let sequence_set = if max_uid_left == 1 {
                             SequenceSet::from(ONE)
@@ -266,7 +410,11 @@ impl FetchState {
                             SequenceSet::try_from(min..=max)?
                         };
                         let (required_responses, macro_or_item_names) =
-                            crate::imap::email::common_attributes();
+                            if uid_store.fetch_body_structure {
+                                crate::imap::email::common_attributes()
+                            } else {
+                                crate::imap::email::common_attributes_light()
+                            };
                         conn.send_command(CommandBody::Fetch {
                             sequence_set,
                             macro_or_item_names,
@@ -274,12 +422,12 @@ impl FetchState {
                             modifiers: vec![],
                         })
                         .await?;
-                        conn.read_response(response, required_responses)
+                        conn.read_response(&mut response, required_responses)
                             .await
                             .chain_err_summary(|| {
                                 format!("Could not parse fetch response for mailbox {mailbox_path}")
                             })?;
-                        let (_, mut v, _) = protocol_parser::fetch_responses(response)?;
+                        let (_, mut v, _) = protocol_parser::fetch_responses(&response)?;
                         for FetchResponse {
                             ref uid,
                             ref mut envelope,
@@ -303,7 +451,7 @@ impl FetchState {
                                     trace,
                                     conn,
                                     "response was: {}",
-                                    String::from_utf8_lossy(response)
+                                    String::from_utf8_lossy(&response)
                                 );
                                 if let Ok(Some(untagged_response)) =
                                     super::protocol_parser::untagged_responses(raw_fetch_value)
@@ -445,7 +593,7 @@ impl FetchState {
             ref uid_store,
             batch_size: _,
             cache_batch_size: _,
-            ref mut response,
+            cache_served_offline: _,
         } = self;
         let mailbox_hash = *mailbox_hash;
         if !uid_store.keep_offline_cache.load(Ordering::SeqCst) {
@@ -453,7 +601,7 @@ impl FetchState {
         }
         {
             let mut conn = connection.lock().await?;
-            let select_response = conn.select_mailbox(mailbox_hash, response, false).await?;
+            let select_response = conn.init_mailbox(mailbox_hash).await?;
             match Self::load_cache(&conn, mailbox_hash, max_uid, batch_size, select_response) {
                 None => Ok(None),
                 Some(Ok(env_hashes)) => {
@@ -469,6 +617,42 @@ impl FetchState {
                 }
                 Some(Err(err)) => Err(err),
             }
+        }
+    }
+
+    /// Offline variant of [`Self::cached_envs`]: reads a batch of
+    /// envelopes from the cache without any network round-trip and
+    /// without updating cache metadata (no SELECT, no `update_mailbox`)
+    /// — the metadata refresh is left to the subsequent resync.
+    async fn cached_envs_offline(
+        &self,
+        max_uid: UID,
+        batch_size: usize,
+    ) -> Result<Option<Vec<Envelope>>> {
+        let mut uid_store = Arc::clone(&self.uid_store);
+        let mailbox_hash = self.mailbox_hash;
+        if !uid_store.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        match uid_store.mailbox_state(mailbox_hash) {
+            Err(err) => return Err(err),
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(None),
+        };
+        match uid_store.envelopes(mailbox_hash, max_uid, batch_size) {
+            Ok(Some(env_hashes)) => {
+                let env_lck = uid_store.envelopes.lock().unwrap();
+                Ok(Some(
+                    env_hashes
+                        .into_iter()
+                        .filter_map(|env_hash| {
+                            env_lck.get(&env_hash).map(|c_env| c_env.inner.clone())
+                        })
+                        .collect::<Vec<Envelope>>(),
+                ))
+            }
+            Ok(None) => Ok(None),
+            Err(err) => Err(err),
         }
     }
 

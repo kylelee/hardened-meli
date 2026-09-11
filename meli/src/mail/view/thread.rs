@@ -59,6 +59,41 @@ pub enum ThreadViewFocus {
     MailView,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum FocusDirection {
+    Left,
+    Right,
+}
+
+/// Outcome of one pane-chain step: move the focus, stay put but consume the
+/// key, or let the key pass through to the parent (listing) component.
+enum FocusStep {
+    Focus(ThreadViewFocus),
+    StayAndConsume,
+    PassThrough,
+}
+
+impl ThreadViewFocus {
+    /// Pane chain step: [sidebar][grid][thread list][mail detail].
+    /// Right: `Thread`→`None`, `None`→`MailView`, `MailView` stays consumed —
+    /// the mail detail state is the terminal stop, so the listing's
+    /// `Entry + focus_right → EntryFullscreen` branch must never fire from
+    /// arrow keys. Left: `MailView`→`None`; at `None`/`Thread` Left passes
+    /// through so the listing component's existing
+    /// `Entry + focus_left → set_focus(None)` branch closes the view and
+    /// refocuses the grid.
+    fn step(self, direction: FocusDirection) -> FocusStep {
+        match (self, direction) {
+            (Self::MailView, FocusDirection::Left) => FocusStep::Focus(Self::None),
+            (Self::None, FocusDirection::Left) => FocusStep::PassThrough,
+            (Self::Thread, FocusDirection::Left) => FocusStep::PassThrough,
+            (Self::Thread, FocusDirection::Right) => FocusStep::Focus(Self::None),
+            (Self::None, FocusDirection::Right) => FocusStep::Focus(Self::MailView),
+            (Self::MailView, FocusDirection::Right) => FocusStep::StayAndConsume,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ThreadView {
     new_cursor_pos: usize,
@@ -117,9 +152,7 @@ impl ThreadView {
             use_color: context.settings.terminal.use_color(),
             last_width: 0,
             thread_layout: *mailbox_settings!(
-                context[&coordinates.0][&coordinates.1]
-                    .listing
-                    .thread_layout
+                context[coordinates.0][&coordinates.1].listing.thread_layout
             ),
             expanded_pos: 0,
             new_expanded_pos: 0,
@@ -129,6 +162,12 @@ impl ThreadView {
         };
         view.initiate(expanded_hash, go_to_first_unread, context);
         view.new_cursor_pos = view.new_expanded_pos;
+        // A single-mail thread has no thread-list pane (draw renders only
+        // the mail view); start at the mail detail so paging keys reach the
+        // mail content without an extra focus step.
+        if view.entries.len() == 1 {
+            view.focus = ThreadViewFocus::MailView;
+        }
         view
     }
 
@@ -492,6 +531,9 @@ impl ThreadView {
                     self.new_cursor_pos = (height / rows) * rows;
                 }
             }
+            // A page/home/end movement moved the selection; the mail pane
+            // follows it live, same as the scroll arms.
+            self.sync_expanded_to_cursor();
         }
         if self.new_cursor_pos >= self.entries.len() {
             self.new_cursor_pos = self.entries.len().saturating_sub(1);
@@ -509,9 +551,6 @@ impl ThreadView {
                 self.visible_entries.iter().flat_map(|v| v.iter()).collect();
 
             for (visible_entry_counter, v) in visibles.iter().skip(top_idx).take(rows).enumerate() {
-                if visible_entry_counter >= rows {
-                    break;
-                }
                 let idx = *v;
 
                 grid.copy_area(
@@ -584,6 +623,20 @@ impl ThreadView {
         self.content.area().width().min(self.last_width / 2) > 62
     }
 
+    fn thread_root_envelope_hash(&self, context: &Context) -> EnvelopeHash {
+        let account = &context.accounts[&self.coordinates.0];
+        let threads = account.collection.get_threads(self.coordinates.1);
+        let thread_root = threads.thread_iter(self.thread_group).next().unwrap().1;
+        let thread_node = &threads.thread_nodes()[&thread_root];
+        thread_node.message().unwrap_or_else(|| {
+            let mut iter_ptr = thread_node.children()[0];
+            while threads.thread_nodes()[&iter_ptr].message().is_none() {
+                iter_ptr = threads.thread_nodes()[&iter_ptr].children()[0];
+            }
+            threads.thread_nodes()[&iter_ptr].message().unwrap()
+        })
+    }
+
     fn draw_vert(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
         if self.entries.is_empty() {
             return;
@@ -599,18 +652,8 @@ impl ThreadView {
         // First draw the thread subject on the first row
         if self.dirty {
             grid.clear_area(area, theme_default);
-            let account = &context.accounts[&self.coordinates.0];
-            let threads = account.collection.get_threads(self.coordinates.1);
-            let thread_root = threads.thread_iter(self.thread_group).next().unwrap().1;
-            let thread_node = &threads.thread_nodes()[&thread_root];
-            let i = thread_node.message().unwrap_or_else(|| {
-                let mut iter_ptr = thread_node.children()[0];
-                while threads.thread_nodes()[&iter_ptr].message().is_none() {
-                    iter_ptr = threads.thread_nodes()[&iter_ptr].children()[0];
-                }
-                threads.thread_nodes()[&iter_ptr].message().unwrap()
-            });
-            let envelope: EnvelopeRef = account.collection.get_env(i);
+            let i = self.thread_root_envelope_hash(context);
+            let envelope: EnvelopeRef = context.accounts[&self.coordinates.0].collection.get_env(i);
 
             let (_, y) = grid.write_string(
                 &envelope.subject(),
@@ -664,18 +707,8 @@ impl ThreadView {
         // First draw the thread subject on the first row
         if self.dirty {
             grid.clear_area(area, theme_default);
-            let account = &context.accounts[&self.coordinates.0];
-            let threads = account.collection.get_threads(self.coordinates.1);
-            let thread_root = threads.thread_iter(self.thread_group).next().unwrap().1;
-            let thread_node = &threads.thread_nodes()[&thread_root];
-            let i = thread_node.message().unwrap_or_else(|| {
-                let mut iter_ptr = thread_node.children()[0];
-                while threads.thread_nodes()[&iter_ptr].message().is_none() {
-                    iter_ptr = threads.thread_nodes()[&iter_ptr].children()[0];
-                }
-                threads.thread_nodes()[&iter_ptr].message().unwrap()
-            });
-            let envelope: EnvelopeRef = account.collection.get_env(i);
+            let i = self.thread_root_envelope_hash(context);
+            let envelope: EnvelopeRef = context.accounts[&self.coordinates.0].collection.get_env(i);
 
             grid.write_string(
                 &envelope.subject(),
@@ -781,6 +814,19 @@ impl ThreadView {
             .nth(self.new_cursor_pos)
             .copied()
     }
+
+    /// Make the mail pane follow the thread-list selection: expand the entry
+    /// under the cursor. Called from the selection-movement paths only
+    /// (scroll arms, page movements applied at draw time, `focus_right`,
+    /// `open_entry`) — refresh/reorder paths (`update`,
+    /// `reverse_thread_order`) anchor the expanded entry deliberately and
+    /// must NOT go through here.
+    fn sync_expanded_to_cursor(&mut self) {
+        if let Some(pos) = self.current_pos() {
+            self.new_expanded_pos = pos;
+            self.expanded_pos = pos;
+        }
+    }
 }
 
 impl std::fmt::Display for ThreadView {
@@ -841,6 +887,74 @@ impl Component for ThreadView {
             return true;
         }
 
+        // Pane chain (Left: [mail detail]→[thread list]→[mail listing]→
+        // [sidebar]; Right: the reverse up to [mail detail], the terminal
+        // stop). Runs in all focus states, ahead of the embedded mail view.
+        // Left pass-through relies on the listing component's existing
+        // `Focus::Entry + focus_left → set_focus(Focus::None)` branch to
+        // close the view and refocus the grid; Right at the mail-detail
+        // state stays consumed so the listing's
+        // `Entry + focus_right → EntryFullscreen` branch never fires from
+        // arrow keys (the chain has no hide-grid stop).
+        let shortcuts = self.shortcuts(context);
+        if let UIEvent::Input(ref key) = *event {
+            let direction = if shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["focus_left"]) {
+                Some(FocusDirection::Left)
+            } else if shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["focus_right"]) {
+                Some(FocusDirection::Right)
+            } else {
+                None
+            };
+            match direction {
+                // A single-mail thread has no conversation stop ("thread
+                // view, if any"): pass Left through so the listing exits
+                // the view directly instead of stopping at a degenerate
+                // empty split.
+                Some(FocusDirection::Left)
+                    if matches!(self.focus, ThreadViewFocus::MailView)
+                        && self.entries.len() <= 1 => {}
+                Some(direction) => match self.focus.step(direction) {
+                    FocusStep::Focus(new_focus) => {
+                        // Right must open the thread-list selection (same
+                        // sync as the GENERAL open_entry arm below).
+                        if matches!(direction, FocusDirection::Right) {
+                            self.sync_expanded_to_cursor();
+                        }
+                        self.focus = new_focus;
+                        self.set_dirty(true);
+                        return true;
+                    }
+                    FocusStep::StayAndConsume => return true,
+                    FocusStep::PassThrough => {}
+                },
+                None => {}
+            }
+        }
+
+        // Pre-detection for thread-list navigation keys at split focus
+        // (None): let the thread list win over the embedded mail view, but
+        // yield whenever the expanded mail view has an active modal/subview:
+        // dialogs (charset selector, URL confirmation, …) are navigable ONLY
+        // via GENERAL shortcuts (Selector has no direction-key branches), so
+        // stealing their keys would make them inoperable. The gate only
+        // narrows the flipped key set — status-quo routing is restored while
+        // a modal is open; it introduces no new flips. If rest were to
+        // return false for a thread key (analytically unreachable: every
+        // matching arm returns true on guard hit), control simply falls
+        // through to the status-quo flow below.
+        if let UIEvent::Input(ref key) = *event {
+            if matches!(self.focus, ThreadViewFocus::None)
+                && self.entries.len() > 1
+                && !self.entries[self.new_expanded_pos]
+                    .mailview
+                    .has_active_modal()
+                && self.is_thread_view_input(key, context)
+                && self.process_event_rest(event, context)
+            {
+                return true;
+            }
+        }
+
         if matches!(
             self.focus,
             ThreadViewFocus::None | ThreadViewFocus::MailView
@@ -852,6 +966,83 @@ impl Component for ThreadView {
             return true;
         }
 
+        self.process_event_rest(event, context)
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty
+            || (!matches!(self.focus, ThreadViewFocus::Thread)
+                && !self.entries.is_empty()
+                && self.entries[self.new_expanded_pos].mailview.is_dirty())
+    }
+
+    fn set_dirty(&mut self, value: bool) {
+        self.dirty = value;
+        if let Some(entry) = self.entries.get_mut(self.new_expanded_pos) {
+            entry.mailview.set_dirty(value);
+        }
+    }
+
+    fn shortcuts(&self, context: &Context) -> ShortcutMaps {
+        let mut map = if !self.entries.is_empty() {
+            self.entries[self.new_expanded_pos]
+                .mailview
+                .shortcuts(context)
+        } else {
+            ShortcutMaps::default()
+        };
+
+        map.insert(
+            Shortcuts::GENERAL,
+            mailbox_settings!(
+                context[self.coordinates.0][&self.coordinates.1]
+                    .shortcuts
+                    .general
+            )
+            .key_values(),
+        );
+        let mut thread_view_map = mailbox_settings!(
+            context[self.coordinates.0][&self.coordinates.1]
+                .shortcuts
+                .thread_view
+        )
+        .key_values();
+        let (account_hash, mailbox_hash, _) = self.coordinates;
+        if mailbox_settings!(context has [account_hash][&mailbox_hash]) {
+            for command in mailbox_settings!(
+                context[account_hash][&mailbox_hash]
+                    .shortcuts
+                    .thread_view
+                    .commands
+            ) {
+                thread_view_map.retain(|_, shortcut| shortcut != &command.shortcut);
+            }
+        }
+        map.insert(Shortcuts::THREAD_VIEW, thread_view_map);
+
+        map
+    }
+
+    fn id(&self) -> ComponentId {
+        self.id
+    }
+
+    fn kill(&mut self, id: ComponentId, context: &mut Context) {
+        debug_assert!(self.id == id);
+        context
+            .replies
+            .push_back(UIEvent::Action(Tab(Kill(self.id))));
+    }
+}
+
+impl ThreadView {
+    /// The big `match *event` tail of [`ThreadView::process_event`], moved
+    /// verbatim so the focus-None pre-detection can run it ahead of the
+    /// embedded mail view. Line-for-line equivalent to the former inline
+    /// match: branch logic, guards and return values are untouched, and the
+    /// trailing `_ =>` arm still forwards unmatched events to ALL entries'
+    /// mail views.
+    fn process_event_rest(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
         let shortcuts = self.shortcuts(context);
         let (account_hash, mailbox_hash, _) = self.coordinates;
         match *event {
@@ -888,6 +1079,7 @@ impl Component for ThreadView {
             {
                 if self.cursor_pos > 0 {
                     self.new_cursor_pos = self.new_cursor_pos.saturating_sub(1);
+                    self.sync_expanded_to_cursor();
                     self.set_dirty(true);
                 }
                 true
@@ -898,6 +1090,7 @@ impl Component for ThreadView {
                 let height = self.visible_entries.iter().flat_map(|v| v.iter()).count();
                 if height > 0 && self.new_cursor_pos + 1 < height {
                     self.new_cursor_pos += 1;
+                    self.sync_expanded_to_cursor();
                     self.set_dirty(true);
                 }
                 true
@@ -929,15 +1122,12 @@ impl Component for ThreadView {
             UIEvent::Input(ref k)
                 if shortcut!(k == shortcuts[Shortcuts::GENERAL]["open_entry"]) =>
             {
-                if self.entries.len() > 1 {
-                    if let Some(new_expanded_pos) = self.current_pos() {
-                        self.new_expanded_pos = new_expanded_pos;
-                        self.expanded_pos = new_expanded_pos;
-                        if matches!(self.focus, ThreadViewFocus::Thread) {
-                            self.focus = ThreadViewFocus::None;
-                        }
-                        self.set_dirty(true);
+                if self.entries.len() > 1 && self.current_pos().is_some() {
+                    self.sync_expanded_to_cursor();
+                    if matches!(self.focus, ThreadViewFocus::Thread) {
+                        self.focus = ThreadViewFocus::None;
                     }
+                    self.set_dirty(true);
                 }
                 true
             }
@@ -1047,9 +1237,9 @@ impl Component for ThreadView {
                 false
             }
             UIEvent::Input(ref key)
-                if mailbox_settings!(context has [&account_hash][&mailbox_hash])
+                if mailbox_settings!(context has [account_hash][&mailbox_hash])
                     && mailbox_settings!(
-                        context[&account_hash][&mailbox_hash]
+                        context[account_hash][&mailbox_hash]
                             .shortcuts
                             .thread_view
                             .commands
@@ -1323,68 +1513,850 @@ impl Component for ThreadView {
         }
     }
 
-    fn is_dirty(&self) -> bool {
-        self.dirty
-            || (!matches!(self.focus, ThreadViewFocus::Thread)
-                && !self.entries.is_empty()
-                && self.entries[self.new_expanded_pos].mailview.is_dirty())
-    }
-
-    fn set_dirty(&mut self, value: bool) {
-        self.dirty = value;
-        if let Some(entry) = self.entries.get_mut(self.new_expanded_pos) {
-            entry.mailview.set_dirty(value);
+    /// Pure detection of thread-view navigation inputs; must stay in sync
+    /// with the Input arm guards of `process_event_rest`: every key that can
+    /// match an arm there must return `true` here. Judges against the same
+    /// parsed `ShortcutMaps` that `process_event_rest` matches on (commands
+    /// conflict keys are retain-removed during assembly), NOT a re-derivation
+    /// from `mailbox_settings!`, so the two can never drift. Pushes nothing —
+    /// the commands side effect happens exactly once, inside rest's arm
+    /// guard.
+    ///
+    /// The `focus_left`/`focus_right` entries are EXCLUDED (by name): focus
+    /// keys are handled exclusively by the pre-arms; letting them into the
+    /// gated pre-detection would run `process_event_rest`'s `_ =>`
+    /// all-entries mailview forwarding on them (double delivery, and a
+    /// potential pager steal under GENERAL `scroll_left`/`scroll_right` arrow
+    /// rebinds).
+    fn is_thread_view_input(&self, key: &Key, context: &Context) -> bool {
+        let shortcuts = self.shortcuts(context);
+        if shortcuts
+            .get(Shortcuts::THREAD_VIEW)
+            .map(|section| {
+                section
+                    .iter()
+                    .any(|(name, k)| !matches!(name, &"focus_left" | &"focus_right") && k == key)
+            })
+            .unwrap_or(false)
+        {
+            return true;
         }
-    }
-
-    fn shortcuts(&self, context: &Context) -> ShortcutMaps {
-        let mut map = if !self.entries.is_empty() {
-            self.entries[self.new_expanded_pos]
-                .mailview
-                .shortcuts(context)
-        } else {
-            ShortcutMaps::default()
-        };
-
-        map.insert(
-            Shortcuts::GENERAL,
-            mailbox_settings!(
-                context[&self.coordinates.0][&self.coordinates.1]
-                    .shortcuts
-                    .general
-            )
-            .key_values(),
-        );
-        let mut thread_view_map = mailbox_settings!(
-            context[&self.coordinates.0][&self.coordinates.1]
-                .shortcuts
-                .thread_view
-        )
-        .key_values();
+        if shortcuts
+            .get(Shortcuts::GENERAL)
+            .map(|section| {
+                ["home_page", "end_page", "open_entry"]
+                    .iter()
+                    .any(|name| section.get(name).map(|k| k == key).unwrap_or(false))
+            })
+            .unwrap_or(false)
+        {
+            return true;
+        }
         let (account_hash, mailbox_hash, _) = self.coordinates;
-        if mailbox_settings!(context has [&account_hash][&mailbox_hash]) {
-            for command in mailbox_settings!(
-                context[&account_hash][&mailbox_hash]
+        mailbox_settings!(context has [account_hash][&mailbox_hash])
+            && mailbox_settings!(
+                context[account_hash][&mailbox_hash]
                     .shortcuts
                     .thread_view
                     .commands
-            ) {
-                thread_view_map.retain(|_, shortcut| shortcut != &command.shortcut);
+            )
+            .iter()
+            .any(|cmd| cmd.shortcut == *key)
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use std::sync::OnceLock;
+
+    use melib::{
+        backends::{BackendMailbox, Mailbox, MailboxHash, MailboxPermissions, SpecialUsageMailbox},
+        Envelope, Mail, Result,
+    };
+
+    use super::*;
+    use crate::{
+        accounts::{MailboxEntry, MailboxStatus},
+        components::Component,
+        conf::{composing::SendMail, FileMailboxConf},
+        terminal::Key,
+        types::UIEvent,
+        Context,
+    };
+
+    #[derive(Debug)]
+    struct TestMailbox {
+        hash: MailboxHash,
+        name: String,
+    }
+
+    impl BackendMailbox for TestMailbox {
+        fn hash(&self) -> MailboxHash {
+            self.hash
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn path(&self) -> &str {
+            "INBOX"
+        }
+
+        fn children(&self) -> &[MailboxHash] {
+            &[]
+        }
+
+        fn clone(&self) -> Mailbox {
+            Box::new(Self {
+                hash: self.hash,
+                name: self.name.clone(),
+            })
+        }
+
+        fn special_usage(&self) -> SpecialUsageMailbox {
+            SpecialUsageMailbox::Normal
+        }
+
+        fn parent(&self) -> Option<MailboxHash> {
+            None
+        }
+
+        fn permissions(&self) -> MailboxPermissions {
+            MailboxPermissions::default()
+        }
+
+        fn is_subscribed(&self) -> bool {
+            true
+        }
+
+        fn set_is_subscribed(&mut self, _: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_special_usage(&mut self, _: SpecialUsageMailbox) -> Result<()> {
+            Ok(())
+        }
+
+        fn count(&self) -> Result<(usize, usize)> {
+            Ok((0, 0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Shared HOME for the mock contexts below. Environment variables are
+    /// process-global, so parallel tests must not race each other by pointing
+    /// them at tempdirs that get deleted while another test constructs its
+    /// `Context` (which reads `MELI_CONFIG`/XDG vars).
+    fn shared_test_home() -> &'static tempfile::TempDir {
+        static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+        HOME.get_or_init(|| {
+            let tempdir = tempfile::tempdir().unwrap();
+            std::env::set_var("HOME", tempdir.path());
+            std::env::set_var("XDG_CONFIG_HOME", tempdir.path().join(".config"));
+            std::env::set_var(
+                "XDG_DATA_HOME",
+                tempdir.path().join(".local").join(".share"),
+            );
+            tempdir
+        })
+    }
+
+    fn mock_context() -> Context {
+        // Retry: parallel suites (conf tests) also overwrite the process-global
+        // `MELI_CONFIG`, which can make `Settings::new()` inside `new_mock` fail
+        // spuriously.
+        let mut ctx = None;
+        for _ in 0..3 {
+            if let Ok(candidate) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Context::new_mock(shared_test_home())
+            })) {
+                ctx = Some(candidate);
+                break;
             }
         }
-        map.insert(Shortcuts::THREAD_VIEW, thread_view_map);
-
-        map
+        let mut ctx = ctx.unwrap_or_else(|| Context::new_mock(shared_test_home()));
+        // The default `send_mail` (`ShellCommand("false")`) races: the child can
+        // exit before meli finishes writing the message to its stdin, panicking
+        // with a broken pipe. An empty command makes `Account::send` return a
+        // deterministic error without spawning anything.
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        ctx.accounts[&account_hash].settings.send_mail = SendMail::ShellCommand(String::new());
+        ctx
     }
 
-    fn id(&self) -> ComponentId {
-        self.id
+    /// Register the mock account's `INBOX` mailbox and return the account and
+    /// mailbox hashes.
+    ///
+    /// `ThreadView::new`/`shortcuts` go through `mailbox_settings!`, which
+    /// indexes `mailbox_entries` directly and panics on a missing entry, so a
+    /// `MailboxEntry` must be registered before constructing the view.
+    fn register_inbox(context: &mut Context) -> (AccountHash, MailboxHash) {
+        let account_hash = *context.accounts.iter().next().unwrap().0;
+        let mailbox_hash = MailboxHash::from_bytes(b"INBOX");
+        context.accounts[&account_hash].mailbox_entries.insert(
+            mailbox_hash,
+            MailboxEntry::new(
+                MailboxStatus::Available,
+                "INBOX".to_string(),
+                Box::new(TestMailbox {
+                    hash: mailbox_hash,
+                    name: "INBOX".to_string(),
+                }),
+                FileMailboxConf::default(),
+            ),
+        );
+        (account_hash, mailbox_hash)
     }
 
-    fn kill(&mut self, id: ComponentId, context: &mut Context) {
-        debug_assert!(self.id == id);
-        context
-            .replies
-            .push_back(UIEvent::Action(Tab(Kill(self.id))));
+    /// Build a `ThreadView` over a two-message thread (a root and a reply
+    /// carrying `In-Reply-To`).
+    fn make_two_mail_thread_view(context: &mut Context, focus: ThreadViewFocus) -> ThreadView {
+        let (account_hash, mailbox_hash) = register_inbox(context);
+
+        let root_envelope = Envelope::from_bytes(ROOT_MAIL_BYTES, None)
+            .expect("could not parse root test envelope");
+        let reply_envelope = Envelope::from_bytes(REPLY_MAIL_BYTES, None)
+            .expect("could not parse reply test envelope");
+        let root_hash = root_envelope.hash();
+        context.accounts[&account_hash]
+            .collection
+            .insert(root_envelope, mailbox_hash);
+        context.accounts[&account_hash]
+            .collection
+            .insert(reply_envelope, mailbox_hash);
+
+        let thread_group = {
+            let threads = context.accounts[&account_hash]
+                .collection
+                .get_threads(mailbox_hash);
+            threads.find_group(threads.envelope_to_thread[&root_hash])
+        };
+
+        ThreadView::new(
+            (account_hash, mailbox_hash, root_hash),
+            thread_group,
+            None,
+            false,
+            Some(focus),
+            context,
+        )
+    }
+
+    /// Exhaustive check of the pane-chain step table: Left: MailView→None,
+    /// None/Thread→PassThrough; Right: Thread→None, None→MailView,
+    /// MailView→StayAndConsume.
+    #[test]
+    fn thread_view_focus_step_transitions_exhaustive() {
+        assert!(matches!(
+            ThreadViewFocus::MailView.step(FocusDirection::Left),
+            FocusStep::Focus(ThreadViewFocus::None)
+        ));
+        assert!(matches!(
+            ThreadViewFocus::None.step(FocusDirection::Left),
+            FocusStep::PassThrough
+        ));
+        assert!(matches!(
+            ThreadViewFocus::Thread.step(FocusDirection::Left),
+            FocusStep::PassThrough
+        ));
+        assert!(matches!(
+            ThreadViewFocus::Thread.step(FocusDirection::Right),
+            FocusStep::Focus(ThreadViewFocus::None)
+        ));
+        assert!(matches!(
+            ThreadViewFocus::None.step(FocusDirection::Right),
+            FocusStep::Focus(ThreadViewFocus::MailView)
+        ));
+        assert!(matches!(
+            ThreadViewFocus::MailView.step(FocusDirection::Right),
+            FocusStep::StayAndConsume
+        ));
+    }
+
+    /// Build a `ThreadView` over a single-mail thread (only the root mail);
+    /// the reply is simply not inserted.
+    fn make_single_mail_thread_view(context: &mut Context, focus: ThreadViewFocus) -> ThreadView {
+        let (account_hash, mailbox_hash) = register_inbox(context);
+        let root_envelope = Envelope::from_bytes(ROOT_MAIL_BYTES, None)
+            .expect("could not parse root test envelope");
+        let root_hash = root_envelope.hash();
+        context.accounts[&account_hash]
+            .collection
+            .insert(root_envelope, mailbox_hash);
+        let thread_group = {
+            let threads = context.accounts[&account_hash]
+                .collection
+                .get_threads(mailbox_hash);
+            threads.find_group(threads.envelope_to_thread[&root_hash])
+        };
+        ThreadView::new(
+            (account_hash, mailbox_hash, root_hash),
+            thread_group,
+            None,
+            false,
+            Some(focus),
+            context,
+        )
+    }
+
+    /// Left at the terminal `Thread` state must pass through unconsumed so
+    /// the listing component's `Focus::Entry + focus_left → set_focus(None)`
+    /// branch closes the view and refocuses the grid.
+    #[test]
+    fn thread_view_focus_left_at_thread_state_passes_through_to_listing() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+        view.new_cursor_pos = 0;
+
+        let mut event = UIEvent::Input(Key::Left);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(
+            !consumed,
+            "`focus_left` at `Thread` state must pass through to the listing"
+        );
+        assert!(
+            matches!(view.focus, ThreadViewFocus::Thread),
+            "pass-through must not change focus"
+        );
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "pass-through must not move the cursor"
+        );
+    }
+
+    /// Left at the split state must pass through unconsumed (same listing
+    /// exit branch) instead of entering the thread-list-only state.
+    #[test]
+    fn thread_view_focus_left_at_none_passes_through_to_listing() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        view.new_cursor_pos = 0;
+
+        let mut event = UIEvent::Input(Key::Left);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(
+            !consumed,
+            "`focus_left` at split (`None`) state must pass through to the listing"
+        );
+        assert!(
+            matches!(view.focus, ThreadViewFocus::None),
+            "pass-through must not change focus"
+        );
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "pass-through must not move the cursor"
+        );
+    }
+
+    /// Single-mail refinement: a single-mail thread has no conversation stop,
+    /// so Left at the mail-detail state passes through (the listing exits the
+    /// view directly) instead of stopping at a degenerate empty split.
+    #[test]
+    fn thread_view_focus_left_at_mailview_single_mail_passes_through() {
+        let mut ctx = mock_context();
+        let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+
+        let mut event = UIEvent::Input(Key::Left);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(
+            !consumed,
+            "`focus_left` at `MailView` over a single-mail thread must pass through"
+        );
+        assert!(
+            matches!(view.focus, ThreadViewFocus::MailView),
+            "pass-through must not change focus"
+        );
+    }
+
+    /// Lock: in a multi-mail thread, Left at the mail-detail state keeps
+    /// falling back to the thread-list split.
+    #[test]
+    fn thread_view_focus_left_at_mailview_multi_mail_falls_back_to_split() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+
+        let mut event = UIEvent::Input(Key::Left);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "`focus_left` at `MailView` must be consumed");
+        assert!(
+            matches!(view.focus, ThreadViewFocus::None),
+            "`focus_left` at `MailView` must fall back to the split state"
+        );
+    }
+
+    /// Lock: Right at the mail-detail state stays consumed (terminal stop of
+    /// the chain; the listing's `Entry + focus_right → EntryFullscreen`
+    /// branch must never fire from arrow keys).
+    #[test]
+    fn thread_view_focus_right_at_mailview_stays_consumed() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+
+        let mut event = UIEvent::Input(Key::Right);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(
+            consumed,
+            "`focus_right` at `MailView` must stay consumed (terminal stop)"
+        );
+        assert!(
+            matches!(view.focus, ThreadViewFocus::MailView),
+            "terminal stop must not change focus"
+        );
+    }
+
+    /// `focus_right` must open the thread-list SELECTION: after the cursor
+    /// moves away from the initially expanded entry, Right (split → mail
+    /// detail) must expand the entry under the cursor, not keep the stale
+    /// expanded one.
+    #[test]
+    fn thread_view_focus_right_at_none_opens_cursor_selected_mail() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        assert_eq!(
+            view.new_cursor_pos, view.new_expanded_pos,
+            "sanity: cursor starts on the expanded (newest) entry"
+        );
+        let stale_expanded_hash = view.entries[view.new_expanded_pos].msg_hash;
+
+        let mut up = UIEvent::Input(Key::Up);
+        assert!(view.process_event(&mut up, &mut ctx));
+        assert_eq!(view.new_cursor_pos, 0, "sanity: cursor moved to the root");
+
+        let mut right = UIEvent::Input(Key::Right);
+        assert!(view.process_event(&mut right, &mut ctx));
+        assert!(
+            matches!(view.focus, ThreadViewFocus::MailView),
+            "Right must focus the mail view"
+        );
+        assert_eq!(
+            view.new_expanded_pos, 0,
+            "Right must expand the cursor-selected entry, not the stale one"
+        );
+        assert_eq!(view.expanded_pos, 0);
+        assert_ne!(
+            view.entries[view.new_expanded_pos].msg_hash, stale_expanded_hash,
+            "the shown mail must be the selected one"
+        );
+    }
+
+    /// Same selection contract from the thread-list-only state: Right
+    /// (thread list → split) must expand the cursor-selected entry.
+    #[test]
+    fn thread_view_focus_right_at_thread_opens_cursor_selected_mail() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+
+        let mut up = UIEvent::Input(Key::Up);
+        assert!(view.process_event(&mut up, &mut ctx));
+        assert_eq!(view.new_cursor_pos, 0, "sanity: cursor moved to the root");
+
+        let mut right = UIEvent::Input(Key::Right);
+        assert!(view.process_event(&mut right, &mut ctx));
+        assert!(
+            matches!(view.focus, ThreadViewFocus::None),
+            "Right must fall back to the split view"
+        );
+        assert_eq!(
+            view.new_expanded_pos, 0,
+            "Right must expand the cursor-selected entry, not the stale one"
+        );
+        assert_eq!(view.expanded_pos, 0);
+    }
+
+    /// A single-mail thread has no thread-list pane (draw renders only the
+    /// mail view), so the view must START at the mail detail — paging keys
+    /// must reach the mail content without an extra focus step.
+    #[test]
+    fn thread_view_single_mail_starts_focused_on_mail_view() {
+        let mut ctx = mock_context();
+        let view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+
+        assert!(
+            matches!(view.focus, ThreadViewFocus::MailView),
+            "single-mail thread must start focused on the mail view, not the \
+             invisible thread list"
+        );
+    }
+
+    /// Reported flow: open a single-mail thread from the listing (Right),
+    /// then page — `PageDown` must page the MAIL content immediately, not be
+    /// eaten by the invisible one-entry thread list's page arms.
+    #[test]
+    fn thread_view_single_mail_pages_mail_without_extra_focus_step() {
+        let mut ctx = mock_context();
+        let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        load_expanded_entry(&mut view, &mut ctx, ROOT_MAIL_BYTES);
+
+        let mut page_down = UIEvent::Input(Key::PageDown);
+        let consumed = view.process_event(&mut page_down, &mut ctx);
+
+        assert!(consumed, "PageDown must be consumed");
+        assert!(
+            view.movement.is_none(),
+            "PageDown must page the mail content, not the invisible thread list"
+        );
+    }
+
+    /// A `None` focus over a single-mail thread (reachable via the p/t
+    /// visibility toggles) must not strand paging keys on the dead
+    /// thread-list arms either.
+    #[test]
+    fn thread_view_single_mail_at_none_routes_paging_to_mail() {
+        let mut ctx = mock_context();
+        let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        load_expanded_entry(&mut view, &mut ctx, ROOT_MAIL_BYTES);
+        view.focus = ThreadViewFocus::None;
+
+        let mut page_down = UIEvent::Input(Key::PageDown);
+        let consumed = view.process_event(&mut page_down, &mut ctx);
+
+        assert!(consumed, "PageDown must be consumed");
+        assert!(
+            view.movement.is_none(),
+            "PageDown must reach the mail view even at focus None over a single mail"
+        );
+    }
+
+    /// `j`/`k` selection switching must switch the mail pane content live,
+    /// with no Enter step: the expanded entry follows the cursor.
+    #[test]
+    fn thread_view_scroll_switches_mail_content_live() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        assert_eq!(view.new_cursor_pos, 1, "sanity: cursor starts on the reply");
+
+        let mut up = UIEvent::Input(Key::Up);
+        assert!(view.process_event(&mut up, &mut ctx));
+
+        assert_eq!(view.new_cursor_pos, 0, "cursor moved to the root");
+        assert_eq!(
+            view.new_expanded_pos, 0,
+            "the mail pane must follow the selection immediately (no Enter)"
+        );
+        assert_eq!(view.expanded_pos, 0);
+    }
+
+    /// Page/Home/End selection switching (applied at draw time from
+    /// `self.movement`) must switch the mail pane content live as well.
+    #[test]
+    fn thread_view_page_movement_switches_mail_content_live() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        assert_eq!(view.new_cursor_pos, 1, "sanity: cursor starts on the reply");
+
+        let mut home = UIEvent::Input(Key::Home);
+        assert!(view.process_event(&mut home, &mut ctx));
+
+        let theme = crate::conf::value(&ctx, "theme_default");
+        let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme);
+        let _ = screen.resize(80, 24);
+        let screen_area = screen.area();
+        view.draw_list(screen.grid_mut(), screen_area, &mut ctx);
+
+        assert_eq!(view.new_cursor_pos, 0, "Home moved the cursor");
+        assert_eq!(
+            view.new_expanded_pos, 0,
+            "the mail pane must follow the page-moved selection"
+        );
+    }
+
+    /// `reverse_thread_order` deliberately re-anchors the expanded entry
+    /// across the reorder; live-follow must not clobber it (the reorder
+    /// never goes through the selection-movement paths).
+    #[test]
+    fn thread_view_reverse_keeps_expanded_anchor() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        // `initiate` leaves `expanded_pos` at a +1 sentinel until the first
+        // draw commits it (draw() top); commit it the same way before use.
+        view.expanded_pos = view.new_expanded_pos;
+        let expanded_hash = view.entries[view.new_expanded_pos].msg_hash;
+
+        let mut reverse = UIEvent::Input(Key::Ctrl('r'));
+        assert!(view.process_event(&mut reverse, &mut ctx));
+
+        assert_eq!(
+            view.entries[view.new_expanded_pos].msg_hash, expanded_hash,
+            "reverse must keep the expanded mail anchored"
+        );
+    }
+
+    /// Raw bytes of the root mail used by the thread-view builders; must stay
+    /// identical to the bytes inserted into the mock collection.
+    const ROOT_MAIL_BYTES: &[u8] = b"From: a@b.example\r\n\
+To: c@d.example\r\n\
+Subject: focus\r\n\
+Message-ID: <focus-root@x.example>\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+\r\n\
+root\r\n";
+
+    /// Raw bytes of the reply mail from `make_two_mail_thread_view`; must stay
+    /// identical to the reply constructed there. `ThreadView::new` with no
+    /// expanded hash expands the newest mail, i.e. the reply.
+    const REPLY_MAIL_BYTES: &[u8] = b"From: c@d.example\r\n\
+To: a@b.example\r\n\
+Subject: Re: focus\r\n\
+Message-ID: <focus-reply@x.example>\r\n\
+In-Reply-To: <focus-root@x.example>\r\n\
+Date: Thu, 1 Jan 2026 00:01:00 +0000\r\n\
+\r\n\
+reply\r\n";
+
+    /// Drive the expanded entry's mail view to the `Loaded` state through the
+    /// public `MailViewState::load_bytes` (simpler than hand-building the
+    /// `Loaded` variant).
+    fn load_expanded_entry(view: &mut ThreadView, context: &mut Context, bytes: &[u8]) {
+        let expanded_pos = view.new_expanded_pos;
+        MailViewState::load_bytes(
+            &mut view.entries[expanded_pos].mailview,
+            bytes.to_vec(),
+            context,
+        );
+    }
+
+    /// Core flip: at focus None, a thread-view navigation key must move the
+    /// thread list cursor even though the expanded (Loaded) mail view would
+    /// swallow it via the headers-walk (`headers_cursor(0) < headers_no(5)`).
+    #[test]
+    fn thread_view_input_down_at_focus_none_moves_thread_cursor() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        view.new_cursor_pos = 0;
+
+        let mut event = UIEvent::Input(Key::Down);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "Down must be consumed");
+        assert_eq!(
+            view.new_cursor_pos, 1,
+            "thread list cursor must advance at focus None"
+        );
+    }
+
+    /// Up twin of `thread_view_input_down_at_focus_none_moves_thread_cursor`:
+    /// at focus None, a rebound thread-view `scroll_up` must move the thread
+    /// list cursor up even when the pager binds the same key and the
+    /// expanded (Loaded) mail view would otherwise swallow it.
+    #[test]
+    fn thread_view_input_up_at_focus_none_moves_thread_cursor() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        view.new_cursor_pos = 1;
+
+        let mut event = UIEvent::Input(Key::Up);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "Up must be consumed");
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "thread list cursor must move up at focus None"
+        );
+    }
+
+    /// Modal gate: while the expanded mail view has an active modal, 'j'
+    /// (thread `scroll_down` AND the Selector's GENERAL `scroll_down` default)
+    /// must go to the modal; the thread cursor must not move.
+    #[test]
+    fn thread_view_input_yields_to_active_modal() {
+        let mut ctx = mock_context();
+        // 'j' is simultaneously the thread `scroll_down` and the Selector's
+        // GENERAL `scroll_down` (both injected: the arrow-key defaults no
+        // longer bind 'j').
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Char('j');
+        ctx.settings.shortcuts.general.scroll_down = Key::Char('j');
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        view.new_cursor_pos = 0;
+        view.entries[view.new_expanded_pos]
+            .mailview
+            .open_force_charset_modal_for_tests(&ctx);
+
+        let mut event = UIEvent::Input(Key::Char('j'));
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "the modal must consume 'j'");
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "'j' must reach the modal, not the thread list, while a modal is open"
+        );
+    }
+
+    /// Status quo lock: at focus `MailView` the embedded mail view keeps
+    /// consuming Down first; the thread cursor must not move.
+    #[test]
+    fn thread_view_input_down_at_focus_mailview_keeps_status_quo() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        view.new_cursor_pos = 0;
+
+        let mut event = UIEvent::Input(Key::Down);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(
+            consumed,
+            "the embedded mail view consumes Down (headers-walk)"
+        );
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "thread cursor must not move at focus MailView"
+        );
+    }
+
+    /// Unbound key routing: 'c' (bound only in `envelope_view`) must still reach
+    /// the EXPANDED entry's mail view and open its contact selector there.
+    #[test]
+    fn thread_view_unbound_key_still_reaches_expanded_mailview() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        view.new_cursor_pos = 0;
+
+        let mut event = UIEvent::Input(Key::Char('c'));
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "'c' must be consumed by the expanded mail view");
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "thread cursor must not move for 'c'"
+        );
+        assert!(
+            view.entries[view.new_expanded_pos]
+                .mailview
+                .has_active_modal(),
+            "'c' must open the contact selector in the EXPANDED entry's mail view"
+        );
+        for (idx, entry) in view.entries.iter().enumerate() {
+            if idx != view.new_expanded_pos {
+                assert!(
+                    !entry.mailview.has_active_modal(),
+                    "non-expanded entry {idx} must not consume 'c'"
+                );
+            }
+        }
+    }
+
+    /// Non-Input ordering: Resize still returns false (status quo).
+    #[test]
+    fn thread_view_non_input_event_ordering_unchanged() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+
+        let mut event = UIEvent::Resize;
+        assert!(!view.process_event(&mut event, &mut ctx));
+    }
+
+    /// `has_active_modal` across the three layers, over the field
+    /// combinations reachable through public/test seams.
+    #[test]
+    fn thread_view_has_active_modal_accessors_truth_table() {
+        let mut ctx = mock_context();
+
+        // Envelope layer: fresh view has no modal; force_charset opens one.
+        let mail = Mail::new(REPLY_MAIL_BYTES.to_vec(), None).expect("could not parse reply mail");
+        let mut env_view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+        assert!(!env_view.has_active_modal());
+        env_view.set_force_charset_modal_for_tests(&ctx);
+        assert!(env_view.has_active_modal());
+
+        // State layer: non-Loaded variants never report a modal.
+        let state = MailViewState::Init {
+            pending_action: None,
+        };
+        assert!(!state.has_active_modal());
+
+        // View layer through a real ThreadView entry: Init → false, Loaded →
+        // false, Loaded + modal → true.
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        let pos = view.new_expanded_pos;
+        assert!(!view.entries[pos].mailview.has_active_modal());
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        assert!(!view.entries[pos].mailview.has_active_modal());
+        view.entries[pos]
+            .mailview
+            .open_force_charset_modal_for_tests(&ctx);
+        assert!(view.entries[pos].mailview.has_active_modal());
+    }
+
+    /// `is_thread_view_input` truth table: true for every `THREAD_VIEW`
+    /// section key EXCEPT the focus keys (handled exclusively by the
+    /// pre-arms) plus the three GENERAL keys the thread arms reference;
+    /// false for the focus keys and for pager/listing/general keys that
+    /// don't collide with the detected set.
+    #[test]
+    fn thread_view_is_thread_view_input_truth_table() {
+        let mut ctx = mock_context();
+        let view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+
+        let shortcuts = view.shortcuts(&ctx);
+        let mut thread_keys: Vec<&Key> = shortcuts[Shortcuts::THREAD_VIEW]
+            .iter()
+            .filter(|(name, _)| !matches!(**name, "focus_left" | "focus_right"))
+            .map(|(_, key)| key)
+            .collect();
+        for name in ["home_page", "end_page", "open_entry"] {
+            if let Some(key) = shortcuts[Shortcuts::GENERAL].get(name) {
+                thread_keys.push(key);
+            }
+        }
+        for key in &thread_keys {
+            assert!(
+                view.is_thread_view_input(key, &ctx),
+                "thread-view key {key:?} must be detected"
+            );
+        }
+        for name in ["focus_left", "focus_right"] {
+            if let Some(key) = shortcuts[Shortcuts::THREAD_VIEW].get(name) {
+                assert!(
+                    !view.is_thread_view_input(key, &ctx),
+                    "focus key {name:?} ({key:?}) must NOT be detected — it is handled \
+                     exclusively by the pre-arms"
+                );
+            }
+        }
+
+        let sections = [
+            (&ctx.settings.shortcuts.pager.key_values(), "pager"),
+            (&ctx.settings.shortcuts.listing.key_values(), "listing"),
+            (&ctx.settings.shortcuts.general.key_values(), "general"),
+        ];
+        for (section, label) in sections {
+            for (name, key) in section.iter() {
+                // Skip keys that collide with thread keys by default (e.g.
+                // pager 'j'/'k', listing Left/Right, general 'h'/'l').
+                if thread_keys.contains(&key) {
+                    continue;
+                }
+                assert!(
+                    !view.is_thread_view_input(key, &ctx),
+                    "{label} key {name:?} ({key:?}) must not be detected as thread input"
+                );
+            }
+        }
     }
 }

@@ -86,8 +86,27 @@ use crate::{
     conf::Secret,
     email::{Address, Envelope},
     error::{Error, ErrorKind, Result, ResultIntoError},
-    utils::connections::{std_net::connect as tcp_stream_connect, Connection},
+    utils::{
+        connections::{
+            enforce_response_size_limit, std_net::connect as tcp_stream_connect, Connection,
+        },
+        futures::timeout,
+    },
 };
+
+/// Per-read timeout for reading SMTP server replies.
+///
+/// IMAP and NNTP read this value from the per-account `timeout` setting
+/// (16 seconds by default); the SMTP client has no such setting, so it is
+/// hardcoded here to the same default. Note that this does not defend
+/// against a server that trickles bytes (each read succeeds before the
+/// timeout); that is what the response size cap is for.
+#[cfg(not(test))]
+const SMTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(16);
+
+/// Shortened in test builds so the timeout can be exercised quickly.
+#[cfg(test)]
+const SMTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Kind of server security (StartTLS/TLS/None) the client should attempt
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -309,7 +328,6 @@ impl SmtpConnection {
                     )
                     .await?;
                     drop(pre_tls_extensions_reply);
-                    //debug!(pre_tls_extensions_reply);
                     socket.write_all(b"STARTTLS\r\n").await?;
                     let _post_starttls_extensions_reply = read_lines(
                         &mut socket,
@@ -318,7 +336,6 @@ impl SmtpConnection {
                         &mut String::new(),
                     )
                     .await?;
-                    //debug!(post_starttls_extensions_reply);
                 }
 
                 let mut ret = {
@@ -329,27 +346,6 @@ impl SmtpConnection {
 
                     socket.set_nonblocking(false)?;
                     let conn = unblock(move || connector.connect(&_path, socket)).await?;
-                    /*
-                    if let Err(native_tls::HandshakeError::WouldBlock(midhandshake_stream)) =
-                        conn_result
-                    {
-                        let mut midhandshake_stream = Some(midhandshake_stream);
-                        loop {
-                            match midhandshake_stream.take().unwrap().handshake() {
-                                Ok(r) => {
-                                    conn_result = Ok(r);
-                                    break;
-                                }
-                                Err(native_tls::HandshakeError::WouldBlock(stream)) => {
-                                    midhandshake_stream = Some(stream);
-                                }
-                                p => {
-                                    p.chain_err_kind(ErrorKind::Network)?;
-                                }
-                            }
-                        }
-                    }
-                        */
                     AsyncWrapper::new({
                         let conn = Connection::new_tls(conn);
                         #[cfg(feature = "smtp-trace")]
@@ -536,7 +532,6 @@ impl SmtpConnection {
                 ret.set_extension_support(extensions_reply);
             }
         }
-        //debug!(&res);
         Ok(ret)
     }
 
@@ -573,16 +568,6 @@ impl SmtpConnection {
     }
 
     pub async fn send_command(&mut self, command: &[&[u8]]) -> Result<()> {
-        //debug!(
-        //    "sending command: {}",
-        //    command
-        //        .iter()
-        //        .fold(String::new(), |mut acc, b| {
-        //            acc.push_str(unsafe { std::str::from_utf8_unchecked(b) });
-        //            acc
-        //        })
-        //        .trim()
-        //);
         for c in command {
             self.stream.write_all(c).await?;
         }
@@ -719,16 +704,8 @@ impl SmtpConnection {
             // RCPT TO commands worked. If the DATA command was properly
             // rejected the client SMTP can just issue RSET, but if the DATA
             // command was accepted the client SMTP should send a single dot.
-            let mut _all_error = self.server_conf.extensions.pipelining;
-            let mut _any_error = false;
-            let mut ignore_mailfrom = true;
             for expected_reply_code in pipelining_queue {
                 let reply = self.read_lines(&mut res, expected_reply_code).await?;
-                if !ignore_mailfrom {
-                    _all_error &= reply.code.is_err();
-                    _any_error |= reply.code.is_err();
-                }
-                ignore_mailfrom = false;
                 pipelining_results.push(reply.into());
             }
 
@@ -994,6 +971,7 @@ impl TryFrom<&'_ str> for ReplyCode {
             "251" => Ok(_251),
             "252" => Ok(_252),
             "334" => Ok(_334),
+            "353" => Ok(_353),
             "354" => Ok(_354),
             "421" => Ok(_421),
             "450" => Ok(_450),
@@ -1037,8 +1015,11 @@ impl<'s> From<Reply<'s>> for Result<ReplyCode> {
 impl<'s> Reply<'s> {
     /// `s` must be raw SMTP output i.e each line must start with 3 digit reply
     /// code, a space or '-' and end with '\r\n'
+    ///
+    /// Lines shorter than four bytes (from a hostile or truncated server)
+    /// contribute an empty text line instead of panicking.
     pub fn new(s: &'s str, code: ReplyCode) -> Self {
-        let lines: SmallVec<_> = s.lines().map(|l| &l[4..l.len()]).collect();
+        let lines: SmallVec<_> = s.lines().map(|l| l.get(4..).unwrap_or_default()).collect();
         Self { lines, code }
     }
 }
@@ -1070,7 +1051,7 @@ async fn read_lines<'r>(
             if let Some(ref returned_code) = returned_code {
                 if ReplyCode::try_from(ret[last_line_idx..].get(..3).unwrap())? != *returned_code {
                     buffer.extend(ret.drain(last_line_idx..));
-                    if ret.lines().last().unwrap().chars().nth(4).unwrap() != ' ' {
+                    if ret.lines().last().and_then(|l| l.chars().nth(4)) != Some(' ') {
                         return Err(Error::new(format!("Invalid SMTP reply: {ret}")));
                     }
                     break 'read_loop;
@@ -1084,21 +1065,22 @@ async fn read_lines<'r>(
                     buffer.extend(ret.drain(last_line_idx + pos + "\r\n".len()..));
                     break 'read_loop;
                 }
-                returned_code = Some(ReplyCode::try_from(&ret[last_line_idx..3])?);
+                returned_code = Some(ReplyCode::try_from(&ret[last_line_idx..last_line_idx + 3])?);
             }
             last_line_idx += pos + "\r\n".len();
         }
-        match _self.read(&mut buf).await {
+        match timeout(Some(SMTP_READ_TIMEOUT), _self.read(&mut buf)).await? {
             Ok(0) => break,
             Ok(b) => {
-                ret.push_str(unsafe { std::str::from_utf8_unchecked(&buf[0..b]) });
+                ret.push_str(&String::from_utf8_lossy(&buf[0..b]));
+                enforce_response_size_limit(ret.len())?;
             }
             Err(err) => {
                 return Err(Error::from(err));
             }
         }
     }
-    if ret.len() < 3 {
+    if ret.len() < 3 || !ret.chars().take(3).all(|c| c.is_ascii_digit()) {
         return Err(Error::new(format!("Invalid SMTP reply: {ret}")));
     }
     let code = ReplyCode::try_from(&ret[..3])?;
@@ -1117,4 +1099,294 @@ async fn read_lines<'r>(
         )));
     }
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{
+        error::NetworkErrorKind,
+        utils::connections::{cap_test_utils, max_server_response_size},
+    };
+
+    /// Regression test for the server response size cap in SMTP
+    /// [`read_lines`]: a server that keeps sending `250-` continuation lines
+    /// (never the final `250 ` line) must produce an error once the cap is
+    /// reached, instead of accumulating unboundedly.
+    #[test]
+    fn test_smtp_read_lines_response_size_cap() {
+        cap_test_utils::assert_completes_within(10, || {
+            let cap = max_server_response_size();
+            let (mut stream, writer) =
+                cap_test_utils::malicious_server(b"250-never ending\r\n", cap.saturating_mul(2));
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(
+                &mut stream,
+                &mut ret,
+                Some((ReplyCode::_250, &[])),
+                &mut buffer,
+            ));
+            drop(stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+                ),
+                "unexpected error: {err:?}"
+            );
+            assert!(ret.len() > cap);
+            assert!(
+                ret.len() <= cap + 1024,
+                "accumulation must stay bounded: {} > {}",
+                ret.len(),
+                cap + 1024
+            );
+        });
+    }
+
+    /// SMTP read timeout regression test: a server that stays silent (but
+    /// keeps the connection open) must produce a `TimedOut` error instead of
+    /// hanging forever. SMTP previously had no read timeout at all.
+    #[test]
+    fn test_smtp_read_lines_read_timeout() {
+        cap_test_utils::assert_completes_within(10, || {
+            let (mut stream, writer) =
+                cap_test_utils::silent_server(std::time::Duration::from_secs(2));
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(
+                &mut stream,
+                &mut ret,
+                Some((ReplyCode::_220, &[])),
+                &mut buffer,
+            ));
+            drop(stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                matches!(err.kind, ErrorKind::TimedOut),
+                "unexpected error: {err:?}"
+            );
+        });
+    }
+
+    /// C6 regression: a short code line (`221\r\n`) followed by a
+    /// mismatching long line (`250-x\r\n`) used to panic: draining the
+    /// mismatch left the bare `221` line, whose 4th char does not exist,
+    /// and `.nth(4).unwrap()` panicked. The reverse ordering (long code
+    /// first) was already a graceful error.
+    #[test]
+    fn test_smtp_read_lines_short_code_first_mismatch_is_err() {
+        cap_test_utils::assert_completes_within(10, || {
+            let (mut stream, writer) = cap_test_utils::malicious_server(b"221\r\n250-x\r\n", 13);
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(&mut stream, &mut ret, None, &mut buffer));
+            drop(stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                err.to_string().contains("Invalid SMTP reply"),
+                "unexpected error: {err:?}"
+            );
+        });
+    }
+
+    /// C6 regression (order twin): long code first leaves a well-formed
+    /// `250-x` line after the drain, which was already rejected gracefully;
+    /// it must stay an error and not become a panic.
+    #[test]
+    fn test_smtp_read_lines_long_code_first_mismatch_is_err() {
+        cap_test_utils::assert_completes_within(10, || {
+            let (mut stream, writer) = cap_test_utils::malicious_server(b"250-x\r\n221\r\n", 13);
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(&mut stream, &mut ret, None, &mut buffer));
+            drop(stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                err.to_string().contains("Invalid SMTP reply"),
+                "unexpected error: {err:?}"
+            );
+        });
+    }
+
+    /// C6 regression: a final chunk of exactly `b"250"` followed by stream
+    /// close passes the `ret.len() < 3` check and used to panic inside
+    /// `Reply::new` (`&l[4..l.len()]` on a 3-byte line). It must now parse
+    /// to a reply with a single empty text line.
+    #[test]
+    fn test_smtp_read_lines_truncated_three_byte_reply_degrades() {
+        cap_test_utils::assert_completes_within(10, || {
+            let (mut stream, writer) = cap_test_utils::malicious_server(b"250", 3);
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(&mut stream, &mut ret, None, &mut buffer));
+            drop(stream);
+            let _ = writer.join();
+            let reply = res.unwrap();
+            assert_eq!(reply.code, ReplyCode::_250);
+            assert_eq!(reply.lines.iter().copied().collect::<Vec<_>>(), vec![""]);
+        });
+    }
+
+    /// C6 regression: shorter-than-a-code truncated replies must stay
+    /// errors (this was already graceful and must not regress).
+    #[test]
+    fn test_smtp_read_lines_truncated_shorter_than_code_is_err() {
+        cap_test_utils::assert_completes_within(10, || {
+            let (mut stream, writer) = cap_test_utils::malicious_server(b"2", 1);
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(&mut stream, &mut ret, None, &mut buffer));
+            drop(stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                err.to_string().contains("Invalid SMTP reply"),
+                "unexpected error: {err:?}"
+            );
+        });
+    }
+
+    /// C6 regression: an empty line and an immediate EOF must be errors
+    /// (both already graceful; pinned so no fix reintroduces a panic).
+    #[test]
+    fn test_smtp_read_lines_empty_line_and_eof_are_err() {
+        cap_test_utils::assert_completes_within(10, || {
+            for chunk in [b"\r\n" as &[u8], b""] {
+                let (mut stream, writer) = cap_test_utils::malicious_server(chunk, chunk.len());
+                let mut ret = String::new();
+                let mut buffer = String::new();
+                let res = smol::block_on(read_lines(&mut stream, &mut ret, None, &mut buffer));
+                drop(stream);
+                let _ = writer.join();
+                let err = res.unwrap_err();
+                assert!(
+                    err.to_string().contains("Invalid SMTP reply"),
+                    "unexpected error for {chunk:?}: {err:?}"
+                );
+            }
+        });
+    }
+
+    /// C6 regression: invalid UTF-8 in an otherwise valid reply used to be
+    /// pushed into the `String` via `from_utf8_unchecked` (constructive
+    /// UB); it must now decode lossily to U+FFFD replacement characters.
+    #[test]
+    fn test_smtp_read_lines_invalid_utf8_degrades_lossy() {
+        cap_test_utils::assert_completes_within(10, || {
+            let (mut stream, writer) = cap_test_utils::malicious_server(b"250 \xff\xfe\r\n", 8);
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(&mut stream, &mut ret, None, &mut buffer));
+            drop(stream);
+            let _ = writer.join();
+            let reply = res.unwrap();
+            assert_eq!(reply.code, ReplyCode::_250);
+            let lines: Vec<_> = reply.lines.iter().copied().collect();
+            drop(reply);
+            assert_eq!(
+                lines,
+                vec!["\u{FFFD}\u{FFFD}"],
+                "invalid UTF-8 must decode lossily"
+            );
+            assert!(ret.contains('\u{FFFD}'), "ret was {ret:?}");
+        });
+    }
+
+    /// Freeze: a well-formed multi-line reply parses exactly as before.
+    #[test]
+    fn test_smtp_read_lines_valid_multiline_unchanged() {
+        cap_test_utils::assert_completes_within(10, || {
+            let (mut stream, writer) =
+                cap_test_utils::malicious_server(b"250-first\r\n250 second\r\n", 23);
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(
+                &mut stream,
+                &mut ret,
+                Some((ReplyCode::_250, &[])),
+                &mut buffer,
+            ));
+            drop(stream);
+            let _ = writer.join();
+            let reply = res.unwrap();
+            assert_eq!(reply.code, ReplyCode::_250);
+            assert_eq!(
+                reply.lines.iter().copied().collect::<Vec<_>>(),
+                vec!["first", "second"]
+            );
+        });
+    }
+
+    /// Regression: the PRDR `353` reply code must be parseable. Without a
+    /// `"353"` arm in [`ReplyCode`]'s `TryFrom<&str>` impl, a valid PRDR
+    /// server reply is rejected as "Unknown SMTP reply code" before the
+    /// expected-reply-code list (which accepts `353`) is ever consulted,
+    /// making the whole PRDR content-analysis path unreachable.
+    #[test]
+    fn test_smtp_reply_code_353_parses() {
+        let code = ReplyCode::try_from("353").expect("353 is a valid PRDR reply code");
+        assert_eq!(code, ReplyCode::_353);
+        assert_eq!(code.value(), 353);
+        assert_eq!(code.as_str(), "PRDR specific notice");
+        assert!(!code.is_err());
+    }
+
+    /// Every parseable [`ReplyCode`] variant's numeric value must round-trip
+    /// through the string parser; this pins the parser against future
+    /// additions of variants that forget a match arm (the bug class behind
+    /// the missing `"353"` arm fixed here).
+    #[test]
+    fn test_smtp_reply_code_roundtrip() {
+        let all = [
+            ReplyCode::_211,
+            ReplyCode::_214,
+            ReplyCode::_220,
+            ReplyCode::_221,
+            ReplyCode::_235,
+            ReplyCode::_250,
+            ReplyCode::_251,
+            ReplyCode::_252,
+            ReplyCode::_334,
+            ReplyCode::_353,
+            ReplyCode::_354,
+            ReplyCode::_421,
+            ReplyCode::_450,
+            ReplyCode::_451,
+            ReplyCode::_452,
+            ReplyCode::_455,
+            ReplyCode::_500,
+            ReplyCode::_501,
+            ReplyCode::_502,
+            ReplyCode::_503,
+            ReplyCode::_504,
+            ReplyCode::_535,
+            ReplyCode::_550,
+            ReplyCode::_551,
+            ReplyCode::_552,
+            ReplyCode::_553,
+            ReplyCode::_554,
+            ReplyCode::_555,
+        ];
+        for code in all {
+            let s = code.value().to_string();
+            assert_eq!(
+                ReplyCode::try_from(s.as_str()).ok(),
+                Some(code),
+                "reply code {s} must round-trip through TryFrom<&str>"
+            );
+        }
+        // `_530` is a known pre-existing gap: its arm is also absent from
+        // `TryFrom<&str>`, but fixing it is out of scope for this change, so
+        // pin the current behaviour instead of asserting it round-trips.
+        let err = ReplyCode::try_from("530").unwrap_err();
+        assert!(err.to_string().contains("Unknown SMTP reply code"));
+    }
 }

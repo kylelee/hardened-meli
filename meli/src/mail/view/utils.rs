@@ -19,7 +19,7 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::{fs::File, io::Write, os::unix::fs::PermissionsExt, path::Path};
+use std::{borrow::Cow, fs::File, io::Write, os::unix::fs::PermissionsExt, path::Path};
 
 use melib::{Result, ShellExpandTrait};
 
@@ -37,32 +37,132 @@ pub fn save_attachment(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub fn desktop_exec_to_command(command: &str, path: String, is_url: bool) -> String {
-    /* Purge unused field codes */
-    let command = command
-        .replace("%i", "")
-        .replace("%c", "")
-        .replace("%k", "");
-    if command.contains("%f") {
-        command.replacen("%f", &path.replace(' ', "\\ "), 1)
-    } else if command.contains("%F") {
-        command.replacen("%F", &path.replace(' ', "\\ "), 1)
-    } else if command.contains("%u") || command.contains("%U") {
-        let from_pattern = if command.contains("%u") { "%u" } else { "%U" };
-        if is_url {
-            command.replacen(from_pattern, &path, 1)
+/// Parse the `Exec` value of a freedesktop.org desktop entry into arguments,
+/// following the quoting rules of the Desktop Entry Specification, §7 "The
+/// Exec key": arguments are separated by unquoted whitespace; double quotes
+/// preserve whitespace; inside quotes only `"`, `` ` ``, `$` and `\` are
+/// escapable by a backslash, and a backslash before any other character is
+/// kept literally; single quotes are not special. Outside quotes a backslash
+/// escapes the next character. An unterminated quote gracefully extends the
+/// argument to the end of the string. (The `Exec` value is a single line by
+/// spec, so newlines are treated as plain whitespace.)
+fn parse_desktop_exec_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut has_arg = false;
+    let mut in_quotes = false;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            match c {
+                '"' => in_quotes = false,
+                '\\' => match chars.next() {
+                    Some(escaped @ ('"' | '`' | '$' | '\\')) => current.push(escaped),
+                    Some(other) => {
+                        current.push('\\');
+                        current.push(other);
+                    }
+                    None => current.push('\\'),
+                },
+                other => current.push(other),
+            }
         } else {
-            command.replacen(
-                from_pattern,
-                &format!("file://{path}").replace(' ', "\\ "),
-                1,
-            )
+            match c {
+                '"' => {
+                    in_quotes = true;
+                    has_arg = true;
+                }
+                '\\' => {
+                    has_arg = true;
+                    match chars.next() {
+                        Some(escaped) => current.push(escaped),
+                        None => current.push('\\'),
+                    }
+                }
+                c if c.is_whitespace() => {
+                    if has_arg {
+                        args.push(std::mem::take(&mut current));
+                        has_arg = false;
+                    }
+                }
+                c => {
+                    current.push(c);
+                    has_arg = true;
+                }
+            }
         }
-    } else if is_url {
-        format!("{command} {path}")
-    } else {
-        format!("{} {}", command, path.replace(' ', "\\ "))
     }
+    if has_arg {
+        args.push(current);
+    }
+    args
+}
+
+/// Escape `arg` so that a shell running the result with `sh -c` passes it on
+/// as a single, literal argument; a space becomes `\ `. Control characters
+/// cannot survive shell quoting: a backslash before a newline is a line
+/// continuation, so the shell drops both characters.
+fn escape_sh_arg(arg: &str) -> Cow<'_, str> {
+    fn is_safe(c: char) -> bool {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '.' | '/' | '-' | ':' | '@' | '%' | '+' | '=' | ',')
+            || !c.is_ascii()
+    }
+
+    if arg.chars().all(is_safe) {
+        return Cow::Borrowed(arg);
+    }
+    let mut escaped = String::with_capacity(arg.len() + 8);
+    for c in arg.chars() {
+        if !is_safe(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    Cow::Owned(escaped)
+}
+
+/// Replace the first occurrence of `code` with `replacement`; the
+/// substituted value is not rescanned for further field codes.
+fn substitute_field_code(args: &mut [String], code: &str, replacement: &str) -> bool {
+    for arg in args.iter_mut() {
+        if let Some(pos) = arg.find(code) {
+            arg.replace_range(pos..pos + code.len(), replacement);
+            return true;
+        }
+    }
+    false
+}
+
+/// Expand the field codes of a desktop entry `Exec` value for a single
+/// `path` (a URL when `is_url` is `true`) into a command line that a shell
+/// invoked with `sh -c` executes with every argument intact.
+pub fn desktop_exec_to_command(command: &str, path: String, is_url: bool) -> String {
+    let url = if is_url {
+        path.clone()
+    } else {
+        format!("file://{path}")
+    };
+    let mut args: Vec<String> = parse_desktop_exec_args(command)
+        .into_iter()
+        .map(|arg| {
+            // Purge unused field codes; arguments that expand to nothing are
+            // dropped entirely.
+            arg.replace("%i", "").replace("%c", "").replace("%k", "")
+        })
+        .filter(|arg| !arg.is_empty())
+        .collect();
+    if !substitute_field_code(&mut args, "%f", &path)
+        && !substitute_field_code(&mut args, "%F", &path)
+        && !substitute_field_code(&mut args, "%u", &url)
+        && !substitute_field_code(&mut args, "%U", &url)
+    {
+        args.push(path);
+    }
+    args.iter()
+        .map(|arg| escape_sh_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -102,6 +202,138 @@ mod tests {
         assert_eq!(
             "zathura --fork file:///tmp/file".to_string(),
             desktop_exec_to_command("zathura --fork %U", "file:///tmp/file".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn test_desktop_exec_unquoted_freeze() {
+        // Unquoted Exec values must keep producing the exact same command
+        // string as the previous whitespace-splitting implementation.
+        assert_eq!(
+            "papers file:///tmp/doc.pdf".to_string(),
+            desktop_exec_to_command("papers %U", "/tmp/doc.pdf".to_string(), false)
+        );
+        assert_eq!(
+            "firefox https://example.org".to_string(),
+            desktop_exec_to_command("firefox %u", "https://example.org".to_string(), true)
+        );
+        assert_eq!(
+            "w3m -T text/html /tmp/a.html".to_string(),
+            desktop_exec_to_command("w3m -T text/html", "/tmp/a.html".to_string(), false)
+        );
+        assert_eq!(
+            "evince /tmp/x.pdf".to_string(),
+            desktop_exec_to_command("evince %f", "/tmp/x.pdf".to_string(), false)
+        );
+        assert_eq!(
+            "gimp /tmp/img\\ with\\ space.png".to_string(),
+            desktop_exec_to_command("gimp %f", "/tmp/img with space.png".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn test_desktop_exec_quoted_arguments() {
+        assert_eq!(
+            "/home/user/My\\ Docs/viewer /tmp/file".to_string(),
+            desktop_exec_to_command(
+                "\"/home/user/My Docs/viewer\" %f",
+                "/tmp/file".to_string(),
+                false
+            )
+        );
+        // Escaped double quote inside quotes.
+        assert_eq!(
+            "say\\ \\\"hi\\\" /tmp/file".to_string(),
+            desktop_exec_to_command("\"say \\\"hi\\\"\" %f", "/tmp/file".to_string(), false)
+        );
+        // Escaped backslash inside quotes.
+        assert_eq!(
+            "a\\\\b /tmp/file".to_string(),
+            desktop_exec_to_command("\"a\\\\b\" %f", "/tmp/file".to_string(), false)
+        );
+        // A backslash before a character that is not escapable per spec is
+        // kept literally.
+        assert_eq!(
+            "a\\\\qb /tmp/file".to_string(),
+            desktop_exec_to_command("\"a\\qb\" %f", "/tmp/file".to_string(), false)
+        );
+        // Escaped dollar sign inside quotes.
+        assert_eq!(
+            "\\$5 /tmp/file".to_string(),
+            desktop_exec_to_command("\"\\$5\" %f", "/tmp/file".to_string(), false)
+        );
+        // Single quotes are not special per spec; they pass through
+        // literally (escaped for the shell).
+        assert_eq!(
+            "it\\'s /tmp/file".to_string(),
+            desktop_exec_to_command("it's %f", "/tmp/file".to_string(), false)
+        );
+        // An unterminated quote gracefully treats the rest of the string as
+        // part of the current argument.
+        assert_eq!(
+            "foo bar\\ baz /tmp/file".to_string(),
+            desktop_exec_to_command("foo \"bar baz", "/tmp/file".to_string(), false)
+        );
+        // An argument that expands to nothing (an explicitly empty argument
+        // or a purged field code) is dropped.
+        assert_eq!(
+            "viewer /tmp/file".to_string(),
+            desktop_exec_to_command("viewer \"\" %f", "/tmp/file".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn test_desktop_exec_shell_metacharacters_in_path() {
+        assert_eq!(
+            "viewer /tmp/x\\$\\(touch\\ pwned\\)y\\;z".to_string(),
+            desktop_exec_to_command("viewer %f", "/tmp/x$(touch pwned)y;z".to_string(), false)
+        );
+        assert_eq!(
+            "viewer /tmp/a\\`id\\`b".to_string(),
+            desktop_exec_to_command("viewer %f", "/tmp/a`id`b".to_string(), false)
+        );
+        // A URL containing a space stays a single argument.
+        assert_eq!(
+            "browser http://example.com/a\\ b".to_string(),
+            desktop_exec_to_command("browser %u", "http://example.com/a b".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn test_parse_desktop_exec_args() {
+        assert!(parse_desktop_exec_args("").is_empty());
+        assert_eq!(parse_desktop_exec_args("a b\tc"), ["a", "b", "c"]);
+        assert_eq!(parse_desktop_exec_args("\"a b\" c"), ["a b", "c"]);
+        // Quotes inside a token glue its pieces into a single argument.
+        assert_eq!(parse_desktop_exec_args("a\"b c\"d"), ["ab cd"]);
+        // An explicit empty quoted argument survives tokenization.
+        assert_eq!(parse_desktop_exec_args("\"\" x"), ["", "x"]);
+        assert_eq!(parse_desktop_exec_args("x \"y z"), ["x", "y z"]);
+        assert_eq!(parse_desktop_exec_args("x\\"), ["x\\"]);
+    }
+
+    #[test]
+    fn test_desktop_exec_field_codes_preserved() {
+        // %i, %c and %k expand to no argument at all.
+        assert_eq!(
+            "eog /tmp/file".to_string(),
+            desktop_exec_to_command("eog %i %f", "/tmp/file".to_string(), false)
+        );
+        // The first field code in f, F, u, U priority order wins, and only
+        // its first occurrence is expanded.
+        assert_eq!(
+            "foo %F /tmp/file".to_string(),
+            desktop_exec_to_command("foo %F %f", "/tmp/file".to_string(), false)
+        );
+        assert_eq!(
+            "foo /tmp/file %f".to_string(),
+            desktop_exec_to_command("foo %f %f", "/tmp/file".to_string(), false)
+        );
+        // Field codes expand inside quoted arguments too, like the previous
+        // implementation did (the spec leaves this undefined).
+        assert_eq!(
+            "v /tmp/file".to_string(),
+            desktop_exec_to_command("v \"%f\"", "/tmp/file".to_string(), false)
         );
     }
 }

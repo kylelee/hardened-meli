@@ -55,6 +55,60 @@ pub use filters::*;
 #[cfg(test)]
 mod tests;
 
+/// What a `List-Unsubscribe` action will do once the user confirms it.
+///
+/// The target shown in the confirmation dialog is derived from the exact same
+/// parsed values that will be used when the action is performed, so what the
+/// user sees is what will be sent/opened.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UnsubscribeAction {
+    /// Send an e-mail built from this `mailto:` URI.
+    Send(Mailto),
+    /// Open this URL with the system url launcher.
+    OpenUrl(String),
+}
+
+impl UnsubscribeAction {
+    /// The exact target that will be used if this action is confirmed.
+    pub fn target_description(&self) -> String {
+        match self {
+            Self::Send(mailto) => mailto
+                .address
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            Self::OpenUrl(url) => url.clone(),
+        }
+    }
+}
+
+/// Pick the `List-Unsubscribe` option that would be performed, if any.
+///
+/// Mirrors the historical dispatch order: the first `mailto:` option that
+/// parses wins, otherwise the first URL option; unparseable options are
+/// skipped.
+pub fn unsubscribe_action(
+    unsubscribe: &[list_management::ListAction<'_>],
+) -> Option<UnsubscribeAction> {
+    for option in unsubscribe.iter() {
+        match option {
+            list_management::ListAction::Email(email) => {
+                if let Ok(mailto) = Mailto::try_from(*email) {
+                    return Some(UnsubscribeAction::Send(mailto));
+                }
+            }
+            list_management::ListAction::Url(url) => {
+                return Some(UnsubscribeAction::OpenUrl(
+                    String::from_utf8_lossy(url).into_owned(),
+                ));
+            }
+            list_management::ListAction::No => {}
+        }
+    }
+    None
+}
+
 /// Contains an Envelope view, with sticky headers, a pager for the body, and
 /// subviews for more menus
 #[derive(Debug)]
@@ -63,6 +117,8 @@ pub struct MailView {
     dirty: bool,
     contact_selector: Option<Box<UIDialog<Card>>>,
     forward_dialog: Option<Box<UIDialog<Option<PendingReplyAction>>>>,
+    unsubscribe_dialog: Option<Box<UIConfirmationDialog>>,
+    pending_unsubscribe: Option<UnsubscribeAction>,
     theme_default: ThemeAttribute,
     active_jobs: HashSet<JobId>,
     initialized: bool,
@@ -99,6 +155,8 @@ impl MailView {
             dirty: true,
             contact_selector: None,
             forward_dialog: None,
+            unsubscribe_dialog: None,
+            pending_unsubscribe: None,
             theme_default: crate::conf::value(context, "mail.view.body"),
             active_jobs: Default::default(),
             initialized: false,
@@ -111,6 +169,25 @@ impl MailView {
             ret.init_futures(context);
         }
         ret
+    }
+
+    pub(crate) fn has_active_modal(&self) -> bool {
+        self.contact_selector.is_some()
+            || self.forward_dialog.is_some()
+            || self.unsubscribe_dialog.is_some()
+            || self.state.has_active_modal()
+    }
+
+    /// Bridge across the module-private `state` field for tests in sibling
+    /// modules: opens the force charset selector inside a `Loaded` mail view.
+    #[cfg(test)]
+    pub(crate) fn open_force_charset_modal_for_tests(&mut self, context: &Context) {
+        if let MailViewState::Loaded {
+            ref mut env_view, ..
+        } = self.state
+        {
+            env_view.set_force_charset_modal_for_tests(context);
+        }
     }
 
     fn init_futures(&mut self, context: &mut Context) {
@@ -306,6 +383,78 @@ impl MailView {
         )));
         self.dirty = true;
     }
+
+    fn perform_unsubscribe_action(&self, action: UnsubscribeAction, context: &mut Context) {
+        let Some(coordinates) = self.coordinates else {
+            return;
+        };
+        match action {
+            UnsubscribeAction::Send(mailto) => {
+                let mut draft: Draft = mailto.into();
+                draft.set_header(
+                    HeaderName::FROM,
+                    context.accounts[&coordinates.0]
+                        .settings
+                        .account()
+                        .main_identity_address()
+                        .to_string(),
+                );
+                if let Err(err) = super::compose::send_draft(
+                    ToggleFlag::False,
+                    context,
+                    coordinates.0,
+                    draft,
+                    SpecialUsageMailbox::Sent,
+                    Flag::SEEN,
+                    true,
+                ) {
+                    context.replies.push_back(UIEvent::Notification {
+                        title: Some("Couldn't send unsubscribe e-mail".into()),
+                        source: None,
+                        body: err.to_string().into(),
+                        kind: Some(NotificationType::Error(err.kind)),
+                    });
+                }
+            }
+            UnsubscribeAction::OpenUrl(url_arg) => {
+                let url_launcher =
+                    mailbox_settings!(context[coordinates.0][&coordinates.1].pager.url_launcher)
+                        .as_ref()
+                        .map(|s| s.as_str())
+                        .unwrap_or(if cfg!(target_os = "macos") {
+                            "open"
+                        } else {
+                            "xdg-open"
+                        });
+                match Command::new(url_launcher)
+                    .arg(&url_arg)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                {
+                    Ok(child) => {
+                        context
+                            .children
+                            .entry(url_launcher.to_string().into())
+                            .or_default()
+                            .push(ForkedProcess::Generic {
+                                id: url_launcher.to_string().into(),
+                                command: Some(format!("{url_launcher} {url_arg}").into()),
+                                child,
+                            });
+                    }
+                    Err(err) => {
+                        context.replies.push_back(UIEvent::Notification {
+                            title: Some(format!("Couldn't launch {url_launcher}").into()),
+                            source: None,
+                            body: err.to_string().into(),
+                            kind: Some(NotificationType::Error(err.kind().into())),
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Component for MailView {
@@ -377,6 +526,8 @@ impl Component for MailView {
             s.draw(grid, area, context);
         } else if let Some(ref mut s) = self.forward_dialog.as_mut() {
             s.draw(grid, area, context);
+        } else if let Some(ref mut s) = self.unsubscribe_dialog.as_mut() {
+            s.draw(grid, area, context);
         }
 
         self.dirty = false;
@@ -396,6 +547,12 @@ impl Component for MailView {
             }
         }
 
+        if let Some(ref mut s) = self.unsubscribe_dialog {
+            if s.process_event(event, context) {
+                return true;
+            }
+        }
+
         let Some(coordinates) = self.coordinates else {
             return false;
         };
@@ -406,6 +563,30 @@ impl Component for MailView {
         /* If envelope data is loaded, pass it to envelope views */
         if self.state.process_event(event, context) {
             return true;
+        }
+
+        if let Some(dialog_id) = self.unsubscribe_dialog.as_ref().map(|s| s.id()) {
+            match event {
+                UIEvent::FinishedUIDialog(id, result) if *id == dialog_id => {
+                    self.unsubscribe_dialog = None;
+                    let confirmed = result.downcast_ref::<bool>().copied().unwrap_or(false);
+                    let action = self.pending_unsubscribe.take();
+                    if confirmed {
+                        if let Some(action) = action {
+                            self.perform_unsubscribe_action(action, context);
+                        }
+                    }
+                    self.set_dirty(true);
+                    return true;
+                }
+                UIEvent::ComponentUnrealize(id) if *id == dialog_id => {
+                    self.unsubscribe_dialog = None;
+                    self.pending_unsubscribe = None;
+                    self.set_dirty(true);
+                    return true;
+                }
+                _ => {}
+            }
         }
 
         match (
@@ -505,7 +686,7 @@ impl Component for MailView {
                 if shortcut!(key == shortcuts[Shortcuts::ENVELOPE_VIEW]["forward"]) =>
             {
                 match mailbox_settings!(
-                    context[&coordinates.0][&coordinates.1]
+                    context[coordinates.0][&coordinates.1]
                         .composing
                         .forward_as_attachment
                 ) {
@@ -681,105 +862,32 @@ impl Component for MailView {
                             return true;
                         }
                         MailingListAction::ListUnsubscribe if actions.unsubscribe.is_some() => {
-                            /* autosend or open unsubscribe option */
-                            let unsubscribe = actions.unsubscribe.as_ref().unwrap();
-                            for option in unsubscribe.iter() {
-                                /* [ref:TODO]: Ask for confirmation before proceeding with an action */
-                                match option {
-                                    list_management::ListAction::Email(email) => {
-                                        if let Ok(mailto) = Mailto::try_from(*email) {
-                                            let mut draft: Draft = mailto.into();
-                                            draft.set_header(
-                                                HeaderName::FROM,
-                                                context.accounts[&coordinates.0]
-                                                    .settings
-                                                    .account()
-                                                    .main_identity_address()
-                                                    .to_string(),
-                                            );
-                                            /* Manually drop stuff because borrowck doesn't do it
-                                             * on its own */
-                                            drop(detect);
-                                            drop(envelope);
-                                            if let Err(err) = super::compose::send_draft(
-                                                ToggleFlag::False,
-                                                context,
-                                                coordinates.0,
-                                                draft,
-                                                SpecialUsageMailbox::Sent,
-                                                Flag::SEEN,
-                                                true,
-                                            ) {
-                                                context.replies.push_back(UIEvent::Notification {
-                                                    title: Some(
-                                                        "Couldn't send unsubscribe e-mail".into(),
-                                                    ),
-                                                    source: None,
-                                                    body: err.to_string().into(),
-                                                    kind: Some(NotificationType::Error(err.kind)),
-                                                });
-                                            }
-                                            return true;
-                                        }
-                                    }
-                                    list_management::ListAction::Url(url) => {
-                                        let url_launcher = mailbox_settings!(
-                                            context[&coordinates.0][&coordinates.1]
-                                                .pager
-                                                .url_launcher
-                                        )
-                                        .as_ref()
-                                        .map(|s| s.as_str())
-                                        .unwrap_or(if cfg!(target_os = "macos") {
-                                            "open"
-                                        } else {
-                                            "xdg-open"
-                                        });
-                                        let url_arg = String::from_utf8_lossy(url).into_owned();
-                                        match Command::new(url_launcher)
-                                            .arg(&url_arg)
-                                            .stdin(Stdio::piped())
-                                            .stdout(Stdio::piped())
-                                            .spawn()
-                                        {
-                                            Ok(child) => {
-                                                context
-                                                    .children
-                                                    .entry(url_launcher.to_string().into())
-                                                    .or_default()
-                                                    .push(ForkedProcess::Generic {
-                                                        id: url_launcher.to_string().into(),
-                                                        command: Some(
-                                                            format!("{url_launcher} {url_arg}")
-                                                                .into(),
-                                                        ),
-                                                        child,
-                                                    });
-                                            }
-                                            Err(err) => {
-                                                context.replies.push_back(UIEvent::Notification {
-                                                    title: Some(
-                                                        format!("Couldn't launch {url_launcher}")
-                                                            .into(),
-                                                    ),
-                                                    source: None,
-                                                    body: err.to_string().into(),
-                                                    kind: Some(NotificationType::Error(
-                                                        err.kind().into(),
-                                                    )),
-                                                });
-                                            }
-                                        }
-                                        return true;
-                                    }
-                                    list_management::ListAction::No => {}
-                                }
+                            /* Ask for confirmation before proceeding with an action */
+                            if let Some(action) =
+                                unsubscribe_action(actions.unsubscribe.as_ref().unwrap())
+                            {
+                                let entry =
+                                    format!("List-Unsubscribe: {}", action.target_description());
+                                self.pending_unsubscribe = Some(action);
+                                self.unsubscribe_dialog =
+                                    Some(Box::new(UIConfirmationDialog::new(
+                                        "Confirm List-Unsubscribe action",
+                                        vec![(true, entry)],
+                                        /* only one choice */
+                                        true,
+                                        Some(Box::new(move |id: ComponentId, result: bool| {
+                                            Some(UIEvent::FinishedUIDialog(id, Box::new(result)))
+                                        })),
+                                        context,
+                                    )));
+                                self.set_dirty(true);
                             }
+                            return true;
                         }
                         MailingListAction::ListArchive if actions.archive.is_some() => {
                             /* open archive url with url_launcher */
                             let url_launcher = mailbox_settings!(
-                                context[&coordinates.0][&coordinates.1].pager.url_launcher
+                                context[coordinates.0][&coordinates.1].pager.url_launcher
                             )
                             .as_ref()
                             .map(|s| s.as_str())
@@ -830,9 +938,9 @@ impl Component for MailView {
                 return true;
             }
             UIEvent::Input(ref key)
-                if mailbox_settings!(context has [&coordinates.0][&coordinates.1])
+                if mailbox_settings!(context has [coordinates.0][&coordinates.1])
                     && mailbox_settings!(
-                        context[&coordinates.0][&coordinates.1]
+                        context[coordinates.0][&coordinates.1]
                             .shortcuts
                             .envelope_view
                             .commands
@@ -868,6 +976,11 @@ impl Component for MailView {
                 .as_ref()
                 .map(|s| s.is_dirty())
                 .unwrap_or(false)
+            || self
+                .unsubscribe_dialog
+                .as_ref()
+                .map(|s| s.is_dirty())
+                .unwrap_or(false)
     }
 
     fn set_dirty(&mut self, value: bool) {
@@ -875,6 +988,8 @@ impl Component for MailView {
         if let Some(ref mut s) = self.contact_selector {
             s.set_dirty(value);
         } else if let Some(ref mut s) = self.forward_dialog {
+            s.set_dirty(value);
+        } else if let Some(ref mut s) = self.unsubscribe_dialog {
             s.set_dirty(value);
         }
         self.state.set_dirty(value);
@@ -884,9 +999,9 @@ impl Component for MailView {
         let mut map = self.state.shortcuts(context);
         if let Some(envelope_view_map) = map.get_mut(Shortcuts::ENVELOPE_VIEW) {
             if let Some((account_hash, mailbox_hash, _)) = self.coordinates {
-                if mailbox_settings!(context has [&account_hash][&mailbox_hash]) {
+                if mailbox_settings!(context has [account_hash][&mailbox_hash]) {
                     for command in mailbox_settings!(
-                        context[&account_hash][&mailbox_hash]
+                        context[account_hash][&mailbox_hash]
                             .shortcuts
                             .envelope_view
                             .commands

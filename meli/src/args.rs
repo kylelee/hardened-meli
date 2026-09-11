@@ -127,14 +127,14 @@ pub enum SubCommand {
 pub struct ManOpt {
     /// If set, output text in stdout instead of spawning PAGER.
     #[cfg(feature = "cli-docs")]
-    #[cfg_attr(feature = "cli-docs", structopt(long = "no-raw", alias = "no-raw"))]
+    #[structopt(long = "no-raw", alias = "no-raw")]
     pub no_raw: bool,
     /// If set, output compressed gzip manpage in binary form in stdout.
     #[cfg(feature = "cli-docs")]
-    #[cfg_attr(feature = "cli-docs", structopt(long = "gzipped"))]
+    #[structopt(long = "gzipped")]
     pub gzipped: bool,
     #[cfg(feature = "cli-docs")]
-    #[cfg_attr(feature = "cli-docs", structopt(default_value = "meli", possible_values=manpages::POSSIBLE_VALUES, value_name="PAGE", parse(try_from_str = manpages::parse_manpage)))]
+    #[structopt(default_value = "meli", possible_values=manpages::POSSIBLE_VALUES, value_name="PAGE", parse(try_from_str = manpages::parse_manpage))]
     /// Name of manual page.
     pub page: manpages::ManPages,
 }

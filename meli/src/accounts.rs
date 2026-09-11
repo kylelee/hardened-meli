@@ -33,7 +33,7 @@ use std::{
     time::Duration,
 };
 
-use futures::{future::FutureExt, stream::StreamExt};
+use futures::stream::StreamExt;
 use indexmap::IndexMap;
 use melib::{
     backends::{prelude::*, Backends},
@@ -251,10 +251,30 @@ impl Account {
         let mut active_jobs = HashMap::default();
         let mut active_job_instants = BTreeMap::default();
         if let Ok(mailboxes_job) = backend.mailboxes() {
+            let handle = main_loop_handler.job_executor.spawn(
+                "list-mailboxes".into(),
+                mailboxes_job,
+                if backend.capabilities().is_async {
+                    IsAsync::Async
+                } else {
+                    IsAsync::Blocking
+                },
+            );
+            let job_id = handle.job_id;
+            active_jobs.insert(
+                job_id,
+                JobRequest::Mailbox(MailboxJobRequest::Mailboxes { handle }),
+            );
+            active_job_instants.insert(std::time::Instant::now(), job_id);
+            main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::StatusEvent(
+                StatusEvent::NewJob(job_id),
+            )));
+        }
+        if backend.capabilities().is_remote {
             if let Ok(online_job) = backend.is_online() {
                 let handle = main_loop_handler.job_executor.spawn(
-                    "list-mailboxes".into(),
-                    online_job.then(|_| mailboxes_job),
+                    "is-online".into(),
+                    online_job,
                     if backend.capabilities().is_async {
                         IsAsync::Async
                     } else {
@@ -262,10 +282,7 @@ impl Account {
                     },
                 );
                 let job_id = handle.job_id;
-                active_jobs.insert(
-                    job_id,
-                    JobRequest::Mailbox(MailboxJobRequest::Mailboxes { handle }),
-                );
+                active_jobs.insert(job_id, JobRequest::IsOnline { handle });
                 active_job_instants.insert(std::time::Instant::now(), job_id);
                 main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::StatusEvent(
                     StatusEvent::NewJob(job_id),
@@ -504,6 +521,85 @@ impl Account {
         self.mailbox_entries = mailbox_entries;
         self.tree = tree;
         Ok(())
+    }
+
+    /// Merge a freshly fetched mailbox list (e.g. from a
+    /// [`MailBackend::refresh_mailboxes`] job spawned on reconnect) into the
+    /// local one: new mailboxes are added, existing ones get their
+    /// `ref_mailbox` handle replaced, and mailboxes that disappeared
+    /// server-side are only warned about, never removed.
+    fn reconcile_mailboxes(&mut self, ref_mailboxes: HashMap<MailboxHash, Mailbox>) {
+        if ref_mailboxes.is_empty() {
+            return;
+        }
+
+        let ref_hashes: HashSet<MailboxHash> = ref_mailboxes.keys().copied().collect();
+        for (hash, mut ref_mailbox) in ref_mailboxes {
+            if let Some(entry) = self.mailbox_entries.get_mut(&hash) {
+                entry.ref_mailbox = ref_mailbox;
+                continue;
+            }
+
+            let mut conf = self
+                .settings
+                .mailbox_confs
+                .get(ref_mailbox.path())
+                .cloned()
+                .unwrap_or_default();
+            conf.mailbox_conf.usage = if ref_mailbox.special_usage() != SpecialUsageMailbox::Normal
+            {
+                Some(ref_mailbox.special_usage())
+            } else {
+                let tmp = SpecialUsageMailbox::detect_usage(ref_mailbox.name());
+                if let Some(tmp) = tmp.filter(|&v| v != SpecialUsageMailbox::Normal) {
+                    let _ = ref_mailbox.set_special_usage(tmp);
+                }
+                tmp
+            };
+            match conf.mailbox_conf.usage {
+                Some(SpecialUsageMailbox::Sent) => {
+                    self.settings.sent_mailbox = Some(hash);
+                }
+                None if ref_mailbox.special_usage() == SpecialUsageMailbox::Sent => {
+                    self.settings.sent_mailbox = Some(hash);
+                }
+                _ => {}
+            }
+
+            let path = ref_mailbox.path().to_string();
+            self.mailbox_entries.insert(
+                hash,
+                MailboxEntry::new(MailboxStatus::None, path, ref_mailbox, conf),
+            );
+            self.collection.new_mailbox(hash);
+            self.main_loop_handler
+                .send(ThreadEvent::UIEvent(UIEvent::MailboxCreate((
+                    self.hash, hash,
+                ))));
+        }
+
+        for (hash, entry) in self.mailbox_entries.iter() {
+            if !ref_hashes.contains(hash) {
+                log::warn!(
+                    "Account `{name}` mailbox `{mbox}` is no longer present in the refreshed \
+                     mailbox list; keeping the local entry. Remove it manually if it was deleted \
+                     on the server.",
+                    name = self.name,
+                    mbox = entry.name(),
+                );
+            }
+        }
+
+        build_mailboxes_order(
+            &mut self.tree,
+            &self.mailbox_entries,
+            &mut self.mailboxes_order,
+        );
+        self.main_loop_handler
+            .send(ThreadEvent::UIEvent(UIEvent::AccountStatusChange(
+                self.hash,
+                Some("Refreshed mailboxes.".into()),
+            )));
     }
 
     fn consume_refresh_event(
@@ -1538,6 +1634,28 @@ impl Account {
                                     || matches!(self.is_online, IsOnline::Uninit)
                                 {
                                     self.watch(None);
+                                    // The transition fires once; use it to
+                                    // reconcile the (possibly stale, cached)
+                                    // mailbox list with the server.
+                                    if self.backend_capabilities.is_remote {
+                                        let refresh_job = {
+                                            let mut backend = self.backend.lock().unwrap();
+                                            backend.refresh_mailboxes()
+                                        };
+                                        if let Ok(refresh_job) = refresh_job {
+                                            let handle = self.main_loop_handler.job_executor.spawn(
+                                                "refresh-mailboxes".into(),
+                                                refresh_job,
+                                                self.is_async(),
+                                            );
+                                            self.insert_job(
+                                                handle.job_id,
+                                                JobRequest::Mailbox(
+                                                    MailboxJobRequest::RefreshMailboxes { handle },
+                                                ),
+                                            );
+                                        }
+                                    }
                                 }
                                 self.is_online = IsOnline::True;
                                 return true;
@@ -1547,15 +1665,9 @@ impl Account {
                             }
                         }
                     }
-                    let online_job = self.backend.lock().unwrap().is_online();
-                    if let Ok(online_job) = online_job {
-                        let handle = self.main_loop_handler.job_executor.spawn(
-                            "is-online".into(),
-                            online_job,
-                            self.is_async(),
-                        );
-                        self.insert_job(handle.job_id, JobRequest::IsOnline { handle });
-                    };
+                    if matches!(self.is_online, IsOnline::Err { .. }) {
+                        _ = self.is_online(true);
+                    }
                 }
                 JobRequest::Refresh { ref mut handle, .. } => {
                     if matches!(self.is_online, IsOnline::Err { ref value, ..} if !value.is_recoverable())
@@ -1855,18 +1967,6 @@ impl Account {
             .send(ThreadEvent::UIEvent(UIEvent::StatusEvent(
                 StatusEvent::NewJob(job_id),
             )));
-    }
-
-    pub fn cancel_job(&mut self, job_id: JobId) -> Option<JobRequest> {
-        if let Some(req) = self.active_jobs.remove(&job_id) {
-            self.main_loop_handler
-                .send(ThreadEvent::UIEvent(UIEvent::StatusEvent(
-                    StatusEvent::JobCanceled(job_id),
-                )));
-            Some(req)
-        } else {
-            None
-        }
     }
 
     #[inline]

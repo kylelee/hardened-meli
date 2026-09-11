@@ -39,6 +39,19 @@ pub struct ImapWatchKit {
     pub uid_store: Arc<UIDStore>,
 }
 
+/// Quote a mailbox path for interpolation into a raw IMAP command per
+/// RFC 3501 quoted-string rules.
+///
+/// Returns `None` if the path contains CR or LF: it can never be legitimate
+/// and would allow injecting arbitrary commands into the IMAP session.
+fn quote_imap_mailbox_path(path: &str) -> Option<String> {
+    if path.contains(['\r', '\n']) {
+        return None;
+    }
+    let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+    Some(format!("\"{escaped}\""))
+}
+
 pub fn poll_with_examine(
     kit: ImapWatchKit,
 ) -> impl futures::stream::Stream<Item = Result<BackendEvent>> {
@@ -190,7 +203,6 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                 .filter(|l| {
                     !l.starts_with(b"+ ")
                         && !l.starts_with(b"* ok")
-                        && !l.starts_with(b"* ok")
                         && !l.starts_with(b"* Ok")
                         && !l.starts_with(b"* OK")
                 })
@@ -208,7 +220,6 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                 for l in line.split_rn().chain(response.split_rn()) {
                     log::trace!("process_untagged {:?}", String::from_utf8_lossy(l));
                     if l.starts_with(b"+ ")
-                        || l.starts_with(b"* ok")
                         || l.starts_with(b"* ok")
                         || l.starts_with(b"* Ok")
                         || l.starts_with(b"* OK")
@@ -285,10 +296,19 @@ pub async fn examine_updates(
                 .any(|cap| cap.eq_ignore_ascii_case(b"LIST-STATUS"));
             if has_list_status {
                 // [ref:TODO]: (#222) imap-codec does not support "LIST Command Extensions" currently.
+                let Some(quoted_mailbox_path) = quote_imap_mailbox_path(mailbox.imap_path()) else {
+                    log::warn!(
+                        "Could not safely quote IMAP mailbox path {:?}; skipping LIST-STATUS \
+                         update.",
+                        mailbox.imap_path()
+                    );
+                    mailbox.set_warm(true);
+                    return Ok(None);
+                };
                 conn.send_command_raw(
                     format!(
-                        "LIST \"{}\" \"\" RETURN (STATUS (MESSAGES UNSEEN))",
-                        mailbox.imap_path()
+                        "LIST {} \"\" RETURN (STATUS (MESSAGES UNSEEN))",
+                        quoted_mailbox_path
                     )
                     .as_bytes(),
                 )
@@ -476,5 +496,65 @@ pub async fn examine_updates(
             });
         }
         Ok(events.try_into().ok())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quote_imap_mailbox_path_clean_path_is_byte_identical() {
+        assert_eq!(
+            quote_imap_mailbox_path("INBOX").as_deref(),
+            Some("\"INBOX\"")
+        );
+        assert_eq!(
+            quote_imap_mailbox_path("Archive/2024").as_deref(),
+            Some("\"Archive/2024\"")
+        );
+    }
+
+    #[test]
+    fn test_quote_imap_mailbox_path_escapes_quote_and_backslash() {
+        assert_eq!(
+            quote_imap_mailbox_path("we\"ird").as_deref(),
+            Some("\"we\\\"ird\"")
+        );
+        assert_eq!(
+            quote_imap_mailbox_path("back\\slash").as_deref(),
+            Some("\"back\\\\slash\"")
+        );
+        assert_eq!(
+            quote_imap_mailbox_path("a\"b\\c").as_deref(),
+            Some("\"a\\\"b\\\\c\"")
+        );
+    }
+
+    #[test]
+    fn test_quote_imap_mailbox_path_rejects_crlf() {
+        assert_eq!(quote_imap_mailbox_path("foo\r\nbar"), None);
+        assert_eq!(quote_imap_mailbox_path("foo\rbar"), None);
+        assert_eq!(quote_imap_mailbox_path("foo\nbar"), None);
+        assert_eq!(quote_imap_mailbox_path("\r\n"), None);
+    }
+
+    #[test]
+    fn test_full_list_command_with_escaped_path() {
+        let quoted = quote_imap_mailbox_path("a\"b\\c").unwrap();
+        assert_eq!(
+            format!("LIST {} \"\" RETURN (STATUS (MESSAGES UNSEEN))", quoted),
+            "LIST \"a\\\"b\\\\c\" \"\" RETURN (STATUS (MESSAGES UNSEEN))"
+        );
+    }
+
+    #[test]
+    fn test_raw_interpolation_of_hostile_path_is_rejected() {
+        // Pre-fix behavior interpolated the path raw into the command,
+        // letting a hostile path (from server LIST responses) terminate the
+        // quoted string early and inject commands. Such paths must be
+        // rejected outright.
+        let evil = "foo\" RETURN (STATUS (MESSAGES 1))\r\nA002 EXPUNGE";
+        assert_eq!(quote_imap_mailbox_path(evil), None);
     }
 }

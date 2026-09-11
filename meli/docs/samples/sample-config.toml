@@ -91,6 +91,9 @@
 #
 #[pager]
 #filter = "COLUMNS=72 /usr/local/bin/pygmentize -l email"
+## Sanitize HTML mail with the bundled meli_sanitize_html filter before
+## rendering it with w3m (requires w3m installed):
+#html_filter = 'meli_sanitize_html | w3m -T text/html'
 #pager_context = 0 # default, optional
 #sticky_headers = true # default, optional
 #

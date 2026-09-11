@@ -127,9 +127,6 @@ pub fn deserialize_from_str<'de, T: serde::de::Deserialize<'de>>(s: &'de str) ->
 #[derive(Debug, Default)]
 pub struct EnvelopeCache {
     bytes: Option<String>,
-    // headers: Option<String>,
-    // body: Option<String>,
-    // flags: Option<Flag>,
 }
 
 #[derive(Clone, Debug)]

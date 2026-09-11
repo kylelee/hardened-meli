@@ -86,16 +86,6 @@ pub struct Tty {
 
 impl Tty {
     #[inline]
-    pub fn stdout_mut(&mut self) -> Option<&mut StateStdout> {
-        self.stdout.as_mut()
-    }
-
-    #[inline]
-    pub fn draw_fn(&self) -> DrawHorizontalSegmentFn {
-        self.draw_horizontal_segment_fn
-    }
-
-    #[inline]
     pub const fn mouse(&self) -> bool {
         self.mouse
     }
@@ -283,11 +273,6 @@ impl Screen<Tty> {
             },
             theme_default,
         )
-    }
-
-    #[inline]
-    pub fn with_tty(self, display: Tty) -> Self {
-        Self { display, ..self }
     }
 
     #[inline]

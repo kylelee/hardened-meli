@@ -78,7 +78,7 @@
 
 //!
 //!  This crate contains the frontend stuff of the application. The application
-//! entry way on  `src/bin.rs` creates an event loop and passes input to a
+//! entry way on  `src/main.rs` creates an event loop and passes input to a
 //! thread.
 //!
 //! The mail handling stuff is done in the `melib` crate which includes all
@@ -146,9 +146,6 @@ pub mod notifications;
 
 pub mod manage;
 pub use manage::*;
-
-// #[cfg(feature = "svgscreenshot")]
-// pub mod svg;
 
 #[macro_use]
 pub mod conf;

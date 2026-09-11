@@ -30,6 +30,9 @@ pub enum MailboxJobRequest {
     Mailboxes {
         handle: JoinHandle<Result<HashMap<MailboxHash, Mailbox>>>,
     },
+    RefreshMailboxes {
+        handle: JoinHandle<Result<HashMap<MailboxHash, Mailbox>>>,
+    },
     CreateMailbox {
         path: String,
         handle: JoinHandle<Result<(MailboxHash, HashMap<MailboxHash, Mailbox>)>>,
@@ -75,6 +78,7 @@ impl std::fmt::Debug for MailboxJobRequest {
                 write!(f, "JobRequest::SetMailboxSubscription")
             }
             Self::Mailboxes { .. } => write!(f, "JobRequest::Mailboxes"),
+            Self::RefreshMailboxes { .. } => write!(f, "JobRequest::RefreshMailboxes"),
         }
     }
 }
@@ -83,6 +87,7 @@ impl std::fmt::Display for MailboxJobRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::Mailboxes { .. } => write!(f, "Get mailbox list"),
+            Self::RefreshMailboxes { .. } => write!(f, "Refresh mailbox list"),
             Self::CreateMailbox { path, .. } => write!(f, "Create mailbox {path}"),
             Self::DeleteMailbox { .. } => write!(f, "Delete mailbox"),
             Self::RenameMailbox { new_path, .. } => write!(f, "Rename mailbox to {new_path}"),
@@ -96,6 +101,7 @@ impl MailboxJobRequest {
     pub fn cancel(&self) -> Option<StatusEvent> {
         match self {
             Self::Mailboxes { handle } => handle.cancel(),
+            Self::RefreshMailboxes { handle } => handle.cancel(),
             Self::CreateMailbox { handle, .. } => handle.cancel(),
             Self::DeleteMailbox { handle, .. } => handle.cancel(),
             Self::RenameMailbox { handle, .. } => handle.cancel(),

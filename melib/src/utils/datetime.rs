@@ -97,31 +97,16 @@ extern "C" {
     fn gettimeofday(tv: *mut libc::timeval, tz: *mut libc::timezone) -> i32;
 }
 
-#[cfg(target_os = "openbsd")]
-const _LC_LAST: c_int = 7;
-#[cfg(all(target_os = "openbsd", target_env = "musl"))]
-const PLATFORM_ALL_MASK: i32 = 0x7fffffff;
-#[cfg(all(target_os = "openbsd", not(target_env = "musl")))]
-const PLATFORM_ALL_MASK: i32 = (1 << _LC_LAST) - 2;
-#[cfg(all(not(target_os = "openbsd"), target_env = "musl"))]
-const PLATFORM_ALL_MASK: i32 = 0x7fffffff;
-#[cfg(all(not(target_os = "openbsd"), not(target_env = "musl")))]
-const PLATFORM_ALL_MASK: i32 = libc::LC_ALL_MASK;
-
 #[repr(i32)]
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 enum LocaleCategoryMask {
     Time = libc::LC_TIME_MASK,
-    All = PLATFORM_ALL_MASK,
 }
 
 #[repr(i32)]
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 enum LocaleCategory {
     Time = libc::LC_TIME,
-    All = libc::LC_ALL,
 }
 
 #[cfg(not(target_os = "netbsd"))]

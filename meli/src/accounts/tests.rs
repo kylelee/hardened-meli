@@ -33,6 +33,7 @@ use tempfile::TempDir;
 use crate::{
     accounts::{AccountConf, FileMailboxConf, MailboxEntry, MailboxStatus},
     command::actions::MailboxOperation,
+    types::UIEvent,
     utilities::tests::{eprint_step_fn, eprintln_ok_fn},
 };
 
@@ -558,4 +559,254 @@ fn test_accounts_mailbox_by_path_error_msg() {
         );
         eprintln_ok();
     }
+}
+
+/// Stand-in [`melib::BackendMailbox`] for tests: fully implemented (no
+/// `unimplemented!()`) so it can flow through entry construction and
+/// `build_mailboxes_order`.
+#[derive(Debug)]
+struct SynthMailbox {
+    hash: MailboxHash,
+    name: String,
+    usage: SpecialUsageMailbox,
+}
+
+fn synth_mailbox(name: &str, usage: SpecialUsageMailbox) -> Mailbox {
+    Box::new(SynthMailbox {
+        hash: MailboxHash::from_bytes(name.as_bytes()),
+        name: name.to_string(),
+        usage,
+    })
+}
+
+impl melib::BackendMailbox for SynthMailbox {
+    fn hash(&self) -> MailboxHash {
+        self.hash
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn path(&self) -> &str {
+        &self.name
+    }
+
+    fn children(&self) -> &[MailboxHash] {
+        &[]
+    }
+
+    fn clone(&self) -> Mailbox {
+        Box::new(Self {
+            hash: self.hash,
+            name: self.name.clone(),
+            usage: self.usage,
+        })
+    }
+
+    fn special_usage(&self) -> SpecialUsageMailbox {
+        self.usage
+    }
+
+    fn parent(&self) -> Option<MailboxHash> {
+        None
+    }
+
+    fn permissions(&self) -> MailboxPermissions {
+        MailboxPermissions::default()
+    }
+
+    fn is_subscribed(&self) -> bool {
+        true
+    }
+
+    fn set_is_subscribed(&mut self, _: bool) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_special_usage(&mut self, usage: SpecialUsageMailbox) -> Result<()> {
+        self.usage = usage;
+        Ok(())
+    }
+
+    fn count(&self) -> Result<(usize, usize)> {
+        Ok((0, 0))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
+fn reconcile_mailboxes_merge() {
+    const ACCOUNT_NAME: &str = "test";
+
+    let eprintln_ok = eprintln_ok_fn();
+    let mut eprint_step_closure = eprint_step_fn();
+    macro_rules! eprint_step {
+        ($($arg:tt)+) => {{
+            eprint_step_closure(format_args!($($arg)+));
+        }};
+    }
+    let temp_dir = TempDir::new().unwrap();
+    let ctx = crate::Context::new_mock(&temp_dir);
+    let backend_event_queue = Arc::new(std::sync::Mutex::new(
+        std::collections::VecDeque::with_capacity(16),
+    ));
+
+    let backend_event_consumer = {
+        let backend_event_queue = Arc::clone(&backend_event_queue);
+
+        BackendEventConsumer::new(Arc::new(move |ah, be| {
+            backend_event_queue.lock().unwrap().push_back((ah, be));
+        }))
+    };
+
+    eprint_step!("Create maildir account with a single root mailbox \"inbox\"...");
+    let (_root_mailbox, settings, maildir) =
+        new_maildir_backend(&temp_dir, ACCOUNT_NAME, backend_event_consumer, true).unwrap();
+    eprintln_ok();
+    let name = maildir.account_name.to_string();
+    let account_hash = maildir.account_hash;
+    let mut backend = maildir as Box<dyn MailBackend>;
+    let ref_mailboxes = smol::block_on(backend.mailboxes().unwrap()).unwrap();
+    let (&inbox_hash, _) = ref_mailboxes
+        .iter()
+        .find(|(_, m)| m.path() == "inbox")
+        .expect("root mailbox `inbox` present");
+    let contacts = melib::contacts::Contacts::new(name.to_string());
+
+    let mut account = super::Account {
+        hash: account_hash,
+        name: name.into(),
+        is_online: super::IsOnline::True,
+        mailbox_entries: Default::default(),
+        mailboxes_order: Default::default(),
+        tree: Default::default(),
+        contacts,
+        collection: backend.collection(),
+        settings,
+        main_loop_handler: ctx.main_loop_handler.clone(),
+        active_jobs: HashMap::default(),
+        active_job_instants: std::collections::BTreeMap::default(),
+        event_queue: IndexMap::default(),
+        backend_capabilities: backend.capabilities(),
+        backend: Arc::new(std::sync::Mutex::new(backend)),
+    };
+    // `gone_hash` exists locally at init time but is absent from the later
+    // refreshed list (i.e. it was removed server-side).
+    let gone_hash = MailboxHash::from_bytes(b"Gone");
+    let mut init_map = ref_mailboxes;
+    init_map.insert(
+        gone_hash,
+        synth_mailbox("Gone", SpecialUsageMailbox::Normal),
+    );
+    account.init(init_map).unwrap();
+    while ctx.receiver.try_recv().is_ok() {}
+    eprintln_ok();
+
+    let inbox_status_before = account.mailbox_entries[&inbox_hash].status.clone();
+    let inbox_usage_before = account.mailbox_entries[&inbox_hash]
+        .ref_mailbox
+        .special_usage();
+    assert_ne!(inbox_usage_before, SpecialUsageMailbox::Archive);
+    assert!(account.mailbox_entries.contains_key(&gone_hash));
+    assert!(account.mailboxes_order.contains(&gone_hash));
+
+    eprint_step!(
+        "Reconcile with a refreshed list that adds a new mailbox, changes the usage of an \
+         existing one, and omits another..."
+    );
+    let new_hash = MailboxHash::from_bytes(b"NewBox");
+    let mut refresh_map = HashMap::new();
+    refresh_map.insert(
+        inbox_hash,
+        synth_mailbox("inbox", SpecialUsageMailbox::Archive),
+    );
+    refresh_map.insert(
+        new_hash,
+        synth_mailbox("NewBox", SpecialUsageMailbox::Normal),
+    );
+    account.reconcile_mailboxes(refresh_map);
+    eprintln_ok();
+
+    eprint_step!("Assert the add/update/retain three-state behavior...");
+    // (a) new mailbox appears both in entries and in the rebuilt order.
+    assert!(
+        account.mailbox_entries.contains_key(&new_hash),
+        "new mailbox missing from mailbox_entries"
+    );
+    assert!(
+        account.mailboxes_order.contains(&new_hash),
+        "new mailbox missing from mailboxes_order"
+    );
+    // (b) existing mailbox: `ref_mailbox` refreshed (usage changed), while
+    // status and path are preserved.
+    let inbox_entry = &account.mailbox_entries[&inbox_hash];
+    assert_eq!(
+        inbox_entry.ref_mailbox.special_usage(),
+        SpecialUsageMailbox::Archive
+    );
+    assert_eq!(
+        format!("{:?}", inbox_entry.status),
+        format!("{:?}", inbox_status_before),
+        "existing mailbox status must be preserved"
+    );
+    assert_eq!(inbox_entry.path, "inbox");
+    // (c) mailbox missing from the refreshed list is retained, never deleted.
+    assert!(
+        account.mailbox_entries.contains_key(&gone_hash),
+        "server-side removed mailbox must be retained"
+    );
+    assert!(account.mailboxes_order.contains(&gone_hash));
+    eprintln_ok();
+
+    eprint_step!("Assert the UI events emitted by the reconcile...");
+    let mut got_mailbox_create = false;
+    let mut got_status_change = false;
+    while let Ok(thread_event) = ctx.receiver.try_recv() {
+        if let crate::ThreadEvent::UIEvent(ui_event) = thread_event {
+            match ui_event {
+                UIEvent::MailboxCreate((ah, mh)) if ah == account_hash && mh == new_hash => {
+                    got_mailbox_create = true;
+                }
+                UIEvent::AccountStatusChange(ah, Some(ref msg))
+                    if ah == account_hash && msg.as_ref() == "Refreshed mailboxes." =>
+                {
+                    got_status_change = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        got_mailbox_create,
+        "UIEvent::MailboxCreate for the new mailbox was not sent"
+    );
+    assert!(
+        got_status_change,
+        "UIEvent::AccountStatusChange(\"Refreshed mailboxes.\") was not sent"
+    );
+    eprintln_ok();
+
+    eprint_step!("Assert that an empty refreshed list returns early without events...");
+    while ctx.receiver.try_recv().is_ok() {}
+    account.reconcile_mailboxes(HashMap::new());
+    while let Ok(thread_event) = ctx.receiver.try_recv() {
+        if let crate::ThreadEvent::UIEvent(ui_event) = thread_event {
+            assert!(
+                !matches!(
+                    ui_event,
+                    UIEvent::MailboxCreate(_) | UIEvent::AccountStatusChange(..)
+                ),
+                "empty ref map must not emit mailbox/status UI events"
+            );
+        }
+    }
+    eprintln_ok();
 }

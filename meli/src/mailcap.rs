@@ -44,6 +44,23 @@ macro_rules! split_command {
     }};
 }
 
+/// Quote a value for safe interpolation into a shell command line using
+/// POSIX single-quote semantics: the value is wrapped in `'...'` and any
+/// embedded `'` becomes `'\''`.
+fn quote_shell_word(s: &str) -> String {
+    let mut ret = String::with_capacity(s.len() + 2);
+    ret.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            ret.push_str("'\\''");
+        } else {
+            ret.push(c);
+        }
+    }
+    ret.push('\'');
+    ret
+}
+
 pub struct MailcapEntry {
     command: String,
     /* Pass to pager */
@@ -100,51 +117,31 @@ impl MailcapEntry {
                 continue;
             }
 
-            if l.ends_with('\\') {
-                let l = format!("{}{}", &l[..l.len() - 2], lines_iter.next().unwrap());
-                let mut parts_iter = l.split(';');
-                let key = parts_iter.next().unwrap();
-                let cmd = parts_iter.next().unwrap();
-                //let flags = parts_iter.next().unwrap();
-                if key.starts_with(&content_type) || key.fnmatches(&content_type) {
-                    let mut copiousoutput = false;
-                    #[allow(clippy::while_let_on_iterator)]
-                    while let Some(flag) = parts_iter.next() {
-                        if flag.trim() == "copiousoutput" {
-                            copiousoutput = true;
-                        } else {
-                            log::trace!("unknown mailcap flag: {}", flag);
-                        }
-                    }
-
-                    result = Some(Self {
-                        command: cmd.to_string(),
-                        copiousoutput,
-                    });
-                    break;
-                }
+            let l = if l.ends_with('\\') {
+                format!("{}{}", &l[..l.len() - 2], lines_iter.next().unwrap())
             } else {
-                let mut parts_iter = l.split(';');
-                let key = parts_iter.next().unwrap();
-                let cmd = parts_iter.next().unwrap();
-                //let flags = parts_iter.next().unwrap();
-                if key.starts_with(&content_type) || key.fnmatches(&content_type) {
-                    let mut copiousoutput = false;
-                    #[allow(clippy::while_let_on_iterator)]
-                    while let Some(flag) = parts_iter.next() {
-                        if flag.trim() == "copiousoutput" {
-                            copiousoutput = true;
-                        } else {
-                            log::trace!("unknown mailcap flag: {}", flag);
-                        }
+                l.to_string()
+            };
+            let mut parts_iter = l.split(';');
+            let key = parts_iter.next().unwrap();
+            let cmd = parts_iter.next().unwrap();
+            //let flags = parts_iter.next().unwrap();
+            if key.starts_with(&content_type) || content_type.fnmatches(key) {
+                let mut copiousoutput = false;
+                #[allow(clippy::while_let_on_iterator)]
+                while let Some(flag) = parts_iter.next() {
+                    if flag.trim() == "copiousoutput" {
+                        copiousoutput = true;
+                    } else {
+                        log::trace!("unknown mailcap flag: {}", flag);
                     }
-
-                    result = Some(Self {
-                        command: cmd.to_string(),
-                        copiousoutput,
-                    });
-                    break;
                 }
+
+                result = Some(Self {
+                    command: cmd.to_string(),
+                    copiousoutput,
+                });
+                break;
             }
         }
 
@@ -176,21 +173,21 @@ impl MailcapEntry {
                                 false,
                             )?;
                             let p = file.path().display().to_string();
-                            Ok(p)
+                            Ok(quote_shell_word(&p))
                         }
-                        "%t" => Ok(a.content_type().to_string()),
+                        "%t" => Ok(quote_shell_word(&a.content_type().to_string())),
                         param if param.starts_with("%{") && param.ends_with('}') => {
                             let param = &param["%{".len()..param.len() - 1];
-                            Ok(
-                                if let Some(v) = params.iter().find(|(k, _)| *k == param.as_bytes())
-                                {
-                                    String::from_utf8_lossy(v.1).into()
-                                } else if param == "charset" {
-                                    String::from("utf-8")
-                                } else {
-                                    String::new()
-                                },
-                            )
+                            let value = if let Some(v) =
+                                params.iter().find(|(k, _)| *k == param.as_bytes())
+                            {
+                                String::from_utf8_lossy(v.1).into()
+                            } else if param == "charset" {
+                                String::from("utf-8")
+                            } else {
+                                String::new()
+                            };
+                            Ok(quote_shell_word(&value))
                         }
                         a => Ok(a.to_string()),
                     })

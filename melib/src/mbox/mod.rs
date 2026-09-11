@@ -253,16 +253,14 @@ impl BackendMailbox for MboxMailbox {
 /// Fetch an e-mail by offseet and length inside an `mbox` file as bytes.
 #[derive(Clone, Debug)]
 pub struct MboxOp {
-    pub _hash: EnvelopeHash,
     pub path: PathBuf,
     pub offset: Offset,
     pub length: Length,
 }
 
 impl MboxOp {
-    pub fn new(_hash: EnvelopeHash, path: &Path, offset: Offset, length: Length) -> Self {
+    pub fn new(path: &Path, offset: Offset, length: Length) -> Self {
         Self {
-            _hash,
             path: path.to_path_buf(),
             offset,
             length,
@@ -397,6 +395,42 @@ macro_rules! find_From__line {
     }};
 }
 
+fn apply_status_flags(env: &mut Envelope) {
+    let mut flags = Flag::empty();
+    if env.other_headers().contains_key("Status") {
+        if env.other_headers()["Status"].contains('F') {
+            flags.set(Flag::FLAGGED, true);
+        }
+        if env.other_headers()["Status"].contains('A') {
+            flags.set(Flag::REPLIED, true);
+        }
+        if env.other_headers()["Status"].contains('R') {
+            flags.set(Flag::SEEN, true);
+        }
+        if env.other_headers()["Status"].contains('D') {
+            flags.set(Flag::TRASHED, true);
+        }
+    }
+    if env.other_headers().contains_key("X-Status") {
+        if env.other_headers()["X-Status"].contains('F') {
+            flags.set(Flag::FLAGGED, true);
+        }
+        if env.other_headers()["X-Status"].contains('A') {
+            flags.set(Flag::REPLIED, true);
+        }
+        if env.other_headers()["X-Status"].contains('R') {
+            flags.set(Flag::SEEN, true);
+        }
+        if env.other_headers()["X-Status"].contains('D') {
+            flags.set(Flag::TRASHED, true);
+        }
+        if env.other_headers()["X-Status"].contains('T') {
+            flags.set(Flag::DRAFT, true);
+        }
+    }
+    env.set_flags(flags);
+}
+
 impl MboxFormat {
     pub fn parse<'i>(&self, input: &'i [u8], is_crlf: bool) -> ParsingResult<'i, Envelope> {
         let mut input = input;
@@ -414,39 +448,7 @@ impl MboxFormat {
                 if let Some((start, len)) = next_offset {
                     match Envelope::from_bytes(&input[start..len], None) {
                         Ok(mut env) => {
-                            let mut flags = Flag::empty();
-                            if env.other_headers().contains_key("Status") {
-                                if env.other_headers()["Status"].contains('F') {
-                                    flags.set(Flag::FLAGGED, true);
-                                }
-                                if env.other_headers()["Status"].contains('A') {
-                                    flags.set(Flag::REPLIED, true);
-                                }
-                                if env.other_headers()["Status"].contains('R') {
-                                    flags.set(Flag::SEEN, true);
-                                }
-                                if env.other_headers()["Status"].contains('D') {
-                                    flags.set(Flag::TRASHED, true);
-                                }
-                            }
-                            if env.other_headers().contains_key("X-Status") {
-                                if env.other_headers()["X-Status"].contains('F') {
-                                    flags.set(Flag::FLAGGED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('A') {
-                                    flags.set(Flag::REPLIED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('R') {
-                                    flags.set(Flag::SEEN, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('D') {
-                                    flags.set(Flag::TRASHED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('T') {
-                                    flags.set(Flag::DRAFT, true);
-                                }
-                            }
-                            env.set_flags(flags);
+                            apply_status_flags(&mut env);
                             input = input
                                 .get(start + len + if is_crlf { 4 } else { 2 }..)
                                 .unwrap_or(&[]);
@@ -466,39 +468,7 @@ impl MboxFormat {
                     .unwrap_or(0);
                     match Envelope::from_bytes(&input[start..], None) {
                         Ok(mut env) => {
-                            let mut flags = Flag::empty();
-                            if env.other_headers().contains_key("Status") {
-                                if env.other_headers()["Status"].contains('F') {
-                                    flags.set(Flag::FLAGGED, true);
-                                }
-                                if env.other_headers()["Status"].contains('A') {
-                                    flags.set(Flag::REPLIED, true);
-                                }
-                                if env.other_headers()["Status"].contains('R') {
-                                    flags.set(Flag::SEEN, true);
-                                }
-                                if env.other_headers()["Status"].contains('D') {
-                                    flags.set(Flag::TRASHED, true);
-                                }
-                            }
-                            if env.other_headers().contains_key("X-Status") {
-                                if env.other_headers()["X-Status"].contains('F') {
-                                    flags.set(Flag::FLAGGED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('A') {
-                                    flags.set(Flag::REPLIED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('R') {
-                                    flags.set(Flag::SEEN, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('D') {
-                                    flags.set(Flag::TRASHED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('T') {
-                                    flags.set(Flag::DRAFT, true);
-                                }
-                            }
-                            env.set_flags(flags);
+                            apply_status_flags(&mut env);
                             Ok((&[], env))
                         }
                         Err(err) => {
@@ -521,39 +491,7 @@ impl MboxFormat {
                 if let Some((start, len)) = next_offset {
                     match Envelope::from_bytes(&input[start..len], None) {
                         Ok(mut env) => {
-                            let mut flags = Flag::empty();
-                            if env.other_headers().contains_key("Status") {
-                                if env.other_headers()["Status"].contains('F') {
-                                    flags.set(Flag::FLAGGED, true);
-                                }
-                                if env.other_headers()["Status"].contains('A') {
-                                    flags.set(Flag::REPLIED, true);
-                                }
-                                if env.other_headers()["Status"].contains('R') {
-                                    flags.set(Flag::SEEN, true);
-                                }
-                                if env.other_headers()["Status"].contains('D') {
-                                    flags.set(Flag::TRASHED, true);
-                                }
-                            }
-                            if env.other_headers().contains_key("X-Status") {
-                                if env.other_headers()["X-Status"].contains('F') {
-                                    flags.set(Flag::FLAGGED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('A') {
-                                    flags.set(Flag::REPLIED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('R') {
-                                    flags.set(Flag::SEEN, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('D') {
-                                    flags.set(Flag::TRASHED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('T') {
-                                    flags.set(Flag::DRAFT, true);
-                                }
-                            }
-                            env.set_flags(flags);
+                            apply_status_flags(&mut env);
                             input = input
                                 .get(len + if is_crlf { 4 } else { 2 }..)
                                 .unwrap_or(&[]);
@@ -573,39 +511,7 @@ impl MboxFormat {
                     .unwrap_or(0);
                     match Envelope::from_bytes(&input[start..], None) {
                         Ok(mut env) => {
-                            let mut flags = Flag::empty();
-                            if env.other_headers().contains_key("Status") {
-                                if env.other_headers()["Status"].contains('F') {
-                                    flags.set(Flag::FLAGGED, true);
-                                }
-                                if env.other_headers()["Status"].contains('A') {
-                                    flags.set(Flag::REPLIED, true);
-                                }
-                                if env.other_headers()["Status"].contains('R') {
-                                    flags.set(Flag::SEEN, true);
-                                }
-                                if env.other_headers()["Status"].contains('D') {
-                                    flags.set(Flag::TRASHED, true);
-                                }
-                            }
-                            if env.other_headers().contains_key("X-Status") {
-                                if env.other_headers()["X-Status"].contains('F') {
-                                    flags.set(Flag::FLAGGED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('A') {
-                                    flags.set(Flag::REPLIED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('R') {
-                                    flags.set(Flag::SEEN, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('D') {
-                                    flags.set(Flag::TRASHED, true);
-                                }
-                                if env.other_headers()["X-Status"].contains('T') {
-                                    flags.set(Flag::DRAFT, true);
-                                }
-                            }
-                            env.set_flags(flags);
+                            apply_status_flags(&mut env);
                             Ok((&[], env))
                         }
                         Err(err) => {
@@ -667,39 +573,7 @@ impl MboxFormat {
                 };
                 let mut env = Envelope::from_bytes(&input[..headers_end + bytes], None)
                     .map_err(|err| (input, Box::new(err)))?;
-                let mut flags = Flag::empty();
-                if env.other_headers().contains_key("Status") {
-                    if env.other_headers()["Status"].contains('F') {
-                        flags.set(Flag::FLAGGED, true);
-                    }
-                    if env.other_headers()["Status"].contains('A') {
-                        flags.set(Flag::REPLIED, true);
-                    }
-                    if env.other_headers()["Status"].contains('R') {
-                        flags.set(Flag::SEEN, true);
-                    }
-                    if env.other_headers()["Status"].contains('D') {
-                        flags.set(Flag::TRASHED, true);
-                    }
-                }
-                if env.other_headers().contains_key("X-Status") {
-                    if env.other_headers()["X-Status"].contains('F') {
-                        flags.set(Flag::FLAGGED, true);
-                    }
-                    if env.other_headers()["X-Status"].contains('A') {
-                        flags.set(Flag::REPLIED, true);
-                    }
-                    if env.other_headers()["X-Status"].contains('R') {
-                        flags.set(Flag::SEEN, true);
-                    }
-                    if env.other_headers()["X-Status"].contains('D') {
-                        flags.set(Flag::TRASHED, true);
-                    }
-                    if env.other_headers()["X-Status"].contains('T') {
-                        flags.set(Flag::DRAFT, true);
-                    }
-                }
-                env.set_flags(flags);
+                apply_status_flags(&mut env);
                 input = input
                     .get(headers_end + bytes + if is_crlf { 6 } else { 3 }..)
                     .unwrap_or(&[]);
@@ -1227,7 +1101,7 @@ impl MailBackend for MboxType {
             index[&hash]
         };
         let mailbox_path = mailboxes_lck[&mailbox_hash].fs_path.clone();
-        let op = MboxOp::new(hash, mailbox_path.as_path(), offset, length);
+        let op = MboxOp::new(mailbox_path.as_path(), offset, length);
 
         Ok(Box::pin(async move { op.as_bytes().await }))
     }

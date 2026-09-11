@@ -25,29 +25,9 @@
 use std::ffi::CString;
 
 mod ffi {
-    #![allow(dead_code)]
-
     use std::os::raw::{c_char, c_int};
 
-    use cfg_if::cfg_if;
-
     pub(super) const FNM_PERIOD: c_int = 1 << 2;
-    pub(super) const FNM_CASEFOLD: c_int = 1 << 4;
-    pub(super) const FNM_NOMATCH: c_int = 1;
-
-    cfg_if! {
-        if #[cfg(any(
-                target_os = "macos",
-                target_os = "freebsd",
-                target_os = "android",
-        ))] {
-            pub(super) const FNM_PATHNAME: c_int = 1 << 1;
-            pub(super) const FNM_NOESCAPE: c_int = 1 << 0;
-        } else {
-            pub(super) const FNM_PATHNAME: c_int = 1 << 0;
-            pub(super) const FNM_NOESCAPE: c_int = 1 << 1;
-        }
-    }
 
     extern "C" {
         pub(super) fn fnmatch(pattern: *const c_char, name: *const c_char, flags: c_int) -> c_int;
