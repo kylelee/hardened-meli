@@ -1783,7 +1783,7 @@ pub fn quoted_or_nil(input: &[u8]) -> IResult<&[u8], Option<Vec<u8>>> {
 /// `test_imap_envelope_raw_bytes_fallback_literal_guard` document the
 /// behavior guaranteed today.
 ///
-/// The concatenated value is stored in a [`MessageID`](crate::email::MessageID),
+/// The concatenated value is stored in a [`MessageID`],
 /// which serializes as a plain string and deserializes without strict
 /// re-parsing, so unlike address fields it can never fail the cache
 /// display-string round-trip; `test_imap_envelope_message_id_survives_cache_serde_roundtrip`

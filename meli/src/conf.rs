@@ -354,7 +354,18 @@ impl FileSettings {
     pub const EXAMPLE_CONFIG: &'static str = include_str!("../docs/samples/sample-config.toml");
 
     pub fn new() -> Result<Self> {
-        let config_path = get_config_file()?;
+        Self::load(get_config_file()?)
+    }
+
+    /// Load and validate settings from an explicit configuration file
+    /// `path`, without consulting `MELI_CONFIG` or XDG environment
+    /// lookups.
+    #[cfg(test)]
+    pub fn from_path(path: PathBuf) -> Result<Self> {
+        Self::load(path)
+    }
+
+    fn load(config_path: PathBuf) -> Result<Self> {
         if !config_path.exists() {
             let path_string = config_path.display().to_string();
             if path_string.is_empty() {
@@ -617,9 +628,20 @@ pub struct Settings {
 
 impl Settings {
     pub fn new() -> Result<Self> {
+        Self::from_file_settings(FileSettings::new()?)
+    }
+
+    /// Create a new `Settings` value from an explicit configuration file
+    /// `path`, without consulting `MELI_CONFIG` or XDG environment
+    /// lookups.
+    #[cfg(test)]
+    pub fn from_path(path: PathBuf) -> Result<Self> {
+        Self::from_file_settings(FileSettings::from_path(path)?)
+    }
+
+    fn from_file_settings(fs: FileSettings) -> Result<Self> {
         let mut _logger = Logger::new(melib::LogLevel::default());
 
-        let fs = FileSettings::new()?;
         if _logger.log_level() != fs.log.maximum_level {
             _logger.change_log_level(fs.log.maximum_level)
         }

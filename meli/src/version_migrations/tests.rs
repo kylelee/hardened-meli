@@ -91,7 +91,6 @@ fn test_version_migrations_ignores_newer_version() {
     let version_file = version_file().unwrap();
     std::fs::write(&version_file, MAX.as_str()).unwrap();
     let config_path = tempdir.path().join("meli.toml");
-    std::env::set_var("MELI_CONFIG", config_path.as_path());
     std::fs::write(&config_path,
 br#"
 [accounts.imap]

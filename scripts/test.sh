@@ -17,10 +17,9 @@ cargo clippy -p melib --features sqlite3 --all-targets -- -D warnings
 echo "=== [3/6] cargo test -p melib --features sqlite3 ==="
 # sqlite3 feature is required: the imap sqlite cache tests/code are
 # feature-gated and never compile/run without it.
-# --skip test_xdg_various_mimes: that test is environment-dependent (it
-# relies on the host xdg-mime defaults and fails on hosts whose default
-# handler is e.g. "papers %U"), so it is skipped here.
-cargo test -p melib --features sqlite3 -- --skip test_xdg_various_mimes
+# test_xdg_various_mimes is hermetic: it pins every XDG env var it
+# consults to test-created temp dirs, so it runs on any host.
+cargo test -p melib --features sqlite3
 
 echo "=== [4/6] cargo test -p meli ==="
 # meli's gpg rusty_fork tests write a log file under XDG_DATA_HOME; in

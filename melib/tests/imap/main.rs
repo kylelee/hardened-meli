@@ -30,6 +30,21 @@ rusty_fork_test! {
         tests::run_imap_watch();
     }
 
+    #[test]
+    fn test_imap_refresh_after_initial_fetch_new_mail() {
+        tests::run_imap_refresh_after_initial_fetch();
+    }
+
+    #[test]
+    fn test_imap_watch_after_initial_fetch_new_mail() {
+        tests::run_imap_watch_after_initial_fetch();
+    }
+
+    #[test]
+    fn test_imap_refresh_status_stale_when_selected() {
+        tests::run_imap_refresh_status_stale_when_selected();
+    }
+
     #[cfg(feature = "sqlite3")]
     #[test]
     fn test_imap_resync_status_shortcircuit_hit() {
@@ -139,10 +154,17 @@ pub mod server {
     }
 
     /// Server state with only one mailbox (INBOX).
+    #[derive(Default)]
     pub struct ServerState {
         pub envelopes: IndexMap<UID, Mail>,
         pub next_uid: UID,
         pub uidvalidity: UID,
+        /// RFC 4549 §4.3.2 permits servers to answer `STATUS` for the
+        /// connection's currently selected mailbox from the state at
+        /// `SELECT` time. When this is `true`, the mock emulates such a
+        /// server: `STATUS` replies with the counters captured when the
+        /// mailbox was selected on this connection, not the live ones.
+        pub stale_status_when_selected: bool,
     }
 
     impl ServerState {
@@ -372,6 +394,11 @@ pub mod server {
             } = self;
             let mut buf_start = 0;
             let mut buf_end = 0;
+            // RFC 4549 §4.3.2 stale-STATUS emulation (see `ServerState` docs).
+            let mut status_snapshot: Option<(usize, usize, UID, UID)> = None;
+            // EXISTS count at the time of the connection's last SELECT/EXAMINE;
+            // a NOOP must report the live count when it differs.
+            let mut select_time_exists = 0_usize;
             async fn read_line<'a>(
                 tcp_stream: &mut Async<TcpStream>,
                 buf: &'a mut [u8],
@@ -456,6 +483,16 @@ pub mod server {
                             break 'main id.to_string();
                         }
                         "NOOP\r\n" => {
+                            // RFC 3501 §6.1.2: NOOP flushes pending untagged
+                            // updates for the selected mailbox.
+                            let exists_now = state.lock().unwrap().envelopes.len();
+                            if exists_now != select_time_exists {
+                                tcp_stream
+                                    .write_all(format!("* {exists_now} EXISTS\r\n").as_bytes())
+                                    .await
+                                    .unwrap();
+                                select_time_exists = exists_now;
+                            }
                             tcp_stream.write_all(id.as_bytes()).await.unwrap();
                             tcp_stream
                                 .write_all(b" OK NOOP completed\r\n")
@@ -503,13 +540,23 @@ pub mod server {
                                 std::thread::sleep(delay);
                             }
                             session_state = SessionState::SelectedMailbox;
-                            let (exists, recent, uidvalidity) = {
+                            let (exists, recent, uidvalidity, unseen, next_uid) = {
                                 let state_lck = state.lock().unwrap();
                                 let uidvalidity = state_lck.uidvalidity;
                                 let exists = state_lck.envelopes.len();
+                                let unseen = state_lck
+                                    .envelopes
+                                    .values()
+                                    .filter(|env| !env.is_seen())
+                                    .count();
+                                let next_uid = state_lck.next_uid;
                                 let recent = 0;
-                                (exists, recent, uidvalidity)
+                                (exists, recent, uidvalidity, unseen, next_uid)
                             };
+                            if state.lock().unwrap().stale_status_when_selected {
+                                status_snapshot = Some((exists, unseen, next_uid, uidvalidity));
+                            }
+                            select_time_exists = exists;
                             tcp_stream
                                 .write_all(
                                     format!(
@@ -531,13 +578,23 @@ pub mod server {
                                 std::thread::sleep(delay);
                             }
                             session_state = SessionState::SelectedMailbox;
-                            let (exists, recent, uidvalidity) = {
+                            let (exists, recent, uidvalidity, unseen, next_uid) = {
                                 let state_lck = state.lock().unwrap();
                                 let uidvalidity = state_lck.uidvalidity;
                                 let exists = state_lck.envelopes.len();
+                                let unseen = state_lck
+                                    .envelopes
+                                    .values()
+                                    .filter(|env| !env.is_seen())
+                                    .count();
+                                let next_uid = state_lck.next_uid;
                                 let recent = 0;
-                                (exists, recent, uidvalidity)
+                                (exists, recent, uidvalidity, unseen, next_uid)
                             };
+                            if state.lock().unwrap().stale_status_when_selected {
+                                status_snapshot = Some((exists, unseen, next_uid, uidvalidity));
+                            }
+                            select_time_exists = exists;
                             tcp_stream
                                 .write_all(
                                     format!(
@@ -565,6 +622,7 @@ pub mod server {
                                 continue 'main;
                             }
                             session_state = SessionState::Authenticated;
+                            status_snapshot = None;
                             tcp_stream.write_all(id.as_bytes()).await.unwrap();
                             tcp_stream
                                 .write_all(b" OK UNSELECT succeeded\r\n")
@@ -574,6 +632,7 @@ pub mod server {
                         }
                         "CLOSE\r\n" => {
                             session_state = SessionState::Authenticated;
+                            status_snapshot = None;
                             tcp_stream.write_all(id.as_bytes()).await.unwrap();
                             tcp_stream
                                 .write_all(b" OK CLOSE succeeded\r\n")
@@ -691,19 +750,20 @@ pub mod server {
                             if status.starts_with("STATUS INBOX (MESSAGES")
                                 && status.ends_with(")\r\n") =>
                         {
-                            let (messages, unseen, uidnext, uidvalidity) = {
-                                let state_lck = state.lock().unwrap();
-                                (
-                                    state_lck.envelopes.len(),
-                                    state_lck
-                                        .envelopes
-                                        .values()
-                                        .filter(|env| !env.is_seen())
-                                        .count(),
-                                    state_lck.next_uid,
-                                    state_lck.uidvalidity,
-                                )
-                            };
+                            let (messages, unseen, uidnext, uidvalidity) = status_snapshot
+                                .unwrap_or_else(|| {
+                                    let state_lck = state.lock().unwrap();
+                                    (
+                                        state_lck.envelopes.len(),
+                                        state_lck
+                                            .envelopes
+                                            .values()
+                                            .filter(|env| !env.is_seen())
+                                            .count(),
+                                        state_lck.next_uid,
+                                        state_lck.uidvalidity,
+                                    )
+                                });
                             tcp_stream
                                 .write_all(
                                     // The item order matches what melib's
@@ -1167,6 +1227,7 @@ mod tests {
             envelopes: indexmap::indexmap! {},
             next_uid: 1,
             uidvalidity: 1,
+            ..Default::default()
         }));
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -1665,6 +1726,7 @@ hello world 3.
             envelopes: indexmap::indexmap! {},
             next_uid: 1,
             uidvalidity: 1,
+            ..Default::default()
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
@@ -1959,6 +2021,7 @@ hello world 4.
             envelopes: indexmap::indexmap! {},
             next_uid: 1,
             uidvalidity: 1,
+            ..Default::default()
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
@@ -2254,6 +2317,7 @@ hello world 3.
             envelopes: indexmap::indexmap! {},
             next_uid: 1,
             uidvalidity: 1,
+            ..Default::default()
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
@@ -2517,6 +2581,7 @@ hello world 4.
             envelopes: indexmap::indexmap! {},
             next_uid: 1,
             uidvalidity: 1,
+            ..Default::default()
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
@@ -2941,6 +3006,7 @@ hello world 4.
             envelopes: indexmap::indexmap! {},
             next_uid: 1,
             uidvalidity: 1,
+            ..Default::default()
         }));
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -3088,6 +3154,7 @@ hello world 4.
             envelopes: indexmap::indexmap! {},
             next_uid: 1,
             uidvalidity: 1,
+            ..Default::default()
         }));
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -3394,6 +3461,7 @@ hello world 3.
             envelopes: indexmap::indexmap! {},
             next_uid: 1,
             uidvalidity: 1,
+            ..Default::default()
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
@@ -3546,5 +3614,564 @@ hello world 3.
 
         // Session 4 (offline again): the rebuilt cache serves startup.
         dead_port_startup_check(dead_port, &expected_identity, &expected);
+    }
+
+    /// Subjects of every `Create` refresh event received so far through the
+    /// backend event consumer, flattening `RefreshBatch` events.
+    fn queue_create_subjects(
+        backend_event_queue: &Arc<Mutex<std::collections::VecDeque<(AccountHash, BackendEvent)>>>,
+    ) -> Vec<String> {
+        let queue_lck = backend_event_queue.lock().unwrap();
+        let mut ret = vec![];
+        for (_, event) in queue_lck.iter() {
+            match event {
+                BackendEvent::Refresh(RefreshEvent {
+                    kind: RefreshEventKind::Create(env),
+                    ..
+                }) => {
+                    ret.push(env.subject().to_string());
+                }
+                BackendEvent::RefreshBatch(events) => {
+                    ret.extend(events.iter().filter_map(|event| match &event.kind {
+                        RefreshEventKind::Create(env) => Some(env.subject().to_string()),
+                        _ => None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        ret
+    }
+
+    /// Common setup for warm-start refresh tests: a mock server holding two
+    /// seed mails, a connected backend whose mailbox list is resolved, and
+    /// the main connection's server loop running in a background thread.
+    #[allow(clippy::type_complexity)]
+    fn warm_start_setup(
+        backend_event_consumer: BackendEventConsumer,
+        server_state: Arc<Mutex<ServerState>>,
+    ) -> (
+        Box<ImapType>,
+        smol::Async<TcpListener>,
+        futures::channel::mpsc::UnboundedSender<ServerEvent>,
+        std::thread::JoinHandle<()>,
+        MailboxHash,
+    ) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let account_conf = AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: "INBOX".to_string(),
+            format: "imap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra: indexmap::indexmap! {
+                "server_hostname".to_string() => local_addr.ip().to_string(),
+                "server_username".to_string() => "user".to_string(),
+                "server_password".to_string() => "password".to_string(),
+                "server_port".to_string() => local_addr.port().to_string(),
+                "use_starttls".to_string() => "false".to_string(),
+                "use_tls".to_string() => "false".to_string(),
+                // Important for testing, because we expect only one connection to be used.
+                "use_connection_pool".to_string() => "false".to_string(),
+                "timeout".to_string() => 1_u64.to_string(),
+            },
+        };
+
+        let mut imap =
+            ImapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
+        let listener = smol::Async::new(listener).unwrap();
+        let mut is_online_fut = imap.is_online().unwrap();
+        let (main_conn_sender, main_conn_receiver) = unbounded();
+        let main_conn = ImapServerStream::new(
+            &listener,
+            &mut is_online_fut,
+            (main_conn_sender.clone(), main_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        block_on(is_online_fut).unwrap();
+        let mut mailboxes_fut = imap.mailboxes().unwrap();
+        let mut main_conn_loop = Box::pin(main_conn.loop_handler("main"));
+        let mailboxes = match block_on(future::select(
+            mailboxes_fut.as_mut(),
+            main_conn_loop.as_mut(),
+        )) {
+            Either::Left((value1, _)) => value1.unwrap(),
+            Either::Right((value2, _)) => {
+                unreachable!("{:?}", value2);
+            }
+        };
+        let inbox_hash = *mailboxes.keys().next().unwrap();
+        let loops_handle = std::thread::spawn(move || {
+            block_on(main_conn_loop);
+        });
+        (imap, listener, main_conn_sender, loops_handle, inbox_hash)
+    }
+
+    /// Regression test for the listing `refresh` shortcut path on a warm
+    /// backend: the mailbox has already been fetched once (meli has been
+    /// running), a new mail is delivered to the server, and a manual
+    /// `MailBackend::refresh` must emit a `Create` `RefreshEvent` for the new
+    /// mail through the backend event consumer.
+    pub(crate) fn run_imap_refresh_after_initial_fetch() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: warm seed 1
+Message-ID: <warm1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: warm seed 2
+Message-ID: <warm2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let new_mail = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:02 +0000
+Cc:
+Subject: RE: warm NEW mail
+Message-ID: <warmnew@example.com>
+Content-Type: text/plain
+
+hello new world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash) =
+            warm_start_setup(backend_event_consumer, Arc::clone(&server_state));
+
+        {
+            let imap = &mut imap;
+            let server_state = &server_state;
+            let new_mail = &new_mail;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                            // New mail is delivered while meli is running.
+                            server_state.lock().unwrap().insert(new_mail.clone());
+                            // The listing `refresh` shortcut path.
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let subjects = queue_create_subjects(&backend_event_queue);
+        assert!(
+            subjects.iter().any(|s| s == "RE: warm NEW mail"),
+            "manual refresh after initial fetch did not emit a Create event for the new mail; \
+             Create events so far: {subjects:?}; full queue: {:?}",
+            backend_event_queue.lock().unwrap()
+        );
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first regression test for the RFC 4549 §4.3.2 hazard:
+    /// servers may answer `STATUS` for the connection's currently selected
+    /// mailbox from the state at `SELECT` time instead of the live
+    /// counters. The mock emulates such a server
+    /// (`stale_status_when_selected`): after an initial fetch and a first
+    /// refresh that selects INBOX on the main connection and records the
+    /// STATUS baseline, **two** new mails arrive, and a manual `refresh`
+    /// must emit a `Create` `RefreshEvent` for each of them — the
+    /// quick-sync skip must not trust `STATUS` while the mailbox is
+    /// selected on this connection, and it must not collapse a batch of
+    /// new mail to the last message sequence number alone.
+    pub(crate) fn run_imap_refresh_status_stale_when_selected() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: warm seed 1
+Message-ID: <warm1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: warm seed 2
+Message-ID: <warm2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let new_mail = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:02 +0000
+Cc:
+Subject: RE: warm NEW mail
+Message-ID: <warmnew@example.com>
+Content-Type: text/plain
+
+hello new world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let new_mail_b = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:03 +0000
+Cc:
+Subject: RE: warm NEW mail B
+Message-ID: <warmnewb@example.com>
+Content-Type: text/plain
+
+hello new world b.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            stale_status_when_selected: true,
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash) =
+            warm_start_setup(backend_event_consumer, Arc::clone(&server_state));
+
+        {
+            let imap = &mut imap;
+            let server_state = &server_state;
+            let new_mail = &new_mail;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                            // First refresh with no changes: runs the full
+                            // resync (SELECT INBOX on this connection) and
+                            // records the STATUS baseline.
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                            // Two new mails are delivered at once while meli
+                            // is running, so the refresh must catch both:
+                            // flushing only the last message sequence number
+                            // (or skipping the resync) is not enough.
+                            {
+                                let mut state_lck = server_state.lock().unwrap();
+                                state_lck.insert(new_mail.clone());
+                                state_lck.insert(new_mail_b.clone());
+                            }
+                            // Second refresh: a stale server would answer the
+                            // quick-check STATUS with the select-time
+                            // snapshot, equal to the baseline.
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let subjects = queue_create_subjects(&backend_event_queue);
+        for expected in ["RE: warm NEW mail", "RE: warm NEW mail B"] {
+            assert!(
+                subjects.iter().any(|s| s == expected),
+                "manual refresh did not emit a Create event for {expected:?}; the stale STATUS \
+                 quick check skipped the resync (or only the last new message was fetched); \
+                 Create events so far: {subjects:?}; full queue: {:?}",
+                backend_event_queue.lock().unwrap()
+            );
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Regression test for the `watch` stream on a warm backend: the mailbox
+    /// has already been fetched once (meli has been running), a new mail is
+    /// delivered while meli is running, and the `ImapType::watch` stream
+    /// must emit a `Create` `RefreshEvent` for it without a restart.
+    pub(crate) fn run_imap_watch_after_initial_fetch() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: warm seed 1
+Message-ID: <warm1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: warm seed 2
+Message-ID: <warm2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let new_mail = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:02 +0000
+Cc:
+Subject: RE: warm NEW mail
+Message-ID: <warmnew@example.com>
+Content-Type: text/plain
+
+hello new world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash) =
+            warm_start_setup(backend_event_consumer, Arc::clone(&server_state));
+
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let mut watch_fut = Box::pin(imap.watch().unwrap().into_future());
+        let (watch_conn_sender, watch_conn_receiver) = unbounded();
+        let watch_conn = ImapServerStream::new(
+            &listener,
+            &mut watch_fut,
+            (watch_conn_sender.clone(), watch_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        // New mail is delivered while meli is running.
+        watch_conn_sender
+            .unbounded_send(ServerEvent::New(new_mail))
+            .unwrap();
+        let watch_conn_loop = watch_conn.loop_handler("watch");
+        let watch_loops_handle = std::thread::spawn(move || {
+            block_on(watch_conn_loop);
+        });
+
+        block_on(async {
+            let mut found = false;
+            while !found {
+                let item = match future::select(
+                    watch_fut.as_mut(),
+                    smol::Timer::after(Duration::from_secs(30)),
+                )
+                .await
+                {
+                    Either::Left(((item, rest), _timeout)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        item
+                    }
+                    Either::Right((_timeout, _pending)) => {
+                        panic!(
+                            "watch stream did not emit the new mail's Create event within 30 \
+                             seconds"
+                        );
+                    }
+                };
+                let Some(backend_event) = item else {
+                    panic!("watch stream ended before the new mail's Create event");
+                };
+                match backend_event.unwrap() {
+                    BackendEvent::RefreshBatch(events) => {
+                        found = events.iter().any(|event| {
+                            matches!(
+                                &event.kind,
+                                RefreshEventKind::Create(env)
+                                    if env.subject() == "RE: warm NEW mail"
+                            )
+                        });
+                    }
+                    BackendEvent::Refresh(event) => {
+                        found = matches!(
+                            &event.kind,
+                            RefreshEventKind::Create(env)
+                                if env.subject() == "RE: warm NEW mail"
+                        );
+                    }
+                    other => {
+                        panic!("Expected Refresh event, got: {other:?}");
+                    }
+                }
+            }
+        });
+
+        watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        watch_loops_handle.join().unwrap();
+        loops_handle.join().unwrap();
     }
 }

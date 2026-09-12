@@ -1,10 +1,7 @@
 use std::{
     fs::File,
     io::prelude::*,
-    os::{
-        fd::{AsFd, AsRawFd},
-        raw::c_int,
-    },
+    os::{fd::AsFd, raw::c_int},
     sync::{Arc, Mutex},
 };
 
@@ -31,10 +28,11 @@ fn notify(
     let (s, r) = crossbeam::channel::bounded(100);
     let mut signals = signal_hook::iterator::Signals::new(signals)?;
     let _ = nix::fcntl::fcntl(
-        alarm_pipe_r.as_raw_fd(),
+        alarm_pipe_r,
         nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
     );
     std::thread::spawn(move || {
+        let _ = (&sender, &signals, &s);
         let mut ctr = 0;
         loop {
             ctr %= 3;
