@@ -74,7 +74,7 @@ enum FocusStep {
 }
 
 impl ThreadViewFocus {
-    /// Pane chain step: [sidebar][grid][thread list][mail detail].
+    /// Pane chain step: \[sidebar\] \[grid\] \[thread list\] \[mail detail\].
     /// Right: `Thread`→`None`, `None`→`MailView`, `MailView` stays consumed —
     /// the mail detail state is the terminal stop, so the listing's
     /// `Entry + focus_right → EntryFullscreen` branch must never fire from

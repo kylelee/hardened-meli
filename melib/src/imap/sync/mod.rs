@@ -146,11 +146,50 @@ impl ImapConnection {
             (Some(status), Some(cached_status))
                 if status_unchanged(&status, cached_uidvalidity, cached_status) =>
             {
-                log::trace!(
-                    "resync_basic: STATUS counters of mailbox {mailbox_path} are unchanged; \
-                     skipping FLAGS resync"
-                );
-                return Ok(Some(vec![]));
+                if self.stream.as_ref().is_ok_and(|stream| {
+                    !matches!(
+                        stream.current_mailbox.is(&mailbox_hash),
+                        MailboxSelection::None
+                    )
+                }) {
+                    // RFC 4549 §4.3.2: a server may answer `STATUS` for the
+                    // mailbox this connection currently has selected from
+                    // the state at `SELECT` time instead of the live
+                    // counters, so a matching reply does not prove the
+                    // mailbox is unchanged. Flush any pending untagged
+                    // updates for the selected mailbox with `NOOP` (RFC
+                    // 3501 §6.1.2); if the server reports any change now,
+                    // the full resync below must run. The reply is read with
+                    // `RequiredResponses::UNTAGGED` so the untagged lines are
+                    // returned in `response` instead of being consumed by
+                    // `process_untagged`, which would only fetch the last
+                    // new message by its message sequence number.
+                    self.send_command(CommandBody::Noop).await?;
+                    self.read_response(&mut response, RequiredResponses::UNTAGGED)
+                        .await?;
+                    if response.split_rn().any(|l| {
+                        protocol_parser::untagged_responses(l)
+                            .map(|(_, v, _)| v.is_some())
+                            .unwrap_or(false)
+                    }) {
+                        log::trace!(
+                            "resync_basic: NOOP reported pending updates for the selected \
+                             mailbox {mailbox_path}; running full resync"
+                        );
+                    } else {
+                        log::trace!(
+                            "resync_basic: STATUS counters of mailbox {mailbox_path} are \
+                             unchanged; skipping FLAGS resync"
+                        );
+                        return Ok(Some(vec![]));
+                    }
+                } else {
+                    log::trace!(
+                        "resync_basic: STATUS counters of mailbox {mailbox_path} are unchanged; \
+                         skipping FLAGS resync"
+                    );
+                    return Ok(Some(vec![]));
+                }
             }
             (None, _) => {
                 log::trace!(

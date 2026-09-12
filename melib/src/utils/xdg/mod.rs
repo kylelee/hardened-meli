@@ -365,7 +365,8 @@ mod tests {
     fn run_various_mimes() {
         let tempdir = tempfile::tempdir().unwrap();
 
-        let applications_dir = tempdir.path().join(".local/share/applications");
+        let data_dir = tempdir.path().join(".local/share");
+        let applications_dir = data_dir.join("applications");
         std::fs::create_dir_all(&applications_dir).unwrap();
 
         let foo_desktop = applications_dir.join("foo.desktop");
@@ -384,12 +385,21 @@ mod tests {
             b"[Default Applications]\nimage/jpeg=foo.desktop\nvideo/mp4=a.desktop;foo.desktop",
         )
         .unwrap();
+        // Pin every XDG location `query_default_app` consults to this
+        // tempdir: the dir-list variables point at real existing empty
+        // dirs, so no system fallback path (e.g. /usr/share/applications
+        // with gnome-mimeapps.list on desktop hosts) is ever consulted.
+        let empty_config_dirs = tempdir.path().join("empty-config-dirs");
+        std::fs::create_dir_all(&empty_config_dirs).unwrap();
+        let empty_data_dirs = tempdir.path().join("empty-data-dirs");
+        std::fs::create_dir_all(&empty_data_dirs).unwrap();
         for var in [
             "HOME",
             "XDG_CACHE_HOME",
             "XDG_STATE_HOME",
             "XDG_CONFIG_DIRS",
             "XDG_CONFIG_HOME",
+            "XDG_CURRENT_DESKTOP",
             "XDG_DATA_DIRS",
             "XDG_DATA_HOME",
         ] {
@@ -397,6 +407,9 @@ mod tests {
         }
         std::env::set_var("HOME", tempdir.path());
         std::env::set_var("XDG_CONFIG_HOME", &config_dir);
+        std::env::set_var("XDG_DATA_HOME", &data_dir);
+        std::env::set_var("XDG_CONFIG_DIRS", &empty_config_dirs);
+        std::env::set_var("XDG_DATA_DIRS", &empty_data_dirs);
 
         assert_eq!(
             query_default_app("image/jpeg").unwrap(),

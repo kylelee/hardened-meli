@@ -284,8 +284,8 @@ identity = "username@hostname.local"
 
     // An explicitly empty value opts out of sanitizing (falls back to plain
     // w3m rendering at runtime).
-    let new_file = ConfigFile::new(&format!("{base}\n[pager]\nhtml_filter = ''\n"), &tempdir)
-        .unwrap();
+    let new_file =
+        ConfigFile::new(&format!("{base}\n[pager]\nhtml_filter = ''\n"), &tempdir).unwrap();
     let config = FileSettings::validate(new_file.path.clone(), true).unwrap();
     assert_eq!(
         config.pager.html_filter, None,

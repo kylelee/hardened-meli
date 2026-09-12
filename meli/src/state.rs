@@ -223,8 +223,7 @@ impl Context {
         let input_thread_pipe = crate::types::pipe().unwrap();
         let backends = Backends::new();
         let config_file = ConfigFile::new(IMAP_CONFIG, dir).unwrap();
-        std::env::set_var("MELI_CONFIG", &config_file.path);
-        let settings = Box::new(Settings::new().unwrap());
+        let settings = Box::new(Settings::from_path(config_file.path.clone()).unwrap());
         let accounts = vec![{
             let name = "test".to_string();
             let mut account_conf = crate::conf::AccountConf::default();

@@ -42,7 +42,7 @@ tls-static = ["tls", "native-tls/vendored"]
 [dependencies]
 async-fn-stream = { version = "0.3" }
 async-io = { version = "2" }
-base64 = { version = ">= 0.13, <= 0.22" }
+base64 = { version = ">= 0.21, <= 0.22" }
 bitflags = { workspace = true }
 cfg-if = { version = "^1.0.0" }
 chrono = { version = "^0.4", default-features = false }
