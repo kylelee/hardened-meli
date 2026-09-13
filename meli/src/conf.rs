@@ -34,6 +34,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::{conf::deserializers::non_empty_opt_string, terminal::Color};
 use indexmap::IndexMap;
 use melib::{
     backends::MailboxHash,
@@ -42,9 +43,6 @@ use melib::{
     search::Query,
     Logger, ShellExpandTrait, SortField, SortOrder,
 };
-use serde::{Deserialize, Serialize};
-
-use crate::{conf::deserializers::non_empty_opt_string, terminal::Color};
 
 pub mod default_values;
 pub mod preprocessing;
