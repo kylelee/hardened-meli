@@ -392,7 +392,10 @@ impl ConnectionMutex {
                 Ok(res)
             }
             // A pool conn was the first available
-            futures::future::Either::Left((Ok((res, _)), _main)) => Ok(res),
+            futures::future::Either::Left((Ok((res, _)), _main)) => {
+                log::trace!("{} using pool connection", self.uid_store.account_name);
+                Ok(res)
+            }
             // All pool connections were unavailable, so fallback to waiting for the main
             // connection
             futures::future::Either::Left((Err(_), main_fut)) => main_fut.await,
@@ -472,7 +475,13 @@ impl ImapStream {
                         .await
                         .chain_err_summary(err_fn)?,
                     ImapProtocol::ManageSieve => {
-                        socket.read(&mut buf).await.chain_err_summary(err_fn)?;
+                        let len = socket.read(&mut buf).await.chain_err_summary(err_fn)?;
+                        log::trace!(
+                            "{} read {} bytes pre-STARTTLS: {:?}",
+                            id,
+                            len,
+                            String::from_utf8_lossy(&buf[0..len.min(300)])
+                        );
                         socket
                             .write_all(b"STARTTLS\r\n")
                             .await
@@ -486,6 +495,12 @@ impl ImapStream {
 
                 while now.elapsed().as_secs() < 3 {
                     let len = socket.read(&mut buf).await.chain_err_summary(err_fn)?;
+                    log::trace!(
+                        "{} read {} bytes during STARTTLS negotiation: {:?}",
+                        id,
+                        len,
+                        String::from_utf8_lossy(&buf[0..len.min(300)])
+                    );
                     response.extend_from_slice(&buf[0..len]);
                     match server_conf.protocol {
                         ImapProtocol::IMAP { .. } => {
@@ -611,6 +626,13 @@ impl ImapStream {
         }
         ret.send_command(CommandBody::Capability).await?;
         ret.read_response(&mut res).await?;
+        // Trace the greeting and the first CAPABILITY reply verbatim.
+        imap_log!(
+            trace,
+            ret,
+            "capabilities raw: {:?}",
+            String::from_utf8_lossy(&res)
+        );
 
         fn parse_capabilities(bytes: &[u8], hostname: &str) -> Result<IndexSet<Box<[u8]>>> {
             protocol_parser::capabilities(bytes)
@@ -795,6 +817,12 @@ impl ImapStream {
             for l in res.split_rn() {
                 if l.starts_with(b"* CAPABILITY") {
                     got_new_capabilities = true;
+                    imap_log!(
+                        trace,
+                        ret,
+                        "capabilities raw: {:?}",
+                        String::from_utf8_lossy(l)
+                    );
                     capabilities.extend(parse_capabilities(l, &server_conf.server_hostname)?);
                 }
 
@@ -819,6 +847,12 @@ impl ImapStream {
             // check for lazy servers.
             ret.send_command(CommandBody::Capability).await?;
             ret.read_response(&mut res).await?;
+            imap_log!(
+                trace,
+                ret,
+                "capabilities raw: {:?}",
+                String::from_utf8_lossy(&res)
+            );
             capabilities.extend(parse_capabilities(&res, &server_conf.server_hostname)?);
         }
 
@@ -830,9 +864,11 @@ impl ImapStream {
             }
         ) && capabilities.contains(b"ID".as_slice())
         {
+            imap_log!(trace, ret, "sending ID command");
             ret.send_command(CommandBody::Id { parameters: None })
                 .await?;
             ret.read_response(&mut res).await?;
+            imap_log!(trace, ret, "ID response {}", String::from_utf8_lossy(&res));
             match id_ext_response(&res) {
                 Err(err) => {
                     log::warn!(
@@ -869,10 +905,20 @@ impl ImapStream {
         let mut buf: Vec<u8> = vec![0; Connection::IO_BUF_SIZE];
         ret.clear();
         let mut last_line_idx: usize = 0;
+        // Complete lines already inspected for the termination tag below
+        // (see the tag-not-last handling); `ret` only ever grows until the
+        // loop breaks, so the cursor is monotonic.
+        let mut tag_scan_idx: usize = 0;
         loop {
             match timeout(self.timeout, self.stream.read(&mut buf)).await? {
                 Ok(0) => break,
                 Ok(b) => {
+                    log::trace!(
+                        "{} read_lines got {} bytes: {:?}",
+                        self.id,
+                        b,
+                        String::from_utf8_lossy(&buf[0..b.min(300)])
+                    );
                     ret.extend_from_slice(&buf[0..b]);
                     enforce_response_size_limit(ret.len())?;
                     if let Some(mut pos) = ret[last_line_idx..].rfind("\r\n") {
@@ -898,6 +944,49 @@ impl ImapStream {
                                     break;
                                 }
                             } else {
+                                break;
+                            }
+                        }
+                        // Tag-not-last framing: the tagged reply terminating
+                        // this command may arrive with more complete lines
+                        // glued after it in the same TCP segment (e.g. a
+                        // new-mail `* n EXISTS` push racing the tagged
+                        // completion of `DONE`). The tagged reply ends the
+                        // command regardless of its position, so stop
+                        // reading at the first complete line carrying the
+                        // termination tag instead of waiting for it to
+                        // become the last complete line (which never
+                        // happens when the server sends nothing more,
+                        // wedging the read until its timeout). The
+                        // remaining complete lines stay in `ret` (when
+                        // `keep_termination_string` is set) so the caller
+                        // hands them to the untagged-response processing
+                        // path instead of dropping them.
+                        if let Some(seq) = termination_string {
+                            let mut tag_found_at: Option<usize> = None;
+                            while tag_found_at.is_none() {
+                                let Some(crlf) = ret[tag_scan_idx..].find(b"\r\n") else {
+                                    break;
+                                };
+                                let line_start = tag_scan_idx;
+                                tag_scan_idx += crlf + b"\r\n".len();
+                                let line = &ret[line_start..tag_scan_idx];
+                                if line.starts_with(seq) || (seq == b"+ " && line.starts_with(b"+"))
+                                {
+                                    tag_found_at = Some(line_start);
+                                }
+                            }
+                            if let Some(line_start) = tag_found_at {
+                                log::trace!(
+                                    "{} read_lines: termination tag {:?} found mid-buffer \
+                                     with {} trailing bytes kept for processing",
+                                    self.id,
+                                    String::from_utf8_lossy(seq),
+                                    ret.len() - tag_scan_idx
+                                );
+                                if !keep_termination_string {
+                                    ret.truncate(line_start);
+                                }
                                 break;
                             }
                         }
@@ -1200,6 +1289,12 @@ impl ImapConnection {
         Box::pin(async move {
             let mut response = Vec::new();
             ret.clear();
+            imap_log!(
+                trace,
+                self,
+                "read_response waiting for reply (required: {:?})",
+                required_responses
+            );
             self.stream.as_mut()?.read_response(&mut response).await?;
             *self.uid_store.is_online.lock().unwrap() = (SystemTime::now(), Ok(()));
 
@@ -1211,7 +1306,27 @@ impl ImapConnection {
                     Err(err)
                 }
                 ImapProtocol::IMAP { .. } => {
-                    let r: ImapResponse = ImapResponse::try_from(response.as_slice())?;
+                    // The tagged status line normally ends the reply, but a
+                    // server may glue untagged data after it in the same
+                    // TCP segment (tag-not-last; see
+                    // `ImapStream::read_lines`, which stops at the tag line
+                    // and keeps the trailing lines in the buffer). Locate
+                    // the status line by the pending command's tag first,
+                    // falling back to the last line for normal replies so
+                    // their parsing is unchanged.
+                    let pending_tag = self
+                        .stream
+                        .as_ref()
+                        .ok()
+                        .map(|s| format!("M{} ", s.cmd_id - 1).into_bytes());
+                    let r: ImapResponse = match pending_tag
+                        .as_deref()
+                        .filter(|t| !t.is_empty())
+                        .and_then(|t| response.split_rn().find(|l| l.starts_with(t)))
+                    {
+                        Some(tagged_line) => ImapResponse::try_from(tagged_line)?,
+                        None => ImapResponse::try_from(response.as_slice())?,
+                    };
                     match r {
                         ImapResponse::Bye(ref response_code) => {
                             self.stream = Err(Error::new(format!(
@@ -1267,6 +1382,10 @@ impl ImapConnection {
                         } else if let Ok(Some(untagged_response)) =
                             super::protocol_parser::untagged_responses(l).map(|(_, v, _)| v)
                         {
+                            log::trace!(
+                                "read_response handling untagged line: {:?} -> {untagged_response:?}",
+                                String::from_utf8_lossy(&l[..l.len().min(200)])
+                            );
                             if let Some(ev) = self.process_untagged(untagged_response).await? {
                                 self.add_backend_event(ev);
                             }
@@ -1354,6 +1473,7 @@ impl ImapConnection {
     }
 
     pub async fn send_raw(&mut self, raw: &[u8]) -> Result<()> {
+        imap_log!(trace, self, "send_raw: {} bytes", raw.len());
         if let Err(err) = try_await(async { self.stream.as_mut()?.send_raw(raw).await }).await {
             self.stream = Err(err.clone());
             if err.kind.is_network() {
@@ -1692,6 +1812,11 @@ impl ImapBlockingConnection {
         self.err.as_ref()
     }
 
+    /// Raw unprocessed bytes buffered from previous reads.
+    pub fn buffered(&self) -> &[u8] {
+        &self.result
+    }
+
     /// Returns a future for a read line (including CRLF)
     ///
     /// The return value is `None` if connection has dropped.
@@ -1730,13 +1855,23 @@ async fn read(
         let len = line.len();
         let retval = line.to_vec();
         result.drain(0..len);
+        log::trace!(
+            "ImapBlockingConnection::read_line got buffered line: {:?}",
+            String::from_utf8_lossy(&retval[..retval.len().min(200)])
+        );
         return Some(retval);
     }
     match conn.stream.as_mut().unwrap().stream.read(buf).await {
         Ok(0) => {
+            log::trace!("ImapBlockingConnection::read got EOF");
             *break_flag = true;
         }
         Ok(b) => {
+            log::trace!(
+                "ImapBlockingConnection::read got {} bytes from socket: {:?}",
+                b,
+                String::from_utf8_lossy(&buf[0..b.min(200)])
+            );
             result.extend_from_slice(&buf[0..b]);
             if let Err(size_err) = enforce_response_size_limit(result.len()) {
                 *err = Some(size_err);
@@ -1960,6 +2095,8 @@ mod tests {
                 danger_accept_invalid_certs: false,
                 protocol: ImapProtocol::default(),
                 timeout: None,
+                idle_heartbeat_interval: Duration::from_secs(60),
+                watch_sweep_interval: Duration::from_secs(300),
             };
             let mut conn = ImapConnection::new_connection(
                 &server_conf,

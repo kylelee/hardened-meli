@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 
-members = ["meli", "meli_sanitize_html", "melib"]
+members = ["meli", "melib"]
 
 [workspace.dependencies]
 bitflags = { version = "2.10", features = ["serde"] }

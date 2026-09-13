@@ -1,8 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 #
-# Build meli (release) and install the workspace executables
-# (meli and meli_sanitize_html) into BIN_DIR (default: ${HOME}/.local/bin).
+# Build meli (release) and install the executable
+# (meli) into BIN_DIR (default: ${HOME}/.local/bin).
 
 set -e
 
@@ -15,7 +15,7 @@ echo "=== cargo build --release ==="
 cargo build --release
 
 mkdir -p "${BIN_DIR}"
-for bin in meli meli_sanitize_html; do
+for bin in meli; do
     if [ ! -f "${TARGET_DIR}/release/${bin}" ]; then
         echo "ERROR: ${TARGET_DIR}/release/${bin} not found" >&2
         exit 1

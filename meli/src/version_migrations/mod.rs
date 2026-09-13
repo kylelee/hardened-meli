@@ -174,14 +174,21 @@ macro_rules! decl_version_map {
 
             macro_rules! v_ids_cmp {
                 ($v2:expr, $v1:expr) => {{
-
-                    $v2.major() >= $v1.major()
-                     && ($v2.minor() >= $v1.minor())
-                     && ($v2.patch() >= $v1.patch())
-                     && ((const_str_cmp($v2.pre(), $v1.pre()) as i8 == std::cmp::Ordering::Greater as i8) || (const_str_cmp($v2.pre(), $v1.pre()) as i8 == std::cmp::Ordering::Equal as i8))
-                     && !($v2.major() == $v1.major()
-                     && ($v2.minor() == $v1.minor())
-                     && ($v2.patch() == $v1.patch()))
+                    // Proper semver ordering: lexicographic on
+                    // (major, minor, patch, pre). Strictly greater in
+                    // the numeric components, with the pre-release
+                    // string as the tie-breaker; array entries are
+                    // unique, so numeric equality is a sort violation.
+                    ($v2.major() > $v1.major())
+                     || ($v2.major() == $v1.major() && $v2.minor() > $v1.minor())
+                     || ($v2.major() == $v1.major()
+                         && $v2.minor() == $v1.minor()
+                         && $v2.patch() > $v1.patch())
+                     || ($v2.major() == $v1.major()
+                         && $v2.minor() == $v1.minor()
+                         && $v2.patch() == $v1.patch()
+                         && ((const_str_cmp($v2.pre(), $v1.pre()) as i8
+                             == std::cmp::Ordering::Greater as i8)))
                 }}
             }
             const _VERSION_ARRAY: &[VersionIdentifier] = &[$($version_id),*];
@@ -249,6 +256,7 @@ decl_version_mods! {
     v0_8_11::V0_8_11_ID => v0_8_11::V0_8_11,
     v0_8_12::V0_8_12_ID => v0_8_12::V0_8_12,
     v0_8_13::V0_8_13_ID => v0_8_13::V0_8_13,
+    v0_9_0::V0_9_0_ID => v0_9_0::V0_9_0,
 }
 
 use std::{
@@ -266,7 +274,7 @@ use crate::{conf::FileSettings, terminal::Ask};
 /// On compile-time if the `CARGO_PKG_VERSION` environment variable is
 /// available, the macro [`decl_version_map`] asserts that it matches the actual
 /// latest version string.
-pub const LATEST: VersionIdentifier = v0_8_13::V0_8_13_ID;
+pub const LATEST: VersionIdentifier = v0_9_0::V0_9_0_ID;
 
 /// An application version identifier with [Semantic Versioning v2.0.0]
 /// semantics.

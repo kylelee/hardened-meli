@@ -42,12 +42,6 @@ pub fn none<T>() -> Option<T> {
     None
 }
 
-/// Default `pager.html_filter`: pipe HTML through the bundled sanitizer
-/// before rendering with w3m.
-pub fn default_html_filter() -> Option<String> {
-    Some("meli_sanitize_html | w3m -T text/html".into())
-}
-
 pub fn internal_value_false<T: From<melib::conf::ToggleFlag>>() -> T {
     melib::conf::ToggleFlag::InternalVal(false).into()
 }

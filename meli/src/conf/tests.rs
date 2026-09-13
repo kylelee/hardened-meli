@@ -251,14 +251,13 @@ save_all_attachments = "C-s"
 }
 
 #[test]
-fn test_conf_html_filter_defaults_to_sanitizer() {
+fn test_conf_html_filter_defaults_to_builtin() {
     use crate::conf::pager::PagerSettings;
 
     let defaults = PagerSettings::default();
     assert_eq!(
-        defaults.html_filter.as_deref(),
-        Some("meli_sanitize_html | w3m -T text/html"),
-        "html_filter must default to the bundled sanitizer pipeline"
+        defaults.html_filter, None,
+        "html_filter must default to None (the built-in renderer)"
     );
 
     let tempdir = tempfile::tempdir().unwrap();
@@ -273,23 +272,34 @@ identity = "username@hostname.local"
         tempdir.path().display()
     );
 
-    // Absent [pager] section: the sanitized pipeline is the effective default.
+    // Absent [pager] section: the built-in renderer is the effective default.
     let new_file = ConfigFile::new(&base, &tempdir).unwrap();
     let config = FileSettings::validate(new_file.path.clone(), true).unwrap();
     assert_eq!(
-        config.pager.html_filter.as_deref(),
-        Some("meli_sanitize_html | w3m -T text/html"),
-        "absent html_filter must resolve to the sanitized default"
+        config.pager.html_filter, None,
+        "absent html_filter must resolve to None (the built-in renderer)"
     );
 
-    // An explicitly empty value opts out of sanitizing (falls back to plain
-    // w3m rendering at runtime).
+    // An explicitly empty value also means the built-in renderer.
     let new_file =
         ConfigFile::new(&format!("{base}\n[pager]\nhtml_filter = ''\n"), &tempdir).unwrap();
     let config = FileSettings::validate(new_file.path.clone(), true).unwrap();
     assert_eq!(
         config.pager.html_filter, None,
-        "empty html_filter must opt out of the sanitized default"
+        "empty html_filter must mean the built-in renderer"
+    );
+
+    // An explicitly configured command string is preserved as-is.
+    let new_file = ConfigFile::new(
+        &format!("{base}\n[pager]\nhtml_filter = 'w3m -T text/html'\n"),
+        &tempdir,
+    )
+    .unwrap();
+    let config = FileSettings::validate(new_file.path.clone(), true).unwrap();
+    assert_eq!(
+        config.pager.html_filter.as_deref(),
+        Some("w3m -T text/html"),
+        "explicit html_filter command must be preserved as-is"
     );
 
     if let Err(err) = tempdir.close() {

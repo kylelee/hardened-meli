@@ -55,14 +55,14 @@ YELLOW ?= `[ -z $${NO_COLOR+x} ] && ([ -z $${TERM} ] && echo "" || tput setaf 3)
 
 .PHONY: meli
 meli: check-deps
-	@echo ${CARGO_BIN} build ${CARGO_ARGS} ${CARGO_COLOR}--target-dir=\""${CARGO_TARGET_DIR}"\" ${FEATURES} --release --bin meli --bin meli_sanitize_html
-	@${CARGO_BIN} build ${CARGO_ARGS} ${CARGO_COLOR}--target-dir="${CARGO_TARGET_DIR}" ${FEATURES} --release --bin meli --bin meli_sanitize_html
+	@echo ${CARGO_BIN} build ${CARGO_ARGS} ${CARGO_COLOR}--target-dir=\""${CARGO_TARGET_DIR}"\" ${FEATURES} --release --bin meli
+	@${CARGO_BIN} build ${CARGO_ARGS} ${CARGO_COLOR}--target-dir="${CARGO_TARGET_DIR}" ${FEATURES} --release --bin meli
 
 .PHONY: help
 help:
 	@echo "For a quick start, build and install locally:\n\n${BOLD}${GREEN}make PREFIX=~/.local install${ANSI_RESET}\n"
 	@echo "Available subcommands:"
-	@echo " - ${BOLD}meli${ANSI_RESET} (builds meli and meli_sanitize_html with optimizations in \$$CARGO_TARGET_DIR)"
+	@echo " - ${BOLD}meli${ANSI_RESET} (builds meli with optimizations in \$$CARGO_TARGET_DIR)"
 	@echo " - ${BOLD}install${ANSI_RESET} (installs binary in \$$BINDIR and documentation to \$$MANDIR)"
 	@echo " - ${BOLD}uninstall${ANSI_RESET}"
 	@echo "\nSecondary subcommands:"
@@ -154,7 +154,6 @@ distclean:
 .PHONY: uninstall
 uninstall:
 	rm -f $(DESTDIR)${BINDIR}/meli
-	rm -f $(DESTDIR)${BINDIR}/meli_sanitize_html
 	for MANPAGE in ${MANPAGES}; do \
 			SECTION=`echo $${MANPAGE} | rev | cut -d "." -f 1`; \
 			MANPAGEPATH="${DESTDIR}${MANDIR}/man$${SECTION}/$${MANPAGE}.gz"; \
@@ -190,11 +189,6 @@ install-bin: meli
 	rm -f  $(DESTDIR)${BINDIR}/meli
 	cp ./${CARGO_TARGET_DIR}/release/meli $(DESTDIR)${BINDIR}/meli
 	chmod 755 $(DESTDIR)${BINDIR}/meli
-	@echo " - ${BOLD}Installing binary to ${ANSI_RESET}${GREEN}${DESTDIR}${BINDIR}/meli_sanitize_html${ANSI_RESET}"
-	mkdir -p $(DESTDIR)${BINDIR}
-	rm -f  $(DESTDIR)${BINDIR}/meli_sanitize_html
-	cp ./${CARGO_TARGET_DIR}/release/meli_sanitize_html $(DESTDIR)${BINDIR}/meli_sanitize_html
-	chmod 755 $(DESTDIR)${BINDIR}/meli_sanitize_html
 
 
 .PHONY: install

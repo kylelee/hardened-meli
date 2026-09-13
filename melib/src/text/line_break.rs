@@ -941,7 +941,7 @@ mod alg {
             if *w == "\n\n" {
                 offsets.push(offsets.iter().last().unwrap() + width - 1);
             } else {
-                offsets.push(offsets.iter().last().unwrap() + w.grapheme_len().saturating_sub(1));
+                offsets.push(offsets.iter().last().unwrap() + w.grapheme_width().saturating_sub(1));
             }
         }
 
@@ -1183,16 +1183,14 @@ pub fn split_lines_reflow(text: &str, reflow: Reflow, width: Option<usize>) -> V
         Reflow::All => {
             if let Some(width) = width {
                 let mut ret = Vec::new();
-                let width = width.saturating_sub(2);
 
                 for line in text.lines() {
-                    if line.grapheme_len() <= width {
+                    if line.grapheme_width() <= width {
                         ret.push(line.to_string());
                         continue;
                     }
 
-                    let breaks = LineBreakCandidateIter::new(line)
-                        .collect::<Vec<(usize, LineBreakCandidate)>>();
+                    let breaks = all_break_candidates(line);
                     if breaks.len() < 2 {
                         split(&mut ret, line, width);
                         continue;
@@ -1200,40 +1198,83 @@ pub fn split_lines_reflow(text: &str, reflow: Reflow, width: Option<usize>) -> V
                     let segment_tree = {
                         let mut t: smallvec::SmallVec<[usize; 1024]> =
                             smallvec::SmallVec::from_iter(std::iter::repeat_n(0, line.len()));
-                        for (idx, _g) in UnicodeSegmentation::grapheme_indices(line, true) {
-                            t[idx] = 1;
+                        for (idx, g) in UnicodeSegmentation::grapheme_indices(line, true) {
+                            t[idx] = g.grapheme_width();
                         }
                         Box::new(segment_tree::SegmentTree::new(t))
                     };
 
-                    let mut prev = 0;
                     let mut prev_line_offset = 0;
-                    while prev < breaks.len() {
-                        let new_off = match breaks[prev..].binary_search_by(|(offset, _)| {
-                            segment_tree
-                                .get_sum(prev_line_offset, offset.saturating_sub(1))
-                                .cmp(&width)
-                        }) {
-                            Ok(v) => v,
-                            Err(v) => v,
-                        } + prev;
-                        let end_offset = if new_off >= breaks.len() {
-                            line.len()
+                    while prev_line_offset < line.len() {
+                        /* Break candidates at or before the current offset
+                         * have zero cumulative width from here; skip them. */
+                        let start =
+                            breaks.partition_point(|&(offset, _)| offset <= prev_line_offset);
+                        /* The first line of a physical line can use the full
+                         * width; continuation lines reserve one column for
+                         * the `⤷` marker — unless the previous line ended at
+                         * a '/' or '-' soft point: those read as natural
+                         * wraps and continue plainly, so the full width is
+                         * available. */
+                        let plain_continuation =
+                            prev_line_offset != 0 && line[..prev_line_offset].ends_with(['-', '/']);
+                        let budget = if prev_line_offset == 0 || plain_continuation {
+                            width
                         } else {
-                            breaks[new_off].0
+                            width.saturating_sub(1)
                         };
-                        if !line[prev_line_offset..end_offset].is_empty() {
-                            if prev_line_offset == 0 {
-                                ret.push(line[prev_line_offset..end_offset].to_string());
-                            } else {
-                                ret.push(format!("⤷{}", &line[prev_line_offset..end_offset]));
+                        /* Pick the *last* break candidate whose cumulative
+                         * display width still fits the budget (the elements
+                         * are non-decreasing). Selecting the first candidate
+                         * that exceeds it instead emitted lines wider than
+                         * the requested width, which the terminal clips. */
+                        let fit = breaks[start..].partition_point(|&(offset, _)| {
+                            segment_tree.get_sum(prev_line_offset, offset.saturating_sub(1))
+                                <= budget
+                        });
+                        if fit == 0 {
+                            /* Not even the first candidate segment fits (an
+                             * unbreakable word wider than the line): fall
+                             * back to a lossless grapheme-boundary hard cut,
+                             * like `split()`. */
+                            let chop =
+                                chop_at_width(&line[prev_line_offset..], width.saturating_sub(1));
+                            if chop == 0 {
+                                ret.push(format!("⤷{}", &line[prev_line_offset..]));
+                                break;
                             }
+                            ret.push(format!(
+                                "⤷{}",
+                                &line[prev_line_offset..prev_line_offset + chop]
+                            ));
+                            prev_line_offset += chop;
+                            continue;
                         }
-                        if prev_line_offset == end_offset && prev == new_off {
-                            break;
+                        let end_offset = breaks[start + fit - 1].0;
+                        /* Absorb the spaces that follow the chosen break into
+                         * this line (while within the budget): the candidate
+                         * iterator does not always offer the position after
+                         * a run of spaces, and leaving them at the start of
+                         * the next line would both look wrong and count
+                         * against the next line's word budget. */
+                        let mut end_offset = end_offset;
+                        let mut cur_width =
+                            segment_tree.get_sum(prev_line_offset, end_offset.saturating_sub(1));
+                        while end_offset < line.len()
+                            && line.as_bytes()[end_offset] == b' '
+                            && cur_width < budget
+                        {
+                            end_offset += 1;
+                            cur_width += 1;
+                        }
+                        if prev_line_offset == 0 {
+                            ret.push(line[..end_offset].to_string());
+                        } else if plain_continuation {
+                            ret.push(line[prev_line_offset..end_offset].to_string());
+                        } else {
+                            ret.push(format!("⤷{}", &line[prev_line_offset..end_offset]));
                         }
                         prev_line_offset = end_offset;
-                        prev = new_off;
                     }
                 }
                 ret
@@ -1245,12 +1286,80 @@ pub fn split_lines_reflow(text: &str, reflow: Reflow, width: Option<usize>) -> V
     }
 }
 
+/// Break candidates that must not be used because they would split an
+/// ASCII word in the middle (the candidate iterator can emit spurious
+/// `BreakAllowed` positions inside long words, e.g. right before the final
+/// letter of a word at end of line). Whole-word wrapping requires that a
+/// word is only ever broken when it is wider than a full line (hard cut).
+fn word_splits_ascii(line: &str, offset: usize) -> bool {
+    let prev = line[..offset].chars().next_back();
+    let at = line[offset..].chars().next();
+    matches!((prev, at), (Some(p), Some(a)) if p.is_ascii_alphanumeric() && a.is_ascii_alphanumeric())
+}
+
+/// Soft break opportunities inside words: a break is allowed after every
+/// '/' (URLs and paths; the slash stays at the end of the line) and after
+/// every word-internal '-' (hyphenated compounds; alphanumeric on both
+/// sides of the hyphen — a leading list-marker `- ` or a standalone dash is
+/// NOT a soft point). Breaking at other URL-internal punctuation ('.',
+/// ':', '=', '&', '?') stays forbidden.
+fn soft_break_points(line: &str) -> impl Iterator<Item = (usize, LineBreakCandidate)> + use<'_> {
+    line.char_indices().filter_map(move |(idx, ch)| {
+        let after = idx + ch.len_utf8();
+        match ch {
+            '/' => Some((after, LineBreakCandidate::BreakAllowed)),
+            '-' if line[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+                && line[after..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphanumeric) =>
+            {
+                Some((after, LineBreakCandidate::BreakAllowed))
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Build the break-candidate list used by `Reflow::All` line selection:
+/// the UAX#14 candidates minus the ones that would split an ASCII word,
+/// plus the '/' and '-' soft points (merged, sorted, deduplicated).
+fn all_break_candidates(line: &str) -> Vec<(usize, LineBreakCandidate)> {
+    let mut breaks: Vec<(usize, LineBreakCandidate)> = LineBreakCandidateIter::new(line)
+        .filter(|&(offset, _)| !word_splits_ascii(line, offset))
+        .collect();
+    breaks.extend(soft_break_points(line));
+    breaks.sort_unstable_by_key(|&(offset, _)| offset);
+    breaks.dedup_by_key(|&mut (offset, _)| offset);
+    breaks
+}
+
+/// Returns the byte length of the longest prefix of `line` (cut at grapheme
+/// boundaries) whose display width does not exceed `budget` columns.
+fn chop_at_width(line: &str, budget: usize) -> usize {
+    let mut chop_index = 0;
+    let mut current_width = 0;
+    for (idx, g) in UnicodeSegmentation::grapheme_indices(line, true) {
+        let g_width = g.grapheme_width();
+        if current_width + g_width > budget {
+            break;
+        }
+        current_width += g_width;
+        chop_index = idx + g.len();
+    }
+    chop_index
+}
+
 fn split(ret: &mut Vec<String>, mut line: &str, width: usize) {
     while !line.is_empty() {
-        let mut chop_index = std::cmp::min(line.len().saturating_sub(1), width);
-        while chop_index > 0 && !line.is_char_boundary(chop_index) {
-            chop_index -= 1;
-        }
+        /* Reserve one column for the `⤷` continuation marker and measure
+         * the content in display columns, cutting only at grapheme
+         * boundaries. */
+        let budget = width.saturating_sub(1);
+        let chop_index = chop_at_width(line, budget);
         if chop_index == 0 {
             ret.push(format!("⤷{line}"));
             return;
@@ -1439,7 +1548,6 @@ enum LineBreakTextState {
         line_length: usize,
         within_line_index: usize,
         breaks: Vec<(usize, LineBreakCandidate)>,
-        prev_break: usize,
         segment_tree: Box<segment_tree::SegmentTree>,
     },
 }
@@ -1652,13 +1760,10 @@ impl Iterator for LineBreakText {
                 width,
                 ref mut state,
             } => {
-                let width = width.saturating_sub(2);
-
                 loop {
                     let line: &str;
                     let cur_index: &mut usize;
                     let within_line_index: &mut usize;
-                    let prev_break: &mut usize;
                     let segment_tree: &segment_tree::SegmentTree;
                     let breaks: &Vec<(usize, LineBreakCandidate)>;
                     match state {
@@ -1680,22 +1785,17 @@ impl Iterator for LineBreakText {
                                 line_index: _cur_index,
                                 line_length: line.len(),
                                 within_line_index: 0,
-                                breaks: LineBreakCandidateIter::new(line).collect::<Vec<(
-                                    usize,
-                                    LineBreakCandidate,
-                                )>>(
-                                ),
-                                prev_break: 0,
+                                breaks: all_break_candidates(line),
                                 segment_tree: {
                                     let mut t: smallvec::SmallVec<[usize; 1024]> =
                                         smallvec::SmallVec::from_iter(std::iter::repeat_n(
                                             0,
                                             line.len(),
                                         ));
-                                    for (idx, _g) in
+                                    for (idx, g) in
                                         UnicodeSegmentation::grapheme_indices(line, true)
                                     {
-                                        t[idx] = 1;
+                                        t[idx] = g.grapheme_width();
                                     }
                                     Box::new(segment_tree::SegmentTree::new(t))
                                 },
@@ -1705,14 +1805,12 @@ impl Iterator for LineBreakText {
                                 line_length: _,
                                 within_line_index: ref mut _within_line_index,
                                 breaks: ref _breaks,
-                                prev_break: ref mut _prev_break,
                                 segment_tree: ref _segment_tree,
                             } = state
                             {
                                 cur_index = line_index;
                                 within_line_index = _within_line_index;
                                 breaks = _breaks;
-                                prev_break = _prev_break;
 
                                 segment_tree = _segment_tree;
                             } else {
@@ -1724,14 +1822,12 @@ impl Iterator for LineBreakText {
                             ref line_length,
                             within_line_index: ref mut _within_line_index,
                             breaks: ref _breaks,
-                            prev_break: ref mut _prev_break,
                             segment_tree: ref _segment_tree,
                         } => {
                             line = &self.text[*line_index..(*line_index + *line_length)];
                             cur_index = line_index;
                             within_line_index = _within_line_index;
                             breaks = _breaks;
-                            prev_break = _prev_break;
                             segment_tree = _segment_tree;
                         }
                     }
@@ -1753,10 +1849,11 @@ impl Iterator for LineBreakText {
                         let mut line = line;
                         while !line.is_empty() {
                             let start = *cur_index;
-                            let mut chop_index = std::cmp::min(line.len().saturating_sub(1), width);
-                            while chop_index > 0 && !line.is_char_boundary(chop_index) {
-                                chop_index -= 1;
-                            }
+                            /* Same budget as `split()`: one column is reserved
+                             * for the `⤷` continuation marker and the content
+                             * is measured in display columns, cut only at
+                             * grapheme boundaries. */
+                            let chop_index = chop_at_width(line, width.saturating_sub(1));
                             if chop_index == 0 {
                                 let end = start + line.len();
                                 self.paragraph.push_back(Line {
@@ -1786,55 +1883,110 @@ impl Iterator for LineBreakText {
                         continue;
                     }
 
-                    while *prev_break < breaks.len() {
-                        let new_off = match breaks[*prev_break..].binary_search_by(|(offset, _)| {
-                            segment_tree
-                                .get_sum(*within_line_index, offset.saturating_sub(1))
-                                .cmp(&width)
-                        }) {
-                            Ok(v) => v,
-                            Err(v) => v,
-                        } + *prev_break;
-                        let end_offset = if new_off >= breaks.len() {
-                            line.len()
-                        } else {
-                            breaks[new_off].0
+                    /* The physical line is fully consumed once
+                     * `within_line_index` reaches its end. */
+                    if *within_line_index >= line.len() {
+                        *state = LineBreakTextState::AtLine {
+                            cur_index: *cur_index + line.len() + 1,
                         };
-                        if !line[*within_line_index..end_offset].is_empty() {
-                            let start = *cur_index + *within_line_index;
-                            let end = *cur_index + end_offset;
-                            if *within_line_index == 0 {
-                                let ret = line[*within_line_index..end_offset]
-                                    .trim_end_matches(['\r', '\n']);
-                                *within_line_index = end_offset;
-                                return Some(Line {
-                                    content: ret.to_string(),
-                                    start,
-                                    end,
-                                });
-                            } else {
-                                let ret = format!(
-                                    "⤷{}",
-                                    line[*within_line_index..end_offset]
-                                        .trim_end_matches(['\r', '\n'])
-                                );
-                                *within_line_index = end_offset;
-                                return Some(Line {
-                                    content: ret,
-                                    start,
-                                    end,
-                                });
-                            }
-                        }
-                        if *within_line_index == end_offset && *prev_break == new_off {
-                            break;
-                        }
-                        *within_line_index = end_offset + 1;
-                        *prev_break = new_off;
+                        continue;
                     }
-                    *state = LineBreakTextState::AtLine {
-                        cur_index: *cur_index + line.len() + 1,
+
+                    /* Break candidates at or before the current offset have
+                     * zero cumulative width from here; skip them. The first
+                     * line of a physical line can use the full width;
+                     * continuation lines reserve one column for the `⤷`
+                     * marker — unless the previous line ended at a '/' or
+                     * '-' soft point: those read as natural wraps and
+                     * continue plainly, so the full width is available. */
+                    let start = breaks.partition_point(|&(offset, _)| offset <= *within_line_index);
+                    let plain_continuation =
+                        *within_line_index != 0 && line[..*within_line_index].ends_with(['-', '/']);
+                    let budget = if *within_line_index == 0 || plain_continuation {
+                        width
+                    } else {
+                        width.saturating_sub(1)
                     };
+                    /* Pick the *last* break candidate whose cumulative
+                     * display width still fits the budget (the elements are
+                     * non-decreasing). Selecting the first candidate that
+                     * exceeds it instead emitted lines wider than the
+                     * requested width, which the terminal clips — the tail
+                     * of a trailing English word after a CJK run then
+                     * vanished instead of moving whole to the next line. */
+                    let fit = breaks[start..].partition_point(|&(offset, _)| {
+                        segment_tree.get_sum(*within_line_index, offset.saturating_sub(1)) <= budget
+                    });
+                    if fit == 0 {
+                        /* Not even the first candidate segment fits (an
+                         * unbreakable word wider than the line): fall back
+                         * to a lossless grapheme-boundary hard cut, like
+                         * `split()`. */
+                        let chop =
+                            chop_at_width(&line[*within_line_index..], width.saturating_sub(1));
+                        let start_off = *cur_index + *within_line_index;
+                        if chop == 0 {
+                            let rest = &line[*within_line_index..];
+                            let end = start_off + rest.len();
+                            self.paragraph.push_back(Line {
+                                content: format!("⤷{rest}"),
+                                start: start_off,
+                                end,
+                            });
+                            *within_line_index = line.len();
+                        } else {
+                            let end = start_off + chop;
+                            self.paragraph.push_back(Line {
+                                content: format!(
+                                    "⤷{}",
+                                    &line[*within_line_index..*within_line_index + chop]
+                                ),
+                                start: start_off,
+                                end,
+                            });
+                            *within_line_index += chop;
+                        }
+                        return self.paragraph.pop_front();
+                    }
+                    let end_offset = breaks[start + fit - 1].0;
+                    /* Absorb the spaces that follow the chosen break into
+                     * this line (while within the budget), mirroring the
+                     * eager `split_lines_reflow` path. */
+                    let mut end_offset = end_offset;
+                    let mut cur_width =
+                        segment_tree.get_sum(*within_line_index, end_offset.saturating_sub(1));
+                    while end_offset < line.len()
+                        && line.as_bytes()[end_offset] == b' '
+                        && cur_width < budget
+                    {
+                        end_offset += 1;
+                        cur_width += 1;
+                    }
+                    {
+                        let start = *cur_index + *within_line_index;
+                        let end = *cur_index + end_offset;
+                        if *within_line_index == 0 || plain_continuation {
+                            let ret =
+                                line[*within_line_index..end_offset].trim_end_matches(['\r', '\n']);
+                            *within_line_index = end_offset;
+                            return Some(Line {
+                                content: ret.to_string(),
+                                start,
+                                end,
+                            });
+                        } else {
+                            let ret = format!(
+                                "⤷{}",
+                                line[*within_line_index..end_offset].trim_end_matches(['\r', '\n'])
+                            );
+                            *within_line_index = end_offset;
+                            return Some(Line {
+                                content: ret,
+                                start,
+                                end,
+                            });
+                        }
+                    }
                 }
             }
             ReflowState::No { ref mut cur_index } | ReflowState::All { ref mut cur_index } => {
@@ -2156,5 +2308,440 @@ easy to take MORE than nothing.'"#;
                 "I fell off the top of the house!’ (Which was very likely true.)"
             ]
         );
+    }
+
+    #[test]
+    fn wrap_by_display_width_continuation_marker_is_narrow() {
+        // The `⤷` continuation prefix occupies exactly one display column,
+        // which the hard-cut budget of `width - 1` content columns relies on.
+        assert_eq!("⤷".grapheme_width(), 1);
+    }
+
+    /// Every emitted line must fit `width` display columns and the
+    /// concatenation of all lines (with the `⤷` continuation markers
+    /// stripped) must reproduce the input byte-for-byte.
+    fn assert_lines_fit_and_keep_content(lines: &[String], text: &str, width: usize) {
+        let mut joined = String::new();
+        for l in lines {
+            assert!(
+                l.grapheme_width() <= width,
+                "width={width}: line is {} columns wide: {l:?}",
+                l.grapheme_width()
+            );
+            joined.push_str(l.strip_prefix('⤷').unwrap_or(l));
+        }
+        assert_eq!(joined, text, "width={width}: content was lost or altered");
+    }
+
+    /// Greedy tightness: apart from the last line of each physical line, no
+    /// line may have been broken early — appending the next break *unit*
+    /// (word, CJK character, or hyphenated chunk, up to the next break
+    /// candidate in the source) must overflow `width` columns. Whole-word
+    /// moves are not early breaks: a word that cannot fit as a unit moves
+    /// down whole.
+    fn assert_no_early_break(lines: &[String], text: &str, width: usize) {
+        let word_splits_ascii = |offset: usize| {
+            matches!(
+                (
+                    text[..offset].chars().next_back(),
+                    text[offset..].chars().next(),
+                ),
+                (Some(p), Some(a)) if p.is_ascii_alphanumeric() && a.is_ascii_alphanumeric()
+            )
+        };
+        let mut breaks: Vec<usize> = LineBreakCandidateIter::new(text)
+            .filter(|&(offset, _)| !word_splits_ascii(offset))
+            .map(|(offset, _)| offset)
+            .collect();
+        breaks.extend(soft_break_points(text).map(|(offset, _)| offset));
+        breaks.sort_unstable();
+        breaks.dedup();
+        let mut pos = 0usize;
+        for pair in lines.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            let _ = b;
+            let a_content = a.strip_prefix('⤷').unwrap_or(a);
+            let a_end = pos + a_content.len();
+            pos = a_end;
+            // Newline breaks end a physical line; greedy tightness only
+            // applies to wrap breaks.
+            if !text[a_end..].starts_with('\n') {
+                let unit_end = breaks
+                    .iter()
+                    .find(|&&offset| offset > a_end)
+                    .copied()
+                    .unwrap_or(text.len());
+                let unit = &text[a_end..unit_end];
+                assert!(
+                    a.grapheme_width() + unit.grapheme_width() > width,
+                    "width={width}: line broke early: {a:?} + {unit:?} would still fit"
+                );
+            }
+        }
+    }
+
+    /// No English word may be split across two lines: every alphanumeric
+    /// token of the source must appear intact as a token of some line.
+    fn assert_english_words_stay_whole(lines: &[String], text: &str) {
+        let is_not_word = |c: char| !c.is_ascii_alphanumeric();
+        for word in text.split(is_not_word) {
+            if word.is_empty() {
+                continue;
+            }
+            assert!(
+                lines.iter().any(|l| {
+                    l.strip_prefix('⤷')
+                        .unwrap_or(l)
+                        .split(is_not_word)
+                        .any(|token| token == word)
+                }),
+                "English word {word:?} was split across lines"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_all_never_exceeds_requested_width() {
+        // The break-point search used to pick the first candidate segment
+        // *exceeding* the budget instead of the last one that fits, so lines
+        // could be wider than the requested width (observed: 16 cols emitted
+        // for width 12 on mixed CJK+ASCII). A line wider than the terminal
+        // is clipped at render time and its tail is lost for good.
+        let cases = [
+            ("aaaa bbbb cccc dddd", 12),
+            ("The quick brown fox jumps over the lazy dog", 20),
+            ("中文测试english word tail", 12),
+            ("中文测试abcdefghij 中文测试abcdefghij tail", 14),
+            (
+                "这是一段用来测试按显示列宽折行的中文长句子 mixed English words tail",
+                30,
+            ),
+        ];
+        for (text, width) in cases {
+            let lines = text.split_lines_reflow(Reflow::All, Some(width));
+            assert_lines_fit_and_keep_content(&lines, text, width);
+            assert_no_early_break(&lines, text, width);
+
+            let streamed: Vec<String> =
+                LineBreakText::new(text.to_string(), Reflow::All, Some(width))
+                    .map(|l| l.content)
+                    .collect();
+            assert_eq!(streamed, lines, "streaming and eager reflow disagree");
+        }
+    }
+
+    #[test]
+    fn wrap_all_english_words_stay_whole() {
+        // A trailing English word that does not fit must move to the next
+        // line whole; it must never be cut mid-word nor lost.
+        let cases = [
+            ("中文测试 englishword", 12),
+            ("The quick brown fox jumps over the lazy dog", 20),
+            ("中文与English混排时行尾的英文单词必须完整换行 word end", 24),
+        ];
+        for (text, width) in cases {
+            let lines = text.split_lines_reflow(Reflow::All, Some(width));
+            assert_lines_fit_and_keep_content(&lines, text, width);
+            assert_english_words_stay_whole(&lines, text);
+        }
+    }
+
+    #[test]
+    fn wrap_all_soft_break_points_after_slash_and_hyphen() {
+        // URLs and hyphenated compound words get soft break points: after
+        // each '/' and after each word-internal '-' (alphanumeric on both
+        // sides). A URL/compound that does not fit whole at end-of-line
+        // breaks at its last soft point that fits instead of moving whole to
+        // the next line; the break reads as a natural wrap (no `⤷` marker)
+        // and segments are never cut mid-segment. Breaking at other
+        // URL-internal punctuation ('.', ':', '=', '&', '?') stays forbidden.
+        let text = "see https://example.com/a/very/long/path/with/segments end";
+        for width in [30usize, 40] {
+            let lines = text.split_lines_reflow(Reflow::All, Some(width));
+            assert_lines_fit_and_keep_content(&lines, text, width);
+            // Every '/'-delimited URL segment stays whole on a single line.
+            for segment in [
+                "https:",
+                "example.com",
+                "a",
+                "very",
+                "long",
+                "path",
+                "with",
+                "segments",
+            ] {
+                assert!(
+                    lines
+                        .iter()
+                        .any(|l| l.strip_prefix('⤷').unwrap_or(l).contains(segment)),
+                    "width={width}: URL segment {segment:?} was cut mid-segment: {lines:?}"
+                );
+            }
+            // The soft point is actually used and reads as a natural wrap.
+            assert!(
+                lines.iter().any(|l| l.ends_with('/')),
+                "width={width}: no line ends with '/' (soft point unused): {lines:?}"
+            );
+            for pair in lines.windows(2) {
+                if pair[0].ends_with('/') {
+                    assert!(
+                        !pair[1].starts_with('⤷'),
+                        "width={width}: '/' continuation must be a plain wrap: {lines:?}"
+                    );
+                }
+            }
+            let streamed: Vec<String> =
+                LineBreakText::new(text.to_string(), Reflow::All, Some(width))
+                    .map(|l| l.content)
+                    .collect();
+            assert_eq!(streamed, lines, "streaming and eager reflow disagree");
+        }
+
+        // Hyphenated compounds break after '-' the same way (hyphen stays at
+        // the end of the line).
+        let compound = "extraordinary-hyphenated-compound-word";
+        for width in [20usize, 25] {
+            let lines = compound.split_lines_reflow(Reflow::All, Some(width));
+            assert_lines_fit_and_keep_content(&lines, compound, width);
+            for part in ["extraordinary", "hyphenated", "compound", "word"] {
+                assert!(
+                    lines
+                        .iter()
+                        .any(|l| l.strip_prefix('⤷').unwrap_or(l).contains(part)),
+                    "width={width}: compound part {part:?} cut mid-part: {lines:?}"
+                );
+            }
+            assert!(
+                lines.iter().any(|l| l.ends_with('-')),
+                "width={width}: no line ends with '-' (soft point unused): {lines:?}"
+            );
+            for pair in lines.windows(2) {
+                if pair[0].ends_with('-') {
+                    assert!(
+                        !pair[1].starts_with('⤷'),
+                        "width={width}: '-' continuation must be a plain wrap: {lines:?}"
+                    );
+                }
+            }
+        }
+
+        // A leading list-marker hyphen ("- ") is NOT a soft point: wrapping
+        // happens at word boundaries (and the hard cut for the oversized
+        // word), never right after the marker hyphen.
+        let listed = "- aaaabbbbccc ccc end";
+        let lines = listed.split_lines_reflow(Reflow::All, Some(10));
+        assert_lines_fit_and_keep_content(&lines, listed, 10);
+        assert!(
+            !lines.iter().any(|l| l.ends_with('-')),
+            "list-marker hyphen must not become a break point: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_all_word_wider_than_line_hard_cut_lossless() {
+        // A single word wider than the line cannot move whole to any line;
+        // it must take the lossless `⤷` hard-cut path and every line must
+        // still fit the requested width.
+        let text = "aa supercalifragilisticexpialidocious bb";
+        let width = 15;
+        let lines = text.split_lines_reflow(Reflow::All, Some(width));
+        assert_lines_fit_and_keep_content(&lines, text, width);
+        // The words that *do* fit a full line must stay whole; only the
+        // oversized word may be cut (into `⤷`-prefixed chunks).
+        for word in ["aa", "bb"] {
+            assert!(
+                lines.iter().any(|l| {
+                    l.strip_prefix('⤷')
+                        .unwrap_or(l)
+                        .split(|c: char| !c.is_ascii_alphanumeric())
+                        .any(|token| token == word)
+                }),
+                "word {word:?} must stay whole"
+            );
+        }
+        let streamed: Vec<String> = LineBreakText::new(text.to_string(), Reflow::All, Some(width))
+            .map(|l| l.content)
+            .collect();
+        assert_eq!(streamed, lines);
+    }
+
+    #[test]
+    fn wrap_by_display_width_cjk_reflow() {
+        // 11 CJK chars = 22 columns (passes the old grapheme-count check but
+        // overflows a 20-column terminal), 21 CJK chars = 42 columns.
+        let text = "这行的显示宽度超出限制\n这是一段用来测试按显示列宽折行的中文长句子";
+        for width in [20, 40] {
+            let lines = text.split_lines_reflow(Reflow::All, Some(width));
+            assert!(!lines.is_empty());
+            for line in &lines {
+                assert!(
+                    line.grapheme_width() <= width,
+                    "width={width}: line is {} columns wide: {line:?}",
+                    line.grapheme_width()
+                );
+            }
+            let joined: String = lines
+                .iter()
+                .map(|l| l.strip_prefix('⤷').unwrap_or(l))
+                .collect();
+            assert_eq!(joined, text.replace('\n', ""));
+        }
+    }
+
+    #[test]
+    fn wrap_by_display_width_emoji_and_combining_marks() {
+        // 📐 is double-width: 40 of them occupy 80 columns.
+        assert_eq!("📐".grapheme_width(), 2);
+        let text = "📐".repeat(40);
+        let lines = text.split_lines_reflow(Reflow::All, Some(20));
+        assert!(lines.len() >= 2);
+        for line in &lines {
+            assert!(
+                line.grapheme_width() <= 20,
+                "line is {} columns wide: {line:?}",
+                line.grapheme_width()
+            );
+        }
+
+        // Combining marks are zero-width and must not be over-counted.
+        assert_eq!("e\u{301}".grapheme_width(), 1);
+        let combining = "a\u{300} b\u{301} c\u{302} d\u{303} e\u{304} f\u{305} "
+            .repeat(3)
+            .trim_end()
+            .to_string();
+        let lines = combining.split_lines(10);
+        for line in &lines {
+            assert!(
+                line.grapheme_width() <= 10,
+                "line is {} columns wide: {line:?}",
+                line.grapheme_width()
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_by_display_width_hard_split() {
+        // A 200-character unbreakable ASCII word goes through the hard-cut
+        // path with the `⤷` prefix and zero content loss.
+        let word = "a".repeat(200);
+        let lines = word.split_lines_reflow(Reflow::All, Some(20));
+        assert!(lines.len() >= 2);
+        assert!(lines.iter().all(|l| l.starts_with('⤷')));
+        let joined: String = lines
+            .iter()
+            .map(|l| l.strip_prefix('⤷').unwrap_or(l))
+            .collect();
+        assert_eq!(joined, word);
+        for line in &lines {
+            assert!(
+                line.grapheme_width() <= 20,
+                "line is {} columns wide: {line:?}",
+                line.grapheme_width()
+            );
+        }
+        // Convergence: the hard-cut content budget is `width - 1` columns
+        // because the `⤷` marker takes one column, so a hard-cut line
+        // (marker included) fills exactly the requested width. (An earlier
+        // revision pinned `width - 2` to lock the then-intentional internal
+        // slack; that slack was removed to let lines use the full width.)
+        for line in &lines {
+            assert!(
+                line.grapheme_width() <= 20,
+                "hard-cut line is {} columns wide (> 20): {line:?}",
+                line.grapheme_width()
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_by_display_width_line_break_text() {
+        // 21 CJK chars = 42 columns.
+        let text = "这是一段用来测试按显示列宽折行的中文长句子";
+        for width in [20, 40] {
+            let lines: Vec<String> = LineBreakText::new(text.to_string(), Reflow::All, Some(width))
+                .map(|line| line.content)
+                .collect();
+            assert!(
+                lines.len() >= 2,
+                "width={width}: expected wrapping, got {lines:?}"
+            );
+            for line in &lines {
+                assert!(
+                    line.grapheme_width() <= width,
+                    "width={width}: line is {} columns wide: {line:?}",
+                    line.grapheme_width()
+                );
+            }
+            let joined: String = lines
+                .iter()
+                .map(|l| l.strip_prefix('⤷').unwrap_or(l))
+                .collect();
+            assert_eq!(joined, text);
+        }
+    }
+
+    #[test]
+    fn wrap_by_display_width_split_lines_linear() {
+        // 43 CJK chars = 86 columns.
+        let text = "这是一段用来测试按显示列宽折行的中文长句子必须保证折行后的每一行都不超过给定的宽度限制";
+        for width in [20, 40] {
+            let lines = text.split_lines(width);
+            assert!(!lines.is_empty());
+            for line in &lines {
+                assert!(
+                    line.grapheme_width() <= width,
+                    "width={width}: line is {} columns wide: {line:?}",
+                    line.grapheme_width()
+                );
+            }
+            assert_eq!(lines.concat(), text);
+        }
+    }
+
+    #[test]
+    fn wrap_by_display_width_narrow_width_edges() {
+        let cjk = "这是一段用来测试按显示列宽折行的中文长句子";
+        // width 0 keeps the existing early-return behaviour.
+        assert!(cjk.split_lines(0).is_empty());
+        assert!(cjk.split_lines_reflow(Reflow::All, Some(0)).is_empty());
+        assert!("".split_lines(0).is_empty());
+        assert!("".split_lines_reflow(Reflow::All, Some(0)).is_empty());
+
+        // Empty input yields no lines.
+        assert!(LineBreakText::new(String::new(), Reflow::All, Some(20))
+            .next()
+            .is_none());
+
+        // A single grapheme cluster wider than the limit is never split
+        // apart and never lost.
+        let family = "👨‍👩‍👧‍👦"; // one grapheme cluster
+        for width in [1, 2] {
+            let lines: Vec<String> =
+                LineBreakText::new(family.to_string(), Reflow::All, Some(width))
+                    .map(|line| line.content)
+                    .collect();
+            assert_eq!(lines, vec![format!("⤷{family}")], "width={width}");
+        }
+
+        // The hard-cut path keeps the whole content at width 0..=2 (an
+        // unbreakable word cannot be budgeted below one grapheme).
+        let word = "a".repeat(64);
+        for width in [0, 1, 2] {
+            let lines: Vec<String> = LineBreakText::new(word.clone(), Reflow::All, Some(width))
+                .map(|line| line.content)
+                .collect();
+            let joined: String = lines
+                .iter()
+                .map(|l| l.strip_prefix('⤷').unwrap_or(l))
+                .collect();
+            assert_eq!(joined, word, "width={width}");
+        }
+
+        // Breakable text must not panic at width 0..=2 either.
+        for width in [0, 1, 2] {
+            let _ = LineBreakText::new("sample text here".to_string(), Reflow::All, Some(width))
+                .map(|line| line.content)
+                .collect::<Vec<_>>();
+        }
     }
 }

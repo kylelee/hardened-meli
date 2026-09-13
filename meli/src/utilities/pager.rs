@@ -27,6 +27,45 @@ use crate::{
     terminal::embedded::EmbeddedGrid,
 };
 
+/// Collapse runs of more than two consecutive blank lines (lines with no
+/// visible characters — empty or whitespace-only) down to exactly two in
+/// the pager reading view. Runs of one or two blank lines are kept verbatim
+/// and non-blank content is untouched; applied uniformly to ASCII, CJK and
+/// mixed text. Returns the original string untouched when no run exceeds
+/// two, so the common case allocates nothing.
+fn collapse_blank_line_runs(text: &str) -> std::borrow::Cow<'_, str> {
+    let mut blanks = 0usize;
+    let mut excess = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            blanks += 1;
+            if blanks > 2 {
+                excess = true;
+                break;
+            }
+        } else {
+            blanks = 0;
+        }
+    }
+    if !excess {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut ret = String::with_capacity(text.len());
+    let mut blanks = 0usize;
+    for line in text.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            blanks += 1;
+            if blanks > 2 {
+                continue;
+            }
+        } else {
+            blanks = 0;
+        }
+        ret.push_str(line);
+    }
+    std::borrow::Cow::Owned(ret)
+}
+
 /// A pager for text.
 /// `Pager` holds its own content in its own `CellBuffer` and when `draw` is
 /// called, it draws the current view of the text. It is responsible for
@@ -114,7 +153,6 @@ impl Pager {
         self.show_scrollbar = new_val;
         self
     }
-
     pub fn set_colors(&mut self, new_val: ThemeAttribute) -> &mut Self {
         self.colors = new_val;
         self
@@ -141,7 +179,7 @@ impl Pager {
             }
         }
 
-        self.text = text.to_string();
+        self.text = collapse_blank_line_runs(text).into_owned();
         self.text_lines.clear();
         self.line_breaker = LineBreakText::new(self.text.clone(), self.reflow, width);
         self.height = 0;
@@ -175,6 +213,14 @@ impl Pager {
             }
         }
 
+        // Collapse runs of more than two consecutive blank lines down to
+        // two for the reading view. Keep the original allocation when
+        // nothing changes.
+        let text = match collapse_blank_line_runs(&text) {
+            std::borrow::Cow::Borrowed(_) => text,
+            std::borrow::Cow::Owned(collapsed) => collapsed,
+        };
+
         let mut ret = Self {
             text,
             text_lines: vec![],
@@ -199,6 +245,16 @@ impl Pager {
     }
 
     pub fn filter(&mut self, cmd: &str, context: &Context) {
+        // Do not spawn a duplicate filter process for the same command: if a
+        // filter job for this exact command is already in flight, keep it.
+        // A different command still replaces the in-flight job.
+        if self
+            .filter_job
+            .as_ref()
+            .is_some_and(|(ongoing_cmd, _)| ongoing_cmd == cmd)
+        {
+            return;
+        }
         async fn filter_fut(bin: String, text: String, tab_width: u8) -> Result<EmbeddedGrid> {
             use std::{
                 io::Write,
@@ -255,17 +311,23 @@ impl Pager {
     }
 
     pub fn initialise(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        let mut width = area.width();
-        if width < self.minimum_width {
-            width = self.minimum_width;
-        }
+        // Wrap at the *actual* area width. Clamping the wrap width up to
+        // `pager.minimum_width` (default 80) made every wrapped line wider
+        // than a narrow pane's pager area; `CellBuffer::write_string` then
+        // clipped each line on draw, losing the clipped tail (it is not
+        // reachable by scrolling), and a wide grapheme starting at the last
+        // column spilled one cell past the pane edge.
+        //
+        // The only column that must be reserved is the vertical scrollbar
+        // gutter (drawn over the last column when the text is taller than
+        // the pane); the previous unconditional `area.width() - 4` slack
+        // left up to four columns unused per line for no reason.
+        let width = area
+            .width()
+            .saturating_sub(usize::from(self.show_scrollbar));
         if self.filtered_content.is_none() {
-            if self.line_breaker.width() != Some(width.saturating_sub(4)) {
-                let line_breaker = LineBreakText::new(
-                    self.text.clone(),
-                    self.reflow,
-                    Some(width.saturating_sub(4)),
-                );
+            if self.line_breaker.width() != Some(width) {
+                let line_breaker = LineBreakText::new(self.text.clone(), self.reflow, Some(width));
 
                 self.line_breaker = line_breaker;
                 self.text_lines.clear();
@@ -1069,5 +1131,451 @@ impl Component for Pager {
         }
 
         context.replies.push_back(UIEvent::Action(Tab(Kill(uuid))));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shared HOME for mock contexts. Environment variables are process-global,
+    /// so parallel tests must not race each other by pointing them at tempdirs
+    /// that get deleted while another test constructs its `Context` (which reads
+    /// `MELI_CONFIG`/XDG vars). Pattern copied from `crate::mail::view::tests`.
+    fn shared_test_home() -> &'static tempfile::TempDir {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            let tempdir = tempfile::tempdir().unwrap();
+            std::env::set_var("HOME", tempdir.path());
+            std::env::set_var("XDG_CONFIG_HOME", tempdir.path().join(".config"));
+            std::env::set_var(
+                "XDG_DATA_HOME",
+                tempdir.path().join(".local").join(".share"),
+            );
+            tempdir
+        })
+    }
+
+    fn mock_context() -> Context {
+        // Retry: parallel suites (conf tests) also overwrite the process-global
+        // `MELI_CONFIG`, which can make `Settings::new()` inside `new_mock` fail
+        // spuriously.
+        let mut ctx = None;
+        for _ in 0..3 {
+            if let Ok(candidate) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Context::new_mock(shared_test_home())
+            })) {
+                ctx = Some(candidate);
+                break;
+            }
+        }
+        ctx.unwrap_or_else(|| Context::new_mock(shared_test_home()))
+    }
+
+    /// `from_string` spawns the configured filter command internally, and the
+    /// envelope view historically called `filter()` again with the same command
+    /// right after, spawning a second (duplicate) process and orphaning the
+    /// first. `filter()` must not spawn a second job while one is already in
+    /// flight for the same command string; a different command must still
+    /// replace the in-flight job.
+    #[test]
+    fn test_pager_filter_same_command_does_not_respawn() {
+        const FIRST_CMD: &str = "cat";
+        const OTHER_CMD: &str = "tr a-z A-Z";
+
+        let mut context = mock_context();
+        context.settings.pager.filter = Some(FIRST_CMD.to_string());
+
+        let mut pager = Pager::from_string(
+            "hello\nworld\n".to_string(),
+            &context,
+            None,
+            None,
+            ThemeAttribute::default(),
+        );
+        let first_job_id = pager
+            .filter_job
+            .as_ref()
+            .expect("from_string must have spawned the configured filter job")
+            .1
+            .job_id;
+
+        // Duplicate call with the SAME command (what envelope view does today):
+        // must be a no-op, keeping the first job id.
+        pager.filter(FIRST_CMD, &context);
+        assert_eq!(
+            pager
+                .filter_job
+                .as_ref()
+                .expect("filter job must still be in flight")
+                .1
+                .job_id,
+            first_job_id,
+            "filter() with the same command must not spawn a second job",
+        );
+
+        // A DIFFERENT command replaces the in-flight job.
+        pager.filter(OTHER_CMD, &context);
+        let (cmd, handle) = pager
+            .filter_job
+            .as_ref()
+            .expect("different command must spawn a replacement job");
+        assert_eq!(cmd, OTHER_CMD);
+        assert_ne!(
+            handle.job_id, first_job_id,
+            "a different command must replace the in-flight job",
+        );
+    }
+
+    /// Regression test for narrow-width CJK truncation: the pager must wrap
+    /// its text at the *actual* area width, not at `pager.minimum_width`
+    /// (default 80), otherwise in panes narrower than `minimum_width` every
+    /// wrapped line is wider than the visible area, gets visually clipped by
+    /// `CellBuffer::write_string`, and the clipped tail is unreachable
+    /// (vertical scroll shows the same clipped rows; horizontal scroll is not
+    /// applied at render time). A wide grapheme starting at the last column
+    /// also spills one cell past the pane edge (the observed width+1).
+    #[test]
+    fn test_pager_narrow_width_cjk_integrity() {
+        use melib::text::TextProcessing;
+
+        let mut context = mock_context();
+        let cjk_line = "横".repeat(72);
+        let text = format!(
+            "Date: Sat, 13 Sep 2026\nFrom: a@example.com\nSubject: S1\nMessage-ID: \
+             <s1@example.com>\n\n{cjk_line}\n\n[-- #1 text/plain --]"
+        );
+        let mut pager = Pager::from_string(text, &context, None, None, ThemeAttribute::default());
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+
+        let mut draw_and_check =
+            |screen: &mut crate::terminal::Screen<crate::terminal::Virtual>,
+             pager: &mut Pager,
+             pane_cols: usize,
+             pane_rows: usize,
+             phase: &str| {
+                // Model the real resize flow: the terminal resize is
+                // broadcast as `UIEvent::Resize`, which makes the pager
+                // re-initialise (re-wrap from source) on the next draw.
+                pager.process_event(&mut UIEvent::Resize, &mut context);
+                assert!(screen.resize(pane_cols, pane_rows));
+                let area = screen.area().skip_cols(13);
+                pager.draw(screen.grid_mut(), area, &mut context);
+                // Every wrapped line must fit the pager area without clipping.
+                for (i, l) in pager.text_lines.iter().enumerate() {
+                    assert!(
+                        l.content.grapheme_width() <= area.width(),
+                        "{phase}: pane {pane_cols}: text line {i} is {} columns wide but the \
+                     pager area is only {} columns: {:?}",
+                        l.content.grapheme_width(),
+                        area.width(),
+                        l.content
+                    );
+                }
+                // And the whole body must actually be rendered: all 72 CJK chars
+                // visible in the pager area.
+                let grid = screen.grid();
+                let visible = grid
+                    .bounds_iter(area)
+                    .flatten()
+                    .filter(|&pos| grid[pos].ch() == '横')
+                    .count();
+                assert_eq!(
+                    visible, 72,
+                    "{phase}: pane {pane_cols}: only {visible}/72 CJK chars rendered in the \
+                 pager area (content lost to clipping)"
+                );
+            };
+
+        // Fresh open in a narrow pane.
+        draw_and_check(&mut screen, &mut pager, 60, 20, "fresh open");
+        // Wider: must re-wrap from source and keep all content.
+        draw_and_check(&mut screen, &mut pager, 120, 36, "resize wider");
+        // Narrower again: must re-wrap from source and keep all content.
+        draw_and_check(&mut screen, &mut pager, 60, 20, "resize narrower");
+        draw_and_check(&mut screen, &mut pager, 80, 24, "resize to 80");
+        // Degenerate small panes must not panic (their wrap width is 0, which
+        // keeps melib's width-0 early-return behaviour; content stays in
+        // `Pager::text`).
+        for pane_cols in [14, 17, 20] {
+            pager.process_event(&mut UIEvent::Resize, &mut context);
+            assert!(screen.resize(pane_cols, 10));
+            let area = screen.area().skip_cols(13);
+            pager.draw(screen.grid_mut(), area, &mut context);
+        }
+    }
+
+    /// Every rendered line must fit the pager area, and greedy tightness
+    /// must hold at the area width: appending the first grapheme of the next
+    /// line to a line must overflow (no systematic one-word-early breaking).
+    fn assert_pager_lines_fit_and_are_tight(pager: &Pager, area_width: usize, phase: &str) {
+        use melib::text::TextProcessing;
+        for (i, l) in pager.text_lines.iter().enumerate() {
+            assert!(
+                l.content.grapheme_width() <= area_width,
+                "{phase}: text line {i} is {} columns wide but the pager area is only \
+                 {area_width} columns: {:?}",
+                l.content.grapheme_width(),
+                l.content
+            );
+        }
+        // Greedy tightness at the area width: appending the next break
+        // *unit* of the source text (word / CJK char) to any line except the
+        // last of a physical line must overflow. Whole-word moves are not
+        // early breaks. Mid-word candidates (the iterator can emit spurious
+        // `BreakAllowed` positions inside ASCII words) are ignored, exactly
+        // like the wrapping code does.
+        let word_splits_ascii = |offset: usize| {
+            matches!(
+                (
+                    pager.text[..offset].chars().next_back(),
+                    pager.text[offset..].chars().next(),
+                ),
+                (Some(p), Some(a)) if p.is_ascii_alphanumeric() && a.is_ascii_alphanumeric()
+            )
+        };
+        let mut breaks: Vec<usize> = melib::text::LineBreakCandidateIter::new(&pager.text)
+            .filter(|&(offset, _)| !word_splits_ascii(offset))
+            .map(|(offset, _)| offset)
+            .collect();
+        // Soft points after '/' and word-internal '-' count as unit
+        // boundaries too, mirroring the wrapping code.
+        breaks.extend(pager.text.char_indices().filter_map(|(idx, ch)| {
+            let after = idx + ch.len_utf8();
+            match ch {
+                '/' => Some(after),
+                '-' if pager.text[..idx]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_alphanumeric)
+                    && pager.text[after..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_alphanumeric) =>
+                {
+                    Some(after)
+                }
+                _ => None,
+            }
+        }));
+        breaks.sort_unstable();
+        breaks.dedup();
+        let mut pos = 0usize;
+        for pair in pager.text_lines.windows(2) {
+            let (a, b) = (&pair[0].content, &pair[1].content);
+            let _ = b;
+            let a_content = a.strip_prefix('⤷').unwrap_or(a);
+            let a_end = pos + a_content.len();
+            pos = a_end;
+            if !pager.text[a_end..].starts_with('\n') {
+                let unit_end = breaks
+                    .iter()
+                    .find(|&&offset| offset > a_end)
+                    .copied()
+                    .unwrap_or(pager.text.len());
+                let unit = &pager.text[a_end..unit_end];
+                assert!(
+                    a.grapheme_width() + unit.grapheme_width() > area_width,
+                    "{phase}: line broke one unit early at {area_width} columns: {a:?} + {unit:?} \
+                     would still fit"
+                );
+            }
+        }
+    }
+
+    /// Mixed CJK+English: the trailing English word must move whole to the
+    /// next line and every one of its characters must actually be rendered
+    /// (the old overshooting break selection emitted lines wider than the
+    /// pane, and `CellBuffer::write_string` clipped the overflowing tail of
+    /// the trailing English word — reported as "the line end swallows 2
+    /// English character widths").
+    #[test]
+    fn test_pager_mixed_cjk_english_no_loss_whole_word() {
+        let mut context = mock_context();
+        // 20 CJK chars = 40 columns, then a long English word.
+        let cjk = "横".repeat(20);
+        let text = format!("{cjk} englishwordtail");
+        let mut pager = Pager::from_string(text, &context, None, None, ThemeAttribute::default());
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+        pager.process_event(&mut UIEvent::Resize, &mut context);
+        assert!(screen.resize(60, 20));
+        let area = screen.area().skip_cols(13);
+        pager.draw(screen.grid_mut(), area, &mut context);
+
+        assert_pager_lines_fit_and_are_tight(&pager, area.width(), "mixed");
+
+        let grid = screen.grid();
+        // All 20 CJK chars must be rendered in the pager area.
+        let visible_cjk = grid
+            .bounds_iter(area)
+            .flatten()
+            .filter(|&pos| grid[pos].ch() == '横')
+            .count();
+        assert_eq!(visible_cjk, 20, "mixed: CJK chars lost to clipping");
+
+        // The whole English word must render intact on one row (never split
+        // mid-word, never clipped).
+        let mut word_row_found = false;
+        for (_, y) in grid.bounds_iter(area).flatten() {
+            let mut row = String::new();
+            for x in 0..area.width() {
+                row.push(grid[(area.upper_left().0 + x, y)].ch());
+            }
+            if row.contains("englishwordtail") {
+                word_row_found = true;
+                break;
+            }
+        }
+        assert!(
+            word_row_found,
+            "mixed: the trailing English word is not rendered whole on one row \
+             (split mid-word or clipped)"
+        );
+    }
+
+    /// Pure English: lines must fit as many whole words as genuinely fit the
+    /// area — no systematic one-word-early breaking with oversized EOL
+    /// whitespace.
+    #[test]
+    fn test_pager_english_full_width_utilization() {
+        let mut context = mock_context();
+        let text = concat!(
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima ",
+            "mike november oscar papa quebec romeo sierra tango uniform victor whiskey ",
+            "xray yankee zulu one two three four five six seven eight nine ten"
+        );
+        let mut pager = Pager::from_string(
+            text.to_string(),
+            &context,
+            None,
+            None,
+            ThemeAttribute::default(),
+        );
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+        pager.process_event(&mut UIEvent::Resize, &mut context);
+        assert!(screen.resize(120, 20));
+        let area = screen.area().skip_cols(13);
+        pager.draw(screen.grid_mut(), area, &mut context);
+
+        assert!(pager.text_lines.len() >= 2, "text must wrap at this width");
+        assert_pager_lines_fit_and_are_tight(&pager, area.width(), "english");
+    }
+
+    /// A URL longer than the pager area must break after a '/' soft point:
+    /// every '/'-delimited segment fully rendered on one row, no `⤷` marker
+    /// on the '/' continuation, no clipping, no loss.
+    #[test]
+    fn test_pager_url_soft_break_no_loss() {
+        let mut context = mock_context();
+        let text = "see https://example.com/a/very/long/path/with/segments end";
+        let mut pager = Pager::from_string(
+            text.to_string(),
+            &context,
+            None,
+            None,
+            ThemeAttribute::default(),
+        );
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+        pager.process_event(&mut UIEvent::Resize, &mut context);
+        assert!(screen.resize(60, 20));
+        let area = screen.area().skip_cols(13);
+        pager.draw(screen.grid_mut(), area, &mut context);
+
+        assert_pager_lines_fit_and_are_tight(&pager, area.width(), "url");
+        // Every URL segment must render whole on a single row of the grid.
+        let grid = screen.grid();
+        for segment in [
+            "https:",
+            "example.com",
+            "very",
+            "long",
+            "path",
+            "with",
+            "segments",
+        ] {
+            let mut found_whole = false;
+            for (_, y) in grid.bounds_iter(area).flatten() {
+                let mut row = String::new();
+                for x in 0..area.width() {
+                    row.push(grid[(area.upper_left().0 + x, y)].ch());
+                }
+                if row.contains(segment) {
+                    found_whole = true;
+                    break;
+                }
+            }
+            assert!(
+                found_whole,
+                "url: segment {segment:?} not rendered whole on one row (cut or lost)"
+            );
+        }
+        // The '/' continuation is a plain wrap: no line after a '/'-ending
+        // line starts with the `⤷` marker.
+        for pair in pager.text_lines.windows(2) {
+            if pair[0].content.ends_with('/') {
+                assert!(
+                    !pair[1].content.starts_with('⤷'),
+                    "url: '/' continuation must be a plain wrap: {:?}",
+                    pair[1].content
+                );
+            }
+        }
+    }
+
+    /// Runs of more than two consecutive blank lines (empty or whitespace-
+    /// only) are collapsed to exactly two in the pager reading view; runs of
+    /// one or two blank lines are preserved verbatim.
+    #[test]
+    fn test_pager_blank_line_runs_collapsed() {
+        let mut context = mock_context();
+        let text = concat!(
+            "para one\n\npara two\n\n\npara three\n\n\n\n\n",
+            "para four\n   \n\t\n\n\npara five\n\n\n\n\n\npara six"
+        );
+        let mut pager = Pager::from_string(
+            text.to_string(),
+            &context,
+            None,
+            None,
+            ThemeAttribute::default(),
+        );
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+        pager.process_event(&mut UIEvent::Resize, &mut context);
+        assert!(screen.resize(120, 20));
+        let area = screen.area().skip_cols(13);
+        pager.draw(screen.grid_mut(), area, &mut context);
+
+        let contents: Vec<&str> = pager
+            .text_lines
+            .iter()
+            .map(|l| l.content.as_str())
+            .collect();
+        // Expected: 1 blank kept; 2 kept; 3 -> 2; 5 -> 2; whitespace-only run
+        // of 4 ("   ", "\t", "", "") -> first 2 kept; 5 -> 2.
+        assert_eq!(
+            contents,
+            vec![
+                "para one",
+                "",
+                "para two",
+                "",
+                "",
+                "para three",
+                "",
+                "",
+                "para four",
+                "   ",
+                "\t",
+                "para five",
+                "",
+                "",
+                "para six",
+            ]
+        );
     }
 }

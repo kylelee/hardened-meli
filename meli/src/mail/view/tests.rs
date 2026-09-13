@@ -31,7 +31,7 @@ use crate::{
     melib::{Attachment, AttachmentBuilder, Envelope, Mail},
     terminal::Key,
     types::{Link, LinkKind, UIEvent},
-    view::{EnvelopeView, ViewFilter, ViewOptions, ViewSettings},
+    view::{EnvelopeView, ViewFilter, ViewFilterContent, ViewOptions, ViewSettings},
     AccountHash, Context, EnvelopeHash, MailboxHash,
 };
 
@@ -240,10 +240,50 @@ foobar
 ";
     let settings = ViewSettings::default();
     let tempdir = tempfile::tempdir().unwrap();
-    let ctx = Context::new_mock(&tempdir);
+    let mut ctx = Context::new_mock(&tempdir);
     let att: Attachment = AttachmentBuilder::new(bytes).build();
-    let value = ViewFilter::new_attachment(&att, &settings, &ctx).unwrap();
-    assert_eq!(&value.content_type.to_string(), "text/html");
+    let mut value = ViewFilter::new_attachment(&att, &settings, &ctx).unwrap();
+    // With the built-in renderer the html job runs in-process and races the
+    // brief `try_recv_timeout` window in `ViewFilter::new_html`: the filter
+    // is returned either still `Running` or already swapped to the rendered
+    // text. In the former case, wait for the job to finish and feed the
+    // `JobFinished` event like the real event loop does.
+    if matches!(value.body_text, ViewFilterContent::Running { .. }) {
+        // The job executor fills the result channel before sending the
+        // `JobFinished` thread event, so once it arrives the result is
+        // ready; feed it to the filter like the real event loop does.
+        loop {
+            let mut event = match ctx
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("job executor thread event channel timed out")
+            {
+                crate::types::ThreadEvent::JobFinished(job_id) => {
+                    UIEvent::StatusEvent(crate::StatusEvent::JobFinished(job_id))
+                }
+                crate::types::ThreadEvent::UIEvent(ev) => ev,
+                _ => continue,
+            };
+            _ = value.process_event(&mut event, &mut ctx);
+            if !matches!(value.body_text, ViewFilterContent::Running { .. }) {
+                break;
+            }
+        }
+    }
+    assert_eq!(&value.content_type.to_string(), "text/plain");
+    assert!(
+        value
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("built-in html renderer")),
+        "unexpected notice: {:?}",
+        value.notice
+    );
+    let inner = match &value.body_text {
+        ViewFilterContent::Filtered { inner } => inner,
+        other => panic!("expected rendered text, got {other:?}"),
+    };
+    assert!(inner.contains("foobar"));
 }
 
 #[test]
@@ -296,10 +336,40 @@ html foobar
     };
 
     let tempdir = tempfile::tempdir().unwrap();
-    let ctx = Context::new_mock(&tempdir);
+    let mut ctx = Context::new_mock(&tempdir);
     let att: Attachment = AttachmentBuilder::new(bytes).build();
-    let value = ViewFilter::new_attachment(&att, &settings, &ctx).unwrap();
-    assert_eq!(&value.content_type.to_string(), "text/html");
+    let mut value = ViewFilter::new_attachment(&att, &settings, &ctx).unwrap();
+    // The plain alternative is empty, so the html one is auto-chosen and
+    // goes through the built-in renderer; drive the job to completion like
+    // `test_view_filter_text_html` does.
+    if matches!(value.body_text, ViewFilterContent::Running { .. }) {
+        // The job executor fills the result channel before sending the
+        // `JobFinished` thread event, so once it arrives the result is
+        // ready; feed it to the filter like the real event loop does.
+        loop {
+            let mut event = match ctx
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("job executor thread event channel timed out")
+            {
+                crate::types::ThreadEvent::JobFinished(job_id) => {
+                    UIEvent::StatusEvent(crate::StatusEvent::JobFinished(job_id))
+                }
+                crate::types::ThreadEvent::UIEvent(ev) => ev,
+                _ => continue,
+            };
+            _ = value.process_event(&mut event, &mut ctx);
+            if !matches!(value.body_text, ViewFilterContent::Running { .. }) {
+                break;
+            }
+        }
+    }
+    assert_eq!(&value.content_type.to_string(), "text/plain");
+    let inner = match &value.body_text {
+        ViewFilterContent::Filtered { inner } => inner,
+        other => panic!("expected rendered text, got {other:?}"),
+    };
+    assert!(inner.contains("html foobar"));
 
     settings.auto_choose_multipart_alternative = false;
 

@@ -127,6 +127,32 @@ impl std::fmt::Display for EnvelopeView {
     }
 }
 
+/// How to convert `text/html` attachment bytes to displayable text in the
+/// envelope view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum HtmlDisplayFilter {
+    /// Pipe bytes through an external command (`sh -c <invocation>`).
+    External { invocation: String },
+    /// Sanitize and render in-process with the built-in renderer.
+    Builtin { width: usize },
+}
+
+impl HtmlDisplayFilter {
+    /// Select the display filter from the `html_filter` setting: `None` or an
+    /// empty/whitespace-only command means the built-in renderer; any other
+    /// value is run verbatim through `sh -c`.
+    fn resolve(html_filter: Option<&str>, render_width: usize) -> Self {
+        match html_filter.filter(|f| !f.trim().is_empty()) {
+            Some(invocation) => Self::External {
+                invocation: invocation.to_string(),
+            },
+            None => Self::Builtin {
+                width: render_width,
+            },
+        }
+    }
+}
+
 impl EnvelopeView {
     pub fn new(
         mail: Mail,
@@ -257,54 +283,105 @@ impl EnvelopeView {
             });
         } else if a.content_type().is_text_html() {
             let bytes = a.decode(view_settings.charset.into());
-            let filter_invocation = view_settings
-                .html_filter
-                .as_deref()
-                .unwrap_or("w3m -I utf-8 -T text/html -o display_link_number=1");
-            let command_obj = Command::new("sh")
-                .args(["-c", filter_invocation])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()
-                .and_then(|mut cmd| {
-                    cmd.stdin.as_mut().unwrap().write_all(&bytes)?;
-                    Ok(String::from_utf8_lossy(&cmd.wait_with_output()?.stdout).to_string())
-                });
-            match command_obj {
-                Err(err) => {
-                    main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::Notification {
-                        title: Some(
-                            format!("Failed to start html filter process: {filter_invocation}",)
-                                .into(),
-                        ),
-                        body: err.to_string().into(),
-                        source: Some(err.into()),
-                        kind: Some(NotificationType::Error(melib::ErrorKind::External)),
-                    }));
-                    // [ref:FIXME]: add `v` configurable shortcut
-                    let comment = Some(format!(
-                        "Failed to start html filter process: `{filter_invocation}`. Press `v` to \
-                         open in web browser. \n\n"
-                    ));
-                    let text = String::from_utf8_lossy(&bytes).to_string();
-                    acc.push(AttachmentDisplay::InlineText {
-                        inner: Box::new(a.clone()),
-                        comment,
-                        text,
-                    });
+            // Same formula as the primary html path in `filters.rs`, minus the
+            // `pager.minimum_width` clamp: `ViewSettings` does not carry it.
+            let render_width = termion::terminal_size()
+                .map(|(cols, _)| cols as usize)
+                .unwrap_or(120)
+                .saturating_sub(4);
+            match HtmlDisplayFilter::resolve(view_settings.html_filter.as_deref(), render_width) {
+                HtmlDisplayFilter::External {
+                    invocation: filter_invocation,
+                } => {
+                    let command_obj =
+                        Command::new("sh")
+                            .args(["-c", filter_invocation.as_str()])
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .spawn()
+                            .and_then(|mut cmd| {
+                                cmd.stdin.as_mut().unwrap().write_all(&bytes)?;
+                                Ok(String::from_utf8_lossy(&cmd.wait_with_output()?.stdout)
+                                    .to_string())
+                            });
+                    match command_obj {
+                        Err(err) => {
+                            main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::Notification {
+                                title: Some(
+                                    format!(
+                                        "Failed to start html filter process: {filter_invocation}"
+                                    )
+                                    .into(),
+                                ),
+                                body: err.to_string().into(),
+                                source: Some(err.into()),
+                                kind: Some(NotificationType::Error(melib::ErrorKind::External)),
+                            }));
+                            // [ref:FIXME]: add `v` configurable shortcut
+                            let comment = Some(format!(
+                                "Failed to start html filter process: `{filter_invocation}`. Press \
+                                 `v` to open in web browser. \n\n"
+                            ));
+                            let text = String::from_utf8_lossy(&bytes).to_string();
+                            acc.push(AttachmentDisplay::InlineText {
+                                inner: Box::new(a.clone()),
+                                comment,
+                                text,
+                            });
+                        }
+                        Ok(text) => {
+                            // [ref:FIXME]: add `v` configurable shortcut
+                            let comment = Some(format!(
+                                "Text piped through `{filter_invocation}`. Press `v` to open in \
+                                 web browser. \n\n"
+                            ));
+                            acc.push(AttachmentDisplay::InlineText {
+                                inner: Box::new(a.clone()),
+                                comment,
+                                text,
+                            });
+                        }
+                    }
                 }
-                Ok(text) => {
-                    // [ref:FIXME]: add `v` configurable shortcut
-                    let comment = Some(format!(
-                        "Text piped through `{filter_invocation}`. Press `v` to open in web \
-                         browser. \n\n"
-                    ));
-                    acc.push(AttachmentDisplay::InlineText {
-                        inner: Box::new(a.clone()),
-                        comment,
-                        text,
-                    });
-                }
+                HtmlDisplayFilter::Builtin { width } => match html_render::render(&bytes, width) {
+                    Err(err) => {
+                        main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::Notification {
+                            title: Some(
+                                "Failed to render html with the built-in html renderer"
+                                    .to_string()
+                                    .into(),
+                            ),
+                            body: err.to_string().into(),
+                            source: Some(err),
+                            kind: Some(NotificationType::Error(melib::ErrorKind::External)),
+                        }));
+                        // [ref:FIXME]: add `v` configurable shortcut
+                        let comment = Some(
+                            "Failed to render html with the built-in html renderer. Press `v` to \
+                             open in web browser. \n\n"
+                                .to_string(),
+                        );
+                        let text = String::from_utf8_lossy(&bytes).to_string();
+                        acc.push(AttachmentDisplay::InlineText {
+                            inner: Box::new(a.clone()),
+                            comment,
+                            text,
+                        });
+                    }
+                    Ok(text) => {
+                        // [ref:FIXME]: add `v` configurable shortcut
+                        let comment = Some(
+                            "Text rendered with the built-in html renderer. Press `v` to open in \
+                             web browser. \n\n"
+                                .to_string(),
+                        );
+                        acc.push(AttachmentDisplay::InlineText {
+                            inner: Box::new(a.clone()),
+                            comment,
+                            text,
+                        });
+                    }
+                },
             }
         } else if a.is_text() {
             let bytes = a.decode(view_settings.charset.into());
@@ -2231,5 +2308,32 @@ impl Component for EnvelopeView {
         context
             .replies
             .push_back(UIEvent::Action(Tab(Kill(self.id))));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_display_filter_unconfigured_is_builtin_not_w3m() {
+        // Unconfigured (`None`) must select the built-in renderer; it must
+        // never produce an external command string.
+        assert_eq!(
+            HtmlDisplayFilter::resolve(None, 116),
+            HtmlDisplayFilter::Builtin { width: 116 }
+        );
+        // An empty command counts as unconfigured.
+        assert_eq!(
+            HtmlDisplayFilter::resolve(Some(""), 116),
+            HtmlDisplayFilter::Builtin { width: 116 }
+        );
+        // An explicitly configured command is kept verbatim.
+        assert_eq!(
+            HtmlDisplayFilter::resolve(Some("w3m -I utf-8 -T text/html"), 116),
+            HtmlDisplayFilter::External {
+                invocation: "w3m -I utf-8 -T text/html".to_string()
+            }
+        );
     }
 }
