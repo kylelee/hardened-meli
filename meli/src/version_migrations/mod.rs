@@ -187,8 +187,8 @@ macro_rules! decl_version_map {
                      || ($v2.major() == $v1.major()
                          && $v2.minor() == $v1.minor()
                          && $v2.patch() == $v1.patch()
-                         && ((const_str_cmp($v2.pre(), $v1.pre()) as i8
-                             == std::cmp::Ordering::Greater as i8)))
+                         && (const_str_cmp($v2.pre(), $v1.pre()) as i8
+                             == std::cmp::Ordering::Greater as i8))
                 }}
             }
             const _VERSION_ARRAY: &[VersionIdentifier] = &[$($version_id),*];
