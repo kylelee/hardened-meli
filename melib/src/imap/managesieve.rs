@@ -80,6 +80,8 @@ impl ManageSieveConnection {
             danger_accept_invalid_certs,
             protocol: ImapProtocol::ManageSieve,
             timeout,
+            idle_heartbeat_interval: std::time::Duration::from_secs(60),
+            watch_sweep_interval: std::time::Duration::from_secs(300),
         };
         let uid_store = Arc::new(UIDStore {
             is_online: Arc::new(Mutex::new((

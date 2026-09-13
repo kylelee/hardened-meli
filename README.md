@@ -17,7 +17,7 @@ A comprehensive code audit and refactor of the original meli fixed 18 audit find
 1. **Parse tolerance**: when an IMAP ENVELOPE field fails strict parsing, it automatically falls back to raw-bytes parsing — any single malformed field can no longer abort the fetch of an entire mailbox;
 2. **Ingestion sanitization**: address fields (From/Sender/Reply-To/To/Cc/Bcc) are validated and normalized before being written to the cache; fixable ones are automatically quoted and re-verified, unfixable ones are replaced with a safe placeholder — new data can never produce "poison rows";
 3. **Visible quarantine**: legacy poisoned cache rows no longer trigger a whole-database reset; they are quarantined row by row into an `invalid_envelopes` table and shown as visible placeholder e-mails (with error-detail headers), self-healing after the server re-fetch — eliminating "one poison e-mail nukes the entire cache".
-4. **Sanitize HTML**: HTML e-mail bodies are cleaned by the bundled `meli_sanitize_html` filter before rendering — an allow-list sanitizer built and installed alongside `meli`, which keeps only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view; enable it with `html_filter = 'meli_sanitize_html | w3m -T text/html'`.
+4. **Sanitize HTML**: HTML e-mail bodies are rendered by a built-in HTML renderer — the mail is sanitized with an allow-list (ammonia), keeping only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), then converted to plain text (html2text) at the terminal's width, all in-process with no external dependency (the standalone sanitizer binary is gone, absorbed into `meli`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view. [w3m](https://github.com/tats/w3m) is now optional: set `pager.html_filter` to a command string to render with an external program instead.
 
 ### 2. UX: browse the whole mailbox with the arrow keys
 
@@ -46,17 +46,16 @@ IMAP startup is now fully cache-first: the mail list and bodies are rendered imm
 
   Install from git repository:
   ```sh
-  cargo install --git https://github.com/kylelee/hardened-meli meli meli_sanitize_html
+  cargo install --git https://github.com/kylelee/hardened-meli meli
   ```
 
 ### Runtime dependencies
 
-[w3m](https://github.com/tats/w3m) is required to safely view HTML e-mail
-content: HTML mail is sanitized by the bundled `meli_sanitize_html` and then
-rendered with `w3m` by default. Install it with your system package manager,
-e.g. `sudo apt install w3m` on Debian/Ubuntu or `sudo dnf install w3m` on
-Fedora. Without it, viewing HTML mail fails with an error notice and falls
-back to the raw source.
+HTML e-mail is rendered out of the box by a built-in renderer (ammonia
+sanitizing + html2text at terminal width), so there is no required external
+dependency. [w3m](https://github.com/tats/w3m) is optional: it is used only
+if you explicitly configure a `pager.html_filter` command string, e.g.
+`html_filter = "w3m -I utf-8 -T text/html"`.
 
 ## Build
 
@@ -173,7 +172,8 @@ See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)
 - theming
 - `NO_COLOR` support
 - ascii-only drawing characters option
-- view text/html attachments through an html filter command (w3m by default)
+- view text/html attachments through the built-in HTML renderer (or an external command via `pager.html_filter`)
+- text wrapping that measures display width (CJK characters count as two columns) and never splits an English word mid-word: URLs and hyphenated compounds get soft breaks after `/` and `-`, only a unit wider than the window is hard-cut losslessly with the `⤷` continuation marker, runs of blank lines longer than two collapse to two, and lines wrap to the actual window width, down to narrow terminals
 - pipe attachments/mail to stuff
 - use external attachment file picker instead of typing in an attachment's full path
 - save all attachments of the viewed mail to ~/Downloads/meli-<subject> with one command or keystroke (default `C-s`)
@@ -182,12 +182,13 @@ See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)
 
 ### HTML Rendering
 
-HTML mail is sanitized by default: meli pipes it through the bundled
-`meli_sanitize_html` sanitizer (allow-list based, removing scripts and
-dangerous links) and renders it with [w3m](https://github.com/tats/w3m);
-enable it with `html_filter = 'meli_sanitize_html | w3m -T text/html'`.
-Override or disable this with the `pager.html_filter` setting (set it to `''`
-to render with plain w3m without sanitizing); for more details consult
+HTML mail is rendered by the built-in renderer by default: meli sanitizes
+it with an allow-list (ammonia, removing scripts and dangerous links) and
+converts it to plain text (html2text) at the terminal's width — no external
+dependency is required. [w3m](https://github.com/tats/w3m) is optional and
+used only if you configure `pager.html_filter` with a command string, e.g.
+`html_filter = "w3m -I utf-8 -T text/html"`, in which case the HTML is
+piped through that program instead. For more details consult
 [`meli.conf(5)`](./meli/docs/meli.conf.5).
 
 

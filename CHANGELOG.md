@@ -21,6 +21,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- ### Miscellaneous Tasks -->
 
+## [v0.9.0] - 2026-09-13
+
+First release of the hardened-meli fork. Condensed summary of all fork changes
+since the repository was created (2026-09-08, based on upstream meli v0.8.13),
+with the security hardening and user-experience work highlighted first.
+
+### Security hardening (highlights)
+
+- Fixed 18 security-audit findings (3 HIGH): CRLF header injection across
+  mailto/composing paths, mailcap %-substitution injection and inverted
+  fnmatch, SMTP short-line panics and UTF-8 undefined behavior, unbounded
+  server responses (now capped at 64 MiB with an SMTP read timeout), JMAP
+  cross-origin redirect credential leaks, multipart parser hangs/panics
+  (nesting caps + boundary-loop guards), and vCard char-boundary panics.
+- HTML mail is sanitized by default: the fork bundles an ammonia-based
+  sanitizer (`meli_sanitize_html`), wired into `pager.html_filter` and built
+  and installed alongside meli, with golden and CLI parity tests.
+- Credentials are never written to traces or error messages: SASL/IMAP trace
+  redaction, `password_command` output dropped from errors, and `meli.log`
+  created with 0600 permissions.
+- Confirmation prompts before opening non-http(s)/mailto URLs and before
+  following List-Unsubscribe links; quote-aware desktop-file Exec parsing.
+- IMAP receive path hardened: UID FETCH replies missing the UID item are a
+  protocol error instead of a panic; tag-not-last framing, bare `+` keepalive
+  lines, pre-continuation pushes and mid-IDLE `* BYE` are all handled.
+- Build chain: the UCD table is fetched over HTTPS with a pinned SHA-256.
+
+### User experience (highlights)
+
+- New mail actually arrives on its own now — historically the biggest pain:
+  a refresh could miss mail while INBOX stayed selected (stale STATUS
+  snapshot, verified with NOOP), and IDLE sessions on servers that never
+  push (e.g. QQ Mail) waited forever. The watched mailbox is now held only
+  by a dedicated read-only IDLE connection (single-session invariant), with
+  a heartbeat re-sync fallback whose interval defaults to 60 seconds — new
+  mail shows up within a minute with zero configuration.
+- Fast, offline-resilient startup: cached envelope serving before network
+  resync (stale-while-revalidate), persisted mailbox list and MSN index in
+  sqlite3, graceful offline fetch, and mailbox-list reconciliation on
+  reconnect; QQ-scale first fetch is dramatically faster.
+- Sidebar `Right` opens the selected mailbox; thread-view gains
+  `focus_left`/`focus_right` pane shortcuts, shortcut-shadowing fixes, and
+  live-following mail content as the thread selection moves.
+- `save-all-attachments` on `C-s`; `Up`/`Down` arrows are the default
+  scroll keys everywhere.
+- Robust mail parsing for real-world servers: ENVELOPE fields split into
+  multiple tokens or sent as raw non-NSTRING bytes are tolerated (QQ Mail
+  compatibility), plus a documented QQ Mail sample-account template.
+
+### Reliability and correctness
+
+- 8 upstream fixes/performance commits ported (error classification, SELECT
+  reuse, text content-type guard, response buffering, cache re-SELECT
+  avoidance, TagsIterator, tag spacing, `tags.rename`).
+- SMTP reply code 353 and PRDR parsing; RFC 4549 STATUS quick-check; full
+  receive-path tracing behind `debug-tracing` (capability bytes, per-connection
+  inbound counts, ID exchange) for diagnosing server quirks; `watch_sweep_interval`
+  account setting.
+- Codebase review cleanup: ~1500 lines of dead code removed, deduplicated
+  mailcap/mbox/thread-view logic, man pages and doc comments synced.
+- Version-migration framework: fixed the upstream sort comparator to proper
+  semver ordering (component-wise `>=` rejected any minor bump).
+
+### Testing and quality
+
+- Hermetic XDG test environments and de-globalized `MELI_CONFIG` mocks
+  (parallel-race eliminated); `make test` green with no skips.
+- Mock IMAP server with scenario modes (multi-session push suppression,
+  ID-gated push, stale STATUS snapshots, glued writes), failing-first
+  regression pins for every fix, and a replay fixture built from real
+  captured push bytes; `scripts/test.sh` as the single test entrypoint.
+
 ## [v0.8.13] - 2026-01-04
 
 This release:

@@ -124,6 +124,17 @@ pub struct ImapServerConf {
     pub danger_accept_invalid_certs: bool,
     pub protocol: ImapProtocol,
     pub timeout: Option<Duration>,
+    /// How long to stay in IDLE before waking up to re-sync the watched
+    /// mailbox. Servers are allowed to never deliver untagged updates
+    /// during IDLE, so this heartbeat is the fallback path that notices
+    /// new mail on such servers.
+    pub idle_heartbeat_interval: Duration,
+    /// How long to stay in IDLE before sweeping all other mailboxes for
+    /// changes on the main connection (a line arriving on the IDLE
+    /// connection after this interval triggers the sweep). The default
+    /// (300 seconds) preserves the historical fixed 5-minute cadence; it
+    /// is configurable so tests can force frequent sweeps.
+    pub watch_sweep_interval: Duration,
 }
 
 type Capabilities = indexmap::IndexSet<Box<[u8]>>;
@@ -1342,6 +1353,24 @@ impl ImapType {
         } else {
             Some(Duration::from_secs(timeout))
         };
+        let idle_heartbeat_interval_secs = get_conf_val!(s["idle_heartbeat_interval"], 60_u64)?;
+        if idle_heartbeat_interval_secs == 0 {
+            return Err(Error::new(format!(
+                "({}) idle_heartbeat_interval must be a positive number of seconds",
+                s.name,
+            ))
+            .set_kind(ErrorKind::Configuration));
+        }
+        let idle_heartbeat_interval = Duration::from_secs(idle_heartbeat_interval_secs);
+        let watch_sweep_interval_secs = get_conf_val!(s["watch_sweep_interval"], 300_u64)?;
+        if watch_sweep_interval_secs == 0 {
+            return Err(Error::new(format!(
+                "({}) watch_sweep_interval must be a positive number of seconds",
+                s.name.as_str(),
+            ))
+            .set_kind(ErrorKind::Configuration));
+        }
+        let watch_sweep_interval = Duration::from_secs(watch_sweep_interval_secs);
         let fetch_body_structure: bool = get_conf_val!(s["fetch_body_structure"], true)?;
         let use_connection_pool = get_conf_val!(s["use_connection_pool"], true)?;
         let server_conf = ImapServerConf {
@@ -1359,10 +1388,12 @@ impl ImapType {
                     deflate: get_conf_val!(s["use_deflate"], true)?,
                     oauth2: use_oauth2,
                     auth_anonymous: get_conf_val!(s["use_auth_anonymous"], false)?,
-                    id: get_conf_val!(s["use_id"], false)?,
+                    id: get_conf_val!(s["use_id"], true)?,
                 },
             },
             timeout,
+            idle_heartbeat_interval,
+            watch_sweep_interval,
         };
         let account_hash = AccountHash::from_bytes(s.name.as_bytes());
         let account_name = s.name.to_string().into();
@@ -1715,10 +1746,26 @@ impl ImapType {
             }
         }
         get_conf_val!(s["use_idle"], true)?;
+        let _idle_heartbeat_interval = get_conf_val!(s["idle_heartbeat_interval"], 60_u64)?;
+        if _idle_heartbeat_interval == 0 {
+            return Err(Error::new(format!(
+                "({}) idle_heartbeat_interval must be a positive number of seconds",
+                s.name.as_str(),
+            ))
+            .set_kind(ErrorKind::Configuration));
+        }
+        let _watch_sweep_interval = get_conf_val!(s["watch_sweep_interval"], 300_u64)?;
+        if _watch_sweep_interval == 0 {
+            return Err(Error::new(format!(
+                "({}) watch_sweep_interval must be a positive number of seconds",
+                s.name.as_str(),
+            ))
+            .set_kind(ErrorKind::Configuration));
+        }
         get_conf_val!(s["use_condstore"], true)?;
         get_conf_val!(s["use_deflate"], true)?;
         get_conf_val!(s["use_auth_anonymous"], false)?;
-        get_conf_val!(s["use_id"], false)?;
+        get_conf_val!(s["use_id"], true)?;
         let _timeout = get_conf_val!(s["timeout"], 16_u64)?;
         let _fetch_body_structure = get_conf_val!(s["fetch_body_structure"], true)?;
         get_conf_val!(s["use_connection_pool"], true)?;

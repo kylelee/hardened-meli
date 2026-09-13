@@ -42,6 +42,7 @@ impl ImapConnection {
         &mut self,
         untagged_response: UntaggedResponse<'_>,
     ) -> Result<Option<BackendEvent>> {
+        imap_log!(trace, self, "process_untagged: {:?}", untagged_response);
         macro_rules! try_fail {
             ($mailbox_hash: expr, $($result:expr $(,)*)+) => {
                 $(if let Err(err) = $result {
@@ -52,6 +53,11 @@ impl ImapConnection {
                 } else { Ok(()) }?;)+
             };
         }
+        // A BYE means the server is closing the connection; log its
+        // reason (log-only) regardless of the session's selection state.
+        if let UntaggedResponse::Bye { reason } = untagged_response {
+            log::trace!("process_untagged: BYE, server is going away: {reason}");
+        }
         let mailbox_hash = match self.stream.as_ref()?.current_mailbox {
             MailboxSelection::Select {
                 mailbox_hash: h, ..
@@ -59,7 +65,16 @@ impl ImapConnection {
             | MailboxSelection::Examine {
                 mailbox_hash: h, ..
             } => h,
-            MailboxSelection::None => return Ok(None),
+            MailboxSelection::None => {
+                // Unselected-state early exit. A BYE must not be silently
+                // dropped here: route it to the same offline/error
+                // handling as the selected-state arm below instead.
+                if let UntaggedResponse::Bye { reason } = untagged_response {
+                    self.uid_store.is_online.lock().unwrap().1 = Err(reason.into());
+                    return Err(reason.into());
+                }
+                return Ok(None);
+            }
         };
         let mailbox =
             std::clone::Clone::clone(&self.uid_store.mailboxes.lock().await[&mailbox_hash]);
@@ -228,10 +243,25 @@ impl ImapConnection {
             }
             UntaggedResponse::Exists(n) => {
                 imap_log!(trace, self, "exists {}", n);
+                let current_exists = mailbox.exists.lock().unwrap().len();
+                if current_exists >= n {
+                    imap_log!(
+                        trace,
+                        self,
+                        "exists {}: already have {} mails locally; nothing to fetch",
+                        n,
+                        current_exists
+                    );
+                    return Ok(None);
+                }
+                // Fetch every message from the first one we do not know
+                // about yet: an EXISTS push reports the new total count, so
+                // more than one mail may have arrived with a single push.
+                let min = current_exists.max(1);
                 let (required_responses, attributes) = common_attributes();
                 try_fail!(
                     mailbox_hash,
-                    self.send_command(CommandBody::fetch(n, attributes, false)?).await
+                    self.send_command(CommandBody::fetch(min.., attributes, false)?).await
                     self.read_response(&mut response, required_responses).await
                 );
                 let mut v = match super::protocol_parser::fetch_responses(&response) {
@@ -247,6 +277,7 @@ impl ImapConnection {
                     }
                 };
                 imap_log!(trace, self, "responses len is {}", v.len());
+                let mut new_uids = std::collections::HashSet::new();
                 for FetchResponse {
                     ref uid,
                     ref mut envelope,
@@ -285,6 +316,7 @@ impl ImapConnection {
                         .unwrap()
                         .contains_key(&(mailbox_hash, uid))
                     {
+                        new_uids.insert(uid);
                         self.uid_store
                             .msn_index
                             .lock()
@@ -303,14 +335,16 @@ impl ImapConnection {
                         .lock()
                         .unwrap()
                         .insert((mailbox_hash, uid), env.hash());
-                    imap_log!(
-                        trace,
-                        self,
-                        "Create event {} {} {}",
-                        env.hash(),
-                        env.subject(),
-                        mailbox.path(),
-                    );
+                    if new_uids.contains(&uid) {
+                        imap_log!(
+                            trace,
+                            self,
+                            "Create event {} {} {}",
+                            env.hash(),
+                            env.subject(),
+                            mailbox.path(),
+                        );
+                    }
                 }
                 {
                     if let Err(err) = self
@@ -331,14 +365,20 @@ impl ImapConnection {
                 for response in v {
                     if let FetchResponse {
                         envelope: Some(envelope),
+                        uid: Some(uid),
                         ..
                     } = response
                     {
-                        events.push(RefreshEvent {
-                            account_hash: self.uid_store.account_hash,
-                            mailbox_hash,
-                            kind: Create(Box::new(envelope)),
-                        });
+                        // Only announce mail that was not already known:
+                        // the FETCH range can include mails a concurrent
+                        // resync already fetched.
+                        if new_uids.contains(&uid) {
+                            events.push(RefreshEvent {
+                                account_hash: self.uid_store.account_hash,
+                                mailbox_hash,
+                                kind: Create(Box::new(envelope)),
+                            });
+                        }
                     }
                 }
                 Ok(events.try_into().ok())

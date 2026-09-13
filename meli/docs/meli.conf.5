@@ -467,7 +467,60 @@ Disabling this makes the initial fetch of large mailboxes faster, but the attach
 Use
 .Em IDLE
 extension.
+A dedicated watch connection idles on the watched mailbox
+.Pq Em INBOX
+and opens it read-only with
+.Em EXAMINE Ns .
+It is the only connection that keeps the mailbox selected: some servers
+stop pushing new-mail updates to an
+.Em IDLE
+session while another session holds the same mailbox selected.
+At watch startup the main connection and any idle pooled connection drop
+their selection of the watched mailbox, and the periodic sweep of the
+other mailboxes
+.Po see
+.Ic watch_sweep_interval
+.Pc
+skips it.
+Short-lived selections such as a manual refresh or opening the mailbox
+are unaffected.
+Keep this enabled even on servers that never deliver unsolicited updates
+during
+.Em IDLE Ns :
+the heartbeat fallback
+.Po see
+.Ic idle_heartbeat_interval
+.Pc
+runs inside the
+.Em IDLE
+loop and relies on it.
 .Pq Em true \" default value
+.It Ic idle_heartbeat_interval Ar integer
+.Pq Em optional
+How long (in seconds) to stay in
+.Em IDLE
+before sending the heartbeat
+.Dq DONE
+and re-syncing the watched mailbox.
+Servers are allowed to never deliver untagged updates during
+.Em IDLE ;
+this heartbeat is the fallback path that notices new mail on such servers.
+Lower it if new mail arrives but the listing does not update until a
+manual refresh or a restart.
+Lowering it makes new mail visible sooner on servers that never push
+during
+.Em IDLE Ns ,
+at the cost of more periodic traffic (one re-sync round per interval);
+raising it saves traffic on servers that do push.
+.Pq Em 60 \" default value
+.It Ic watch_sweep_interval Ar integer
+.Pq Em optional
+How often (in seconds) the main connection examines the mailboxes other
+than the watched one, which the watch connection covers with
+.Em IDLE
+pushes and heartbeat re-sync.
+Must be a positive number of seconds.
+.Pq Em 300 \" default value
 .It Ic use_condstore Ar boolean
 .Pq Em optional
 Use
@@ -1687,17 +1740,19 @@ Always show headers when scrolling.
 .Pq Em false \" default value
 .It Ic html_filter Ar String
 Pipe html attachments through this filter before display.
-.Pq Em meli_sanitize_html | w3m -T text/html \" default value
+.Pq Em optional \" no default value
 .Pp
-By default HTML is piped through the bundled
-.Li meli_sanitize_html
-helper binary, which sanitizes HTML (allow-list based) by stripping scripts
-and dangerous links before rendering with
-.Xr w3m 1 .
-Set it to an empty value to render with plain w3m without sanitizing:
+By default HTML mail is rendered by the built-in HTML renderer: it is
+sanitized with an allow-list
+.Pq Li ammonia
+and converted to plain text with
+.Li html2text
+at the terminal's width, with no external dependency.
+If set to a command string, HTML is piped through that command instead,
+e.g. w3m:
 .Bd -literal
 [pager]
-html_filter = ''
+html_filter = "w3m -I utf-8 -T text/html"
 .Ed
 .It Ic html_open Ar String
 .Pq Em optional
@@ -1726,10 +1781,35 @@ Respect format=flowed
 .It Ic split_long_lines Ar boolean
 .Pq Em optional
 Split long lines that would overflow on the x axis.
+.Pp
+Wrapping measures display width, with CJK characters counting as two columns,
+and wraps at the visible width of the pager area (one column less when a
+scrollbar is shown), however narrow.
+English words are never split mid-word; a word that does not fit moves whole
+to the next line.
+Soft break opportunities exist after every
+.Li /
+in URLs and paths, and after a word-internal
+.Li \-
+in hyphenated compounds; such lines wrap as plain full-width lines with no
+continuation marker.
+List markers such as
+.Qo Li "- " Qc
+are never break points.
+Only a unit wider than a full line (e.g. a long unbreakable token or a long
+CJK run) falls back to a lossless hard cut marked with
+.Qo Li \[u2937] Qc
+as a continuation marker.
+CJK text may break at any character boundary.
+Runs of blank lines (no visible characters) longer than two collapse to two.
 .Pq Em true \" default value
 .It Ic minimum_width Ar num
 .Pq Em optional
 Minimum text width in columns.
+.Pp
+This value is no longer a floor for automatic wrapping: the pager always
+wraps at the visible width of its area, however narrow.
+It only applies to explicitly requested widths.
 .Pq Em 80 \" default value
 .It Ic auto_choose_multipart_alternative Ar boolean
 .Pq Em optional
@@ -2550,7 +2630,7 @@ Standard
 .El
 .Sh AUTHORS
 Copyright 2017\(en2024
-.An Manos Pitsidianakis Aq Mt manos@pitsidianak.is
+.An Kyle Lee
 .Pp
 Released under the GPL, version 3 or greater.
 This software carries no warranty of any kind.

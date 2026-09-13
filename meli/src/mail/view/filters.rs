@@ -44,7 +44,7 @@ use crate::{
     components::*,
     desktop_exec_to_command,
     jobs::{IsAsync, JobId, JoinHandle},
-    mail::view::ViewSettings,
+    mail::view::{html_render, ViewSettings},
     terminal::{Area, CellBuffer},
     try_recv_timeout,
     types::{ForkedProcess, NotificationType},
@@ -241,23 +241,41 @@ impl ViewFilter {
             }
         }
         let settings = &context.settings;
-        let (filter_invocation, cmd, args): (
-            Cow<'static, str>,
-            &'static str,
-            SmallVec<[Cow<'static, str>; 8]>,
-        ) = if let Some(filter_invocation) = settings.pager.html_filter.as_ref() {
-            (
-                filter_invocation.to_string().into(),
-                "sh",
-                smallvec::smallvec!["-c".into(), filter_invocation.to_string().into()],
-            )
-        } else {
-            (
-                "w3m -I utf-8 -T text/html -o display_link_number=1".into(),
-                "w3m",
-                smallvec::smallvec!["-I".into(), "utf-8".into(), "-T".into(), "text/html".into()],
-            )
-        };
+        /// How to convert HTML bytes to text.
+        enum HtmlFilter {
+            /// Pipe bytes through an external process.
+            External {
+                cmd: &'static str,
+                args: Box<SmallVec<[Cow<'static, str>; 8]>>,
+            },
+            /// Sanitize and render in-process with the built-in renderer.
+            Builtin { width: usize },
+        }
+        let (filter_invocation, filter): (Cow<'static, str>, HtmlFilter) =
+            if let Some(filter_invocation) = settings.pager.html_filter.as_ref() {
+                (
+                    filter_invocation.to_string().into(),
+                    HtmlFilter::External {
+                        cmd: "sh",
+                        args: Box::new(smallvec::smallvec![
+                            "-c".into(),
+                            filter_invocation.to_string().into()
+                        ]),
+                    },
+                )
+            } else {
+                let render_width = termion::terminal_size()
+                    .map(|(cols, _)| cols as usize)
+                    .unwrap_or(120)
+                    .max(settings.pager.minimum_width)
+                    .saturating_sub(4);
+                (
+                    "built-in html renderer".into(),
+                    HtmlFilter::Builtin {
+                        width: render_width,
+                    },
+                )
+            };
         let bytes: Vec<u8> = att.decode(view_settings.charset.into());
 
         let filter_invocation2 = filter_invocation.to_string();
@@ -266,34 +284,56 @@ impl ViewFilter {
         let job = async move {
             let filter_invocation = filter_invocation2;
             let bytes = bytes2;
-            let borrowed_args = args
-                .iter()
-                .map(|a| a.as_ref())
-                .collect::<SmallVec<[&str; 8]>>();
-            match run(cmd, &borrowed_args, &bytes) {
-                Err(err) => Err((
-                    Error::new(format!(
-                        "Failed to start html filter process `{filter_invocation}`",
-                    ))
-                    .set_source(Some(Arc::new(err)))
-                    .set_kind(ErrorKind::External),
-                    bytes,
-                )),
-                Ok(body_text) => {
-                    let mut att = AttachmentBuilder::default();
-                    att.set_raw(body_text.into_bytes()).set_body_to_raw();
-                    Ok(FilterOutput {
-                        attachment: att.build(),
-                        raw: bytes,
-                        notice: Some(
-                            format!(
-                                "Text piped through `{filter_invocation}` Press \
-                                 `{open_html_shortcut}` to open in web browser."
-                            )
-                            .into(),
-                        ),
-                    })
+            match filter {
+                HtmlFilter::External { cmd, args } => {
+                    let borrowed_args = args
+                        .iter()
+                        .map(|a| a.as_ref())
+                        .collect::<SmallVec<[&str; 8]>>();
+                    match run(cmd, &borrowed_args, &bytes) {
+                        Err(err) => Err((
+                            Error::new(format!(
+                                "Failed to start html filter process `{filter_invocation}`",
+                            ))
+                            .set_source(Some(Arc::new(err)))
+                            .set_kind(ErrorKind::External),
+                            bytes,
+                        )),
+                        Ok(body_text) => {
+                            let mut att = AttachmentBuilder::default();
+                            att.set_raw(body_text.into_bytes()).set_body_to_raw();
+                            Ok(FilterOutput {
+                                attachment: att.build(),
+                                raw: bytes,
+                                notice: Some(
+                                    format!(
+                                        "Text piped through `{filter_invocation}` Press \
+                                         `{open_html_shortcut}` to open in web browser."
+                                    )
+                                    .into(),
+                                ),
+                            })
+                        }
+                    }
                 }
+                HtmlFilter::Builtin { width } => match html_render::render(&bytes, width) {
+                    Err(err) => Err((err.set_kind(ErrorKind::External), bytes)),
+                    Ok(body_text) => {
+                        let mut att = AttachmentBuilder::default();
+                        att.set_raw(body_text.into_bytes()).set_body_to_raw();
+                        Ok(FilterOutput {
+                            attachment: att.build(),
+                            raw: bytes,
+                            notice: Some(
+                                format!(
+                                    "Text rendered with the built-in html renderer Press \
+                                         `{open_html_shortcut}` to open in web browser."
+                                )
+                                .into(),
+                            ),
+                        })
+                    }
+                },
             }
         };
         let mut job_handle = context.main_loop_handler.job_executor.spawn(

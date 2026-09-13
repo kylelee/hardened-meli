@@ -44,11 +44,44 @@
 ##server_port="993" # imaps
 #server_port="143" # STARTTLS
 #use_starttls=true #optional
+## IMAP IDLE watching: the watch connection is the only session holding the
+## watched mailbox (INBOX), read-only; some servers stop pushing updates
+## when a second session selects it.
+#use_idle = true # default
+## Heartbeat: seconds in IDLE before re-checking for new mail. On servers
+## that never push (proprietary-push providers), THIS is the delivery path:
+## lower it (e.g. 30-60) for faster listing updates, at slightly more traffic.
+#idle_heartbeat_interval = 60 # default
+## How often (seconds) the main connection examines the OTHER mailboxes.
+#watch_sweep_interval = 300 # default
 #listing.index_style = "Conversations"
 #identity = "username@example.com"
 #display_name = "Name Name"
 ### show only specific mailboxes, overriding the server's subscribed status.
 ##subscribed_mailboxes = ["INBOX", "INBOX/Sent", "INBOX/Drafts", "INBOX/Junk"]
+#
+## Setting up a QQ Mail account (imap.qq.com)
+## NOTE: QQ Mail requires an IMAP/SMTP authorization code (授权码) instead of
+## the account login password — generate one in QQ Mail settings under
+## 账号 (account) -> POP3/IMAP/SMTP service, and use it as the password.
+#[accounts."qq"]
+#root_mailbox = "INBOX"
+#format = "imap"
+#send_mail = { hostname = "smtp.qq.com", port = 465, auth = { type = "auto", username = "yourname@qq.com", password = "your-authorization-code" }, security = { type = "tls" } }
+#server_hostname = "imap.qq.com"
+#server_username = "yourname@qq.com"
+#server_password = "your-authorization-code"
+#server_port = 993 # implicit TLS (imaps)
+#identity = "yourname@qq.com"
+#display_name = "Your Name"
+#listing.index_style = "Conversations"
+## Watching (see meli.conf(5) IMAP section):
+## QQ does not push unsolicited IDLE updates to third-party clients; new mail
+## is picked up by the heartbeat re-sync, so the defaults below work well:
+#use_idle = true # default; watch connection is the only session holding INBOX
+#idle_heartbeat_interval = 60 # default; lower (e.g. 30) = faster pickup, more traffic
+#watch_sweep_interval = 300 # default; how often OTHER mailboxes are examined
+#use_deflate = false # optional; QQ supports COMPRESS=DEFLATE, saves traffic
 #
 ## Setting up an account for an already existing notmuch database
 ##[accounts.notmuch]
@@ -91,10 +124,16 @@
 #
 #[pager]
 #filter = "COLUMNS=72 /usr/local/bin/pygmentize -l email"
-## HTML mail is sanitized by default with the bundled meli_sanitize_html
-## filter before rendering with w3m (requires both binaries in PATH).
-## Set html_filter = '' to render with plain w3m without sanitizing:
-#html_filter = ''
+## Long lines wrap at the pager's visible width, however narrow: display width
+## is measured (CJK characters count as two columns), words are never split
+## mid-word, '/' and '-' offer soft break points, and only a unit wider than
+## the window is hard-cut losslessly with the '⤷' marker; blank-line runs cap at two.
+## HTML mail is rendered by the built-in HTML renderer by default: it is
+## sanitized with an allow-list (ammonia) and converted to plain text
+## (html2text) at the terminal's width, with no external dependency.
+## Set html_filter to a command string to render HTML with an external
+## program instead, e.g. w3m:
+#html_filter = "w3m -I utf-8 -T text/html"
 #pager_context = 0 # default, optional
 #sticky_headers = true # default, optional
 #

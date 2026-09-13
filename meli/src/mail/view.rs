@@ -52,6 +52,8 @@ pub use envelope::EnvelopeView;
 pub mod filters;
 pub use filters::*;
 
+pub mod html_render;
+
 #[cfg(test)]
 mod tests;
 

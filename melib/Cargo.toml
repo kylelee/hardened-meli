@@ -1,9 +1,9 @@
 [package]
 name = "melib"
-version = "0.8.13"
-authors = ["Manos Pitsidianakis <manos@pitsidianak.is>"]
-homepage = "https://meli-email.org"
-repository = "https://git.meli-email.org/meli/meli.git"
+version = "0.9.0"
+authors = ["Kyle Lee"]
+homepage = "https://github.com/kylelee/hardened-meli"
+repository = "https://github.com/kylelee/hardened-meli"
 description = "library for e-mail clients and other e-mail applications"
 keywords = ["mail", "mua", "maildir", "imap", "jmap"]
 categories = ["email", "parser-implementations"]

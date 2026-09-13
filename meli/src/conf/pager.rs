@@ -69,11 +69,13 @@ pub struct PagerSettings {
 
     /// A command to pipe html output before displaying it in a pager.
     ///
-    /// Defaults to the bundled sanitizer pipeline, which strips scripts and
-    /// dangerous links before rendering. Set it to an empty value to opt out
-    /// and render with plain w3m.
+    /// If unset (or set to an empty value), HTML mail is rendered with
+    /// meli's built-in renderer, which sanitizes untrusted HTML and renders
+    /// it to text in-process.
+    ///
+    /// Default: None
     #[serde(
-        default = "default_html_filter",
+        default = "none",
         deserialize_with = "non_empty_opt_string",
         alias = "html-filter"
     )]
@@ -137,7 +139,7 @@ impl Default for PagerSettings {
             pager_ratio: 80,
             filter: None,
             named_filters: IndexMap::default(),
-            html_filter: default_html_filter(),
+            html_filter: None,
             html_open: None,
             format_flowed: true,
             split_long_lines: true,

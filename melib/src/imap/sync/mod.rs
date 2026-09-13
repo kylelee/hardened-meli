@@ -258,7 +258,17 @@ impl ImapConnection {
                     ..
                 } in v.iter_mut()
                 {
-                    let uid = uid.unwrap();
+                    // RFC 3501 §6.4.8: a reply to a `UID FETCH` command
+                    // must contain the UID data item. Without it the
+                    // envelope cannot be associated with a message, so
+                    // surface a protocol error instead of panicking.
+                    let Some(uid) = *uid else {
+                        return Err(Error::new(format!(
+                            "IMAP server error: UID FETCH reply for mailbox {mailbox_path} is \
+                             missing the UID data item (RFC 3501 6.4.8 violation)."
+                        ))
+                        .set_kind(ErrorKind::ProtocolError));
+                    };
                     let env = envelope.as_mut().unwrap();
                     let env_hash = generate_envelope_hash(&mailbox_path, &uid);
                     valid_envs.insert(env_hash);
@@ -318,7 +328,19 @@ impl ImapConnection {
             let mut env_lck = self.uid_store.envelopes.lock().unwrap();
             let mut tag_lck = self.uid_store.collection.tag_index.write().unwrap();
             for FetchResponse { uid, flags, .. } in v {
-                let uid = uid.unwrap();
+                // RFC 3501 §6.4.8: a reply to a `UID FETCH` command must
+                // contain the UID data item. Without it the flags cannot
+                // be associated with a message, and skipping the reply
+                // would (wrongly) mark the message as removed in Step 4
+                // below, so surface a protocol error instead of
+                // panicking.
+                let Some(uid) = uid else {
+                    return Err(Error::new(format!(
+                        "IMAP server error: UID FETCH reply for mailbox {mailbox_path} is \
+                         missing the UID data item (RFC 3501 6.4.8 violation)."
+                    ))
+                    .set_kind(ErrorKind::ProtocolError));
+                };
                 let env_hash = generate_envelope_hash(&mailbox_path, &uid);
                 let Some(cenv) = env_lck.get_mut(&env_hash) else {
                     continue;
@@ -590,7 +612,18 @@ impl ImapConnection {
                         ..
                     } in v.iter_mut()
                     {
-                        let uid = uid.unwrap();
+                        // RFC 3501 §6.4.8: a reply to a `UID FETCH`
+                        // command must contain the UID data item. Without
+                        // it the envelope cannot be associated with a
+                        // message, so surface a protocol error instead of
+                        // panicking.
+                        let Some(uid) = *uid else {
+                            return Err(Error::new(format!(
+                                "IMAP server error: UID FETCH reply for mailbox {mailbox_path} is \
+                                 missing the UID data item (RFC 3501 6.4.8 violation)."
+                            ))
+                            .set_kind(ErrorKind::ProtocolError));
+                        };
                         let env = envelope.as_mut().unwrap();
                         let env_hash = generate_envelope_hash(&mailbox_path, &uid);
                         env.set_hash(env_hash);
@@ -655,7 +688,19 @@ impl ImapConnection {
             let (_, v, _) = protocol_parser::fetch_responses(&response)?;
             {
                 for FetchResponse { uid, flags, .. } in v {
-                    let uid = uid.unwrap();
+                    // RFC 3501 §6.4.8: a reply to a `UID FETCH` command
+                    // must contain the UID data item. Without it the
+                    // flags cannot be associated with a message, and
+                    // skipping the reply would (wrongly) mark the
+                    // message as removed in Step 4 below, so surface a
+                    // protocol error instead of panicking.
+                    let Some(uid) = uid else {
+                        return Err(Error::new(format!(
+                            "IMAP server error: UID FETCH reply for mailbox {mailbox_path} is \
+                             missing the UID data item (RFC 3501 6.4.8 violation)."
+                        ))
+                        .set_kind(ErrorKind::ProtocolError));
+                    };
                     let env_hash = generate_envelope_hash(&mailbox_path, &uid);
                     let Some(cenv) = env_lck.get_mut(&env_hash) else {
                         continue;

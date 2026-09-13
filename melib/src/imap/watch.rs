@@ -79,15 +79,42 @@ pub fn poll_with_examine(
     })
 }
 
+/// Whether `l` is IDLE keepalive/continuation noise: a continuation
+/// request (`+ ...`, or a bare `+` without the trailing space — see
+/// <https://github.com/modern-email/defects/issues/7>) or an untagged
+/// `* OK` status line.
+fn is_idling_noise(l: &[u8]) -> bool {
+    is_continuation_request(l)
+        || l.starts_with(b"* ok")
+        || l.starts_with(b"* Ok")
+        || l.starts_with(b"* OK")
+}
+
+/// Whether `l` is a continuation request line (`+ ...`, or a bare `+`
+/// without the trailing space).
+fn is_continuation_request(l: &[u8]) -> bool {
+    l.starts_with(b"+ ") || l == b"+" || l == b"+\r\n"
+}
+
 pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<BackendEvent>> {
-    // duration interval to send heartbeat
-    const _10_MINS: Duration = Duration::from_secs(10 * 60);
-    // duration interval to check other mailboxes for changes
-    const _5_MINS: Duration = Duration::from_secs(5 * 60);
+    // How long to wait for the tagged response to the IDLE terminator
+    // `DONE`. A server that is going to answer does so promptly; anything
+    // else is a wedged connection and the watch should restart with a new
+    // one.
+    const DONE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+    // How long to wait for the `+` continuation of an IDLE command after
+    // unexpected data has already arrived. Per RFC 2177 the server sends
+    // the continuation immediately, so data racing ahead of it means the
+    // continuation is in flight; only once it has arrived is it safe to
+    // end the idle with `DONE` (a DONE that races the continuation can be
+    // answered with a tagged BAD by servers whose idle state machine was
+    // not ready yet).
+    const IDLE_CONTINUATION_GRACE: Duration = Duration::from_secs(5);
     try_fn_stream(|emitter| async move {
         log::trace!("IDLE");
         /* IDLE only watches the connection's selected mailbox. We will IDLE on INBOX
-         * and every ~5 minutes wake up and poll the others */
+         * and every `watch_sweep_interval` (5 minutes by default, see
+         * `ImapServerConf::watch_sweep_interval`) wake up and poll the others */
         let ImapWatchKit {
             mut conn,
             main_conn,
@@ -126,6 +153,50 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
             }
         };
         let mailbox_hash = mailbox.hash();
+        // Single-session invariant: from this point on, the watched
+        // mailbox must be persistently selected only by this (watch)
+        // connection. Some servers stop pushing new-mail untagged `EXISTS`
+        // updates to an IDLE session while more than one session holds
+        // the mailbox selected, so the main connection (which the
+        // warm-start initial fetch leaves holding the selection) and any
+        // idle pooled connection must drop it. Transient selections by
+        // user actions (a manual refresh, opening a mailbox) are
+        // unaffected: they run on a connection and finish, and nothing
+        // re-selects the watched mailbox on a second connection while the
+        // watch is running.
+        {
+            let mut main_conn_lck = timeout(uid_store.timeout, main_conn.inner.lock()).await?;
+            if main_conn_lck.stream.as_ref().is_ok_and(|s| {
+                !matches!(s.current_mailbox.is(&mailbox_hash), MailboxSelection::None)
+            }) {
+                main_conn_lck.unselect().await?;
+            }
+        }
+        // Pooled connections can carry the same stale selection; clear
+        // those too. A busy slot belongs to an in-flight operation (a
+        // transient selection by definition), so skipping it is correct;
+        // a dead pooled connection has no server-side selection either,
+        // so its errors are only logged.
+        for slot in main_conn.pool.iter() {
+            let Some(mut pooled_conn) = slot.try_lock() else {
+                continue;
+            };
+            let Some(pooled_conn) = pooled_conn.as_mut() else {
+                continue;
+            };
+            if pooled_conn.stream.as_ref().is_ok_and(|s| {
+                !matches!(s.current_mailbox.is(&mailbox_hash), MailboxSelection::None)
+            }) {
+                if let Err(err) = pooled_conn.unselect().await {
+                    log::trace!(
+                        "{}: could not unselect the watched mailbox on a pooled connection: \
+                         {}",
+                        uid_store.account_name,
+                        err
+                    );
+                }
+            }
+        }
         let mut response = Vec::with_capacity(8 * 1024);
         let select_response = conn
             .examine_mailbox(mailbox_hash, &mut response, true)
@@ -153,14 +224,57 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                     .await;
             }
         }
+        {
+            // The server may have gained mail while no watcher was running
+            // (or it may never deliver untagged EXISTS updates at all);
+            // the EXAMINE response we just got may be the only signal.
+            // Compensate by re-syncing before entering IDLE.
+            let current_exists = mailbox.exists.lock().unwrap().len();
+            if select_response.exists > current_exists {
+                log::trace!(
+                    "IDLE compensating resync: mailbox {} reports {} EXISTS but {} are known \
+                     locally",
+                    mailbox.path(),
+                    select_response.exists,
+                    current_exists
+                );
+                if let Some(ev) = examine_updates(Clone::clone(&mailbox), &mut conn).await? {
+                    emitter.emit(ev).await;
+                }
+            }
+        }
         let mailboxes: HashMap<MailboxHash, ImapMailbox> = {
             let mailboxes_lck = timeout(uid_store.timeout, uid_store.mailboxes.lock()).await?;
             mailboxes_lck.clone()
         };
+        let heartbeat_interval = conn.server_conf.idle_heartbeat_interval;
+        // Interval of the periodic sweep of the other mailboxes on the
+        // main connection; read from the account configuration (default
+        // 300 seconds) so tests can force frequent sweeps.
+        let sweep_interval = conn.server_conf.watch_sweep_interval;
+        // Cap the DONE-response wait so a wedged server fails fast: if the
+        // user configured a shorter socket timeout, honor it too.
+        let done_timeout = conn
+            .server_conf
+            .timeout
+            .map(|t| t.min(DONE_RESPONSE_TIMEOUT))
+            .unwrap_or(DONE_RESPONSE_TIMEOUT);
+        // Cap the continuation grace the same way the DONE-response wait
+        // is capped, so a short user-configured socket timeout bounds it
+        // too.
+        let continuation_grace = conn
+            .server_conf
+            .timeout
+            .map(|t| t.min(IDLE_CONTINUATION_GRACE))
+            .unwrap_or(IDLE_CONTINUATION_GRACE);
         conn.send_command(CommandBody::Idle).await?;
         let mut blockn = ImapBlockingConnection::from(conn);
         let mut watch = Instant::now();
         let mut events = vec![];
+        // Whether the `+` continuation of the current IDLE session has been
+        // seen (the greeting after entering IDLE, or any later
+        // continuation/keepalive `+` line).
+        let mut continuation_seen = false;
         loop {
             if !events.is_empty() {
                 let events = BackendEvent::flatten(std::mem::take(&mut events));
@@ -168,7 +282,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                     emitter.emit(ev).await;
                 }
             }
-            let line = match timeout(Some(_10_MINS), blockn.read_line()).await {
+            let line = match timeout(Some(heartbeat_interval), blockn.read_line()).await {
                 Ok(Some(line)) => line,
                 Ok(None) => {
                     log::trace!("IDLE connection dropped: {:?}", blockn.err());
@@ -176,54 +290,156 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                 }
                 Err(_) => {
                     /* Timeout */
+                    log::trace!(
+                        "IDLE heartbeat timed out after {heartbeat_interval:?}; unprocessed \
+                         buffered bytes: {:?}",
+                        String::from_utf8_lossy(
+                            &blockn.buffered()[..blockn.buffered().len().min(200)]
+                        )
+                    );
                     blockn.conn.send_raw(b"DONE").await?;
-                    blockn
-                        .conn
-                        .read_response(&mut response, RequiredResponses::empty())
-                        .await?;
+                    if let Err(err) = timeout(
+                        Some(done_timeout),
+                        blockn
+                            .conn
+                            .read_response(&mut response, RequiredResponses::empty()),
+                    )
+                    .await
+                    {
+                        log::trace!("IDLE: no response to DONE within {done_timeout:?}: {err}");
+                        return Err(err);
+                    }
+                    // The server may never deliver untagged updates during
+                    // IDLE; the heartbeat wake-up may be the only chance to
+                    // notice new mail, so re-sync the watched mailbox before
+                    // going back to sleep.
+                    if let Some(ev) =
+                        examine_updates(Clone::clone(&mailbox), &mut blockn.conn).await?
+                    {
+                        emitter.emit(ev).await;
+                    }
                     blockn.conn.send_command(CommandBody::Idle).await?;
+                    continuation_seen = false;
                     let mut main_conn_lck = main_conn.lock().await?;
                     main_conn_lck.connect().await?;
                     continue;
                 }
             };
+            log::trace!(
+                "IDLE received data: {:?}",
+                String::from_utf8_lossy(&line[..line.len().min(300)])
+            );
             let now = Instant::now();
-            if now.duration_since(watch) >= _5_MINS {
+            if now.duration_since(watch) >= sweep_interval {
                 /* Time to poll all inboxes */
                 let mut main_conn_lck = main_conn.lock().await?;
-                for (_h, mailbox) in mailboxes.clone() {
+                for (h, mailbox) in mailboxes.clone() {
+                    // Single-session invariant: the watched mailbox is
+                    // persistently selected only on the watch connection,
+                    // which covers it via IDLE plus the heartbeat
+                    // compensation re-sync; examining it here would
+                    // re-select it on a second connection and can make the
+                    // server stop pushing new-mail updates to the IDLE
+                    // session.
+                    if h == mailbox_hash {
+                        continue;
+                    }
                     if let Some(ev) = examine_updates(mailbox, &mut main_conn_lck).await? {
                         events.push(ev);
                     }
                 }
                 watch = now;
             }
-            if line
-                .split_rn()
-                .filter(|l| {
-                    !l.starts_with(b"+ ")
-                        && !l.starts_with(b"* ok")
-                        && !l.starts_with(b"* Ok")
-                        && !l.starts_with(b"* OK")
-                })
-                .count()
-                == 0
-            {
+            if line.split_rn().filter(|l| !is_idling_noise(l)).count() == 0 {
+                if line.split_rn().any(is_continuation_request) {
+                    continuation_seen = true;
+                }
+                log::trace!("IDLE data was only keepalive/continuation lines, continuing");
                 continue;
             }
             {
+                log::trace!("IDLE push data received, sending DONE");
+                let mut pending_lines: Vec<Vec<u8>> = vec![line];
+                if !continuation_seen {
+                    // The push data raced the `+` continuation of this
+                    // IDLE session. Buffer it and only send DONE once the
+                    // continuation arrived (or the bounded grace expired:
+                    // servers answer IDLE with the continuation
+                    // immediately, so it is in flight; a wedged server is
+                    // then handled by the DONE-response read). No inline
+                    // sleeps: every wait below is bounded by
+                    // `continuation_grace`.
+                    log::trace!(
+                        "IDLE push data arrived before the `+` continuation; waiting up to \
+                         {continuation_grace:?} for it before sending DONE"
+                    );
+                    let grace_deadline = Instant::now() + continuation_grace;
+                    while !continuation_seen {
+                        let remaining = grace_deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        match timeout(Some(remaining), blockn.read_line()).await {
+                            Ok(Some(l)) => {
+                                if l.split_rn().any(is_continuation_request) {
+                                    log::trace!(
+                                        "IDLE continuation arrived within the grace period"
+                                    );
+                                    continuation_seen = true;
+                                } else if l.split_rn().any(|x| !is_idling_noise(x)) {
+                                    pending_lines.push(l);
+                                }
+                            }
+                            Ok(None) => {
+                                log::trace!(
+                                    "IDLE connection dropped while waiting for the \
+                                     continuation: {:?}",
+                                    blockn.err()
+                                );
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                /* Grace expired without the continuation; fall
+                                 * through and send DONE anyway. */
+                                break;
+                            }
+                        }
+                    }
+                }
                 blockn.conn.send_raw(b"DONE").await?;
-                blockn
+                let done_read = blockn
                     .conn
                     .read_response(&mut response, RequiredResponses::UNTAGGED)
-                    .await?;
-                for l in line.split_rn().chain(response.split_rn()) {
+                    .await;
+                if let Err(err) = &done_read {
+                    // Some servers answer the DONE terminator with a tagged
+                    // BAD when it raced the `+` continuation (their idle
+                    // state machine was not ready for it yet). That must not
+                    // be fatal: restart the IDLE flow below (process the
+                    // buffered push data and enter IDLE again) instead of
+                    // surfacing a fatal error. `read_response` leaves the
+                    // raw server reply in `response` when it converts a
+                    // BAD/NO reply into an error, so the BAD can be
+                    // recognized there.
+                    if matches!(
+                        super::protocol_parser::ImapResponse::try_from(response.as_slice()),
+                        Ok(super::protocol_parser::ImapResponse::Bad(_))
+                    ) {
+                        log::trace!(
+                            "IDLE: server answered DONE with a tagged BAD; restarting the \
+                             IDLE flow: {err}"
+                        );
+                    } else {
+                        return Err(err.clone());
+                    }
+                }
+                for l in pending_lines
+                    .iter()
+                    .flat_map(|l| l.split_rn())
+                    .chain(response.split_rn())
+                {
                     log::trace!("process_untagged {:?}", String::from_utf8_lossy(l));
-                    if l.starts_with(b"+ ")
-                        || l.starts_with(b"* ok")
-                        || l.starts_with(b"* Ok")
-                        || l.starts_with(b"* OK")
-                    {
+                    if is_idling_noise(l) {
                         continue;
                     }
                     if let Ok(Some(untagged_response)) =
@@ -235,6 +451,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                     }
                 }
                 blockn.conn.send_command(CommandBody::Idle).await?;
+                continuation_seen = false;
             }
         }
     })

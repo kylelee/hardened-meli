@@ -104,26 +104,20 @@ xbiff_file_path = "/tmp/xbiff"
 
 ## Viewing HTML e-mail
 
-By default `meli` tries to render HTML e-mail with `w3m`. You can override this 
-by setting the `pager.html_filter` setting. The default setting corresponds to:
+By default `meli` renders HTML e-mail with a built-in renderer: the HTML is 
+sanitized with an allow-list (ammonia) and converted to plain text with 
+`html2text` at the terminal's width — no external dependency is required.
+
+[w3m](https://github.com/tats/w3m) is optional: if you prefer an external 
+renderer, set the `pager.html_filter` setting to a command string and the 
+HTML of the e-mail is piped into that command's standard input:
 
 ```toml
 [pager]
 html_filter = "w3m -I utf-8 -T text/html -o display_link_number=1"
 ```
 
-The HTML of the e-mail is piped into `html_filter`'s standard input.
-
-`meli` also ships a bundled sanitizer binary, `meli_sanitize_html`, which is 
-built and installed alongside `meli`. It sanitizes HTML with an allow-list, 
-removing scripts and dangerous links before rendering:
-
-```toml
-[pager]
-html_filter = 'meli_sanitize_html | w3m -T text/html'
-```
-
-That is, the HTML is sanitized first, then handed over to `w3m` for rendering.
+That is, the HTML is handed over to the configured command for rendering.
 
 ## Externally refreshing e-mail accounts
 
