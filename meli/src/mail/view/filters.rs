@@ -264,7 +264,7 @@ impl ViewFilter {
                     },
                 )
             } else {
-                let render_width = termion::terminal_size()
+                let render_width = crossterm::terminal::size()
                     .map(|(cols, _)| cols as usize)
                     .unwrap_or(120)
                     .max(settings.pager.minimum_width)

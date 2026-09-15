@@ -30,4 +30,11 @@ cargo test -p meli
 echo "=== [5/5] cargo check --workspace ==="
 cargo check --workspace
 
+echo "=== [optional] private-CSI watchdog PTY regression ==="
+# Not one of the cargo gates: a PTY end-to-end check that needs tmux. The
+# script itself skips (exit 0) when tmux is unavailable.
+if command -v bash >/dev/null 2>&1 && [ -x ./scripts/test-private-csi-watchdog.sh ]; then
+    ./scripts/test-private-csi-watchdog.sh || exit 1
+fi
+
 echo "=== all gates passed ==="

@@ -82,12 +82,19 @@ impl InputHandler {
         let pipe = nix::unistd::dup(&self.pipe.0)
             .expect("Fatal: Could not dup() input pipe file descriptor");
         let tx = self.state_tx.clone();
+        let resize_tx = self.state_tx.clone();
         thread::Builder::new()
             .name("input-thread".to_string())
             .spawn(move || {
                 get_events(
                     |i| {
                         tx.send(ThreadEvent::Input(i)).unwrap();
+                    },
+                    |cols, rows| {
+                        log::trace!("terminal resized to {cols}x{rows}");
+                        resize_tx
+                            .send(ThreadEvent::UIEvent(UIEvent::Resize))
+                            .unwrap();
                     },
                     &rx,
                     &pipe,
@@ -427,7 +434,7 @@ impl State {
             Settings::new()?
         });
 
-        let (cols, rows) = termion::terminal_size().chain_err_summary(|| {
+        let (cols, rows) = crossterm::terminal::size().chain_err_summary(|| {
             "Could not determine terminal size. Are you running this on a tty? If yes, do you need \
              permissions for tty ioctls?"
         })?;
@@ -1238,6 +1245,11 @@ impl State {
                 let content = if let Some(spawn_fn) = spawn {
                     // Kill input thread so that spawned command can be sole receiver of stdin
                     self.context.input_kill();
+                    // Restore the original blocking stdin in case the
+                    // input thread has not exited its fd 0 nonblocking
+                    // swap yet: the child must not inherit the swapped
+                    // descriptor.
+                    crate::terminal::input::restore_stdin_for_child_spawn();
 
                     self.screen.switch_to_main_screen();
                     let result = command.spawn().map_err(Into::into).and_then(|child| {

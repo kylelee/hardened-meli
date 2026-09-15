@@ -488,12 +488,24 @@ impl Component for DisplayMessageBox {
                 return;
             }
 
-            self.cached_area = area.place_inside(
+            /* OSD placement via ratatui Layout (bridge helper): identical
+             * to the previous `place_inside(.., false, false)` bottom-right
+             * anchoring for every size, clamps included. */
+            self.cached_area = crate::terminal::ratatui_bridge::place_inside_via_layout(
+                area,
                 (width, area.height().min(msg_lines.len() + 4)),
                 false,
                 false,
             );
-            let box_displ_area = create_box(grid, self.cached_area);
+            /* Rounded OSD panel: the notification floats above all content,
+             * so it gets the overlay frame treatment — a rounded border in
+             * the notification colors over its raised panel background
+             * (status.notification bg), distinct from the content below. */
+            let box_displ_area = crate::terminal::ratatui_bridge::draw_rounded_frame(
+                grid,
+                self.cached_area,
+                noto_colors,
+            );
             for row in grid.bounds_iter(box_displ_area) {
                 for c in row {
                     grid[c]

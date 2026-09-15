@@ -1,0 +1,12 @@
+[profile.ci]
+fail-fast = false
+global-timeout = "10m"
+# Upstream 2e00c62e uses terminate-after = 2 (kills at 20s). This fork keeps
+# terminate-after = 4 (kills at 40s) because the fork's watch test has its own
+# WATCH_TEST_DEADLINE = 30s: we want nextest to surface the test's panic
+# diagnostics first, then terminate it, i.e. 40s > 30s.
+slow-timeout = { period = "10s", terminate-after = 4 }
+#
+# [[profile.ci.overrides]]
+# filter = 'test(test_notmuch_)'
+# success-output = "final"

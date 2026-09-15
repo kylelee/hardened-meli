@@ -20,7 +20,6 @@
  */
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use termion::color::{AnsiValue, Rgb as TermionRgb};
 
 /// The color of a `Cell`.
 ///
@@ -82,40 +81,6 @@ impl Color {
             Self::Rgb(_, _, _) => return None,
             Self::Default => 0x00,
         })
-    }
-
-    pub fn write_fg(self, stdout: &mut crate::StateStdout) -> std::io::Result<()> {
-        use std::io::Write;
-        match self {
-            Self::Default => write!(stdout, "{}", termion::color::Fg(termion::color::Reset)),
-            Self::Rgb(r, g, b) => write!(stdout, "{}", termion::color::Fg(TermionRgb(r, g, b))),
-            _ => write!(stdout, "{}", termion::color::Fg(self.as_termion())),
-        }
-    }
-
-    pub fn write_bg(self, stdout: &mut crate::StateStdout) -> std::io::Result<()> {
-        use std::io::Write;
-        match self {
-            Self::Default => write!(stdout, "{}", termion::color::Bg(termion::color::Reset)),
-            Self::Rgb(r, g, b) => write!(stdout, "{}", termion::color::Bg(TermionRgb(r, g, b))),
-            _ => write!(stdout, "{}", termion::color::Bg(self.as_termion())),
-        }
-    }
-
-    pub fn as_termion(self) -> AnsiValue {
-        match self {
-            b @ Self::Black
-            | b @ Self::Red
-            | b @ Self::Green
-            | b @ Self::Yellow
-            | b @ Self::Blue
-            | b @ Self::Magenta
-            | b @ Self::Cyan
-            | b @ Self::White
-            | b @ Self::Default => AnsiValue(b.as_byte().unwrap_or_default()),
-            Self::Byte(b) => AnsiValue(b),
-            Self::Rgb(_, _, _) => AnsiValue(0),
-        }
     }
 
     pub fn from_string_de<'de, D>(s: String) -> std::result::Result<Self, D::Error>

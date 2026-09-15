@@ -45,6 +45,9 @@ pub struct EditAttachments {
     pub buttons: ButtonWidget<FormButtonAction>,
     pub cursor: EditAttachmentCursor,
     pub dirty: bool,
+    /// Set when an inner attachment edit is accepted and written back to the
+    /// draft. Consumed by `Composer` when leaving the attachments mode.
+    pub edited: bool,
     pub id: ComponentId,
 }
 
@@ -66,6 +69,7 @@ impl EditAttachments {
             buttons,
             cursor: EditAttachmentCursor::Buttons,
             dirty: true,
+            edited: false,
             id: ComponentId::default(),
         }
     }
@@ -149,14 +153,36 @@ impl Component for EditAttachmentsRefMut<'_, '_> {
         } else if self.is_dirty() {
             let attachments_no = self.draft.attachments().len();
             let theme_default = crate::conf::value(context, "theme_default");
-            grid.clear_area(area, theme_default);
+            /* The attachments modal replaces the composer body as a floating
+             * panel: rounded frame in the tab focus vocabulary over the
+             * raised overlay background (status.notification), and the same
+             * selection highlight as the dialogs' options lists. */
+            let surface = crate::conf::value(context, "status.notification");
+            let mut border_attrs = crate::conf::value(context, "tab.focused");
+            border_attrs.bg = surface.bg;
+            if !context.settings.terminal.use_color() {
+                border_attrs.attrs |= Attr::REVERSE;
+            }
+            let mut highlighted = crate::conf::value(context, "widgets.options.highlighted");
+            if !context.settings.terminal.use_color() {
+                highlighted.attrs |= Attr::REVERSE;
+            }
+            grid.clear_area(
+                area,
+                ThemeAttribute {
+                    bg: surface.bg,
+                    ..theme_default
+                },
+            );
+            let inner_area =
+                crate::terminal::ratatui_bridge::draw_rounded_frame(grid, area, border_attrs);
             if attachments_no == 0 {
                 grid.write_string(
                     "No attachments",
                     theme_default.fg,
-                    theme_default.bg,
+                    surface.bg,
                     theme_default.attrs,
-                    area,
+                    inner_area,
                     None,
                     None,
                 );
@@ -168,22 +194,23 @@ impl Component for EditAttachmentsRefMut<'_, '_> {
                         if attachments_no == 1 { "" } else { "s" }
                     ),
                     theme_default.fg,
-                    theme_default.bg,
+                    surface.bg,
                     theme_default.attrs,
-                    area,
+                    inner_area,
                     None,
                     None,
                 );
                 for (i, a) in self.draft.attachments().iter().enumerate() {
-                    let bg = if let EditAttachmentCursor::AttachmentNo(u) = self.inner.cursor {
-                        if u == i {
-                            crate::conf::value(context, "highlight").bg
+                    let (fg, bg, attrs) =
+                        if let EditAttachmentCursor::AttachmentNo(u) = self.inner.cursor {
+                            if u == i {
+                                (theme_default.fg, highlighted.bg, highlighted.attrs)
+                            } else {
+                                (theme_default.fg, surface.bg, theme_default.attrs)
+                            }
                         } else {
-                            theme_default.bg
-                        }
-                    } else {
-                        theme_default.bg
-                    };
+                            (theme_default.fg, surface.bg, theme_default.attrs)
+                        };
                     grid.write_string(
                         &if let Some(name) = a.content_type().name() {
                             format!(
@@ -201,18 +228,20 @@ impl Component for EditAttachmentsRefMut<'_, '_> {
                                 melib::BytesDisplay(a.raw.len())
                             )
                         },
-                        theme_default.fg,
+                        fg,
                         bg,
-                        theme_default.attrs,
-                        area.skip(2, 2 + i),
+                        attrs,
+                        inner_area.skip(1, 2 + i),
                         None,
                         None,
                     );
                 }
             }
+            /* ButtonWidget::draw clears its whole area; give it a single
+             * row so it does not wipe the panel background below. */
             self.inner.buttons.draw(
                 grid,
-                area.skip_rows(3 + self.draft.attachments().len()),
+                inner_area.nth_row(3 + self.draft.attachments().len()),
                 context,
             );
             self.set_dirty(false);
@@ -242,6 +271,7 @@ impl Component for EditAttachmentsRefMut<'_, '_> {
                                 entry.content_type.set_tag(mime_type.as_str().to_string());
                             }
                         }
+                        self.inner.edited = true;
                         self.inner.mode = EditAttachmentMode::Overview;
                     }
                     Some(FormButtonAction::Cancel) => {

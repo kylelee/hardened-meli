@@ -21,24 +21,38 @@
 
 //! Terminal grid cells, keys, colors, etc.
 use std::io::{BufWriter, Write};
+use std::os::fd::AsFd;
+use std::time::{Duration, Instant};
 
 use melib::{log, uuid};
-use termion::{clear, cursor, raw::IntoRawMode, screen::AlternateScreen};
+
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    queue,
+    style::{
+        Attribute, Color as CrosstermColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
+    terminal::{
+        self, Clear, ClearType, DisableLineWrap, EnterAlternateScreen, LeaveAlternateScreen,
+    },
+};
+use nix::{
+    poll::{poll, PollFd, PollFlags, PollTimeout},
+    unistd::read,
+};
 
 use crate::{
     terminal::{
-        cells::CellBuffer, Alignment, BracketModeEnd, BracketModeStart, Cell, Color,
-        DisableAlternateScrollMode, DisableMouse, DisableSGRMouse, DisableWraparoundMode,
-        EnableAlternateScrollMode, EnableMouse, EnableSGRMouse, Pos, QueryBackground,
-        QueryForeground, QuerySynchronizedOutputSupport, RestoreWindowTitleIconFromStack,
-        RestoreWraparoundMode, SaveWindowTitleIconToStack, SaveWraparoundMode,
+        cells::CellBuffer, Alignment, Cell, Color, DisableAlternateScrollMode,
+        EnableAlternateScrollMode, EscapeSequenceQuery, Pos, QueryBackground, QueryForeground,
+        RestoreWindowTitleIconFromStack, RestoreWraparoundMode, SaveWindowTitleIconToStack,
+        SaveWraparoundMode,
     },
     Attr, Context, ThemeAttribute,
 };
 
-pub type StateStdout = termion::screen::AlternateScreen<
-    termion::raw::RawTerminal<BufWriter<Box<dyn Write + 'static>>>,
->;
+pub type StateStdout = BufWriter<Box<dyn Write + 'static>>;
 
 type DrawHorizontalSegmentFn =
     fn(&mut CellBuffer, &mut StateStdout, std::ops::Range<usize>, usize) -> ();
@@ -95,24 +109,19 @@ impl Tty {
         let Some(stdout) = self.stdout.as_mut() else {
             return self;
         };
+        if mouse {
+            queue!(stdout, EnableMouseCapture).expect("Could not write to stdout");
+        } else {
+            queue!(stdout, DisableMouseCapture).expect("Could not write to stdout");
+        }
         write!(
             stdout,
-            "{enable_mouse}{enable_sgr_mouse}{enable_alt_scroll}",
-            enable_mouse = if mouse {
-                EnableMouse.as_ref()
-            } else {
-                DisableMouse.as_ref()
-            },
-            enable_sgr_mouse = if mouse {
-                EnableSGRMouse.as_ref()
-            } else {
-                DisableSGRMouse.as_ref()
-            },
-            enable_alt_scroll = if mouse {
+            "{}",
+            if mouse {
                 EnableAlternateScrollMode.as_ref()
             } else {
                 DisableAlternateScrollMode.as_ref()
-            },
+            }
         )
         .expect("Could not write to stdout");
         _ = stdout.flush();
@@ -261,6 +270,67 @@ impl Clone for Screen<Virtual> {
     }
 }
 
+/// Translate a meli [`Color`] to its crossterm equivalent for the flush
+/// layer.
+///
+/// Named colors and `Color::Byte(_)` go through the 256-color indexed forms
+/// (`38;5;n` / `48;5;n`), `Color::Default` becomes `Reset` (`39`/`49`) and
+/// `Color::Rgb` keeps the direct-color form, byte-identical to the
+/// pre-migration writers.
+#[inline]
+fn crossterm_color(color: Color) -> CrosstermColor {
+    match color {
+        Color::Default => CrosstermColor::Reset,
+        Color::Rgb(r, g, b) => CrosstermColor::Rgb { r, g, b },
+        color => CrosstermColor::AnsiValue(color.as_byte().unwrap_or_default()),
+    }
+}
+
+/// Emit the SGR attribute transitions needed to move the terminal from
+/// `prev` to `next`.
+///
+/// Byte-compatible with the previous hand-written escape emitter: every
+/// transition is queued as a crossterm [`SetAttribute`] command in the same
+/// fixed attribute order (`BOLD`, `DIM`, `ITALICS`, `UNDERLINE`, `UNDERCURL`,
+/// `BLINK`, `REVERSE`, `HIDDEN`), except the `UNDERCURL` reset which has no
+/// crossterm equivalent (`Attribute` cannot express `CSI 4:0 m`) and keeps
+/// its explicit escape.
+///
+/// `Attr::FORCE_TEXT` is intentionally not handled here; it is not an SGR
+/// attribute and is rendered as a `U+FE0E` suffix after the cell symbol by
+/// the callers.
+fn write_attr_delta(next: Attr, prev: Attr, stdout: &mut StateStdout) {
+    macro_rules! transition {
+        ($bit:expr, $on:expr, $off:expr) => {
+            match (next.intersects($bit), prev.intersects($bit)) {
+                (true, true) | (false, false) => {}
+                (false, true) => queue!(stdout, SetAttribute($off)).unwrap(),
+                (true, false) => queue!(stdout, SetAttribute($on)).unwrap(),
+            }
+        };
+    }
+    transition!(Attr::BOLD, Attribute::Bold, Attribute::NormalIntensity);
+    transition!(Attr::DIM, Attribute::Dim, Attribute::NormalIntensity);
+    transition!(Attr::ITALICS, Attribute::Italic, Attribute::NoItalic);
+    transition!(
+        Attr::UNDERLINE,
+        Attribute::Underlined,
+        Attribute::NoUnderline
+    );
+    match (
+        next.intersects(Attr::UNDERCURL),
+        prev.intersects(Attr::UNDERCURL),
+    ) {
+        (true, true) | (false, false) => {}
+        // No crossterm `Attribute` maps to SGR `4:0` (underline style none).
+        (false, true) => write!(stdout, "\x1B[4:0m").unwrap(),
+        (true, false) => queue!(stdout, SetAttribute(Attribute::Undercurled)).unwrap(),
+    }
+    transition!(Attr::BLINK, Attribute::SlowBlink, Attribute::NoBlink);
+    transition!(Attr::REVERSE, Attribute::Reverse, Attribute::NoReverse);
+    transition!(Attr::HIDDEN, Attribute::Hidden, Attribute::NoHidden);
+}
+
 impl Screen<Tty> {
     #[inline]
     pub fn new(theme_default: ThemeAttribute) -> Self {
@@ -304,7 +374,7 @@ impl Screen<Tty> {
     /// On `SIGWNICH` the `State` redraws itself according to the new
     /// terminal size.
     pub fn update_size(&mut self) {
-        let termsize = termion::terminal_size().ok();
+        let termsize = terminal::size().ok();
         let termcols = termsize.map(|(w, _)| w);
         let termrows = termsize.map(|(_, h)| h);
         if termcols.unwrap_or(72) as usize != self.cols
@@ -338,68 +408,61 @@ impl Screen<Tty> {
             return;
         };
         let mouse = self.display.mouse;
+        queue!(stdout, LeaveAlternateScreen, Show, DisableBracketedPaste,)
+            .expect("Could not write to stdout");
         write!(
             stdout,
-            "{restore_wraparound}{}{}{}{}{disable_sgr_mouse}{disable_mouse}{disable_alt_scroll}",
-            termion::screen::ToMainScreen,
-            cursor::Show,
-            RestoreWindowTitleIconFromStack,
-            BracketModeEnd,
+            "{restore_title}{restore_wraparound}",
+            restore_title = RestoreWindowTitleIconFromStack,
             restore_wraparound = RestoreWraparoundMode,
-            disable_sgr_mouse = if mouse { DisableSGRMouse.as_ref() } else { "" },
-            disable_mouse = if mouse { DisableMouse.as_ref() } else { "" },
-            disable_alt_scroll = if mouse {
-                DisableAlternateScrollMode.as_ref()
-            } else {
-                ""
-            },
         )
         .unwrap();
+        if mouse {
+            queue!(stdout, DisableMouseCapture).expect("Could not write to stdout");
+            write!(stdout, "{}", DisableAlternateScrollMode).expect("Could not write to stdout");
+        }
         self.flush();
+        if let Err(err) = terminal::disable_raw_mode() {
+            log::warn!("Error while disabling raw mode: {err}");
+        }
         self.display.stdout = None;
     }
 
     pub fn switch_to_alternate_screen(&mut self, context: &crate::Context) {
+        terminal::enable_raw_mode().expect("Could not enable raw mode");
         let mut stdout = BufWriter::with_capacity(
             240 * 80,
             Box::new(std::io::stdout()) as Box<dyn std::io::Write>,
         );
 
+        write!(stdout, "{}", SaveWindowTitleIconToStack).unwrap();
+        queue!(
+            stdout,
+            EnterAlternateScreen,
+            Hide,
+            Clear(ClearType::All),
+            MoveTo(0, 0),
+            EnableBracketedPaste
+        )
+        .unwrap();
         write!(
-            &mut stdout,
-            "{save_title_to_stack}{}{}{}{save_wraparound}{disable_wraparound}{window_title}{}{}{enable_mouse}{enable_sgr_mouse}{enable_alt_scroll}",
-            termion::screen::ToAlternateScreen,
-            cursor::Hide,
-            clear::All,
-            cursor::Goto(1, 1),
-            BracketModeStart,
+            stdout,
+            "{save_wraparound}{window_title}",
             save_wraparound = SaveWraparoundMode,
-            disable_wraparound = DisableWraparoundMode,
-            save_title_to_stack = SaveWindowTitleIconToStack,
             window_title = if let Some(ref title) = context.settings.terminal.window_title {
                 format!("\x1b]2;{title}\x07")
             } else {
                 String::new()
-            },
-            enable_mouse = if self.display.mouse {
-                EnableMouse.as_ref()
-            } else {
-                ""
-            },
-            enable_sgr_mouse = if self.display.mouse {
-                EnableSGRMouse.as_ref()
-            } else {
-                ""
-            },
-            enable_alt_scroll = if self.display.mouse {
-                EnableAlternateScrollMode.as_ref()
-            } else {
-                ""
-            },
+            }
         )
         .unwrap();
+        queue!(stdout, DisableLineWrap).unwrap();
+        if self.display.mouse {
+            queue!(stdout, EnableMouseCapture).unwrap();
+            write!(stdout, "{}", EnableAlternateScrollMode).unwrap();
+        }
 
-        self.display.stdout = Some(AlternateScreen::from(stdout.into_raw_mode().unwrap()));
+        self.display.stdout = Some(stdout);
         self.flush();
     }
 
@@ -417,12 +480,7 @@ impl Screen<Tty> {
         xs: std::ops::Range<usize>,
         y: usize,
     ) {
-        write!(
-            stdout,
-            "{}",
-            cursor::Goto(xs.start as u16 + 1, (y + 1) as u16)
-        )
-        .unwrap();
+        queue!(stdout, MoveTo(xs.start as u16, y as u16)).unwrap();
         let mut current_fg = Color::Default;
         let mut current_bg = Color::Default;
         let mut current_attrs = Attr::DEFAULT;
@@ -446,15 +504,15 @@ impl Screen<Tty> {
                 }
             }
             if c.attrs() != current_attrs {
-                c.attrs().write(current_attrs, stdout).unwrap();
+                write_attr_delta(c.attrs(), current_attrs, stdout);
                 current_attrs = c.attrs();
             }
             if c.bg() != current_bg {
-                c.bg().write_bg(stdout).unwrap();
+                queue!(stdout, SetBackgroundColor(crossterm_color(c.bg()))).unwrap();
                 current_bg = c.bg();
             }
             if c.fg() != current_fg {
-                c.fg().write_fg(stdout).unwrap();
+                queue!(stdout, SetForegroundColor(crossterm_color(c.fg()))).unwrap();
                 current_fg = c.fg();
             }
             if !c.empty() {
@@ -475,18 +533,13 @@ impl Screen<Tty> {
         xs: std::ops::Range<usize>,
         y: usize,
     ) {
-        write!(
-            stdout,
-            "{}",
-            cursor::Goto(xs.start as u16 + 1, (y + 1) as u16)
-        )
-        .unwrap();
+        queue!(stdout, MoveTo(xs.start as u16, y as u16)).unwrap();
         let mut current_attrs = Attr::DEFAULT;
         write!(stdout, "\x1B[m").unwrap();
         for x in xs {
             let c = &grid[(x, y)];
             if c.attrs() != current_attrs {
-                c.attrs().write(current_attrs, stdout).unwrap();
+                write_attr_delta(c.attrs(), current_attrs, stdout);
                 current_attrs = c.attrs();
             }
             if !c.empty() {
@@ -502,15 +555,213 @@ impl Screen<Tty> {
         self.display.background_query
     }
 
+    /// Write the startup terminal queries to the tty and synchronously read
+    /// the replies: default background color (OSC 11) and default foreground
+    /// color (OSC 10).
+    ///
+    /// The replies are raw-read from stdin with a bounded total timeout of
+    /// [`PALETTE_QUERY_TIMEOUT`], parsed with the same logic the input thread
+    /// uses, and any leftover bytes are drained afterwards.
+    ///
+    /// This must run *before* the input thread is spawned (see
+    /// `State::new`): it consumes stdin in-band responses that would
+    /// otherwise be observed by the input parser as keystrokes. On silent or
+    /// slow terminals the read times out, so startup is never blocked for
+    /// longer than the query budget plus a bounded drain pass.
     pub fn do_background_query(&mut self) {
         let Some(stdout) = self.display.stdout.as_mut() else {
             return;
         };
-        write!(stdout, "{}", QueryBackground.as_ref()).expect("Could not write to stdout");
-        write!(stdout, "{}", QueryForeground.as_ref()).expect("Could not write to stdout");
-        write!(stdout, "{}", QuerySynchronizedOutputSupport.as_ref())
-            .expect("Could not write to stdout");
+        write_startup_queries(stdout);
         _ = stdout.flush();
+
+        let mut palette = (None, None);
+        query_terminal_palette(std::io::stdin(), &mut palette, PALETTE_QUERY_TIMEOUT);
+        if let (Some(fg), Some(bg)) = palette {
+            log::trace!(
+                "compute_scheme_contrast(fg {fg:?}, bg {bg:?}) = {:?}",
+                Color::compute_scheme_contrast(fg, bg)
+            );
+        }
+        log::debug!(
+            "Startup terminal palette query resolved: foreground = {:?}, background = {:?}",
+            palette.0,
+            palette.1
+        );
+        self.display.background_query = palette.1;
+        drain_stdin();
+    }
+}
+
+/// Write the startup terminal queries to `out`: first the default background
+/// color (OSC 11) query, then the default foreground color (OSC 10) query.
+fn write_startup_queries(out: &mut impl Write) {
+    write!(out, "{}", QueryBackground.as_ref()).expect("Could not write to stdout");
+    write!(out, "{}", QueryForeground.as_ref()).expect("Could not write to stdout");
+}
+
+/// Total time budget for the synchronous startup terminal palette queries.
+const PALETTE_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
+/// Maximum size of a single reply before it is treated as garbage: replies
+/// are a few dozen bytes.
+const MAX_REPLY_LEN: usize = 1024;
+/// Upper bound for the post-query stdin drain pass.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Raw-read replies to the startup palette queries from `fd` for at most
+/// `timeout` in total, and parse them into `palette`.
+///
+/// Returns as soon as both the foreground and background replies have been
+/// parsed, on EOF/error, or when the timeout expires.
+fn query_terminal_palette(
+    fd: impl AsFd,
+    palette: &mut (Option<Color>, Option<Color>),
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    let mut buf: Vec<u8> = Vec::with_capacity(3 * 32);
+    let mut chunk = [0u8; 512];
+    while palette.0.is_none() || palette.1.is_none() {
+        let Some(poll_timeout) = deadline
+            .checked_duration_since(Instant::now())
+            .and_then(|remaining| PollTimeout::try_from(remaining).ok())
+        else {
+            break;
+        };
+        let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+        match poll(&mut fds, poll_timeout) {
+            Ok(0) => break, // timed out
+            Ok(_)
+                if fds[0]
+                    .revents()
+                    .is_some_and(|revents| revents.contains(PollFlags::POLLIN)) =>
+            {
+                match read(fd.as_fd(), &mut chunk) {
+                    Ok(0) | Err(_) => break, // EOF or error
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        parse_palette_replies(&mut buf, palette);
+                    }
+                }
+            }
+            _ => break, // poll error or unexpected revents
+        }
+    }
+}
+
+/// Scan `buf` for complete replies to the startup palette queries and update
+/// `palette` with the parsed values, logging each parsed reply.
+///
+/// Complete replies are removed from `buf`; a trailing partial reply is kept
+/// for the next read, and bytes that cannot belong to a reply are discarded.
+fn parse_palette_replies(buf: &mut Vec<u8>, palette: &mut (Option<Color>, Option<Color>)) {
+    loop {
+        // Replies are escape sequences; drop anything before the first ESC.
+        let Some(esc) = buf.iter().position(|&b| b == 0x1b) else {
+            buf.clear();
+            return;
+        };
+        buf.drain(..esc);
+        if buf.len() < 2 {
+            return; // might be a partial reply
+        }
+        match buf[1] {
+            b']' => {
+                let Some((idx, term_len)) = find_osc_terminator(buf) else {
+                    if buf.len() > MAX_REPLY_LEN {
+                        // Malformed, unterminated reply: drop the ESC byte and rescan.
+                        buf.remove(0);
+                    } else {
+                        return; // partial reply, wait for more bytes
+                    }
+                    continue;
+                };
+                let reply = String::from_utf8_lossy(&buf[..idx]).into_owned();
+                buf.drain(..idx + term_len);
+                if let Some(bg) = QueryBackground::parse(&reply) {
+                    log::trace!("EscapeSequence parsed bg {bg:?}");
+                    palette.1 = Some(bg);
+                } else if let Some(fg) = QueryForeground::parse(&reply) {
+                    log::trace!("EscapeSequence parsed fg {fg:?}");
+                    palette.0 = Some(fg);
+                } else {
+                    log::trace!("EscapeSequence unknown");
+                }
+            }
+            b'[' => {
+                if buf.len() < 3 {
+                    return; // might be a partial reply
+                }
+                let Some(idx) = find_csi_final_byte(buf) else {
+                    if buf.len() > MAX_REPLY_LEN {
+                        buf.remove(0);
+                    } else {
+                        return; // partial reply, wait for more bytes
+                    }
+                    continue;
+                };
+                // Unknown CSI reply (no palette consumer): consume the whole
+                // sequence so the scan can proceed to any palette replies
+                // that follow it within the bounded read window.
+                buf.drain(..idx + 1);
+            }
+            _ => {
+                // Not an OSC/CSI sequence; skip the stray ESC byte and rescan.
+                buf.remove(0);
+            }
+        }
+    }
+}
+
+/// Find the terminator (BEL `\x07` or string terminator `ESC \\`) of an OSC
+/// sequence in `buf` starting after the `ESC ]` prefix. Returns the index of
+/// the first terminator byte and its length.
+fn find_osc_terminator(buf: &[u8]) -> Option<(usize, usize)> {
+    let mut i = 2;
+    while i < buf.len() {
+        match buf[i] {
+            0x07 => return Some((i, 1)),
+            0x1b if i + 1 == buf.len() => return None, // need one more byte to decide
+            0x1b if buf.get(i + 1) == Some(&b'\\') => return Some((i, 2)),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the final byte of a CSI sequence in `buf` (the first byte in
+/// `0x40..=0x7E` after the `ESC [` prefix).
+fn find_csi_final_byte(buf: &[u8]) -> Option<usize> {
+    buf[2..]
+        .iter()
+        .position(|b| (0x40..=0x7E).contains(b))
+        .map(|i| i + 2)
+}
+
+/// Non-blockingly read and discard any bytes still pending on stdin, so that
+/// no leftover terminal-reply bytes are observed by the input thread as user
+/// input.
+fn drain_stdin() {
+    let stdin = std::io::stdin();
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    let mut chunk = [0u8; 4096];
+    while Instant::now() < deadline {
+        let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
+        match poll(&mut fds, PollTimeout::ZERO) {
+            Ok(0) => return,
+            Ok(_)
+                if fds[0]
+                    .revents()
+                    .is_some_and(|revents| revents.contains(PollFlags::POLLIN)) =>
+            {
+                match read(stdin.as_fd(), &mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+            }
+            _ => return,
+        }
     }
 }
 
@@ -1355,5 +1606,104 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_parse_palette_replies_osc_replies() {
+        let mut palette = (None, None);
+        let mut buf = b"\x1b]11;rgb:ffff/0000/0000\x1b\\\x1b]10;rgb:0000/ffff/0000\x07".to_vec();
+        parse_palette_replies(&mut buf, &mut palette);
+        assert_eq!(palette.1, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(palette.0, Some(Color::Rgb(0, 255, 0)));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_parse_palette_replies_split_across_reads() {
+        let mut palette = (None, None);
+        let mut buf = b"\x1b]11;rgb:ffff/".to_vec();
+        parse_palette_replies(&mut buf, &mut palette);
+        assert_eq!(palette, (None, None));
+        buf.extend_from_slice(b"ffff/ffff\x1b\\");
+        parse_palette_replies(&mut buf, &mut palette);
+        assert_eq!(palette.1, Some(Color::Rgb(255, 255, 255)));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_parse_palette_replies_rejects_garbage() {
+        let mut palette = (None, None);
+        // Invalid UTF-8 and sequences with missing/invalid payload: parsing
+        // must reject them without panicking and keep the default colors.
+        let mut buf = b"garbage \xff\xfe \x1b[?9999z\x1b]10;notacolor\x07\x1b]11\x1b\\".to_vec();
+        parse_palette_replies(&mut buf, &mut palette);
+        assert_eq!(palette, (None, None));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_parse_palette_replies_mixed_with_unknown_csi() {
+        let mut palette = (None, None);
+        // A late DECRPM-style reply interleaved with the palette replies:
+        // it must be consumed without disturbing the palette parsing.
+        let mut buf =
+            b"\x1b[?2026;2$y\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:1c1c/1b1b/1919\x07"
+                .to_vec();
+        parse_palette_replies(&mut buf, &mut palette);
+        assert_eq!(palette.0, Some(Color::Rgb(255, 255, 255)));
+        assert_eq!(palette.1, Some(Color::Rgb(28, 27, 25)));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_write_startup_queries() {
+        let mut out = Vec::new();
+        write_startup_queries(&mut out);
+        // Background (OSC 11) query first, then foreground (OSC 10).
+        assert_eq!(out, b"\x1b]11;?\x1b\\\x1b]10;?\x1b\\");
+        // The Synchronized-Output support probe (`CSI ? 2026 $ p`) must not
+        // be revived: its late replies stall the input parser.
+        let needle = b"\x1b[?2026$p";
+        assert!(!out.windows(needle.len()).any(|w| w == needle));
+    }
+
+    #[test]
+    fn test_query_terminal_palette_mocked_reply() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer
+            .write_all(b"\x1b]11;rgb:ffff/0000/0000\x1b\\")
+            .unwrap();
+        writer.write_all(b"\x1b]10;rgb:0000/0000/ffff\x07").unwrap();
+        drop(writer); // EOF after the replies
+
+        let mut palette = (None, None);
+        query_terminal_palette(&reader, &mut palette, Duration::from_secs(2));
+        assert_eq!(palette.1, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(palette.0, Some(Color::Rgb(0, 0, 255)));
+    }
+
+    #[test]
+    fn test_query_terminal_palette_silent_timeout() {
+        use std::os::unix::net::UnixStream;
+
+        // A terminal that never replies must not block the startup read loop
+        // for longer than the query budget.
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        let mut palette = (None, None);
+        let start = Instant::now();
+        query_terminal_palette(&reader, &mut palette, PALETTE_QUERY_TIMEOUT);
+        let elapsed = start.elapsed();
+        assert_eq!(palette, (None, None));
+        assert!(
+            elapsed >= PALETTE_QUERY_TIMEOUT - Duration::from_millis(10),
+            "query returned too early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "query blocked too long: {elapsed:?}"
+        );
     }
 }

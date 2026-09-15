@@ -5,14 +5,14 @@ Maintainer: Manos Pitsidianakis <manos@pitsidianak.is>
 Build-Depends: debhelper-compat (=13), mandoc (>=1.14.4-1), quilt, libsqlite3-dev
 Standards-Version: 4.1.4
 Rules-Requires-Root: no
-Vcs-Git: https://git.meli-email.org/meli/meli.git
-Vcs-Browser: https://git.meli-email.org/meli/meli
+Vcs-Git: https://github.com/meli/meli.git
+Vcs-Browser: https://github.com/meli/meli
 Homepage: https://meli-email.org
 
 Package: meli
 Architecture: any
 Depends: ${misc:Depends}, ${shlibs:Depends}
-Recommends: xdg-utils (>=1.1.3-1), w3m, mailcap
+Recommends: xdg-utils (>=1.1.3-1), mailcap
 Suggests: libnotmuch5, notmuch, rss2email, xterm, neovim, msmtp
 Provides: mail-reader, imap-client
 Description: terminal mail client.

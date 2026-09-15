@@ -1,3 +1,26 @@
+meli (0.9.0-2) trixie; urgency=medium
+
+  * Migrate the terminal UI backend from termion to crossterm 0.29 for
+    terminal I/O and ratatui 0.30 for layout and border rendering; termion
+    is no longer a dependency.
+  * Ship crossterm 0.29 from the in-tree vendor/ directory through a
+    [patch.crates-io] override; the patch stops unrecognized private-mode
+    CSI replies from stalling the input parser.
+  * Refresh the default look of every screen: rounded pane frames, focus
+    highlighting, and unified selection styling with zebra-striped rows.
+  * Raise the minimum supported Rust version (MSRV) to 1.88.0. No
+    configuration options or shortcuts were added, removed or changed.
+
+ -- Kyle Lee <k@example.com>  Mon, 14 Sep 2026 13:42:23 +0000
+
+meli (0.9.0-1) trixie; urgency=medium
+
+  * Raise the minimum supported Rust version (MSRV) to 1.88.0.
+  * Add ratatui 0.30.2 and crossterm 0.29 dependencies in preparation of
+    the terminal UI backend migration (termion is still in use).
+
+ -- Kyle Lee <k@example.com>  Mon, 14 Sep 2026 09:14:51 +0000
+
 meli (0.8.13-1) trixie; urgency=high
 
   This release:

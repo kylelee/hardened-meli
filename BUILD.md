@@ -9,8 +9,15 @@ PREFIX=~/.local make install
 Available subcommands for `make` are listed with `make help`.
 The Makefile *should* be POSIX portable and not require a specific `make` version.
 
-`meli` requires rust version 1.80.0 or later and rust's package manager, Cargo.
+`meli` requires Rust and Rust's package manager, Cargo.
+
 Information on how to get it on your system can be found here: <https://doc.rust-lang.org/cargo/getting-started/installation.html>
+
+The terminal UI renders with `ratatui` 0.30 and talks to the terminal through
+`crossterm` 0.29 from `crates.io`. Offline builds (`cargo build --offline`)
+work when the dependencies have been fetched into the local cargo cache
+beforehand (`cargo fetch` with network access, or copying the cache); the
+committed `Cargo.lock` pins the exact versions.
 
 With Cargo available, the project can be built with `make` and the resulting binary will then be found under `target/release/meli`.
 Run `make install` to install the binary and man pages.

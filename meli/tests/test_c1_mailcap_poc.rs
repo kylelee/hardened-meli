@@ -39,15 +39,34 @@
 //! fixed `meli/src/mailcap.rs` because it lives in the `meli` binary crate
 //! and cannot be imported from integration tests (`%s` exercises the
 //! meli-internal temp file API and is omitted from the replica). Ground
-//! truth for execution proofs is marker-file (non-)existence under
-//! `/tmp/opencode/`; markers are removed before and after each run.
+//! truth for execution proofs is marker-file (non-)existence under a
+//! unique per-run directory in the system temp dir; markers are removed
+//! before and after each run.
 
 use std::path::Path;
 
 use melib::email::AttachmentBuilder;
 use melib::utils::fnmatch::Fnmatch;
 
-const MARKER_DIR: &str = "/tmp/opencode/poc-b";
+/// Unique, per-test marker directory under the system temp dir. The test
+/// process id plus a per-test tag keeps concurrent test runs on the same
+/// machine from colliding; `/tmp/opencode` may be a read-only mount.
+fn marker_dir(tag: &str) -> String {
+    std::env::temp_dir()
+        .join(format!("meli-c1-poc-{}-{tag}", std::process::id()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Removes the marker directory tree when dropped, so tests clean up after
+/// themselves even when an assertion fails mid-test.
+struct MarkerGuard(String);
+
+impl Drop for MarkerGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// Replica of `split_command!` in `meli/src/mailcap.rs`.
 macro_rules! split_command {
@@ -173,8 +192,10 @@ fn c1_content_type_token_hardening() {
 
 #[test]
 fn c1_percent_param_substitution_is_inert() {
-    std::fs::create_dir_all(MARKER_DIR).unwrap();
-    let marker = format!("{MARKER_DIR}/c1_exec_param");
+    let dir = marker_dir("param");
+    let _guard = MarkerGuard(dir.clone());
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = format!("{dir}/c1_exec_param");
     let _ = std::fs::remove_file(&marker);
 
     // Attacker mail: command substitution in a Content-Type param value.
@@ -209,8 +230,10 @@ fn c1_percent_param_substitution_is_inert() {
 
 #[test]
 fn c1_percent_t_substitution_is_inert() {
-    std::fs::create_dir_all(MARKER_DIR).unwrap();
-    let marker = format!("{MARKER_DIR}/c1_exec_t");
+    let dir = marker_dir("t");
+    let _guard = MarkerGuard(dir.clone());
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = format!("{dir}/c1_exec_t");
     let _ = std::fs::remove_file(&marker);
 
     // The original PoC payload injected an absolute path into the subtype;
@@ -223,7 +246,7 @@ fn c1_percent_t_substitution_is_inert() {
     // A payload made only of legal token bytes (backticks, `${IFS}`) still
     // parses through; quoting must neutralize it. `sh` is spawned with the
     // marker dir as cwd so the slash-free payload is observable there.
-    let marker = format!("{MARKER_DIR}/c1_exec_t_rel");
+    let marker = format!("{dir}/c1_exec_t_rel");
     let _ = std::fs::remove_file(&marker);
     let raw = b"Content-Type: text/x`touch${IFS}c1_exec_t_rel`\r\n\r\nbody";
     let a = AttachmentBuilder::new(raw).build();
@@ -241,7 +264,7 @@ fn c1_percent_t_substitution_is_inert() {
     let _status = std::process::Command::new("sh")
         .arg("-c")
         .arg(&cmd_string)
-        .current_dir(MARKER_DIR)
+        .current_dir(&dir)
         .status()
         .expect("spawn sh");
     assert!(
@@ -249,27 +272,29 @@ fn c1_percent_t_substitution_is_inert() {
         "backtick command must NOT execute via %t"
     );
     let _ = std::fs::remove_file(&marker);
-    let _ = std::fs::remove_file(format!("{MARKER_DIR}/c1_exec_t"));
+    let _ = std::fs::remove_file(format!("{dir}/c1_exec_t"));
 }
 
 #[test]
 fn c1_single_quote_escape_form() {
-    std::fs::create_dir_all(MARKER_DIR).unwrap();
-    let marker = "/tmp/opencode/c1-marker";
-    let _ = std::fs::remove_file(marker);
+    let dir = marker_dir("escape");
+    let _guard = MarkerGuard(dir.clone());
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = format!("{dir}/c1-marker");
+    let _ = std::fs::remove_file(&marker);
 
     // Attacker mail: param value attempting to break out of single quotes.
-    let value = "x'; touch /tmp/opencode/c1-marker; '";
+    let value = format!("x'; touch {marker}; '");
     let raw = format!("Content-Type: application/pdf; exec=\"{value}\"\r\n\r\n%PDF-1.4 fake");
     let a = AttachmentBuilder::new(raw.as_bytes()).build();
     let cmd_string = build_cmd_string("pdfviewer --data %{exec}", &a);
     eprintln!("c1 escape-form cmd_string: {cmd_string}");
 
     // POSIX single-quote escaping: the value `x'; touch ...; '` must
-    // appear as `'x'\''; touch /tmp/opencode/c1-marker; '\'''`.
+    // appear as `'x'\''; touch <marker>; '\'''`.
     assert_eq!(
         cmd_string,
-        "pdfviewer --data 'x'\\''; touch /tmp/opencode/c1-marker; '\\'''"
+        format!("pdfviewer --data 'x'\\''; touch {marker}; '\\'''")
     );
 
     let _status = std::process::Command::new("sh")
@@ -278,7 +303,7 @@ fn c1_single_quote_escape_form() {
         .status()
         .expect("spawn sh");
     assert!(
-        !Path::new(marker).exists(),
+        !Path::new(&marker).exists(),
         "quote-breakout attempt must NOT create the marker file"
     );
     let _ = std::fs::remove_file(marker);

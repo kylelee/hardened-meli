@@ -3,11 +3,11 @@
 
 # lint with $ shellcheck -s sh -S style
 
-: "${GITEA_TOKEN?"Environment variable GITEA_TOKEN must be set."}"
+: "${GITHUB_TOKEN?"Environment variable GITHUB_TOKEN must be set."}"
 
 PREVIOUS_TAG_VERSION="$(git describe --abbrev=0)"
-GITEA_API_URL="https://git.meli-email.org"
-export PREVIOUS_TAG_VERSION GITEA_API_URL
+GITHUB_API_URL="https://api.github.com"
+export PREVIOUS_TAG_VERSION GITHUB_API_URL
 
 printf "Next release assumed to be for git range %s..HEAD.\n" "${PREVIOUS_TAG_VERSION}"  >&2
 printf "Executing friends script to get release contributors.\n" >&2

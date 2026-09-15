@@ -97,6 +97,8 @@ pub mod server {
         pub mailbox_state: State<mailbox::MailboxObject>,
         pub email_state_changes:
             IndexMap<State<email::EmailObject>, StateChange<email::EmailObject>>,
+        /// Error response types the server has replied with, for assertions.
+        pub error_responses: Vec<String>,
         pub session: Session,
     }
 
@@ -178,6 +180,7 @@ pub mod server {
                 email_state: State::new_random(),
                 mailbox_state: State::new_random(),
                 email_state_changes: indexmap::indexmap! {},
+                error_responses: vec![],
                 session,
             }
         }
@@ -323,6 +326,8 @@ pub mod server {
                                                  have: {method_responses:?}",
                                                 method_responses = responses.method_responses
                                             );
+                                            self.error_responses
+                                                .push("invalidResultReference".to_string());
                                             responses.method_responses.insert(
                                                 id.clone(),
                                                 serde_json::json! {["error",{"type":"invalidResultReference"},id]},
@@ -332,8 +337,11 @@ pub mod server {
                                         if prev_response[0].as_str() == Some("error") {
                                             eprintln!(
                                                 "{id} {type}: resultOf={result_of:?} was error: \
-                                                 {prev_response:?}"
+                                                 {prev_response:?}",
+                                                prev_response = prev_response
                                             );
+                                            self.error_responses
+                                                .push("invalidResultReference".to_string());
                                             responses.method_responses.insert(
                                                 id.clone(),
                                                 serde_json::json! {["error",{"type":"invalidResultReference"},id]},
@@ -396,42 +404,48 @@ pub mod server {
                             let changes: Changes<email::EmailObject> =
                                 serde_json::value::from_value(body).unwrap();
                             eprintln!("Parsed Email/changes object {changes:?}");
-                            let Some(pos) = self
+                            let mut created = IndexSet::new();
+                            let mut updated = IndexSet::new();
+                            let mut destroyed = IndexSet::new();
+
+                            if let Some(pos) = self
                                 .email_state_changes
                                 .keys()
                                 .position(|k| *k == changes.since_state)
-                            else {
+                            {
+                                for (_, change) in &self.email_state_changes[pos..] {
+                                    match change {
+                                        StateChange::Created(id) => {
+                                            _ = created.insert(id.clone());
+                                        }
+                                        StateChange::Updated(id) => {
+                                            if !created.contains(id) {
+                                                _ = updated.insert(id.clone());
+                                            }
+                                        }
+                                        StateChange::Destroyed(id) => {
+                                            created.shift_remove(id);
+                                            updated.shift_remove(id);
+                                            destroyed.insert(id.clone());
+                                        }
+                                    }
+                                }
+                            } else if changes.since_state == self.email_state {
+                                // No changes
+                            } else {
                                 eprintln!(
                                     "Email/changes since_state={since_state:?} not found, have: \
                                      {email_state_changes:?}",
                                     since_state = changes.since_state,
                                     email_state_changes = self.email_state_changes
                                 );
+                                self.error_responses
+                                    .push("cannotCalculateChanges".to_string());
                                 responses.method_responses.insert(
                                     id.clone(),
                                     serde_json::json! {["error",{"type":"cannotCalculateChanges"},id]},
                                 );
                                 continue;
-                            };
-                            let mut created = IndexSet::new();
-                            let mut updated = IndexSet::new();
-                            let mut destroyed = IndexSet::new();
-                            for (_, change) in &self.email_state_changes[pos..] {
-                                match change {
-                                    StateChange::Created(id) => {
-                                        _ = created.insert(id.clone());
-                                    }
-                                    StateChange::Updated(id) => {
-                                        if !created.contains(id) {
-                                            _ = updated.insert(id.clone());
-                                        }
-                                    }
-                                    StateChange::Destroyed(id) => {
-                                        created.shift_remove(id);
-                                        updated.shift_remove(id);
-                                        destroyed.insert(id.clone());
-                                    }
-                                }
                             }
                             let response: ChangesResponse<email::EmailObject> = ChangesResponse {
                                 account_id: changes.account_id,
@@ -972,6 +986,14 @@ hello world.
                 panic!("Expected Remove event, got: {refresh_event:?}");
             };
             assert_eq!(env_hash, env_1.hash());
+        }
+        {
+            let error_responses = server_state.lock().unwrap().error_responses.clone();
+            assert!(
+                error_responses.is_empty(),
+                "server replied with error responses during the test, expected none (in \
+                 particular no cannotCalculateChanges): {error_responses:?}"
+            );
         }
         server_event_sender
             .unbounded_send(ServerEvent::Quit)

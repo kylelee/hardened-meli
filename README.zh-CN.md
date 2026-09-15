@@ -6,11 +6,11 @@
 
 **安全加强和用户体验优化的 meli 版本 —— BSD/Linux/macos 终端邮件客户端，支持多账户与 Maildir / mbox / notmuch / IMAP / JMAP / NNTP (Usenet)。**
 
-基于上游加固（hardened）而来：<https://github.com/meli/meli> <https://gitlab.com/meli-project/meli>
+基于上游加固（hardened）而来：<https://github.com/meli/meli>
 
 ## 亮点介绍
 
-本仓库是 meli 的增强版分支（fork），在原版基础上完成了全面的安全审计、加固（harden）与重构，并针对实际使用体验做了多项优化。三大核心亮点：
+本仓库是 meli 的增强版分支（fork），在原版基础上完成了全面的安全审计、加固（harden）与重构，并针对实际使用体验做了多项优化。四大核心亮点：
 
 ### 1. 安全加固：四道防线抵御邮件攻击
 
@@ -19,7 +19,7 @@
 1. **解析容错**：IMAP ENVELOPE 字段严格解析失败时，自动回退到原始字节兜底解析——任何单个畸形字段都不会中止整个邮箱的拉取；
 2. **摄入净化**：地址字段（From/Sender/Reply-To/To/Cc/Bcc）写入缓存前统一校验与归一化，可修复的自动加引号修复并复验，不可修复的替换为安全占位符——新数据永远不会产生"毒行"；
 3. **可见隔离**：历史遗留的坏缓存行不再触发整库重置，而是逐行隔离到 `invalid_envelopes` 表，以占位邮件可见呈现（附错误详情头），服务器重取后自动自愈——杜绝"一封毒邮件核弹整个缓存"。
-4. **HTML 清洗**：HTML 邮件正文由内置 HTML 渲染器处理——先经 ammonia 白名单清洗（仅保留安全的结构标签与 http/https/mailto 链接，脚本、样式、事件属性、注释及 `javascript:`/`data:` 等危险 URL 一律剔除），再以终端宽度经 html2text 转为纯文本，全部在进程内完成、无外部依赖（独立清洗二进制已取消，功能并入 `meli`），恶意 HTML 邮件再也无法向渲染视图夹带脚本或跟踪链接。[w3m](https://github.com/tats/w3m) 现为可选：配置 `pager.html_filter` 命令字符串即可改用外部程序渲染。
+4. **HTML 清洗**：HTML 邮件正文由内置 HTML 渲染器处理——先经 ammonia 白名单清洗（仅保留安全的结构标签与 http/https/mailto 链接，脚本、样式、事件属性、注释及 `javascript:`/`data:` 等危险 URL 一律剔除），再以终端宽度经 html2text 转为纯文本，全部在进程内完成、无外部依赖（独立清洗二进制已取消，功能并入 `meli`），恶意 HTML 邮件再也无法向渲染视图夹带脚本或跟踪链接。
 
 ### 2. 用户体验：方向键上下左右浏览邮箱全部内容
 
@@ -28,6 +28,10 @@
 ### 3. 用户体验：缓存优先，启动近乎秒开
 
 IMAP 启动全面改为缓存优先（cache-first）：邮件列表与正文先从本地 sqlite 缓存即时渲染（stale-while-revalidate，网络增量后台静默同步）；邮箱文件夹列表持久化缓存，启动不再等待联网检查；配合 STATUS 计数短路（RFC 4549）与 MSN 索引持久化，消除启动期全量扫描命令。真实账号（QQ 邮箱 INBOX ~5000 封）实测：热启动等待从分钟级降至秒级（中位约 2.7 秒，最快约 1 秒）。
+
+### 4. 界面重构：使用漂亮的 ratatui 库，美感极大提升
+
+使用漂亮的 [ratatui](https://ratatui.rs) 库重构了整个产品交互界面——布局求解、边框绘制与对话框/通知（OSD）定位全部经由 ratatui 的 `Layout`、`Block` 原语，终端 I/O 同步迁移到 crossterm——极大的提升了美感。
 
 **目录**：
 
@@ -54,8 +58,6 @@ IMAP 启动全面改为缓存优先（cache-first）：邮件列表与正文先�
 ### 运行时依赖
 
 HTML 邮件开箱即由内置渲染器渲染（ammonia 清洗 + html2text 按终端宽度转纯文本），无需任何外部依赖。
-[w3m](https://github.com/tats/w3m) 现为可选：仅在显式配置 `pager.html_filter` 命令字符串时才会使用，例如
-`html_filter = "w3m -I utf-8 -T text/html"`。
 
 ## 构建
 
@@ -64,6 +66,8 @@ HTML 邮件开箱即由内置渲染器渲染（ammonia 清洗 + html2text 按终
 运行 `make help` 查看 `Makefile` 的使用说明。
 
 详细构建步骤见 [`BUILD.md`](./BUILD.md)。
+
+上游 meli 同步记录见 [`SYNC.md`](./SYNC.md)。
 
 ### Cargo 编译期特性
 
@@ -179,7 +183,7 @@ MELI_CONFIG=./test_config cargo run
 
 ### HTML 渲染
 
-HTML 邮件默认由内置渲染器渲染：先经 ammonia 白名单清洗（移除脚本和危险链接），再经 html2text 按终端宽度转为纯文本，无外部依赖。[w3m](https://github.com/tats/w3m) 现为可选，仅在配置 `pager.html_filter` 命令字符串时使用（例如 `html_filter = "w3m -I utf-8 -T text/html"`），此时 HTML 经管道交给该程序渲染。
+HTML 邮件默认由内置渲染器渲染：先经 ammonia 白名单清洗（移除脚本和危险链接），再经 html2text 按终端宽度转为纯文本，无外部依赖。
 详见 [`meli.conf(5)`](./meli/docs/meli.conf.5)。
 
 

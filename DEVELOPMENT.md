@@ -102,6 +102,30 @@ make fmt
 make lint
 ```
 
+## Terminal UI architecture
+
+The UI sits on two libraries, glued by an edge adapter:
+
+- `crossterm` owns terminal I/O: raw mode, alternate screen, mouse capture,
+  bracketed paste, and the input event parser (`meli/src/terminal/input.rs`,
+  `meli/src/terminal/screen.rs`).
+- `ratatui` owns layout solving and border rendering. The top-level chrome
+  (tab bar, status bar, pane splits, dialog placement) computes its areas
+  through ratatui `Layout` helpers exposed by
+  `meli/src/terminal/ratatui_bridge.rs`.
+- meli's own `CellBuffer` remains the painting target. Components draw into
+  it as before, the screen keeps flushing dirty segments itself
+  (`draw_horizontal_segment` in `meli/src/terminal/screen.rs`), and
+  `ratatui::Terminal`'s full-frame diff flush is deliberately not used.
+
+`meli/src/terminal/ratatui_bridge.rs` is the seam between the two worlds:
+color and attribute conversions, whole-buffer blits between `CellBuffer` and
+ratatui's `Buffer`, `Area`/`Rect` converters, key/mouse translation from
+crossterm events onto meli's `Key` vocabulary, and `encode_key`, which
+re-encodes a `Key` into the raw bytes the pre-migration reader produced. The
+embedded terminal and the `ThreadEvent::Input` contract depend on those
+bytes.
+
 ## Testing
 
 ```sh
@@ -113,6 +137,31 @@ How to run specific tests:
 ```sh
 cargo test -p {melib, meli} (-- --nocapture) (--test test_name)
 ```
+
+### Golden snapshot tests
+
+`meli/src/golden.rs` pins the rendering of the major UI surfaces (listings,
+pager, composer, dialogs, tab and status bar chrome) to golden files under
+`meli/tests/golden`. Each test draws a component into a `Screen<Virtual>` and
+compares the serialized cell buffer byte-for-byte against the committed
+file.
+
+Run them like this:
+
+```sh
+XDG_DATA_HOME=/tmp/meli-test-xdg cargo test -p meli golden
+```
+
+Point `XDG_DATA_HOME` at a writable scratch directory: mock contexts resolve
+XDG paths from the process environment, and a scratch directory keeps the
+run from touching your real user data. Two switches control recording:
+
+- `MELI_UPDATE_GOLDEN=1` re-records goldens instead of asserting. Review the
+  resulting diff before committing; an unexpected diff means rendering
+  changed.
+- `MELI_GOLDEN_DIR=<path>` redirects where goldens are read from and written
+  to (default `meli/tests/golden`), so a re-record can target a scratch
+  directory and be diffed against the committed corpus.
 
 ## Profiling
 

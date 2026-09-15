@@ -42,7 +42,12 @@ use crate::{
     accounts::{JobRequest, MailboxStatus},
     components::ExtendShortcutsMaps,
     jobs::IsAsync,
+    terminal::{
+        draw_rounded_frame, frame_ring_areas,
+        ratatui_bridge::{area_to_rect, rect_to_area},
+    },
 };
+use ratatui::layout::{Constraint, Layout};
 
 pub const DEFAULT_ATTACHMENT_FLAG: &str = concat!("📎", emoji_text_presentation_selector!());
 pub const DEFAULT_SELECTED_FLAG: &str = concat!("☑️", emoji_text_presentation_selector!());
@@ -397,6 +402,11 @@ impl ColorCache {
                     context,
                     "mail.listing.conversations.highlighted_selected",
                 ),
+                // Zebra parity shares the plain listing keys, like the
+                // threaded style does; conversations has no even/odd keys of
+                // its own.
+                even: crate::conf::value(context, "mail.listing.plain.even"),
+                odd: crate::conf::value(context, "mail.listing.plain.odd"),
                 ..default
             },
         };
@@ -1312,8 +1322,33 @@ impl Component for Listing {
             total_cols
         };
         let mid = area.width().saturating_sub(right_component_width);
+        /* Top-level horizontal split via ratatui Layout: sidebar | divider
+         * column | right side. Identical to the previous take_cols/nth_col/
+         * skip_cols math for every size. The degenerate single-pane cases
+         * (no sidebar / sidebar only) hand the whole area to one pane
+         * without a divider column, exactly as before, so the split is only
+         * computed when both are visible (1 <= mid < total width). */
+        let (menu_area, divider_area, list_area) =
+            if right_component_width != total_cols && right_component_width != 0 {
+                let [menu, divider, right] = Layout::horizontal([
+                    Constraint::Length(mid as u16),
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                ])
+                .areas(area_to_rect(area));
+                (
+                    rect_to_area(menu, area),
+                    rect_to_area(divider, area),
+                    rect_to_area(right, area),
+                )
+            } else {
+                (
+                    area,
+                    Area::new_empty(area.generation()),
+                    Area::new_empty(area.generation()),
+                )
+            };
         if self.dirty && mid != 0 {
-            let divider_area = area.nth_col(mid);
             for row in grid.bounds_iter(divider_area) {
                 for c in row {
                     grid[c]
@@ -1327,6 +1362,26 @@ impl Component for Listing {
         }
 
         let account_hash = self.accounts[self.cursor_pos.account].hash;
+        /* Rounded pane frames (visual chrome only): each visible pane gets
+         * a border ring styled by listing focus — the pane under the focus
+         * cursor (sidebar after `focus_left`, else the list) uses
+         * "tab.focused" and the other "tab.unfocused". Each frame is drawn
+         * before its pane's content and the content is rendered in the
+         * frame's returned inner area, so the ring owns its own cells and
+         * never covers content (the first list row, line start/end). An
+         * open ThreadView draws its own pane frames over the whole list
+         * pane, so the listing skips its frame there rather than layer a
+         * second ring under the view's; in that state the component, its
+         * view_area and the view keep the full pane area. Pane areas and
+         * interior dividers are unchanged. */
+        let tab_focused = crate::conf::value(context, "tab.focused");
+        let tab_unfocused = crate::conf::value(context, "tab.unfocused");
+        let (menu_attr, list_attr) = if matches!(self.focus, ListingFocus::Menu) {
+            (tab_focused, tab_unfocused)
+        } else {
+            (tab_unfocused, tab_focused)
+        };
+        let view_drawn = self.status.is_none() && self.component.unfocused() && self.view.is_some();
         if right_component_width == total_cols {
             if context.is_online(account_hash).is_err()
                 && !matches!(self.component, ListingComponent::Offline(_))
@@ -1339,12 +1394,21 @@ impl Component for Listing {
                 self.component.realize(self.id().into(), context);
             }
 
-            if let Some(s) = self.status.as_mut() {
-                s.draw(grid, area, context);
+            let content_area = if view_drawn {
+                area
             } else {
-                self.component.draw(grid, area, context);
+                let inner = draw_rounded_frame(grid, area, list_attr);
+                for frame_area in frame_ring_areas(area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                inner
+            };
+            if let Some(s) = self.status.as_mut() {
+                s.draw(grid, content_area, context);
+            } else {
+                self.component.draw(grid, content_area, context);
                 if self.component.unfocused() {
-                    if let Some(ref mut view) = self.view {
+                    if let Some(view) = &mut self.view {
                         view.draw(grid, self.component.view_area().unwrap_or(area), context);
                         if let Some(view_area) = self.component.view_area() {
                             if view_area != area {
@@ -1366,9 +1430,17 @@ impl Component for Listing {
                 }
             }
         } else if right_component_width == 0 {
-            self.draw_menu(grid, area, context);
+            let menu_inner = draw_rounded_frame(grid, area, menu_attr);
+            for frame_area in frame_ring_areas(area) {
+                context.dirty_areas.push_back(frame_area);
+            }
+            self.draw_menu(grid, menu_inner, context);
         } else {
-            self.draw_menu(grid, area.take_cols(mid), context);
+            let menu_inner = draw_rounded_frame(grid, menu_area, menu_attr);
+            for frame_area in frame_ring_areas(menu_area) {
+                context.dirty_areas.push_back(frame_area);
+            }
+            self.draw_menu(grid, menu_inner, context);
             if context.is_online(account_hash).is_err()
                 && !matches!(self.component, ListingComponent::Offline(_))
             {
@@ -1379,13 +1451,22 @@ impl Component for Listing {
                     .process_event(&mut UIEvent::VisibilityChange(true), context);
                 self.component.realize(self.id().into(), context);
             }
-            if let Some(s) = self.status.as_mut() {
-                s.draw(grid, area.skip_cols(mid + 1), context);
+            let content_area = if view_drawn {
+                list_area
             } else {
-                let area = area.skip_cols(mid + 1);
-                self.component.draw(grid, area, context);
+                let inner = draw_rounded_frame(grid, list_area, list_attr);
+                for frame_area in frame_ring_areas(list_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                inner
+            };
+            if let Some(s) = self.status.as_mut() {
+                s.draw(grid, content_area, context);
+            } else {
+                let area = list_area;
+                self.component.draw(grid, content_area, context);
                 if self.component.unfocused() {
-                    if let Some(ref mut view) = self.view {
+                    if let Some(view) = &mut self.view {
                         view.draw(grid, self.component.view_area().unwrap_or(area), context);
                         if let Some(view_area) = self.component.view_area() {
                             if view_area != area {
@@ -2955,6 +3036,13 @@ impl Listing {
         }
 
         let rows = area.height();
+        /* `area` is the menu pane's inner area (inside the rounded frame
+         * ring), so a pane shorter than the ring (outer height < 4) can
+         * yield zero rows here. The `skip_offset` computation below
+         * divides by `rows`, so bail out early instead of panicking. */
+        if rows == 0 {
+            return;
+        }
         const SCROLLING_CONTEXT: usize = 3;
         let y_offset = (cursor.account)
             + self
@@ -2982,6 +3070,9 @@ impl Listing {
 
         grid.copy_area(
             self.menu.grid(),
+            /* `area` is already the pane's inner area inside the rounded
+             * frame ring, drawn before this call by Listing::draw, so the
+             * menu content is copied as-is with no extra inset. */
             area,
             self.menu
                 .area()
@@ -3920,5 +4011,219 @@ mod listing_menu_tests {
             listing.status.is_some(),
             "focus_right at the Status entry must open the account status view"
         );
+    }
+
+    /// A standalone (single-mail thread) mail opened and the component put
+    /// into `Focus::EntryFullscreen` directly (key-driven `focus_right`
+    /// cannot reach it: with the view open, the listing routes input to the
+    /// `ThreadView` first and its `MailView` focus state consumes arrow
+    /// keys). The view covers the whole surface and the listing skips its
+    /// own frames (`view_drawn`), so the frame must come from the
+    /// `ThreadView`'s single-mail fast path — pinned here as rounded
+    /// corners at the screen edges.
+    #[test]
+    fn listing_open_solo_fullscreen_frame() {
+        let mut ctx = mock_context();
+        let (_a, inbox_hash, _arch) = register_two_mailboxes(&mut ctx);
+        let bytes = b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: fullscreen frame mail\r\nMessage-ID: <fullscreen-solo@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\nfullscreen body line\r\n";
+        let mut env = Envelope::from_bytes(bytes, None).unwrap();
+        env.set_flags(melib::Flag::SEEN);
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(env, inbox_hash);
+
+        ctx.settings.shortcuts.listing.open_entry = Key::Char('\n');
+        let mut listing = Listing::new(&mut ctx);
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let mut event = UIEvent::Input(Key::Char('\n'));
+        assert!(listing.process_event(&mut event, &mut ctx));
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+        assert!(listing.view.is_some(), "open_entry must create the view");
+        listing
+            .component
+            .set_focus(Focus::EntryFullscreen, &mut ctx);
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+
+        let grid = screen.grid();
+        let last_col = area.width() - 1;
+        let last_row = area.height() - 1;
+        assert_eq!(grid[(0, 0)].ch(), '╭', "fullscreen top-left corner");
+        assert_eq!(grid[(last_col, 0)].ch(), '╮', "fullscreen top-right corner");
+        assert_eq!(
+            grid[(last_col, last_row)].ch(),
+            '╯',
+            "fullscreen bottom-right corner"
+        );
+        let tab_focused = crate::conf::value(&ctx, "tab.focused");
+        assert_eq!(
+            grid[(0, 0)].fg(),
+            tab_focused.fg,
+            "fullscreen frame uses the focused attribute"
+        );
+        println!("listing_open_solo_fullscreen_frame: fullscreen ring pinned");
+    }
+
+    /// Conversations style, entry open, then `Focus::EntryFullscreen` and
+    /// back to `Focus::Entry` (key-driven `focus_right` cannot reach the
+    /// fullscreen state once the view owns the keys, so the focus flips
+    /// are driven directly like the solo fullscreen precedent). Entry
+    /// state: sidebar frame + conversation-subpane frame (unfocused, the
+    /// `ThreadView` owns the focus) + `ThreadView` frame. Fullscreen: the
+    /// `ThreadView` frame covers the whole pane alone. The round trip must
+    /// restore exactly the Entry-state frames — no residue, no doubled
+    /// borders.
+    #[test]
+    fn conversations_entry_fullscreen_roundtrip() {
+        let mut ctx = mock_context();
+        ctx.settings.listing.index_style = IndexStyle::Conversations;
+        let (_a, inbox_hash, _arch) = register_two_mailboxes(&mut ctx);
+        let bytes = b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: roundtrip frame mail\r\nMessage-ID: <roundtrip-solo@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\nroundtrip body line\r\n";
+        let mut env = Envelope::from_bytes(bytes, None).unwrap();
+        env.set_flags(melib::Flag::SEEN);
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(env, inbox_hash);
+
+        ctx.settings.shortcuts.listing.open_entry = Key::Char('\n');
+        let mut listing = Listing::new(&mut ctx);
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let mut event = UIEvent::Input(Key::Char('\n'));
+        assert!(listing.process_event(&mut event, &mut ctx));
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+        assert!(listing.view.is_some(), "open_entry must create the view");
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        assert_entry_state_frames(&ctx, screen.grid(), "after open");
+
+        listing
+            .component
+            .set_focus(Focus::EntryFullscreen, &mut ctx);
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        {
+            let grid = screen.grid();
+            let tab_focused = crate::conf::value(&ctx, "tab.focused");
+            // Fullscreen hides the sidebar (`is_menu_visible` is false
+            // for `Focus::EntryFullscreen`), so the pane is the whole
+            // width and the ThreadView frames it alone.
+            assert_eq!(
+                grid[(0, 0)].ch(),
+                '╭',
+                "fullscreen: pane top-left ring corner"
+            );
+            assert_eq!(
+                grid[(79, 0)].ch(),
+                '╮',
+                "fullscreen: pane top-right ring corner"
+            );
+            assert_eq!(
+                grid[(79, 23)].ch(),
+                '╯',
+                "fullscreen: pane bottom-right ring corner"
+            );
+            assert_eq!(
+                grid[(0, 0)].fg(),
+                tab_focused.fg,
+                "fullscreen: ring must use the focused attr"
+            );
+            for y in 1..23 {
+                for x in [31, 32] {
+                    assert!(
+                        !matches!(grid[(x, y)].ch(), '─' | '│' | '╭' | '╮' | '╰' | '╯'),
+                        "fullscreen: subpane ring residue at ({x},{y})"
+                    );
+                }
+            }
+        }
+
+        listing.component.set_focus(Focus::Entry, &mut ctx);
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        assert_entry_state_frames(&ctx, screen.grid(), "after roundtrip");
+        println!("conversations_entry_fullscreen_roundtrip: three frames restored");
+    }
+
+    /// The Conversations Entry-state frame layout shared by
+    /// [`conversations_entry_fullscreen_roundtrip`]: sidebar frame
+    /// (x=0..=7), conversation-subpane frame (x=9..=31, unfocused) and
+    /// `ThreadView` frame (x=33..=79, focused), with no ring glyphs on
+    /// the columns inside the subpane ring or on the gap column next to
+    /// it (no doubled borders).
+    fn assert_entry_state_frames(ctx: &Context, grid: &CellBuffer, phase: &str) {
+        let tab_unfocused = crate::conf::value(ctx, "tab.unfocused");
+        let tab_focused = crate::conf::value(ctx, "tab.focused");
+        assert_eq!(grid[(9, 0)].ch(), '╭', "{phase}: subpane top-left ring");
+        assert_eq!(grid[(31, 0)].ch(), '╮', "{phase}: subpane top-right ring");
+        assert_eq!(grid[(9, 23)].ch(), '╰', "{phase}: subpane bottom-left ring");
+        assert_eq!(
+            grid[(31, 23)].ch(),
+            '╯',
+            "{phase}: subpane bottom-right ring"
+        );
+        assert_eq!(
+            grid[(31, 12)].ch(),
+            '│',
+            "{phase}: subpane right ring column"
+        );
+        assert_eq!(
+            grid[(31, 12)].fg(),
+            tab_unfocused.fg,
+            "{phase}: subpane ring must use the unfocused attr"
+        );
+        assert_eq!(grid[(33, 0)].ch(), '╭', "{phase}: ThreadView top-left ring");
+        assert_eq!(
+            grid[(33, 0)].fg(),
+            tab_focused.fg,
+            "{phase}: ThreadView ring keeps the focused attr"
+        );
+        for y in 1..23 {
+            for x in [10, 30, 32] {
+                assert!(
+                    !matches!(grid[(x, y)].ch(), '─' | '│' | '╭' | '╮' | '╰' | '╯'),
+                    "{phase}: ring glyph inside the subpane or on the gap column at ({x},{y})"
+                );
+            }
+        }
     }
 }

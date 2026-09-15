@@ -70,7 +70,6 @@ pub struct MailboxManager {
 
     initialized: bool,
     theme_default: ThemeAttribute,
-    highlight_theme: ThemeAttribute,
 
     dirty: bool,
 
@@ -105,7 +104,6 @@ impl MailboxManager {
             sort_order: SortOrder::Asc,
             min_width: [0; 4],
             theme_default,
-            highlight_theme: crate::conf::value(context, "highlight"),
             initialized: false,
             dirty: true,
             movement: None,
@@ -359,11 +357,20 @@ impl MailboxManager {
                 let new_area = area.nth_row(idx % rows);
                 self.data_columns
                     .draw(grid, idx, self.cursor_pos, grid.bounds_iter(new_area));
-                let row_attr = if highlight {
-                    self.highlight_theme
+                let mut row_attr = if highlight {
+                    if idx.is_multiple_of(2) {
+                        crate::conf::value(context, "mail.listing.plain.even_selected")
+                    } else {
+                        crate::conf::value(context, "mail.listing.plain.odd_selected")
+                    }
+                } else if idx.is_multiple_of(2) {
+                    crate::conf::value(context, "mail.listing.plain.even")
                 } else {
-                    self.theme_default
+                    crate::conf::value(context, "mail.listing.plain.odd")
                 };
+                if !grid.use_color && highlight {
+                    row_attr.attrs |= Attr::REVERSE;
+                }
                 grid.change_theme(new_area, row_attr);
                 context.dirty_areas.push_back(new_area);
             }
@@ -384,8 +391,26 @@ impl MailboxManager {
         self.data_columns
             .draw(grid, top_idx, self.cursor_pos, grid.bounds_iter(area));
 
+        // zebra parity base colors for the visible rows
+        for i in top_idx..self.length.min(top_idx + rows) {
+            let row_attr = if i.is_multiple_of(2) {
+                crate::conf::value(context, "mail.listing.plain.even")
+            } else {
+                crate::conf::value(context, "mail.listing.plain.odd")
+            };
+            grid.change_theme(area.nth_row(i % rows), row_attr);
+        }
+
         // highlight cursor
-        grid.change_theme(area.nth_row(self.cursor_pos % rows), self.highlight_theme);
+        let mut highlight_attr = if self.cursor_pos.is_multiple_of(2) {
+            crate::conf::value(context, "mail.listing.plain.even_selected")
+        } else {
+            crate::conf::value(context, "mail.listing.plain.odd_selected")
+        };
+        if !grid.use_color {
+            highlight_attr.attrs |= Attr::REVERSE;
+        }
+        grid.change_theme(area.nth_row(self.cursor_pos % rows), highlight_attr);
 
         // clear gap if available height is more than count of entries
         if top_idx + rows > self.length {

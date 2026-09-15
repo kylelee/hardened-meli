@@ -155,6 +155,114 @@ fn test_command_parser_all() {
 }
 
 #[test]
+fn test_command_parser_raw_search() {
+    use super::{Action::*, ListingAction::*};
+
+    assert_eq!(
+        parse_command(b"raw-search foo bar").unwrap(),
+        Listing(Search {
+            term: "foo bar".to_string(),
+            raw_search: true,
+        }),
+    );
+    assert_eq!(
+        parse_command(b"search foo").unwrap(),
+        Listing(Search {
+            term: "foo".to_string(),
+            raw_search: false,
+        }),
+    );
+    assert_eq!(
+        parse_command(b"raw-select baz").unwrap(),
+        Listing(Select {
+            term: "baz".to_string(),
+            raw_search: true,
+        }),
+    );
+    assert_eq!(
+        parse_command(b"select qux").unwrap(),
+        Listing(Select {
+            term: "qux".to_string(),
+            raw_search: false,
+        }),
+    );
+    // `rawsearch` (no hyphen) must not be recognized as a raw search.
+    parse_command(b"rawsearch foo").unwrap_err();
+    // Missing argument.
+    assert!(matches!(
+        parse_command(b"search").unwrap_err(),
+        CommandError::WrongNumberOfArguments {
+            too_many: false,
+            takes: (1, Some(_)),
+            given: 0,
+            ..
+        }
+    ));
+}
+
+/// Wiring discriminator: `Account::search` with `raw_search = true` must
+/// route to `MailBackend::raw_search`. On the mock account (a maildir
+/// backend) the trait default returns `ErrorKind::NotSupported`
+/// synchronously; if the flag were dropped, a term that is not a valid
+/// melib `Query` would instead fail `Query` parsing with a different
+/// error kind.
+#[test]
+fn test_command_parser_raw_search_account_wiring() {
+    use melib::{backends::prelude::*, SortField, SortOrder};
+
+    let mut context = crate::golden::mock_context();
+    let account_hash = *context.accounts.iter().next().unwrap().0;
+    // Force the non-sqlite3 routing: with the sqlite3 search backend the
+    // raw flag is ignored (upstream quirk, kept verbatim), and both
+    // calls below would fail melib `Query` parsing instead.
+    context.accounts[&account_hash].settings.conf.search_backend =
+        crate::conf::data_types::SearchBackend::None;
+    let account = &context.accounts[&account_hash];
+    let mailbox_hash = account
+        .mailbox_entries
+        .keys()
+        .next()
+        .copied()
+        .unwrap_or_else(|| MailboxHash::from_bytes(b"INBOX"));
+
+    // The maildir backend does not override `raw_search`: the default
+    // method must fail synchronously with `NotSupported`.
+    let err = match account.search(
+        "~invalid~ ((",
+        true,
+        (SortField::Date, SortOrder::Desc),
+        mailbox_hash,
+    ) {
+        Err(err) => err,
+        Ok(_) => panic!("raw search must fail synchronously on the maildir backend"),
+    };
+    assert!(
+        matches!(err.kind, melib::ErrorKind::NotSupported),
+        "raw search must be rejected with NotSupported, got {:?}",
+        err.kind
+    );
+
+    // Discriminator: with the flag dropped the same term would go
+    // through melib `Query` parsing and fail with a different error
+    // kind (a parsing error, not `NotSupported`).
+    let err = match account.search(
+        "~invalid~ ((",
+        false,
+        (SortField::Date, SortOrder::Desc),
+        mailbox_hash,
+    ) {
+        Err(err) => err,
+        Ok(_) => panic!("non-raw search of a non-Query term must fail parsing"),
+    };
+    assert!(
+        !matches!(err.kind, melib::ErrorKind::NotSupported),
+        "non-raw search of a non-Query term must fail with a parsing \
+         error, not NotSupported; got {:?}",
+        err.kind
+    );
+}
+
+#[test]
 fn test_command_error_display() {
     assert_eq!(
         &CommandError::BadValue {

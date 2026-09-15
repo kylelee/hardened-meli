@@ -131,9 +131,7 @@
 ## HTML mail is rendered by the built-in HTML renderer by default: it is
 ## sanitized with an allow-list (ammonia) and converted to plain text
 ## (html2text) at the terminal's width, with no external dependency.
-## Set html_filter to a command string to render HTML with an external
-## program instead, e.g. w3m:
-#html_filter = "w3m -I utf-8 -T text/html"
+## Set html_filter to a command string (reads HTML on stdin, writes text to stdout) to use an external renderer instead.
 #pager_context = 0 # default, optional
 #sticky_headers = true # default, optional
 #
@@ -146,6 +144,7 @@
 ###shortcuts
 #[shortcuts.composing]
 #edit = 'e'
+#close = 'Esc'
 #
 #[shortcuts.contact-list]
 #create_contact = 'c'

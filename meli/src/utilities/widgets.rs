@@ -853,11 +853,28 @@ impl Component for AutoComplete {
         if rows == 0 {
             return;
         }
-        let page_no = (self.cursor.saturating_sub(1)).wrapping_div(rows);
-        let top_idx = page_no * rows;
-        let x_offset = usize::from(rows < self.entries.len());
-
-        grid.clear_area(area, crate::conf::value(context, "theme_default"));
+        /* When the handed region fits a frame ring, render a rounded
+         * floating panel consistent with the dialog surfaces: a raised
+         * "status.notification" panel background, a "tab.focused" border
+         * ring and "widgets.options.highlighted" selection bars. Narrow
+         * regions (e.g. the composer form's one-row field secondary areas)
+         * keep the flat strip below. */
+        if rows >= 3 && area.width() >= 4 {
+            self.draw_popup(grid, area, context);
+            return;
+        }
+        let theme_default = crate::conf::value(context, "theme_default");
+        let surface = crate::conf::value(context, "status.notification");
+        let entry_attrs = ThemeAttribute {
+            fg: theme_default.fg,
+            bg: surface.bg,
+            attrs: theme_default.attrs,
+        };
+        let description_attrs = ThemeAttribute {
+            fg: crate::conf::value(context, "tab.unfocused").fg,
+            bg: surface.bg,
+            attrs: theme_default.attrs | Attr::ITALICS,
+        };
         let width = self
             .entries
             .iter()
@@ -865,57 +882,47 @@ impl Component for AutoComplete {
             .max()
             .unwrap_or(0)
             + 1;
-        // [ref:hardcoded_color_value]
-        let theme_attr = ThemeAttribute {
-            fg: Color::Byte(23),
-            bg: Color::Byte(7),
-            attrs: Attr::DEFAULT,
-        };
-        grid.change_theme(area, theme_attr);
+        grid.clear_area(area, entry_attrs);
+        let page_no = (self.cursor.saturating_sub(1)).wrapping_div(rows);
+        let top_idx = page_no * rows;
         for (i, e) in self.entries.iter().skip(top_idx).enumerate() {
             let (x, _) = grid.write_string(
                 &e.entry,
-                Color::Byte(23),
-                Color::Byte(7),
-                Attr::DEFAULT,
+                entry_attrs.fg,
+                entry_attrs.bg,
+                entry_attrs.attrs,
                 area.nth_row(i).take_cols(width),
                 None,
                 None,
             );
             grid.write_string(
                 &e.description,
-                Color::Byte(23),
-                Color::Byte(7),
-                Attr::ITALICS,
+                description_attrs.fg,
+                description_attrs.bg,
+                description_attrs.attrs,
                 area.nth_row(i).skip_cols(x + 2).take_cols(width),
-                None,
-                None,
-            );
-            grid.write_string(
-                "▒",
-                Color::Byte(23),
-                Color::Byte(7),
-                Attr::DEFAULT,
-                area.nth_row(i).skip_cols(width - 1),
                 None,
                 None,
             );
         }
 
-        /* Highlight cursor */
+        /* Highlight the cursor row over the entry text, like the dialog
+         * option lists. */
         if self.cursor > 0 {
-            let highlight = crate::conf::value(context, "highlight");
+            let mut highlighted = crate::conf::value(context, "widgets.options.highlighted");
+            if !context.settings.terminal.use_color() {
+                highlighted.attrs |= Attr::REVERSE;
+            }
 
             grid.change_theme(
-                area.nth_row((self.cursor - 1) % rows)
-                    .skip_cols(width.saturating_sub(1 + x_offset)),
-                highlight,
+                area.nth_row((self.cursor - 1) % rows).take_cols(width),
+                highlighted,
             );
         }
         if rows < self.entries.len() {
             ScrollBar { show_arrows: false }.draw(
                 grid,
-                area.take_rows(x_offset),
+                area.take_rows(usize::from(rows < self.entries.len())),
                 context,
                 self.cursor.saturating_sub(1),
                 rows,
@@ -996,6 +1003,94 @@ impl AutoComplete {
 
     pub fn suggestions(&self) -> &Vec<AutoCompleteEntry> {
         &self.entries
+    }
+
+    /// Rounded floating popup panel (command-line completions): shrinks to
+    /// its content, anchors at the bottom-left of the handed region (right
+    /// above the command line) and styles itself with the dialog
+    /// vocabulary — a raised "status.notification" panel background, a
+    /// "tab.focused" border ring, "widgets.options.highlighted"
+    /// selection bars and dimmed descriptions.
+    fn draw_popup(&self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        let theme_default = crate::conf::value(context, "theme_default");
+        let surface = crate::conf::value(context, "status.notification");
+        let mut border = crate::conf::value(context, "tab.focused");
+        border.bg = surface.bg;
+        let mut highlighted = crate::conf::value(context, "widgets.options.highlighted");
+        if !context.settings.terminal.use_color() {
+            border.attrs |= Attr::REVERSE;
+            highlighted.attrs |= Attr::REVERSE;
+        }
+        let panel_attrs = ThemeAttribute {
+            fg: theme_default.fg,
+            bg: surface.bg,
+            attrs: theme_default.attrs,
+        };
+        let description_attrs = ThemeAttribute {
+            fg: crate::conf::value(context, "tab.unfocused").fg,
+            bg: surface.bg,
+            attrs: theme_default.attrs | Attr::ITALICS,
+        };
+
+        let content_width = self
+            .entries
+            .iter()
+            .map(|a| a.entry.grapheme_len() + a.description.grapheme_len() + 2)
+            .max()
+            .unwrap_or(0);
+        /* One padding column on each side of the text, plus the frame
+         * ring. */
+        let popup_width = std::cmp::min(content_width + 4, area.width());
+        /* At most 15 visible entry rows, plus the frame ring. */
+        let popup_height = std::cmp::min(std::cmp::min(self.entries.len(), 15) + 2, area.height());
+        let popup_area = area
+            .skip_rows(area.height().saturating_sub(popup_height))
+            .take_cols(popup_width);
+        grid.clear_area(popup_area, panel_attrs);
+        let inner_area =
+            crate::terminal::ratatui_bridge::draw_rounded_frame(grid, popup_area, border);
+        let rows = inner_area.height();
+        if rows == 0 {
+            context.dirty_areas.push_back(popup_area);
+            return;
+        }
+        let page_no = (self.cursor.saturating_sub(1)).wrapping_div(rows);
+        let top_idx = page_no * rows;
+        let text_area = inner_area.skip_cols(1);
+        for (i, e) in self.entries.iter().skip(top_idx).enumerate() {
+            let (x, _) = grid.write_string(
+                &e.entry,
+                panel_attrs.fg,
+                panel_attrs.bg,
+                panel_attrs.attrs,
+                text_area.nth_row(i),
+                None,
+                None,
+            );
+            grid.write_string(
+                &e.description,
+                description_attrs.fg,
+                description_attrs.bg,
+                description_attrs.attrs,
+                text_area.nth_row(i).skip_cols(x + 2),
+                None,
+                None,
+            );
+        }
+        if self.cursor > 0 {
+            grid.change_theme(inner_area.nth_row((self.cursor - 1) % rows), highlighted);
+        }
+        if self.entries.len() > rows {
+            ScrollBar { show_arrows: false }.draw(
+                grid,
+                inner_area.nth_col(inner_area.width().saturating_sub(1)),
+                context,
+                self.cursor.saturating_sub(1),
+                rows,
+                self.entries.len(),
+            );
+        }
+        context.dirty_areas.push_back(popup_area);
     }
 }
 

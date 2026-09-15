@@ -41,7 +41,7 @@ impl KeySelectionLoading {
         allow_remote_lookup: ActionFlag,
         context: &Context,
     ) -> Result<Self> {
-        use melib::gpgme::{self, *};
+        use melib::{email::pgp::LocateKey, gpgme};
         let mut ctx = gpgme::Context::new()?;
         if local {
             ctx.set_auto_key_locate(LocateKey::LOCAL)?;
@@ -145,7 +145,11 @@ impl Component for KeySelection {
                         ..
                     },
                 keys_accumulator: _,
-            } => progress_spinner.draw(grid, area.center_inside((2, 2)), context),
+            } => progress_spinner.draw(
+                grid,
+                crate::terminal::ratatui_bridge::center_inside_via_layout(area, (2, 2)),
+                context,
+            ),
             Self::Error { ref err, .. } => {
                 let theme_default = crate::conf::value(context, "theme_default");
                 grid.write_string(
@@ -153,7 +157,7 @@ impl Component for KeySelection {
                     theme_default.fg,
                     theme_default.bg,
                     theme_default.attrs,
-                    area.center_inside((15, 2)),
+                    crate::terminal::ratatui_bridge::center_inside_via_layout(area, (15, 2)),
                     None,
                     Some(0),
                 );
@@ -402,7 +406,10 @@ impl Default for GpgComposeState {
 mod tests {
     use std::{borrow::Cow, ffi::CString};
 
-    use melib::gpgme::{EngineInfo, LocateKey, Protocol};
+    use melib::{
+        email::pgp::LocateKey,
+        gpgme::{EngineInfo, Protocol},
+    };
     use rusty_fork::rusty_fork_test;
 
     use super::*;

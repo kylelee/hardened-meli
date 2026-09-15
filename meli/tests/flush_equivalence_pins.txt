@@ -1,0 +1,361 @@
+# SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+# meli flush byte-layer semantic-equivalence pins (decoded per-cell state).
+# Recorded from the emitter in use before the crossterm swap.
+# Regenerate (ONLY with deliberate intent) via MELI_UPDATE_FLUSH_PINS=1.
+case all_empty
+end
+case attrs_at_edges
+0 \u{76} i3 d 10000010 0 -
+1 \u{77} i3 d 10000010 0 -
+2 \u{78} i3 d 10000010 0 -
+3 \u{79} i3 d 10000010 0 -
+4 \u{7a} i3 d 10000010 0 -
+end
+case attrs_combos
+0 \u{30} i7 i0 00000000 0 -
+1 \u{31} i7 i0 10000000 0 -
+2 \u{32} i7 i0 10010000 0 -
+3 \u{33} i7 i0 10010010 0 -
+4 \u{34} i7 i0 00000010 0 -
+5 \u{35} i7 i0 00000000 0 -
+6 \u{36} i7 i0 01000000 0 -
+7 \u{37} i7 i0 00100000 0 -
+8 \u{38} i7 i0 00000100 0 -
+9 \u{39} i7 i0 00000001 0 -
+10 \u{3a} i7 i0 00011000 0 -
+11 \u{3b} i7 i0 00010000 0 -
+12 \u{3c} i7 i0 00000000 0 -
+end
+case colors_256_rgb
+0 \u{41} i0 i255 00000000 0 -
+1 \u{42} i1 i16 00000000 0 -
+2 \u{43} i16 r255.0.128 00000000 0 -
+3 \u{44} i231 d 00000000 0 -
+4 \u{45} i255 i1 00000000 0 -
+5 \u{46} r255.0.128 r0.0.0 00000000 0 -
+6 \u{47} r0.0.0 r255.255.255 00000000 0 -
+7 \u{48} r255.255.255 i240 00000000 0 -
+8 \u{49} d i15 00000000 0 -
+9 \u{4a} i15 r1.2.3 00000000 0 -
+10 \u{4b} r1.2.3 i231 00000000 0 -
+11 \u{4c} i240 d 00000000 0 -
+end
+case colors_named_default_16
+0 \u{61} d i234 00000000 0 -
+1 \u{62} i0 i234 00000000 0 -
+2 \u{63} i1 i234 00000000 0 -
+3 \u{64} i2 i234 00000000 0 -
+4 \u{65} i3 i234 00000000 0 -
+5 \u{66} i4 i234 00000000 0 -
+6 \u{67} i5 i234 00000000 0 -
+7 \u{68} i6 i234 00000000 0 -
+8 \u{69} i7 i234 00000000 0 -
+9 \u{6a} i8 i234 00000000 0 -
+10 \u{6b} i9 i234 00000000 0 -
+11 \u{6c} i10 i234 00000000 0 -
+12 \u{6d} i11 i234 00000000 0 -
+13 \u{6e} i12 i234 00000000 0 -
+14 \u{6f} i13 i234 00000000 0 -
+15 \u{70} i14 i234 00000000 0 -
+16 \u{71} i15 i234 00000000 0 -
+end
+case empty_scatter
+0 \u{41} d d 00000000 0 -
+1 \u{42} i6 d 00000010 0 -
+2 \u{43} d d 00000000 0 -
+end
+case empty_segment
+end
+case force_text
+0 \u{2602} i1 d 00000000 1 -
+1 \u{78} d d 00000000 0 -
+2 \u{26a1} i9 i234 00010000 1 -
+4 \u{79} d d 00000000 0 -
+5 \u{3012} r9.8.7 d 10000000 1 -
+end
+case hl_adjacent
+0 \u{72} d d 00000000 0 -
+1 \u{72} d d 00000000 0 -
+2 \u{72} d d 00000000 0 https://example.com/b
+3 \u{72} d d 00000000 0 https://example.com/b
+4 \u{72} d d 00000000 0 https://example.com/b
+5 \u{72} d d 00000000 0 https://example.com/b
+6 \u{72} d d 00000000 0 https://example.com/c
+7 \u{72} d d 00000000 0 https://example.com/c
+8 \u{72} d d 00000000 0 https://example.com/c
+9 \u{72} d d 00000000 0 https://example.com/c
+10 \u{72} d d 00000000 0 -
+11 \u{72} d d 00000000 0 -
+12 \u{72} d d 00000000 0 -
+13 \u{72} d d 00000000 0 -
+end
+case hl_disabled
+0 \u{70} d d 00000000 0 -
+1 \u{70} d d 00000000 0 -
+2 \u{70} d d 00000000 0 -
+3 \u{70} d d 00000000 0 -
+4 \u{70} d d 00000000 0 -
+5 \u{70} d d 00000000 0 -
+6 \u{70} d d 00000000 0 -
+7 \u{70} d d 00000000 0 -
+8 \u{70} d d 00000000 0 -
+9 \u{70} d d 00000000 0 -
+10 \u{70} d d 00000000 0 -
+11 \u{70} d d 00000000 0 -
+12 \u{70} d d 00000000 0 -
+13 \u{70} d d 00000000 0 -
+14 \u{70} d d 00000000 0 -
+15 \u{70} d d 00000000 0 -
+16 \u{70} d d 00000000 0 -
+17 \u{70} d d 00000000 0 -
+18 \u{70} d d 00000000 0 -
+19 \u{70} d d 00000000 0 -
+end
+case hl_multiple_color_churn
+0 \u{73} d d 00000000 0 -
+1 \u{73} d d 00000000 0 https://example.com/b
+2 \u{73} i9 d 00000000 0 https://example.com/b
+3 \u{73} d d 00010000 0 https://example.com/b
+4 \u{73} d d 00000000 0 https://example.com/c
+5 \u{73} d d 00000000 0 https://example.com/c
+6 \u{73} i9 d 00000000 0 https://example.com/c
+7 \u{73} d d 00010000 0 https://example.com/c
+8 \u{73} d d 00000000 0 https://example.com/d
+9 \u{73} d d 00000000 0 https://example.com/d
+10 \u{73} i9 d 00000000 0 https://example.com/d
+11 \u{73} d d 00010000 0 https://example.com/d
+12 \u{73} d d 00000000 0 -
+13 \u{73} d d 00000000 0 -
+14 \u{73} i9 d 00000000 0 -
+15 \u{73} d d 00010000 0 -
+end
+case hl_nested
+0 \u{6e} d d 00000000 0 -
+1 \u{6e} d d 00000000 0 -
+2 \u{6e} d d 00000000 0 https://example.com/d
+3 \u{6e} d d 00000000 0 https://example.com/d
+4 \u{6e} d d 00000000 0 https://example.com/e
+5 \u{6e} d d 00000000 0 https://example.com/e
+6 \u{6e} d d 00000000 0 -
+7 \u{6e} d d 00000000 0 -
+8 \u{6e} d d 00000000 0 -
+9 \u{6e} d d 00000000 0 -
+10 \u{6e} d d 00000000 0 -
+11 \u{6e} d d 00000000 0 -
+12 \u{6e} d d 00000000 0 -
+13 \u{6e} d d 00000000 0 -
+end
+case hl_single
+0 \u{70} d d 00000000 0 -
+1 \u{70} d d 00000000 0 -
+2 \u{70} d d 00000000 0 -
+3 \u{70} d d 00000000 0 -
+4 \u{70} d d 00000000 0 -
+5 \u{70} d d 00000000 0 https://example.com/a
+6 \u{70} d d 00000000 0 https://example.com/a
+7 \u{70} d d 00000000 0 https://example.com/a
+8 \u{70} d d 00000000 0 https://example.com/a
+9 \u{70} d d 00000000 0 -
+10 \u{70} d d 00000000 0 -
+11 \u{70} d d 00000000 0 -
+12 \u{70} d d 00000000 0 -
+13 \u{70} d d 00000000 0 -
+14 \u{70} d d 00000000 0 -
+15 \u{70} d d 00000000 0 -
+16 \u{70} d d 00000000 0 -
+17 \u{70} d d 00000000 0 -
+18 \u{70} d d 00000000 0 -
+19 \u{70} d d 00000000 0 -
+end
+case hl_to_row_end
+0 \u{74} d d 00000000 0 -
+1 \u{74} d d 00000000 0 -
+2 \u{74} d d 00000000 0 -
+3 \u{74} d d 00000000 0 -
+4 \u{74} d d 00000000 0 -
+5 \u{74} d d 00000000 0 -
+6 \u{74} d d 00000000 0 -
+7 \u{74} d d 00000000 0 -
+8 \u{74} d d 00000000 0 -
+9 \u{74} d d 00000000 0 -
+10 \u{74} d d 00000000 0 https://example.com/f
+11 \u{74} d d 00000000 0 https://example.com/f
+12 \u{74} d d 00000000 0 https://example.com/f
+13 \u{74} d d 00000000 0 https://example.com/f
+14 \u{74} d d 00000000 0 https://example.com/f
+15 \u{74} d d 00000000 0 https://example.com/f
+16 \u{74} d d 00000000 0 https://example.com/f
+17 \u{74} d d 00000000 0 https://example.com/f
+18 \u{74} d d 00000000 0 https://example.com/f
+19 \u{74} d d 00000000 0 https://example.com/f
+20 \u{74} d d 00000000 0 https://example.com/f
+21 \u{74} d d 00000000 0 https://example.com/f
+22 \u{74} d d 00000000 0 https://example.com/f
+23 \u{74} d d 00000000 0 https://example.com/f
+24 \u{74} d d 00000000 0 https://example.com/f
+25 \u{74} d d 00000000 0 https://example.com/f
+26 \u{74} d d 00000000 0 https://example.com/f
+27 \u{74} d d 00000000 0 https://example.com/f
+28 \u{74} d d 00000000 0 https://example.com/f
+29 \u{74} d d 00000000 0 https://example.com/f
+30 \u{74} d d 00000000 0 https://example.com/f
+31 \u{74} d d 00000000 0 https://example.com/f
+32 \u{74} d d 00000000 0 https://example.com/f
+33 \u{74} d d 00000000 0 https://example.com/f
+34 \u{74} d d 00000000 0 https://example.com/f
+35 \u{74} d d 00000000 0 https://example.com/f
+36 \u{74} d d 00000000 0 https://example.com/f
+37 \u{74} d d 00000000 0 https://example.com/f
+38 \u{74} d d 00000000 0 https://example.com/f
+39 \u{74} d d 00000000 0 https://example.com/f
+40 \u{74} d d 00000000 0 https://example.com/f
+41 \u{74} d d 00000000 0 https://example.com/f
+42 \u{74} d d 00000000 0 https://example.com/f
+43 \u{74} d d 00000000 0 https://example.com/f
+44 \u{74} d d 00000000 0 https://example.com/f
+45 \u{74} d d 00000000 0 https://example.com/f
+46 \u{74} d d 00000000 0 https://example.com/f
+47 \u{74} d d 00000000 0 https://example.com/f
+end
+case hl_zero_len
+0 \u{7a} d d 00000000 0 -
+1 \u{7a} d d 00000000 0 -
+2 \u{7a} d d 00000000 0 -
+3 \u{7a} d d 00000000 0 -
+4 \u{7a} d d 00000000 0 -
+5 \u{7a} d d 00000000 0 https://example.com/a
+6 \u{7a} d d 00000000 0 https://example.com/a
+7 \u{7a} d d 00000000 0 https://example.com/a
+8 \u{7a} d d 00000000 0 https://example.com/a
+9 \u{7a} d d 00000000 0 https://example.com/a
+10 \u{7a} d d 00000000 0 https://example.com/a
+11 \u{7a} d d 00000000 0 https://example.com/a
+end
+case nc_attrs_combos
+0 \u{30} d d 00000000 0 -
+1 \u{31} d d 10000000 0 -
+2 \u{32} d d 10010000 0 -
+3 \u{33} d d 10010010 0 -
+4 \u{34} d d 00000010 0 -
+5 \u{35} d d 00000000 0 -
+6 \u{36} d d 01000000 0 -
+7 \u{37} d d 00100000 0 -
+8 \u{38} d d 00000100 0 -
+9 \u{39} d d 00000001 0 -
+10 \u{3a} d d 00011000 0 -
+11 \u{3b} d d 00010000 0 -
+12 \u{3c} d d 00000000 0 -
+end
+case nc_colors_256_rgb
+0 \u{41} d d 00000000 0 -
+1 \u{42} d d 00000000 0 -
+2 \u{43} d d 00000000 0 -
+3 \u{44} d d 00000000 0 -
+4 \u{45} d d 00000000 0 -
+5 \u{46} d d 00000000 0 -
+6 \u{47} d d 00000000 0 -
+7 \u{48} d d 00000000 0 -
+8 \u{49} d d 00000000 0 -
+9 \u{4a} d d 00000000 0 -
+10 \u{4b} d d 00000000 0 -
+11 \u{4c} d d 00000000 0 -
+end
+case nc_colors_named
+0 \u{61} d d 00000000 0 -
+1 \u{62} d d 00000000 0 -
+2 \u{63} d d 00000000 0 -
+3 \u{64} d d 00000000 0 -
+4 \u{65} d d 00000000 0 -
+5 \u{66} d d 00000000 0 -
+6 \u{67} d d 00000000 0 -
+7 \u{68} d d 00000000 0 -
+8 \u{69} d d 00000000 0 -
+9 \u{6a} d d 00000000 0 -
+10 \u{6b} d d 00000000 0 -
+11 \u{6c} d d 00000000 0 -
+12 \u{6d} d d 00000000 0 -
+13 \u{6e} d d 00000000 0 -
+14 \u{6f} d d 00000000 0 -
+15 \u{70} d d 00000000 0 -
+16 \u{71} d d 00000000 0 -
+end
+case nc_force_text
+0 \u{2602} d d 00000000 1 -
+1 \u{78} d d 00000000 0 -
+2 \u{26a1} d d 00010000 1 -
+4 \u{79} d d 00000000 0 -
+5 \u{3012} d d 10000000 1 -
+end
+case nc_hl_single
+0 \u{70} d d 00000000 0 -
+1 \u{70} d d 00000000 0 -
+2 \u{70} d d 00000000 0 -
+3 \u{70} d d 00000000 0 -
+4 \u{70} d d 00000000 0 -
+5 \u{70} d d 00000000 0 -
+6 \u{70} d d 00000000 0 -
+7 \u{70} d d 00000000 0 -
+8 \u{70} d d 00000000 0 -
+9 \u{70} d d 00000000 0 -
+10 \u{70} d d 00000000 0 -
+11 \u{70} d d 00000000 0 -
+12 \u{70} d d 00000000 0 -
+13 \u{70} d d 00000000 0 -
+14 \u{70} d d 00000000 0 -
+15 \u{70} d d 00000000 0 -
+16 \u{70} d d 00000000 0 -
+17 \u{70} d d 00000000 0 -
+18 \u{70} d d 00000000 0 -
+19 \u{70} d d 00000000 0 -
+end
+case nc_undercurl
+0 \u{6d} d d 00011000 0 -
+1 \u{6e} d d 00000000 0 -
+2 \u{6f} d d 00011000 0 -
+3 \u{70} d d 00000000 0 -
+4 \u{71} d d 00011000 0 -
+5 \u{72} d d 00000000 0 -
+6 \u{73} d d 00010000 0 -
+7 \u{74} d d 00000000 0 -
+end
+case nc_wide_char
+0 \u{4e2d} d d 10000000 0 -
+2 \u{6587} d d 10000000 0 -
+4 \u{61} d d 10000000 0 -
+5 \u{ff57} d d 00000000 0 -
+7 \u{5a} d d 00000000 0 -
+8 \u{4e2d} d d 10000000 1 -
+10 \u{71} d d 00000000 0 -
+end
+case segment_offset
+5 \u{6b} r5.10.20 i237 10000000 0 -
+6 \u{6c} i7 i237 10000000 0 -
+7 \u{6d} r7.10.20 i237 10000000 0 -
+8 \u{6e} i9 i237 10000000 0 -
+9 \u{6f} r9.10.20 i237 10000000 0 -
+10 \u{70} i11 i237 10000000 0 -
+11 \u{71} r11.10.20 i237 10000000 0 -
+12 \u{72} i13 i237 10000000 0 -
+end
+case single_cell
+40 \u{51} r10.200.30 r4.5.6 10000010 0 -
+end
+case undercurl_transitions
+0 \u{6d} i2 d 00011000 0 -
+1 \u{6e} i2 d 00000000 0 -
+2 \u{6f} i2 d 00011000 0 -
+3 \u{70} i2 d 00000000 0 -
+4 \u{71} i2 d 00011000 0 -
+5 \u{72} i2 d 00000000 0 -
+6 \u{73} i2 d 00010000 0 -
+7 \u{74} i2 d 00000000 0 -
+end
+case wide_char_skip
+0 \u{4e2d} i1 d 10000000 0 -
+2 \u{6587} i1 d 10000000 0 -
+4 \u{61} i1 d 10000000 0 -
+5 \u{ff57} i4 d 00000000 0 -
+7 \u{5a} i4 d 00000000 0 -
+8 \u{4e2d} i2 d 10000000 1 -
+10 \u{71} i2 d 00000000 0 -
+end

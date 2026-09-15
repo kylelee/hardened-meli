@@ -61,11 +61,10 @@ fn run_app(mut opt: Opt) -> Result<()> {
      * the sole receiver.
      */
     let (sender, receiver) = crossbeam::channel::unbounded();
-    /* Catch SIGWINCH to handle terminal resizing */
+    /* Terminal resizes no longer need a SIGWINCH handler here: crossterm
+     * watches SIGWINCH in the input thread and reports `Event::Resize`. */
     let signals = &[
-        /* Catch SIGWINCH to handle terminal resizing */
-        signal_hook::consts::SIGWINCH,
-        /* Catch SIGCHLD to handle embedded applications status change */
+        /* Catch SIGCHLD for embedded applications status change */
         signal_hook::consts::SIGCHLD,
     ];
 
@@ -211,6 +210,13 @@ fn run_app(mut opt: Opt) -> Result<()> {
                                 break 'inner; // `goto` 'reap loop, and wait on child.
                             }
                         }
+                        ThreadEvent::UIEvent(UIEvent::Resize) if state.mode != UIMode::Fork => {
+                            /* Terminal resized: the input thread's crossterm
+                             * parser noticed SIGWINCH and reported it. */
+                            state.update_size();
+                            state.render();
+                            state.redraw();
+                        }
                         ThreadEvent::UIEvent(e) => {
                             state.rcv_event(e);
                             state.redraw();
@@ -232,13 +238,6 @@ fn run_app(mut opt: Opt) -> Result<()> {
                 },
                 recv(signal_recvr) -> sig => {
                     match sig.unwrap() {
-                        signal_hook::consts::SIGWINCH => {
-                            if state.mode != UIMode::Fork  {
-                                state.update_size();
-                                state.render();
-                                state.redraw();
-                            }
-                        },
                         signal_hook::consts::SIGCHLD => {
                             state.try_wait_on_children();
                             state.redraw();

@@ -45,6 +45,7 @@ pub mod terminal;
 
 #[cfg(not(target_os = "macos"))]
 use std::path::Path;
+use std::path::PathBuf;
 use std::{
     convert::TryFrom,
     io::{Read, Write},
@@ -122,37 +123,25 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
         (ends.master, ends.slave)
     };
 
-    let mut shell_path = None;
-
-    // Find posix sh location, because POSIX shell is not always at /bin/sh
     let path_var = std::process::Command::new("getconf")
         .args(["PATH"])
         .output()?
         .stdout;
-    for mut p in std::env::split_paths(&OsStr::from_bytes(&path_var[..])) {
-        p.push("sh");
-        if p.exists() {
-            shell_path = Some(
-                CString::new(p.as_os_str().as_bytes())
-                    .chain_err_kind(ErrorKind::ValueError)
-                    .chain_err_summary(|| {
-                        format!(
-                            "Could not convert shell path `{}` into a C string; it should contain \
-                             no NUL bytes.",
-                            p.display()
-                        )
-                    })?,
-            );
-            break;
-        }
-    }
-
-    let Some(shell_path) = shell_path else {
+    let Some(sh_path) = find_sh_path(&path_var) else {
         return Err(Error::new(format!(
             "Could not execute `{command}`: did not find the standard POSIX sh shell in PATH = {}",
             String::from_utf8_lossy(&path_var)
         )));
     };
+    let shell_path = CString::new(sh_path.as_os_str().as_bytes())
+        .chain_err_kind(ErrorKind::ValueError)
+        .chain_err_summary(|| {
+            format!(
+                "Could not convert shell path `{}` into a C string; it should contain no NUL \
+                 bytes.",
+                sh_path.display()
+            )
+        })?;
 
     let child_pid = match unsafe { nix::unistd::fork()? } {
         nix::unistd::ForkResult::Child => {
@@ -212,4 +201,67 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
             "Could not spawn controlling thread for forked embedded terminal process"
         })?;
     Ok(pty)
+}
+
+/// Find the location of the POSIX `sh` shell from the output of `getconf PATH`
+/// (the confstr `_CS_PATH` value), because POSIX shell is not always at
+/// `/bin/sh`.
+///
+/// The `getconf` output is newline-terminated, so trailing whitespace must be
+/// stripped before splitting into candidate directories; otherwise on hosts
+/// where it is a single component (e.g. `/usr/bin`), every candidate carries a
+/// trailing `\n` and never matches.
+fn find_sh_path(getconf_path_output: &[u8]) -> Option<PathBuf> {
+    std::env::split_paths(OsStr::from_bytes(getconf_path_output.trim_ascii()))
+        .map(|mut p| {
+            p.push("sh");
+            p
+        })
+        .find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("meli-t26-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn find_sh_path_handles_multi_component_path_with_trailing_newline() {
+        let dir = scratch_dir("multi");
+        let bindir = dir.join("bin1");
+        std::fs::create_dir_all(&bindir).unwrap();
+        std::fs::write(bindir.join("sh"), b"#!/bin/sh").unwrap();
+        let output = format!(
+            "/nonexistent-meli-t26-a:\n/nonexistent-meli-t26-b:{}\n",
+            bindir.display()
+        );
+        assert_eq!(find_sh_path(output.as_bytes()), Some(bindir.join("sh")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn find_sh_path_handles_single_component_path_with_trailing_newline() {
+        let dir = scratch_dir("single");
+        let bindir = dir.join("bin2");
+        std::fs::create_dir_all(&bindir).unwrap();
+        std::fs::write(bindir.join("sh"), b"#!/bin/sh").unwrap();
+        let output = format!("{}\n", bindir.display());
+        assert_eq!(find_sh_path(output.as_bytes()), Some(bindir.join("sh")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn find_sh_path_returns_none_without_existing_candidate() {
+        assert_eq!(
+            find_sh_path(b"/nonexistent-meli-t26-c:/nonexistent-meli-t26-d\n"),
+            None
+        );
+        assert_eq!(find_sh_path(b"\n"), None);
+        assert_eq!(find_sh_path(b""), None);
+    }
 }

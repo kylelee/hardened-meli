@@ -1,17 +1,35 @@
 # Changelog
 
+**English** | [简体中文](./CHANGELOG.zh-CN.md)
+
 All notable changes to this project will be documented in this file.
+The Simplified Chinese counterpart is [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md);
+keep both files in sync when adding entries.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-<!-- ### Added -->
+### Added
 
-<!-- ### Bug Fixes -->
+- Input-thread private-CSI watchdog: detects the "bytes consumed by crossterm but no events produced" hang (e.g. a late `CSI ?` private-mode reply from a mux/terminal being buffered indefinitely inside the crossterm 0.29 parser and swallowing keys). After a 3s stall + 2s input-silence verdict it automatically injects a DA1 query (`ESC[c`); the terminal's reply makes the parser drop the whole buffered packet and restores subsequent keys (already-swallowed keys are unrecoverable). After 3 consecutive injections without recovery it disables itself for the rest of the process; zero injections during normal use. The input loop's main wait was reworked onto `poll(2)` and the input thread swaps stdin for a non-blocking tty file descriptor to avoid deadlocking inside crossterm's internal reads. New `scripts/test-private-csi-watchdog.sh` PTY regression gate (SKIP when tmux is missing).
 
-<!-- ### Changes -->
+- Composer close shortcut (`close` key in `[shortcuts.composing]`, default `Esc`): pressing `Esc` in the compose view closes the tab and returns to the previous screen; unsaved draft changes trigger an x/y/n dialog (quit without saving / save draft and quit / cancel). In attachment-management mode, `Esc` returns to the main compose view. Also plugged four `has_changes` gaps (attachment removal, in-attachment save, recipient confirmation, gpg key confirmation) so closing via Esc can no longer silently drop unsaved changes (plan `composer-esc-exit`).
+
+### Changes
+
+- Dependency governance: removed the `[patch.crates-io]` section from the root `Cargo.toml` and deleted the `vendor/crossterm/` directory; crossterm is back to the pristine crates.io 0.29.0. The "unrecognized private CSI hang" the vendored patch defended against is now covered by deleting a useless startup query (the `CSI ? 2026 $ p` synchronized-output support probe, which nothing in the codebase consumes) plus the input watchdog. Offline builds now rely on pre-fetched dependencies in the local cargo cache (`cargo fetch`).
+
+### Known Issues
+
+- Watchdog known limitations (matching the vendored-patch-era non-regressions, plus new residue): the `<` (half of an SGR mouse sequence) hang is not protected by DA1 injection; garbage keys caused by late OSC 10/11 replies are ordinary events and invisible to the watchdog; the watchdog does not trigger when a mux keeps injecting `CSI ?` replies at intervals under 2s; on very slow links, DA1 bytes mixing into a large paste are theoretically possible; worst-case hang-recovery latency is about 5s (T_STALL 3s + T_QUIET 2s + DA1 round trip); when stdin is not a tty (redirected), crossterm's private `/dev/tty` cannot be put in non-blocking mode and watchdog coverage is limited; when stdin points to a tty that is not the controlling terminal, the input source switches to `/dev/tty`.
+
+### Bug Fixes
+
+- Fixed the startup version-migration prompt misfire: a leftover non-semver value in `${XDG_DATA_HOME}/meli/.version` (e.g. `meli-git`) was previously treated as a "newer version" by lexicographic string ordering, triggering a downgrade warning plus an interactive CAUTION prompt on every launch. The value is now honestly reported in a one-line warning and treated as "older than every known version" (applicable migrations are still offered after the `is_applicable` pre-check); the current version is written back at the end of the run, so a single launch self-heals it.
+- Version comparison now uses numeric semver ordering: fixes legal versions such as `0.10.0` being misjudged as older by lexicographic order (`'1' < '9'`); pre-releases (e.g. `0.8.8-rc1`) now sort before the same-number final release per semver precedence, so migration targeting no longer falls back to full migrations.
+- thread-view vertical scroll keys (`Up`/`Down`) now stop at the edges in the body-focus state: after pressing Right to focus the body (MailView), scrolling stops (the key is consumed as a no-op) once the body reaches its top or bottom, instead of bubbling up to drive the thread-list cursor or auto-switching to the previous/next mail. In the split-view default state (focus=None), `Down` still moves the thread-list cursor directly — existing behavior unchanged. Note the regression: if the thread-view vertical keys are rebound to different keys than the pager vertical keys, they become a pure stop in the body-focus state (they neither scroll the body nor move the list).
 
 <!-- ### Refactoring -->
 
@@ -19,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- ### Packaging -->
 
-<!-- ### Miscellaneous Tasks -->
+### Miscellaneous Tasks
+
+- Verified full sync with upstream meli as of 2026-09-15: upstream HEAD `3d7eb2c5` has no new commits since the 2026-09-14 sync of `4f2414a3..3d7eb2c5` (see `SYNC.md`).
 
 ## [v0.9.0] - 2026-09-13
 
