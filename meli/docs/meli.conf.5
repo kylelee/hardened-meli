@@ -179,7 +179,6 @@ send_mail = { hostname = "localhost", port = 25, auth = { type = "none" }, secur
 
 [pager]
 filter = "COLUMNS=72 /usr/local/bin/pygmentize -l email"
-html_filter = "w3m -I utf-8 -T text/html -o display_link_number=1"
 
 [notifications]
 script = "notify-send"
@@ -1505,6 +1504,9 @@ Edit mail.
 .It Ic send_mail
 Deliver draft to mailer
 .Pq Em s \" default value
+.It Ic close
+Close composer tab.
+.Pq Em Esc \" default value
 .It Ic scroll_up
 Change field focus.
 .Pq Em Up \" default value
@@ -1596,10 +1598,12 @@ Force attachment charset for decoding.
 Scroll up list.
 The mail view follows the selection.
 While the thread view is in the split layout, thread-view navigation keys and the general home_page, end_page and open_entry shortcuts act on the thread list before the embedded mail view; when a dialog is open in the mail view (charset selector, URL prompt, contact selector), the mail view keeps its keys.
+When the mail view is focused, scrolling stops at the top of the message body instead of switching to the previous message.
 .Pq Em Up \" default value
 .It Ic scroll_down
 Scroll down list.
 The mail view follows the selection.
+When the mail view is focused, scrolling stops at the bottom of the message body instead of switching to the next message.
 .Pq Em Down \" default value
 .It Ic collapse_subtree
 collapse thread branches.
@@ -1739,21 +1743,8 @@ Default values are shown in parentheses.
 Always show headers when scrolling.
 .Pq Em false \" default value
 .It Ic html_filter Ar String
-Pipe html attachments through this filter before display.
+If set to a command string, the HTML is piped to that command's standard input and its standard output replaces the mail body.
 .Pq Em optional \" no default value
-.Pp
-By default HTML mail is rendered by the built-in HTML renderer: it is
-sanitized with an allow-list
-.Pq Li ammonia
-and converted to plain text with
-.Li html2text
-at the terminal's width, with no external dependency.
-If set to a command string, HTML is piped through that command instead,
-e.g. w3m:
-.Bd -literal
-[pager]
-html_filter = "w3m -I utf-8 -T text/html"
-.Ed
 .It Ic html_open Ar String
 .Pq Em optional
 A command to open html files.
@@ -2644,11 +2635,7 @@ for full copyright and warranty notices.
 .It
 .Lk https://meli\-email.org "Website"
 .It
-.Lk https://git.meli\-email.org/meli/meli "Main\ git\ repository\ and\ issue\ tracker"
-.It
-.Lk https://codeberg.org/meli/meli "Official\ read-only\ git\ mirror\ on\ codeberg.org"
-.It
-.Lk https://github.com/meli/meli "Official\ read-only\ git\ mirror\ on\ github.com"
+.Lk https://github.com/meli/meli "Main\ git\ repository\ and\ issue\ tracker"
 .It
 .Lk https://crates.io/crates/meli "meli\ crate\ on\ crates.io"
 .El

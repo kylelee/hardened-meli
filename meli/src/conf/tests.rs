@@ -38,6 +38,7 @@ use crate::{
         FileSettings,
     },
     terminal::{Color, Key},
+    Attr,
 };
 
 pub struct ConfigFile {
@@ -334,6 +335,49 @@ fn test_conf_arrow_navigation_defaults() {
 }
 
 #[test]
+fn test_conf_composer_close_shortcut_default() {
+    let defaults = ComposingShortcuts::default().key_values();
+    assert_eq!(
+        defaults.get("close"),
+        Some(&Key::Esc),
+        "composing.close must default to Esc"
+    );
+}
+
+#[test]
+fn test_conf_composer_close_shortcut_parse() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = format!(
+        r#"
+[accounts.shortcut-test]
+root_mailbox = "{}"
+format = "maildir"
+send_mail = 'false'
+identity = "username@hostname.local"
+
+[shortcuts.composing]
+close = "C-x"
+"#,
+        tempdir.path().display()
+    );
+
+    let new_file = ConfigFile::new(&config, &tempdir).unwrap();
+    let config = FileSettings::validate(new_file.path.clone(), true)
+        .expect("could not parse composing close shortcut config");
+
+    let composing = config.shortcuts.composing.key_values();
+    assert_eq!(
+        composing.get("close"),
+        Some(&Key::Ctrl('x')),
+        "close must parse from [shortcuts.composing] as C-x"
+    );
+
+    if let Err(err) = tempdir.close() {
+        eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+
+#[test]
 fn test_conf_theme_parsing() {
     /* MUST SUCCEED: default themes should be valid */
     let def = Themes::default();
@@ -478,6 +522,115 @@ fn test_conf_theme_key_values() {
             }
         }
     }
+}
+
+/// Pin the default focus/selection palette for both light and dark themes
+/// (todo: modern focus/selection defaults). If a value changes intentionally,
+/// update this test alongside the golden re-record.
+#[test]
+fn test_conf_theme_default_focus_palette() {
+    let def = Themes::default();
+    let dark = |key: &str| unlink(&def.dark, key);
+    let light = |key: &str| unlink(&def.light, key);
+    // tab.focused = bold + accent fg; tab.unfocused = dim.
+    assert_eq!(
+        dark("tab.focused"),
+        ThemeAttribute {
+            fg: Color::Byte(123),
+            bg: Color::Default,
+            attrs: Attr::BOLD
+        }
+    );
+    assert_eq!(
+        light("tab.focused"),
+        ThemeAttribute {
+            fg: Color::Byte(31),
+            bg: Color::Default,
+            attrs: Attr::BOLD
+        }
+    );
+    for theme in [dark("tab.unfocused"), light("tab.unfocused")] {
+        assert_eq!(
+            theme,
+            ThemeAttribute {
+                fg: Color::Byte(244),
+                bg: Color::Default,
+                attrs: Attr::DIM
+            }
+        );
+    }
+    // Status bars: normal = accent on subtle dark, command = amber.
+    assert_eq!(
+        dark("status.bar"),
+        ThemeAttribute {
+            fg: Color::Byte(123),
+            bg: Color::Byte(235),
+            attrs: Attr::DEFAULT
+        }
+    );
+    assert_eq!(
+        light("status.bar"),
+        ThemeAttribute {
+            fg: Color::Byte(31),
+            bg: Color::Byte(254),
+            attrs: Attr::DEFAULT
+        }
+    );
+    for theme in [dark("status.command_bar"), light("status.command_bar")] {
+        assert_eq!(
+            theme,
+            ThemeAttribute {
+                fg: Color::Byte(16),
+                bg: Color::Byte(214),
+                attrs: Attr::DEFAULT
+            }
+        );
+    }
+    // Selection fill: steel blue (dark) / light blue (light);
+    // cursor highlight: grey ramp.
+    for key in [
+        "mail.listing.compact.even_selected",
+        "mail.listing.compact.odd_selected",
+        "mail.listing.plain.even_selected",
+        "mail.listing.plain.odd_selected",
+        "mail.listing.conversations.selected",
+    ] {
+        assert_eq!(dark(key).bg, Color::Byte(24), "{key} dark bg");
+        assert_eq!(light(key).bg, Color::Byte(153), "{key} light bg");
+    }
+    for key in [
+        "mail.listing.compact.even_highlighted",
+        "mail.listing.compact.odd_highlighted",
+        "mail.listing.plain.even_highlighted",
+        "mail.listing.plain.odd_highlighted",
+    ] {
+        assert_eq!(dark(key).bg, Color::Byte(240), "{key} dark bg");
+        assert_eq!(light(key).bg, Color::Byte(189), "{key} light bg");
+    }
+    assert_eq!(
+        dark("mail.listing.conversations.highlighted").bg,
+        Color::Byte(240)
+    );
+    assert_eq!(
+        light("mail.listing.conversations.highlighted").bg,
+        Color::Byte(189)
+    );
+    assert_eq!(
+        dark("mail.sidebar_highlighted"),
+        ThemeAttribute {
+            fg: Color::Byte(16),
+            bg: Color::Byte(123),
+            attrs: Attr::DEFAULT
+        }
+    );
+    assert_eq!(
+        light("mail.sidebar_highlighted"),
+        ThemeAttribute {
+            fg: Color::Byte(16),
+            bg: Color::Byte(123),
+            attrs: Attr::DEFAULT
+        }
+    );
 }
 
 #[test]

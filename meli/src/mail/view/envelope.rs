@@ -93,7 +93,6 @@ pub struct EnvelopeView {
     pub body: Box<Attachment>,
     pub display: Vec<AttachmentDisplay>,
     pub body_text: String,
-    pub html_filter: Option<Result<ViewFilter>>,
     pub filters: Vec<ViewFilter>,
     pub links: Vec<Link<'static>>,
     pub attachment_tree: String,
@@ -179,7 +178,6 @@ impl EnvelopeView {
             display: vec![],
             links: vec![],
             body_text: String::new(),
-            html_filter: None,
             filters: vec![],
             view_settings,
             headers_no: 5,
@@ -270,6 +268,19 @@ impl EnvelopeView {
         }
     }
 
+    /// Routing predicate for cleartext (`-----BEGIN PGP SIGNED MESSAGE-----`)
+    /// signed `text/plain` bodies: reuse melib's `extract_unverified_signature`
+    /// instead of re-matching the armor prefix, so the decision stays in sync
+    /// with the verification pipeline.
+    #[cfg(feature = "gpgme")]
+    fn is_cleartext_signature(a: &Attachment, view_settings: &ViewSettings) -> bool {
+        view_settings.auto_verify_signatures.is_true()
+            && matches!(
+                melib::email::pgp::extract_unverified_signature(a),
+                Ok(melib::email::pgp::UnverifiedSignature::Cleartext { .. })
+            )
+    }
+
     fn attachment_to_display_helper(
         a: &Attachment,
         main_loop_handler: &MainLoopHandler,
@@ -285,7 +296,7 @@ impl EnvelopeView {
             let bytes = a.decode(view_settings.charset.into());
             // Same formula as the primary html path in `filters.rs`, minus the
             // `pager.minimum_width` clamp: `ViewSettings` does not carry it.
-            let render_width = termion::terminal_size()
+            let render_width = crossterm::terminal::size()
                 .map(|(cols, _)| cols as usize)
                 .unwrap_or(120)
                 .saturating_sub(4);
@@ -385,10 +396,48 @@ impl EnvelopeView {
             }
         } else if a.is_text() {
             let bytes = a.decode(view_settings.charset.into());
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            #[cfg(feature = "gpgme")]
+            if Self::is_cleartext_signature(a, view_settings) {
+                // Route cleartext signed `text/plain` bodies through the same
+                // SignedPending -> SignedVerified pipeline as
+                // `multipart/signed`. The original armored text is displayed
+                // as-is; stripping the armor is deferred (FilterOutputMetadata
+                // debt, see SYNC.md).
+                let verify_fut = crate::mail::pgp::verify(a.clone());
+                let process_fut =
+                    async move { crate::mail::pgp::signatures_into_error(verify_fut.await?) };
+                let handle = main_loop_handler.job_executor.spawn(
+                    "gpg::verify_cleartext".into(),
+                    process_fut,
+                    IsAsync::Blocking,
+                );
+                active_jobs.insert(handle.job_id);
+                main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::StatusEvent(
+                    StatusEvent::NewJob(handle.job_id),
+                )));
+                acc.push(AttachmentDisplay::SignedPending {
+                    inner: Box::new(a.clone()),
+                    job_id: handle.job_id,
+                    display: vec![AttachmentDisplay::InlineText {
+                        inner: Box::new(a.clone()),
+                        comment: None,
+                        text,
+                    }],
+                    handle,
+                });
+            } else {
+                acc.push(AttachmentDisplay::InlineText {
+                    inner: Box::new(a.clone()),
+                    comment: None,
+                    text,
+                });
+            }
+            #[cfg(not(feature = "gpgme"))]
             acc.push(AttachmentDisplay::InlineText {
                 inner: Box::new(a.clone()),
                 comment: None,
-                text: String::from_utf8_lossy(&bytes).to_string(),
+                text,
             });
         } else if a.content_type == "message/rfc822" {
             let bytes = a.decode(view_settings.charset.into());
@@ -2335,5 +2384,90 @@ mod tests {
                 invocation: "w3m -I utf-8 -T text/html".to_string()
             }
         );
+    }
+
+    #[cfg(feature = "gpgme")]
+    mod cleartext_signature_routing {
+        use super::*;
+
+        const CLEARTEXT: &[u8] = b"-----BEGIN PGP SIGNED MESSAGE-----\r\nHash: SHA512\r\n\r\nSample text for gpg signing\r\n\r\n-----BEGIN PGP SIGNATURE-----\r\n\r\n[...]\r\n-----END PGP SIGNATURE-----\r\n";
+
+        fn auto_verify() -> ViewSettings {
+            ViewSettings {
+                auto_verify_signatures: melib::conf::ActionFlag::True,
+                ..ViewSettings::default()
+            }
+        }
+
+        #[test]
+        fn cleartext_text_hits_route() {
+            let a = Attachment::new(
+                ContentType::default(),
+                Default::default(),
+                CLEARTEXT.to_vec(),
+            );
+            assert!(EnvelopeView::is_cleartext_signature(&a, &auto_verify()));
+        }
+
+        #[test]
+        fn plain_text_without_armor_does_not_hit_route() {
+            let a = Attachment::new(
+                ContentType::default(),
+                Default::default(),
+                b"Sample text for gpg signing".to_vec(),
+            );
+            assert!(!EnvelopeView::is_cleartext_signature(&a, &auto_verify()));
+        }
+
+        #[test]
+        fn multipart_signed_is_unchanged() {
+            let a = Attachment::new(
+                ContentType::Multipart {
+                    boundary: b"b".to_vec(),
+                    parameters: vec![
+                        (b"micalg".to_vec(), b"pgp-sha512".to_vec()),
+                        (b"protocol".to_vec(), b"application/pgp-signature".to_vec()),
+                    ],
+                    kind: MultipartType::Signed,
+                    parts: vec![
+                        Attachment::new(
+                            ContentType::default(),
+                            Default::default(),
+                            b"Sample text for gpg signing".to_vec(),
+                        ),
+                        Attachment::new(
+                            ContentType::PGPSignature,
+                            Default::default(),
+                            b"-----BEGIN PGP SIGNATURE-----\r\n[...]\r\n-----END PGP SIGNATURE-----"
+                                .to_vec(),
+                        ),
+                    ],
+                },
+                Default::default(),
+                Vec::new(),
+            );
+            // multipart/signed is not routed through the cleartext arm...
+            assert!(!EnvelopeView::is_cleartext_signature(&a, &auto_verify()));
+            // ...it still extracts as a detached signature for the existing
+            // MultipartType::Signed arm.
+            assert!(matches!(
+                melib::email::pgp::extract_unverified_signature(&a),
+                Ok(melib::email::pgp::UnverifiedSignature::Detached { .. })
+            ));
+        }
+
+        #[test]
+        fn auto_verify_disabled_does_not_hit_route() {
+            let a = Attachment::new(
+                ContentType::default(),
+                Default::default(),
+                CLEARTEXT.to_vec(),
+            );
+            let view_settings = ViewSettings {
+                auto_verify_signatures: melib::conf::ActionFlag::False,
+                ..ViewSettings::default()
+            };
+            assert!(!EnvelopeView::is_cleartext_signature(&a, &view_settings));
+        }
     }
 }

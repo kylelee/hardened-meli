@@ -1,6 +1,6 @@
 # configuration for https://github.com/orhun/git-cliff
 
-[remote.gitea]
+[remote.github]
 owner = "meli"
 repo = "meli"
 
@@ -26,15 +26,15 @@ body = """
 {% if not version %}
 ## Unreleased
 {% else %}
-## [{{ version }}]({{ "https://git.meli-email.org/meli/meli/releases/tag/" ~ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+## [{{ version }}]({{ "https://github.com/meli/meli/releases/tag/" ~ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
 {% endif %}{% if get_env(name = "FRIENDS", default = "") != "" %}
 Contributors in alphabetical order:
 
 {{ get_env(name = "FRIENDS") }}
-{%- endif -%}{% if gitea and gitea.contributors %}{% for contributor in gitea.contributors | filter(attribute="is_first_time", value=true) %}
-  * [@{{ contributor.username }}](https://git.meli-email.org/{{ contributor.username }}) made their first contribution in [#{{ contributor.pr_number }}]({{ "https://git.meli-email.org/meli/meli/pulls/" ~ contributor.pr_number }})
+{%- endif -%}{% if github and github.contributors %}{% for contributor in github.contributors | filter(attribute="is_first_time", value=true) %}
+  * [@{{ contributor.username }}](https://github.com/{{ contributor.username }}) made their first contribution in [#{{ contributor.pr_number }}]({{ "https://github.com/meli/meli/pull/" ~ contributor.pr_number }})
 {%- endfor -%}{%- endif -%}{% macro commit(commit) -%}
-- [**`{{ commit.id | truncate(length=8, end="") }}`**]({{ "https://git.meli-email.org/meli/meli/commit/" ~ commit.id }}) {% if commit.scope %}*({{commit.scope | lower }})* {% endif %}`{{ commit.message | split(pat="\n")| first }}`{% if commit.remote and commit.remote.pr_number and commit.remote.pr_title %} in PR [`#{{ commit.remote.pr_number }}` "{{ commit.remote.pr_title }}"]({{ "https://git.meli-email.org/meli/meli/pulls/" ~ commit.remote.pr_number }}){%- endif -%}{% endmacro -%}
+- [**`{{ commit.id | truncate(length=8, end="") }}`**]({{ "https://github.com/meli/meli/commit/" ~ commit.id }}) {% if commit.scope %}*({{commit.scope | lower }})* {% endif %}`{{ commit.message | split(pat="\n")| first }}`{% if commit.remote and commit.remote.pr_number and commit.remote.pr_title %} in PR [`#{{ commit.remote.pr_number }}` "{{ commit.remote.pr_title }}"]({{ "https://github.com/meli/meli/pull/" ~ commit.remote.pr_number }}){%- endif -%}{% endmacro -%}
 {% for group, commits in commits | group_by(attribute="group") %}
 
 ### {{ group | striptags | trim | upper_first }}
@@ -67,7 +67,7 @@ filter_unconventional = false
 split_commits = false
 # regex for preprocessing the commit messages
 commit_preprocessors = [
-  { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](https://git.meli-email.org/meli/meli/issues/${2}))" }, # Replace the issue number with the link
+  { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](https://github.com/meli/meli/issues/${2}))" }, # Replace the issue number with the link
   { pattern = " +", replace = " "}, # Replace multiple spaces with a single space
   { pattern = "`[^`]+`", replace_command = "pandoc -f commonmark -t plain" },
 ]

@@ -28,13 +28,16 @@ use super::*;
 use crate::{components::PageMovement, jobs::JoinHandle};
 
 macro_rules! row_attr {
-    ($field:ident, $color_cache:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
+    ($field:ident, $color_cache:expr, even: $even:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
         let color_cache = &$color_cache;
+        let even = $even;
         let unseen = $unseen;
         let highlighted = $highlighted;
         let selected = $selected;
         ThemeAttribute {
-            fg: if highlighted {
+            fg: if highlighted && selected {
+                color_cache.highlighted_selected.fg
+            } else if highlighted {
                 color_cache.highlighted.fg
             } else if selected {
                 color_cache.selected.fg
@@ -43,14 +46,18 @@ macro_rules! row_attr {
             } else {
                 color_cache.$field.fg
             },
-            bg: if highlighted {
+            bg: if highlighted && selected {
+                color_cache.highlighted_selected.bg
+            } else if highlighted {
                 color_cache.highlighted.bg
             } else if selected {
                 color_cache.selected.bg
             } else if unseen {
                 color_cache.unseen.bg
+            } else if even {
+                color_cache.even.bg
             } else {
-                color_cache.$field.bg
+                color_cache.odd.bg
             },
             attrs: if highlighted && selected {
                 color_cache.highlighted_selected.attrs
@@ -65,13 +72,16 @@ macro_rules! row_attr {
             },
         }
     }};
-    ($color_cache:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
+    ($color_cache:expr, even: $even:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
         let color_cache = &$color_cache;
+        let even = $even;
         let unseen = $unseen;
         let highlighted = $highlighted;
         let selected = $selected;
         ThemeAttribute {
-            fg: if highlighted {
+            fg: if highlighted && selected {
+                color_cache.highlighted_selected.fg
+            } else if highlighted {
                 color_cache.highlighted.fg
             } else if selected {
                 color_cache.selected.fg
@@ -80,14 +90,18 @@ macro_rules! row_attr {
             } else {
                 color_cache.theme_default.fg
             },
-            bg: if highlighted {
+            bg: if highlighted && selected {
+                color_cache.highlighted_selected.bg
+            } else if highlighted {
                 color_cache.highlighted.bg
             } else if selected {
                 color_cache.selected.bg
             } else if unseen {
                 color_cache.unseen.bg
+            } else if even {
+                color_cache.even.bg
             } else {
-                color_cache.theme_default.bg
+                color_cache.odd.bg
             },
             attrs: if highlighted && selected {
                 color_cache.highlighted_selected.attrs
@@ -863,6 +877,7 @@ impl ConversationsListing {
 
             let row_attr = row_attr!(
                 self.color_cache,
+                even: idx.is_multiple_of(2),
                 unseen: thread.unseen() > 0,
                 highlighted: self.cursor_pos.2 == idx,
                 selected: self.rows.is_thread_selected(*thread_hash)
@@ -886,6 +901,7 @@ impl ConversationsListing {
             let subject_attr = row_attr!(
                 subject,
                 self.color_cache,
+                even: idx.is_multiple_of(2),
                 unseen: thread.unseen() > 0,
                 highlighted: self.cursor_pos.2 == idx,
                 selected: self.rows.is_thread_selected(*thread_hash)
@@ -939,6 +955,7 @@ impl ConversationsListing {
             let date_attr = row_attr!(
                 date,
                 self.color_cache,
+                even: idx.is_multiple_of(2),
                 unseen: thread.unseen() > 0,
                 highlighted: self.cursor_pos.2 == idx,
                 selected: self.rows.is_thread_selected(*thread_hash)
@@ -962,6 +979,7 @@ impl ConversationsListing {
             let from_attr = row_attr!(
                 from,
                 self.color_cache,
+                even: idx.is_multiple_of(2),
                 unseen: thread.unseen() > 0,
                 highlighted: self.cursor_pos.2 == idx,
                 selected: self.rows.is_thread_selected(*thread_hash)
@@ -1060,7 +1078,53 @@ impl Component for ConversationsListing {
 
                 area = area.skip_rows(1);
             }
-            let rows = area.height() / 3;
+            /* Common subpane geometry, computed once for every branch
+             * below. In `Focus::Entry` the conversation list keeps
+             * rendering as a subpane in the left third while the parent
+             * listing skips its own pane frame (the open `ThreadView`
+             * draws its own), so the subpane must draw its own rounded
+             * frame too — unfocused-styled, because the keyboard focus
+             * sits in the `ThreadView` (the same convention the
+             * `ThreadView`'s internal panes follow). `Focus::None` keeps
+             * the parent listing's outer pane frame and draws edge to
+             * edge. The row math below must share this inner-area basis
+             * with `draw_list` (it derives its own rows from the area
+             * passed in), otherwise a row refresh would use rows/offsets
+             * shifted by the ring and paint over it. */
+            let list_inner = if matches!(self.focus, Focus::Entry) {
+                let list_area = area.take_cols(area.width() / 3);
+                let inner = draw_rounded_frame(
+                    grid,
+                    list_area,
+                    crate::conf::value(context, "tab.unfocused"),
+                );
+                for frame_area in frame_ring_areas(list_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                inner
+            } else {
+                area
+            };
+            let rows = list_inner.height() / 3;
+            if rows == 0 {
+                /* Initialize coordinates/rows via `draw_list`'s refresh
+                 * path; its own `rows == 0` guard then stops it before
+                 * rendering anything. */
+                self.draw_list(grid, list_inner, context);
+                if matches!(self.focus, Focus::Entry) {
+                    /* The subpane's ring is up but no list row fits its
+                     * inner area; still hand the view its split area so
+                     * it does not paint over the ring (degenerate pane
+                     * heights 3-4). */
+                    let entry_area = area.skip_cols(1 + area.width() / 3);
+                    let gap_area = area.nth_col(area.width() / 3);
+                    grid.clear_area(gap_area, self.color_cache.theme_default);
+                    context.dirty_areas.push_back(gap_area);
+                    self.view_area = entry_area.into();
+                }
+                self.dirty = false;
+                return;
+            }
             if let Some(modifier) = self.modifier_command.take() {
                 if let Some(mvm) = self.movement.as_ref() {
                     match mvm {
@@ -1248,29 +1312,19 @@ impl Component for ConversationsListing {
                     let top_idx = page_no * rows;
                     // Update row only if it's currently visible
                     if row >= top_idx && row < top_idx + rows {
-                        let area = area.skip_rows(3 * (row % rows)).take_rows(3);
+                        let area = list_inner.skip_rows(3 * (row % rows)).take_rows(3);
                         self.highlight_line(grid, area, row, context);
                         context.dirty_areas.push_back(area);
                     }
                 }
                 if self.force_draw {
                     // Draw the entire list
-                    let area = if matches!(self.focus, Focus::Entry) {
-                        area.take_cols(area.width() / 3)
-                    } else {
-                        area
-                    };
-                    self.draw_list(grid, area, context);
+                    self.draw_list(grid, list_inner, context);
                     self.force_draw = false;
                 }
             } else {
                 // Draw the entire list
-                let area = if matches!(self.focus, Focus::Entry) {
-                    area.take_cols(area.width() / 3)
-                } else {
-                    area
-                };
-                self.draw_list(grid, area, context);
+                self.draw_list(grid, list_inner, context);
             }
         }
         if matches!(self.focus, Focus::Entry) {
@@ -1489,9 +1543,13 @@ impl Component for ConversationsListing {
                 self.set_dirty(true);
             }
             UIEvent::Action(ref action) => match action {
-                Action::Listing(Search(ref filter_term)) if !self.unfocused() => {
+                Action::Listing(Search {
+                    term: ref filter_term,
+                    raw_search,
+                }) if !self.unfocused() => {
                     match context.accounts[&self.cursor_pos.0].search(
                         filter_term,
+                        *raw_search,
                         self.sort,
                         self.cursor_pos.1,
                     ) {
@@ -1583,5 +1641,241 @@ impl Component for ConversationsListing {
 
     fn id(&self) -> ComponentId {
         self.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use melib::backends::{
+        BackendMailbox, Mailbox, MailboxHash, MailboxPermissions, SpecialUsageMailbox,
+    };
+    use melib::Result;
+
+    use super::*;
+    use crate::{
+        accounts::{build_mailboxes_order, MailboxEntry, MailboxStatus},
+        conf::FileMailboxConf,
+        terminal::{Screen, Virtual},
+    };
+
+    #[derive(Debug)]
+    struct TestMailbox {
+        hash: MailboxHash,
+        name: String,
+    }
+
+    impl BackendMailbox for TestMailbox {
+        fn hash(&self) -> MailboxHash {
+            self.hash
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn path(&self) -> &str {
+            &self.name
+        }
+
+        fn children(&self) -> &[MailboxHash] {
+            &[]
+        }
+
+        fn clone(&self) -> Mailbox {
+            Box::new(Self {
+                hash: self.hash,
+                name: self.name.clone(),
+            })
+        }
+
+        fn special_usage(&self) -> SpecialUsageMailbox {
+            SpecialUsageMailbox::Normal
+        }
+
+        fn parent(&self) -> Option<MailboxHash> {
+            None
+        }
+
+        fn permissions(&self) -> MailboxPermissions {
+            MailboxPermissions::default()
+        }
+
+        fn is_subscribed(&self) -> bool {
+            true
+        }
+
+        fn set_is_subscribed(&mut self, _: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_special_usage(&mut self, _: SpecialUsageMailbox) -> Result<()> {
+            Ok(())
+        }
+
+        fn count(&self) -> Result<(usize, usize)> {
+            Ok((0, 0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Register an `INBOX` mailbox on the mock account, modeled on the
+    /// `register_two_mailboxes` helper in `meli/src/golden.rs` and the
+    /// `listing_menu_tests` precedent.
+    fn register_inbox(context: &mut Context) -> (AccountHash, MailboxHash) {
+        let account_hash = *context.accounts.iter().next().unwrap().0;
+        let mailbox_hash = MailboxHash::from_bytes(b"INBOX");
+        let account = context.accounts.get_mut(&account_hash).unwrap();
+        account.mailbox_entries.insert(
+            mailbox_hash,
+            MailboxEntry::new(
+                MailboxStatus::Available,
+                "INBOX".to_string(),
+                Box::new(TestMailbox {
+                    hash: mailbox_hash,
+                    name: "INBOX".to_string(),
+                }),
+                FileMailboxConf::default(),
+            ),
+        );
+        build_mailboxes_order(
+            &mut account.tree,
+            &account.mailbox_entries,
+            &mut account.mailboxes_order,
+        );
+        (account_hash, mailbox_hash)
+    }
+
+    /// Read one screen row as its plain text (symbols only).
+    fn grid_row_text(grid: &CellBuffer, y: usize) -> String {
+        (0..grid.cols).map(|x| grid[(x, y)].ch()).collect()
+    }
+
+    /// An open entry's row refresh (e.g. a seen receipt arriving for the
+    /// open thread) must stay inside the conversation subpane's rounded
+    /// frame: the row-update path derives its row strips from the same
+    /// inner area `draw_list` renders in, so the ring keeps its own
+    /// cells and the refreshed content lands one row below the ring.
+    #[test]
+    fn conversations_entry_row_update_stays_inside_frame() {
+        let bytes = b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: row update frame mail\r\nMessage-ID: <row-update-solo@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\nrow update body line\r\n";
+        let mut ctx = crate::golden::mock_context();
+        let (account_hash, inbox_hash) = register_inbox(&mut ctx);
+        let mut env = Envelope::from_bytes(bytes, None).unwrap();
+        env.set_flags(melib::Flag::SEEN);
+        let env_hash = env.hash();
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(env, inbox_hash);
+
+        let mut listing =
+            ConversationsListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx);
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        // First draw in Focus::None populates `rows` so the cursor has a
+        // thread to open; the kick_parent messages of set_focus stay
+        // unconsumed in the reply queue (there is no parent component
+        // here).
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        listing.set_focus(Focus::Entry, &mut ctx);
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let tab_unfocused = crate::conf::value(&ctx, "tab.unfocused");
+        {
+            let grid = screen.grid();
+            // Full 80-col pane: the subpane takes x=0..=25, so its ring
+            // owns columns 0 and 25 and rows 0 and 23.
+            assert_eq!(grid[(0, 0)].ch(), '╭', "subpane top-left ring corner");
+            assert_eq!(grid[(25, 0)].ch(), '╮', "subpane top-right ring corner");
+            let first_row = grid_row_text(grid, 1);
+            assert!(
+                first_row.contains("row update frame"),
+                "first conversation row must render inside the subpane frame; row 1 was {first_row:?}"
+            );
+        }
+
+        // The row-update path alone (no full redraw): the env hash lands
+        // in `rows.row_updates` and only that row's strip is redrawn.
+        listing.rows.row_updates.push(env_hash);
+        listing.set_dirty(true);
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        assert_eq!(
+            grid[(0, 0)].ch(),
+            '╭',
+            "row update must not paint over the ring's top-left corner"
+        );
+        assert_eq!(
+            grid[(25, 0)].ch(),
+            '╮',
+            "row update must not paint over the ring's top-right corner"
+        );
+        for y in 1..23 {
+            assert_eq!(
+                grid[(25, y)].ch(),
+                '│',
+                "ring right column must survive the row refresh at y={y}"
+            );
+            assert_eq!(
+                grid[(25, y)].fg(),
+                tab_unfocused.fg,
+                "ring right column must keep the unfocused attr at y={y}"
+            );
+        }
+        assert_eq!(grid[(0, 23)].ch(), '╰', "subpane bottom-left ring corner");
+        assert_eq!(grid[(25, 23)].ch(), '╯', "subpane bottom-right ring corner");
+        let first_row = grid_row_text(grid, 1);
+        assert!(
+            first_row.contains("row update frame"),
+            "refreshed row must stay at the inner row below the ring; row 1 was {first_row:?}"
+        );
+        println!("conversations_entry_row_update_stays_inside_frame: ring pinned");
+    }
+
+    /// Degenerate pane heights (3-4 rows) in `Focus::Entry`: the
+    /// subpane's inner area fits no conversation row, but the subpane
+    /// ring is still drawn and the view must still receive its split
+    /// area (right two thirds) instead of falling back to the whole
+    /// pane, which would paint over the ring.
+    #[test]
+    fn conversations_entry_tiny_height_keeps_split_area() {
+        let bytes = b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: tiny height mail\r\nMessage-ID: <tiny-height-solo@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\ntiny body line\r\n";
+        let mut ctx = crate::golden::mock_context();
+        let (account_hash, inbox_hash) = register_inbox(&mut ctx);
+        let mut env = Envelope::from_bytes(bytes, None).unwrap();
+        env.set_flags(melib::Flag::SEEN);
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(env, inbox_hash);
+
+        let mut listing =
+            ConversationsListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx);
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 4));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        listing.set_focus(Focus::Entry, &mut ctx);
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        // The subpane ring survives even though no row fits inside it.
+        assert_eq!(grid[(0, 0)].ch(), '╭', "subpane top-left ring corner");
+        assert_eq!(grid[(25, 0)].ch(), '╮', "subpane top-right ring corner");
+        assert_eq!(grid[(0, 3)].ch(), '╰', "subpane bottom-left ring corner");
+        assert_eq!(grid[(25, 3)].ch(), '╯', "subpane bottom-right ring corner");
+        // The view keeps the split area: x=27..=79 on every row.
+        let view_area = listing
+            .view_area()
+            .expect("tiny-height Entry state must still set the view area");
+        assert_eq!(view_area.upper_left(), (27, 0));
+        assert_eq!(view_area.width(), 53);
+        println!("conversations_entry_tiny_height_keeps_split_area: split area pinned");
     }
 }

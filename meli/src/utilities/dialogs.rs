@@ -56,8 +56,6 @@ pub struct Selector<
     cursor: SelectorCursor,
     scroll_x_cursor: usize,
     movement: Option<PageMovement>,
-    vertical_alignment: Alignment,
-    horizontal_alignment: Alignment,
     title: String,
     content: Screen<Virtual>,
     initialized: bool,
@@ -530,8 +528,6 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
             cursor: SelectorCursor::Unfocused,
             scroll_x_cursor: 0,
             movement: None,
-            vertical_alignment: Alignment::Center,
-            horizontal_alignment: Alignment::Center,
             title,
             content: Screen::<Virtual>::new(theme_default),
             initialized: false,
@@ -566,6 +562,16 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
         if !context.settings.terminal.use_color() {
             highlighted_attrs.attrs |= Attr::REVERSE;
         }
+        /* Dialogs are focused floating surfaces: accent title from the tab
+         * focus vocabulary, a raised-panel background (status.notification)
+         * distinct from the content underneath, and dimmed secondary text. */
+        let focused_attrs = crate::conf::value(context, "tab.focused");
+        let unfocused_attrs = crate::conf::value(context, "tab.unfocused");
+        let surface = crate::conf::value(context, "status.notification");
+        let entry_attrs = ThemeAttribute {
+            bg: surface.bg,
+            ..self.theme_default
+        };
         let shortcuts = context.settings.shortcuts.general.key_values();
         let navigate_help_string = format!(
             "Navigate options with {} to go down, {} to go up, select with {}, cancel with {}",
@@ -587,13 +593,18 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
             self.dirty = false;
             return;
         }
+        // Raised panel background for the dialog body.
+        let content_area = self.content.area();
+        self.content
+            .grid_mut()
+            .clear_area(content_area, entry_attrs);
 
         let inner_area = self.content.area();
         let (_, y) = self.content.grid_mut().write_string(
             &self.title,
-            self.theme_default.fg,
-            self.theme_default.bg,
-            self.theme_default.attrs | Attr::BOLD,
+            focused_attrs.fg,
+            surface.bg,
+            focused_attrs.attrs | Attr::BOLD,
             inner_area.skip_cols(2),
             None,
             None,
@@ -604,9 +615,9 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
             .grid_mut()
             .write_string(
                 &navigate_help_string,
-                self.theme_default.fg,
-                self.theme_default.bg,
-                self.theme_default.attrs | Attr::ITALICS,
+                unfocused_attrs.fg,
+                surface.bg,
+                unfocused_attrs.attrs | Attr::ITALICS,
                 inner_area.skip_cols(2).skip_rows(y + 2),
                 None,
                 None,
@@ -623,7 +634,7 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
                 let attr = if matches!(self.cursor, SelectorCursor::Entry(e) if e == i) {
                     highlighted_attrs
                 } else {
-                    self.theme_default
+                    entry_attrs
                 };
                 self.content.grid_mut().write_string(
                     e,
@@ -640,7 +651,7 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
                 let attr = if matches!(self.cursor, SelectorCursor::Entry(e) if e == i) {
                     highlighted_attrs
                 } else {
-                    self.theme_default
+                    entry_attrs
                 };
                 self.content.grid_mut().write_string(
                     &format!("[{}] {}", if self.entries[i].1 { "x" } else { " " }, e),
@@ -656,7 +667,7 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
             let attr = if matches!(self.cursor, SelectorCursor::Ok) {
                 highlighted_attrs
             } else {
-                self.theme_default
+                entry_attrs
             };
             let (x, y) = self.content.grid_mut().write_string(
                 OK,
@@ -670,7 +681,7 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
             let attr = if matches!(self.cursor, SelectorCursor::Cancel) {
                 highlighted_attrs
             } else {
-                self.theme_default
+                entry_attrs
             };
             self.content.grid_mut().write_string(
                 CANCEL,
@@ -686,21 +697,27 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
     }
 
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        let mut highlighted_attrs = crate::conf::value(context, "widgets.options.highlighted");
-        if !context.settings.terminal.use_color() {
-            highlighted_attrs.attrs |= Attr::REVERSE;
-        }
         if !self.initialized {
             // [ref:FIXME]: don't re-initialize when the only change is highlight index.
             self.initialize(context);
         }
         let (width, height) = self.content.area().size();
-        let dialog_area = area.align_inside(
+        /* Dialog centering via ratatui Layout (bridge helper): identical to
+         * the previous `align_inside(.., Center, Center)` for every size. */
+        let dialog_area = crate::terminal::ratatui_bridge::center_inside_via_layout(
+            area,
             (width + 2, height + 2),
-            self.horizontal_alignment,
-            self.vertical_alignment,
         );
-        let inner_area = create_box(grid, dialog_area);
+        /* Rounded frame in the focus vocabulary: a dialog is, by definition,
+         * the focused surface while it is shown, so its border uses
+         * tab.focused over the raised overlay panel background. */
+        let mut border_attrs = crate::conf::value(context, "tab.focused");
+        border_attrs.bg = crate::conf::value(context, "status.notification").bg;
+        if !context.settings.terminal.use_color() {
+            border_attrs.attrs |= Attr::REVERSE;
+        }
+        let inner_area =
+            crate::terminal::ratatui_bridge::draw_rounded_frame(grid, dialog_area, border_attrs);
         let rows = inner_area.height();
         if let Some(mvm) = self.movement.take() {
             match mvm {

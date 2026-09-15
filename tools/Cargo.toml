@@ -6,7 +6,7 @@ edition = "2018"
 rust-version = "1.65.0"
 license = "GPL-3.0-or-later"
 homepage = "https://meli-email.org"
-repository = "https://git.meli-email.org/meli/meli.git"
+repository = "https://github.com/meli/meli.git"
 publish = false
 
 # Prevent this from interfering with workspaces
@@ -39,7 +39,7 @@ debug-tracing = ["meli/debug-tracing"]
 [dependencies]
 crossbeam = { version = "^0.8" }
 meli = { path = "../meli", version = "0.9" }
-melib = { path = "../melib", version = "0.9", features = ["debug-tracing" ] }
+melib = { path = "../melib", version = "0.9", features = ["debug-tracing"] }
 nix = { version = "0.30", default-features = false, features = ["signal", "poll", "term", "ioctl", "process"] }
 signal-hook = { version = "^0.3", default-features = false, features = ["iterator"] }
 signal-hook-registry = { version = "1.2.0", default-features = false }

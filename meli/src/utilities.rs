@@ -25,6 +25,7 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 use melib::{text::Reflow, ShellExpandTrait};
+use ratatui::layout::{Constraint, Layout};
 
 use super::*;
 use crate::{components::ExtendShortcutsMaps, jobs::JobId, melib::text::TextProcessing};
@@ -97,6 +98,9 @@ impl std::fmt::Display for StatusBar {
 }
 
 impl StatusBar {
+    const MOUSE_MODE: &str = "🖱️ ";
+    const MOUSE_MODE_ASCII: &str = "(mouse)";
+
     pub fn new(context: &Context, container: Box<dyn Component>) -> Self {
         let mut progress_spinner = ProgressSpinner::new(20, context);
         match context.settings.terminal.progress_spinner_sequence.as_ref() {
@@ -140,12 +144,30 @@ impl StatusBar {
             attribute.attrs |= Attr::REVERSE;
         }
         grid.clear_area(area, attribute);
+        /* UIMode indicator chip: the leading mode word is styled per mode
+         * from the existing status vocabulary (no new theme keys); the
+         * remainder of the line keeps the plain "status.bar" values. */
+        let mode_str = self.mode.to_string();
+        let mode_attribute = Self::mode_indicator_attrs(self.mode, context);
         let (x, _) = grid.write_string(
-            &self.status,
+            &mode_str,
+            mode_attribute.fg,
+            mode_attribute.bg,
+            mode_attribute.attrs,
+            area,
+            None,
+            None,
+        );
+        let rest = self
+            .status
+            .strip_prefix(mode_str.as_str())
+            .unwrap_or(&self.status);
+        let (x, _) = grid.write_string(
+            rest,
             attribute.fg,
             attribute.bg,
             attribute.attrs,
-            area,
+            area.skip_cols(x),
             None,
             None,
         );
@@ -209,12 +231,17 @@ impl StatusBar {
             "{} {}| {}{}{}",
             self.mode,
             if self.mouse {
+                let alt = if context.settings.terminal.ascii_drawing {
+                    Self::MOUSE_MODE_ASCII
+                } else {
+                    Self::MOUSE_MODE
+                };
                 context
                     .settings
                     .terminal
                     .mouse_flag
                     .as_deref()
-                    .unwrap_or("🖱️ ")
+                    .unwrap_or(alt)
             } else {
                 ""
             },
@@ -249,6 +276,42 @@ impl StatusBar {
         }
         context.dirty_areas.push_back(area);
     }
+
+    /// Per-mode attributes for the status bar's leading [`UIMode`]
+    /// indicator, derived strictly from the existing theme vocabulary (no
+    /// new keys): "status.bar" is the base; Insert inverts it (the classic
+    /// editing emphasis), Command adopts the amber `status.command_bar`
+    /// block shared with the command line above, and Embedded uses the
+    /// bolded "status.notification" surface. Fork stays on the base.
+    fn mode_indicator_attrs(mode: UIMode, context: &Context) -> ThemeAttribute {
+        let mut base = crate::conf::value(context, "status.bar");
+        if !context.settings.terminal.use_color() {
+            base.attrs |= Attr::REVERSE;
+        }
+        match mode {
+            UIMode::Normal | UIMode::Fork => base,
+            UIMode::Insert => ThemeAttribute {
+                fg: base.bg,
+                bg: base.fg,
+                attrs: base.attrs | Attr::BOLD,
+            },
+            UIMode::Command => {
+                let mut attrs = crate::conf::value(context, "status.command_bar");
+                if !context.settings.terminal.use_color() {
+                    attrs.attrs |= Attr::REVERSE;
+                }
+                attrs
+            }
+            UIMode::Embedded => {
+                let mut attrs = crate::conf::value(context, "status.notification");
+                attrs.attrs |= Attr::BOLD;
+                if !context.settings.terminal.use_color() {
+                    attrs.attrs |= Attr::REVERSE;
+                }
+                attrs
+            }
+        }
+    }
 }
 
 impl Component for StatusBar {
@@ -258,14 +321,32 @@ impl Component for StatusBar {
             return;
         }
 
+        /* Top-level vertical split via ratatui Layout: the container takes
+         * every row but the bottom strip, which the status bar and (in
+         * Command mode, where the strip is two rows) the command line share.
+         * Identical to the previous take_rows/skip_rows/nth_row math for
+         * every size. */
+        let [body, bar] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(self.height as u16)])
+                .areas(crate::terminal::ratatui_bridge::area_to_rect(area));
+        let [command_line, status_row] = Layout::vertical([
+            Constraint::Length(self.height.saturating_sub(1) as u16),
+            Constraint::Length(1),
+        ])
+        .areas(bar);
+
         self.container.draw(
             grid,
-            area.take_rows(total_rows.saturating_sub(self.height)),
+            crate::terminal::ratatui_bridge::rect_to_area(body, area),
             context,
         );
 
         self.dirty = false;
-        self.draw_status_bar(grid, area.skip_rows(total_rows.saturating_sub(1)), context);
+        self.draw_status_bar(
+            grid,
+            crate::terminal::ratatui_bridge::rect_to_area(status_row, area),
+            context,
+        );
 
         if self.mode != UIMode::Command && !self.is_dirty() {
             return;
@@ -273,8 +354,9 @@ impl Component for StatusBar {
         match self.mode {
             UIMode::Normal => {}
             UIMode::Command => {
-                let area = area.nth_row(total_rows.saturating_sub(self.height));
-                self.draw_command_bar(grid, area, context);
+                let command_line_area =
+                    crate::terminal::ratatui_bridge::rect_to_area(command_line, area);
+                self.draw_command_bar(grid, command_line_area, context);
                 /* don't autocomplete for less than 3 characters */
                 if self.ex_buffer.as_str().split_graphemes().len() <= 2 {
                     return;
@@ -341,6 +423,13 @@ impl Component for StatusBar {
                     self.auto_complete.set_cursor(len);
 
                     self.container.set_dirty(true);
+                }
+                /* Completion popup: a rounded floating panel anchored right
+                 * above the status strip (the widget styles itself with the
+                 * dialog vocabulary in `AutoComplete::draw`). */
+                if !self.auto_complete.suggestions().is_empty() {
+                    self.auto_complete
+                        .draw(grid, area.skip_rows_from_end(self.height), context);
                 }
                 /*
                 let hist_height = std::cmp::min(15, self.auto_complete.suggestions().len());
@@ -554,12 +643,17 @@ impl Component for StatusBar {
                         "{} {}",
                         m,
                         if self.mouse {
+                            let alt = if context.settings.terminal.ascii_drawing {
+                                Self::MOUSE_MODE_ASCII
+                            } else {
+                                Self::MOUSE_MODE
+                            };
                             context
                                 .settings
                                 .terminal
                                 .mouse_flag
                                 .as_deref()
-                                .unwrap_or("🖱️ ")
+                                .unwrap_or(alt)
                         } else {
                             ""
                         },
@@ -848,6 +942,12 @@ struct HelpView {
 pub struct Tabbed {
     pinned: usize,
     children: Vec<Box<dyn Component>>,
+    /// Per-child flag: dynamically added tab children (via `Tab(New)`) draw
+    /// inside an area inset by one cell so their content stays clear of the
+    /// rounded frame ring painted over the tab body's outermost cells. The
+    /// pinned children (the mail listing and the contact list) manage the
+    /// ring themselves.
+    inset_children: Vec<bool>,
     cursor_pos: usize,
 
     show_shortcuts: bool,
@@ -874,6 +974,7 @@ impl Tabbed {
             },
             theme_default,
             pinned,
+            inset_children: vec![false; children.len()],
             children,
             cursor_pos: 0,
             show_shortcuts: false,
@@ -898,16 +999,26 @@ impl Tabbed {
             tab_focused_attribute.attrs |= Attr::REVERSE;
         }
 
-        let mut x = 0;
+        /* Modern tab spacing: a one-column gutter aligns labels with the
+         * inner content of the rounded body frame drawn right below this
+         * row; labels keep one blank padding column on each side and tabs
+         * are separated by a two-column gap. The focused tab gains an
+         * underline accent on top of the "tab.focused" vocabulary so the
+         * active tab also reads on grayscale terminals. */
+        let mut x = 1;
         for (idx, c) in self.children.iter().enumerate() {
-            let ThemeAttribute { fg, bg, attrs } = if idx == self.cursor_pos {
+            let focused = idx == self.cursor_pos;
+            let ThemeAttribute { fg, bg, mut attrs } = if focused {
                 tab_focused_attribute
             } else {
                 tab_unfocused_attribute
             };
+            if focused {
+                attrs |= Attr::UNDERLINE;
+            }
             let name = format!(" {c} ");
             grid.write_string(&name, fg, bg, attrs, area.skip_cols(x), None, None);
-            x += name.len() + 1;
+            x += name.len() + 2;
             if idx == self.pinned.saturating_sub(1) {
                 x += 2;
             }
@@ -920,6 +1031,7 @@ impl Tabbed {
 
     pub fn add_component(&mut self, new: Box<dyn Component>, context: &mut Context) {
         new.realize(self.id().into(), context);
+        self.inset_children.push(true);
         self.children.push(new);
     }
 
@@ -944,10 +1056,21 @@ impl std::fmt::Display for Tabbed {
 
 impl Component for Tabbed {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        /* Top-level vertical split via ratatui Layout: one tab row, the rest
+         * is the tab body. Identical to the previous nth_row/skip_rows math
+         * for every size (including empty areas). */
+        let [tab_row, below_tab_row] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+                .areas(crate::terminal::ratatui_bridge::area_to_rect(area));
+        let below_tab_row = crate::terminal::ratatui_bridge::rect_to_area(below_tab_row, area);
         if self.dirty {
-            let first_row = area.nth_row(0);
-            grid.clear_area(first_row, crate::conf::value(context, "tab.bar"));
-            context.dirty_areas.push_back(first_row);
+            grid.clear_area(
+                crate::terminal::ratatui_bridge::rect_to_area(tab_row, area),
+                crate::conf::value(context, "tab.bar"),
+            );
+            context
+                .dirty_areas
+                .push_back(crate::terminal::ratatui_bridge::rect_to_area(tab_row, area));
         }
 
         /* If children are dirty but self isn't and the shortcuts panel is visible,
@@ -957,13 +1080,49 @@ impl Component for Tabbed {
         /* children should be drawn after the shortcuts/help panel lest they
          * overwrite the panel on the grid. the drawing order is determined
          * by the dirty_areas queue which is LIFO */
+        /* Dynamically added tab children draw inside an area inset by one
+         * cell: the rounded frame below is painted over the tab body's
+         * outermost cells, so a child drawing at the area's edges would get
+         * its first column and header row overwritten. Pinned children (the
+         * mail listing, the contact list) draw pane frames flush to the body
+         * edges themselves and get the full area. */
+        let inset_child = *self.inset_children.get(self.cursor_pos).unwrap_or(&false);
+        let inset = |a: Area| a.skip(1, 1).skip_cols_from_end(1).skip_rows_from_end(1);
         if self.children.len() > 1 {
-            self.draw_tabs(grid, area.nth_row(0), context);
-            self.children[self.cursor_pos].draw(grid, area.skip_rows(1), context);
+            self.draw_tabs(
+                grid,
+                crate::terminal::ratatui_bridge::rect_to_area(tab_row, area),
+                context,
+            );
+            let child_area = if inset_child {
+                inset(below_tab_row)
+            } else {
+                below_tab_row
+            };
+            self.children[self.cursor_pos].draw(grid, child_area, context);
         } else {
-            self.children[self.cursor_pos].draw(grid, area, context);
+            let child_area = if inset_child { inset(area) } else { area };
+            self.children[self.cursor_pos].draw(grid, child_area, context);
         }
-        let area = area.skip_rows(1);
+
+        /* Rounded outer frame around the tab body (visual chrome only). The
+         * visible tab is the focused pane, so its frame uses "tab.focused";
+         * there is no unfocused pane at this layer. Drawn after the children
+         * so partial child redraws cannot leave the border ring eaten; the
+         * ring cells are pushed for flushing. The shortcuts overlay below
+         * draws after the frame, so it layers on top. */
+        let body_area = if self.children.len() > 1 {
+            below_tab_row
+        } else {
+            area
+        };
+        if self.is_dirty() && body_area.width() >= 2 && body_area.height() >= 2 {
+            draw_rounded_frame(grid, body_area, crate::conf::value(context, "tab.focused"));
+            for frame_area in frame_ring_areas(body_area) {
+                context.dirty_areas.push_back(frame_area);
+            }
+        }
+        let area = below_tab_row;
 
         if (self.show_shortcuts && self.dirty) || must_redraw_shortcuts {
             let mut children_maps = self.children[self.cursor_pos].shortcuts(context);
@@ -978,23 +1137,24 @@ impl Component for Tabbed {
                 children_maps.move_index(i, children_maps.len().saturating_sub(1));
             }
             if (children_maps == self.help_view.curr_views) && must_redraw_shortcuts {
-                let dialog_area = area.align_inside(
+                let dialog_area = crate::terminal::ratatui_bridge::center_inside_via_layout(
                     // add box perimeter padding
+                    area,
                     {
                         let (w, h) = self.help_view.content.area().size();
                         (w + 1, h + 1)
                     },
-                    // horizontal
-                    Alignment::Center,
-                    // vertical
-                    Alignment::Center,
                 );
                 context.dirty_areas.push_back(dialog_area);
                 grid.clear_area(dialog_area, self.theme_default);
-                let inner_area = create_box(grid, dialog_area);
+                let inner_area = draw_rounded_frame(
+                    grid,
+                    dialog_area,
+                    crate::conf::value(context, "tab.focused"),
+                );
                 let (x, y) = grid.write_string(
                     "shortcuts",
-                    self.theme_default.fg,
+                    crate::conf::value(context, "tab.focused").fg,
                     self.theme_default.bg,
                     self.theme_default.attrs | Attr::BOLD,
                     inner_area.skip_cols(2),
@@ -1006,7 +1166,7 @@ impl Component for Tabbed {
                         "Press {} to close",
                         children_maps[Shortcuts::GENERAL]["toggle_help"]
                     ),
-                    self.theme_default.fg,
+                    crate::conf::value(context, "tab.unfocused").fg,
                     self.theme_default.bg,
                     self.theme_default.attrs | Attr::ITALICS,
                     inner_area.skip(4 + x, y),
@@ -1162,23 +1322,24 @@ impl Component for Tabbed {
                 idx += 1;
             }
             self.help_view.curr_views = children_maps;
-            let dialog_area = area.align_inside(
+            let dialog_area = crate::terminal::ratatui_bridge::center_inside_via_layout(
                 // add box perimeter padding
+                area,
                 {
                     let (w, h) = self.help_view.content.area().size();
                     (w + 1, h + 1)
                 },
-                // horizontal
-                Alignment::Center,
-                // vertical
-                Alignment::Center,
             );
             context.dirty_areas.push_back(dialog_area);
             grid.clear_area(dialog_area, self.theme_default);
-            let inner_area = create_box(grid, dialog_area);
+            let inner_area = draw_rounded_frame(
+                grid,
+                dialog_area,
+                crate::conf::value(context, "tab.focused"),
+            );
             let (x, y) = grid.write_string(
                 "shortcuts",
-                self.theme_default.fg,
+                crate::conf::value(context, "tab.focused").fg,
                 self.theme_default.bg,
                 self.theme_default.attrs | Attr::BOLD,
                 inner_area.skip_cols(2),
@@ -1190,7 +1351,7 @@ impl Component for Tabbed {
                     "Press {} to close",
                     self.help_view.curr_views[Shortcuts::GENERAL]["toggle_help"]
                 ),
-                self.theme_default.fg,
+                crate::conf::value(context, "tab.unfocused").fg,
                 self.theme_default.bg,
                 self.theme_default.attrs | Attr::ITALICS,
                 inner_area.skip(4 + x, y),
@@ -1426,6 +1587,7 @@ impl Component for Tabbed {
                         .process_event(&mut UIEvent::VisibilityChange(false), context);
                     self.children[c_idx].unrealize(context);
                     self.children.remove(c_idx);
+                    self.inset_children.remove(c_idx);
                     self.cursor_pos = 0;
                     self.set_dirty(true);
                     self.update_help_curr_views(context);
@@ -1438,7 +1600,7 @@ impl Component for Tabbed {
                     );
                 }
             }
-            UIEvent::Action(Action::Listing(ListingAction::Search(pattern)))
+            UIEvent::Action(Action::Listing(ListingAction::Search { term: pattern, .. }))
                 if self.show_shortcuts =>
             {
                 self.help_view.search = Some(SearchPattern {

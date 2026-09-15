@@ -38,6 +38,13 @@ rusty_fork_test! {
     }
 }
 
+rusty_fork_test! {
+    #[test]
+    fn test_maildir_raw_search_not_supported() {
+        run_maildir_raw_search_not_supported();
+    }
+}
+
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -437,4 +444,42 @@ hello world.
         );
         assert_eq!(old_hash, trash_env_hash);
     }
+}
+
+/// `MaildirType` must inherit the `MailBackend::raw_search` default
+/// method, which fails with `ErrorKind::NotSupported` instead of
+/// silently parsing the raw query string as a melib `Query`. See
+/// upstream `75752b38`.
+fn run_maildir_raw_search_not_supported() {
+    let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+    let temp_dir = TempDir::new().unwrap();
+    let backend_event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(16)));
+
+    let backend_event_consumer = {
+        let backend_event_queue = Arc::clone(&backend_event_queue);
+
+        BackendEventConsumer::new(Arc::new(move |ah, be| {
+            eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+            backend_event_queue.lock().unwrap().push_back((ah, be));
+        }))
+    };
+
+    let (_root_mailbox, _settings, mut maildir) =
+        new_maildir_backend(&temp_dir, "maildir", backend_event_consumer.clone(), true).unwrap();
+
+    let is_online_fut = maildir.is_online().unwrap();
+    block_on(is_online_fut).unwrap();
+    let mut mailboxes_fut = maildir.mailboxes().unwrap();
+    let mailboxes = block_on(mailboxes_fut.as_mut()).unwrap();
+    let inbox_hash: MailboxHash = *mailboxes.keys().next().unwrap();
+
+    let err = match maildir.raw_search("from:foo@bar.com".to_string(), Some(inbox_hash)) {
+        Err(err) => err,
+        Ok(_) => panic!("raw_search must fail for MaildirType via the trait default"),
+    };
+    assert!(
+        matches!(err.kind, ErrorKind::NotSupported),
+        "raw_search default must fail with NotSupported, got {:?}",
+        err.kind
+    );
 }

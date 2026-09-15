@@ -96,7 +96,6 @@ pub use melib::uuid;
 pub extern crate bitflags;
 pub extern crate serde_json;
 pub extern crate smallvec;
-pub extern crate termion;
 
 pub use structopt::StructOpt;
 
@@ -164,3 +163,6 @@ pub mod accounts;
 pub use self::accounts::Account;
 
 pub mod version_migrations;
+
+#[cfg(test)]
+pub mod golden;

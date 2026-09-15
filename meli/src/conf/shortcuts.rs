@@ -239,6 +239,7 @@ shortcut_key_values! { "composing",
     pub struct ComposingShortcuts {
         edit |> "Edit." |> Key::Char('e'),
         send_mail |> "Deliver draft to mailer." |> Key::Char('s'),
+        close |> "Close composer tab." |> Key::Esc,
         scroll_up |> "Change field focus." |> Key::Up,
         scroll_down |> "Change field focus." |> Key::Down,
         reset_date |> "Reset date to current time." |> Key::F(1),

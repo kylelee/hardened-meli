@@ -42,6 +42,13 @@
 //! migration is applicable, it asks the user interactively whether to perform
 //! them. This happens in [`version_setup`].
 //!
+//! If the version file contains a value that is not a valid
+//! `MAJOR.MINOR.PATCH[-PRE]` string (for example `meli-git`, written by an
+//! external build), it is treated as predating every known version: a single
+//! warning is printed, any applicable migrations are offered interactively,
+//! and at the end of the run the file is rewritten with [`LATEST`], so the
+//! condition disappears on the next launch.
+//!
 //! # How `meli` encodes version information statically with types and modules
 //!
 //! Every release **MUST** have a module associated with it. The module
@@ -101,6 +108,7 @@ pub type VersionMap = IndexMap<VersionIdentifier, Box<dyn Version + Send + Sync 
 ///    v0_8_11::V0_8_11_ID => v0_8_11::V0_8_11,
 ///    v0_8_12::V0_8_12_ID => v0_8_12::V0_8_12,
 ///    v0_8_13::V0_8_13_ID => v0_8_13::V0_8_13,
+///    v0_9_0::V0_9_0_ID => v0_9_0::V0_9_0,
 /// }
 /// ```
 ///
@@ -435,6 +443,76 @@ pub fn version_file() -> Result<PathBuf> {
     Ok(xdg_dirs.place_data_file(".version")?)
 }
 
+/// Parse a strict `MAJOR.MINOR.PATCH[-PRE]` version string, as stored in the
+/// `.version` file, into its numeric components.
+///
+/// Returns `None` for anything that does not follow this exact format:
+/// missing or extra components, non-numeric or out-of-`u8`-range numbers,
+/// `v` prefixes, build metadata, a trailing `-` with an empty pre-release
+/// part, and so on. Whitespace is not tolerated either; the `.version` file
+/// contents are trimmed by the caller ([`version_setup`]).
+fn parse_version(s: &str) -> Option<(u8, u8, u8, &str)> {
+    fn num(s: &str) -> Option<u8> {
+        if !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    }
+
+    let mut parts = s.split('.');
+    let major = num(parts.next()?)?;
+    let minor = num(parts.next()?)?;
+    let patch_and_pre = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let (patch, pre) = match patch_and_pre.split_once('-') {
+        Some((patch, pre)) if !pre.is_empty() => (num(patch)?, pre),
+        // `MAJOR.MINOR.PATCH-` with an empty pre-release part is invalid.
+        Some(_) => return None,
+        None => (num(patch_and_pre)?, ""),
+    };
+    Some((major, minor, patch, pre))
+}
+
+/// Compare the parsed version `parsed` against the release `id` with
+/// [Semantic Versioning] precedence: a pre-release version sorts before the
+/// release with the same `MAJOR.MINOR.PATCH` numbers, and two pre-release
+/// strings compare with their bytes.
+///
+/// This differs from the [`Ord`] implementation of [`VersionIdentifier`],
+/// which compares the `pre` strings directly and would sort `0.8.8-rc1`
+/// _after_ `0.8.8`; since every version returned by [`versions`] is a
+/// release (empty `pre`), the relative order of known versions is the same
+/// either way.
+///
+/// [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
+fn cmp_parsed_version(parsed: (u8, u8, u8, &str), id: &VersionIdentifier) -> Ordering {
+    (parsed.0, parsed.1, parsed.2, parsed.3.is_empty(), parsed.3).cmp(&(
+        id.major(),
+        id.minor(),
+        id.patch(),
+        id.pre().is_empty(),
+        id.pre(),
+    ))
+}
+
+/// Whether any migration in `migrations` is applicable for the configuration
+/// in `config`.
+///
+/// Migrations that cannot determine their applicability ([`None`]) are
+/// conservatively counted as applicable, so that the user gets to decide.
+fn any_migration_is_applicable(
+    migrations: &[(&VersionIdentifier, Vec<Box<dyn Migration + Send + Sync>>)],
+    config: &Path,
+) -> bool {
+    migrations.iter().any(|(_, migrs)| {
+        migrs
+            .iter()
+            .any(|migr| migr.is_applicable(config) != Some(false))
+    })
+}
+
 /// Inspect current/previous version setup, perform migrations if necessary,
 /// etc.
 ///
@@ -471,10 +549,47 @@ pub fn version_setup(
         Some(stored_version)
     };
     let version_map = versions();
-    let migrations = calculate_migrations(stored_version.as_deref(), version_map);
+    let stored = stored_version.as_deref();
+    let parsed = stored.and_then(parse_version);
+    let migrations = calculate_migrations(stored, version_map);
+    // A stored value that parses to a version newer than `LATEST` means meli
+    // was downgraded since the last launch. Warn about it before anything
+    // else, regardless of whether any migrations apply, since rewriting
+    // `.version` when this function ends would otherwise silently discard
+    // that information.
+    if let Some(prev) = stored {
+        if parsed.is_some_and(|v| cmp_parsed_version(v, &LATEST) == Ordering::Greater) {
+            writeln!(
+                writer,
+                "This version of meli, {}, appears to be older than the previously used one \
+                 stored in the file {}: {}.",
+                LATEST,
+                version_file.display(),
+                prev,
+            )?;
+            writeln!(
+                writer,
+                "Certain configuration options might not be compatible with this version, \
+                 refer to release changelogs if you need to troubleshoot configuration \
+                 options problems."
+            )?;
+            writer.flush()?;
+            let ask = Ask::new(
+                "Update .version file to make this warning go away? (CAUTION: current \
+                 configuration and stored data might not be compatible with this version!!)",
+            )
+            .yes_by_default(false);
+            if ask.run(writer, reader) {
+                std::fs::write(&version_file, LATEST.as_str())
+                    .chain_err_related_path(&version_file)?;
+                return Ok(());
+            }
+            return Ok(());
+        }
+    }
     if !migrations.is_empty() {
-        if let Some(prev) = stored_version {
-            if prev.as_str() < LATEST.as_str() {
+        if let Some(prev) = stored {
+            if parsed.is_some() {
                 writeln!(
                     writer,
                     "meli appears updated; file {} contains the value {:?} and the latest version \
@@ -487,39 +602,31 @@ pub fn version_setup(
             } else {
                 writeln!(
                     writer,
-                    "This version of meli, {}, appears to be older than the previously used one \
-                     stored in the file {}: {}.",
-                    LATEST,
+                    "warning: version file {} contains an unrecognized value {:?}; treating it \
+                     as predating {} and checking for applicable migrations",
                     version_file.display(),
                     prev,
-                )?;
-                writeln!(
-                    writer,
-                    "Certain configuration options might not be compatible with this version, \
-                     refer to release changelogs if you need to troubleshoot configuration \
-                     options problems."
+                    LATEST
                 )?;
                 writer.flush()?;
-                let ask = Ask::new(
-                    "Update .version file to make this warning go away? (CAUTION: current \
-                     configuration and stored data might not be compatible with this version!!)",
-                )
-                .yes_by_default(false);
-                if ask.run(writer, reader) {
+                // Check if any migrations are applicable; they might not be
+                // any (for example if the unrecognized value was left by an
+                // external build with no data to migrate).
+                if !any_migration_is_applicable(&migrations, config) {
+                    log::info!(
+                        "Creating version info file {} with value {}",
+                        version_file.display(),
+                        LATEST
+                    );
                     std::fs::write(&version_file, LATEST.as_str())
                         .chain_err_related_path(&version_file)?;
                     return Ok(());
                 }
-                return Ok(());
             }
         } else {
             // Check if any migrations are applicable; they might not be any (for example if
             // user runs meli for the first time).
-            if !migrations.iter().any(|(_, migrs)| {
-                migrs
-                    .iter()
-                    .any(|migr| migr.is_applicable(config) != Some(false))
-            }) {
+            if !any_migration_is_applicable(&migrations, config) {
                 log::info!(
                     "Creating version info file {} with value {}",
                     version_file.display(),
@@ -623,12 +730,29 @@ pub fn calculate_migrations<'v>(
     version_map: &'v VersionMap,
 ) -> Vec<(&'v VersionIdentifier, Vec<Box<dyn Migration + Send + Sync>>)> {
     let mut migrations = vec![];
-    if let Some(newer_versions) = current_version
-        .and_then(|v| version_map.get_index_of(v))
-        .map(|i| i + 1)
-        .or(Some(0))
-        .and_then(|i| version_map.get_range(i..))
-    {
+    // Index of the first version in `version_map` that follows
+    // `current_version`.
+    let start = match current_version {
+        // No previously stored version: check every migration.
+        None => 0,
+        Some(v) => match version_map.get_index_of(v) {
+            Some(i) => i + 1,
+            None => match parse_version(v) {
+                // A valid version that is not a known key, e.g. `0.8.7` or a
+                // pre-release like `0.8.8-rc1`: start from the first known
+                // version that compares greater than it.
+                Some(parsed) => version_map
+                    .iter()
+                    .position(|(k, _)| cmp_parsed_version(parsed, k) == Ordering::Less)
+                    // Nothing in the map is newer than `parsed`.
+                    .unwrap_or(version_map.len()),
+                // An unrecognized value, e.g. `meli-git`: conservatively
+                // check every migration.
+                None => 0,
+            },
+        },
+    };
+    if let Some(newer_versions) = version_map.get_range(start..) {
         for (k, v) in newer_versions {
             let vec = v.migrations();
             if !vec.is_empty() {

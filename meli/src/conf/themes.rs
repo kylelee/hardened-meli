@@ -1149,14 +1149,19 @@ impl Default for Themes {
         /* rest */
         add!("highlight", dark = { fg: "theme_default.bg", bg: "theme_default.fg", attrs: Attr::BOLD }, light = { fg: Color::Byte(240), bg: Color::Byte(237), attrs: Attr::BOLD });
 
-        add!("status.bar", dark = { fg: Color::Byte(123), bg: Color::Byte(26) }, light = { fg: Color::Byte(123), bg: Color::Byte(26) });
-        add!("status.command_bar", dark = { fg: Color::Byte(219), bg: Color::Byte(88) }, light = { fg: Color::Byte(219), bg: Color::Byte(88) });
+        /* Mode colors: normal = subtle accent-on-dark, command = vivid amber. */
+        add!("status.bar", dark = { fg: Color::Byte(123), bg: Color::Byte(235) }, light = { fg: Color::Byte(31), bg: Color::Byte(254) });
+        add!("status.command_bar", dark = { fg: Color::Byte(16), bg: Color::Byte(214) }, light = { fg: Color::Byte(16), bg: Color::Byte(214) });
         add!("status.history", dark = { fg: Color::Byte(197), bg: Color::Byte(174) }, light = { fg: Color::Byte(197), bg: Color::Byte(174) });
         add!("status.history.hints", dark = { fg: Color::Black, bg: "status.command_bar" }, light = { fg: Color::Black, bg: "status.command_bar" });
-        add!("status.notification", dark = { fg: Color::Byte(219), bg: Color::Default }, light = { fg: Color::Byte(219), bg: Color::Default });
+        /* Floating overlay surface: the OSD and dialogs share the raised
+         * panel background of the status bar so they read as a layer above
+         * the content instead of blending into it. */
+        add!("status.notification", dark = { fg: Color::Byte(219), bg: Color::Byte(235) }, light = { fg: Color::Byte(31), bg: Color::Byte(254) });
 
-        add!("tab.focused");
-        add!("tab.unfocused", dark = { fg: Color::Byte(15), bg: Color::Byte(8), }, light = { fg: Color::Byte(15), bg: Color::Byte(8), });
+        /* Focus convention: focused tab = bold + accent, unfocused = dim. */
+        add!("tab.focused", dark = { fg: Color::Byte(123), attrs: Attr::BOLD }, light = { fg: Color::Byte(31), attrs: Attr::BOLD });
+        add!("tab.unfocused", dark = { fg: Color::Byte(244), attrs: Attr::DIM }, light = { fg: Color::Byte(244), attrs: Attr::DIM });
         add!("tab.bar");
         add!(
             "widgets.list.header",
@@ -1170,7 +1175,10 @@ impl Default for Themes {
         );
         add!("widgets.form.field");
         add!("widgets.form.highlighted", light = { bg: Color::Byte(246) }, dark = { bg: Color::Byte(246) });
-        add!("widgets.options.highlighted", light = { bg: Color::Byte(8) }, dark = { bg: Color::Byte(8) });
+        /* Options/dialog selection highlight: the same selection fill as the
+         * mail.listing *_selected family, so every selectable row in the UI
+         * highlights identically. */
+        add!("widgets.options.highlighted", light = { bg: Color::Byte(153) }, dark = { bg: Color::Byte(24) });
 
         /* Mail Sidebar */
 
@@ -1191,7 +1199,7 @@ impl Default for Themes {
         );
         add!("mail.sidebar_unread_count" from "mail.sidebar", dark = { fg: Color::Byte(243) });
         add!("mail.sidebar_index" from "mail.sidebar", dark = { fg: Color::Byte(243) });
-        add!("mail.sidebar_highlighted" from "mail.sidebar", dark = { fg: Color::Byte(233), bg: Color::Byte(15) });
+        add!("mail.sidebar_highlighted" from "mail.sidebar", dark = { fg: Color::Byte(16), bg: Color::Byte(123) }, light = { fg: Color::Byte(16), bg: Color::Byte(123) });
         add!(
             "mail.sidebar_highlighted_unread_count" from "mail.sidebar_highlighted",
             light = {
@@ -1272,65 +1280,69 @@ impl Default for Themes {
             "mail.listing.compact.even_unseen",
             dark = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
             },
             light = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
             }
         );
         add!(
             "mail.listing.compact.odd_unseen",
             dark = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
             },
             light = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
             }
         );
         add!("mail.listing.compact.even_selected",
             dark = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(24)
             },
             light = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(153)
             }
         );
         add!("mail.listing.compact.odd_selected",
             dark = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(24)
             },
             light = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(153)
             }
         );
         add!(
             "mail.listing.compact.even_highlighted",
             dark = {
-                bg: Color::Byte(246)
+                bg: Color::Byte(240)
             },
             light = {
-                bg: Color::Byte(244)
+                bg: Color::Byte(189)
             }
         );
         add!(
             "mail.listing.compact.odd_highlighted",
             dark = {
-                bg: Color::Byte(246)
+                bg: Color::Byte(240)
             },
             light = {
-                bg: Color::Byte(244)
+                bg: Color::Byte(189)
             }
         );
         add!("mail.listing.compact.even_highlighted_selected",
             dark = {
-                bg: Color::Byte(210),
+                bg: Color::Byte(24),
                 attrs: Attr::REVERSE,
             },
             light = {
-                bg: Color::Byte(210),
+                bg: Color::Byte(153),
                 attrs: Attr::REVERSE,
             }
         );
@@ -1374,40 +1386,42 @@ impl Default for Themes {
             "mail.listing.conversations.unseen",
             dark = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
             },
             light = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
             }
         );
         add!(
             "mail.listing.conversations.highlighted",
             dark = {
-                bg: Color::Byte(246),
+                bg: Color::Byte(240),
                 attrs: Attr::BOLD,
             },
             light = {
-                bg: Color::Byte(246),
+                bg: Color::Byte(189),
                 attrs: Attr::BOLD,
             }
         );
         add!("mail.listing.conversations.selected",
             dark = {
-                bg: Color::Byte(210),
+                bg: Color::Byte(24),
             },
             light = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(153)
             }
         );
 
         add!("mail.listing.conversations.highlighted_selected",
             dark = {
-                bg: Color::Byte(210),
+                bg: Color::Byte(24),
                 attrs: Attr::REVERSE,
             },
             light = {
-                bg: Color::Byte(210),
+                bg: Color::Byte(153),
                 attrs: Attr::REVERSE,
             }
         );
@@ -1426,67 +1440,71 @@ impl Default for Themes {
             "mail.listing.plain.even_unseen",
             dark = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
 
             },
             light = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
             }
         );
         add!(
             "mail.listing.plain.odd_unseen",
             dark = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
 
             },
             light = {
                 fg: Color::Byte(0),
-                bg: Color::Byte(251)
+                bg: Color::Byte(251),
+                attrs: Attr::BOLD
             }
         );
         add!("mail.listing.plain.even_selected",
             dark = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(24)
             },
             light = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(153)
             }
         );
         add!("mail.listing.plain.odd_selected",
             dark = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(24)
             },
             light = {
-                bg: Color::Byte(210)
+                bg: Color::Byte(153)
             }
         );
         add!(
             "mail.listing.plain.even_highlighted",
             dark = {
-                bg: Color::Byte(246)
+                bg: Color::Byte(240)
             },
             light = {
-                bg: Color::Byte(244)
+                bg: Color::Byte(189)
             }
         );
         add!(
             "mail.listing.plain.odd_highlighted",
             dark = {
-                bg: Color::Byte(246)
+                bg: Color::Byte(240)
             },
             light = {
-                bg: Color::Byte(244)
+                bg: Color::Byte(189)
             }
         );
         add!("mail.listing.plain.even_highlighted_selected",
             dark = {
-                bg: Color::Byte(210),
+                bg: Color::Byte(24),
                 attrs: Attr::REVERSE,
             },
             light = {
-                bg: Color::Byte(210),
+                bg: Color::Byte(153),
                 attrs: Attr::REVERSE,
             }
         );

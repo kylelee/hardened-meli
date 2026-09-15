@@ -40,6 +40,13 @@ rusty_fork_test! {
         tests::run_imap_watch_after_initial_fetch();
     }
 
+    /// Gmail X-GM-RAW raw search through the mock's literal continuation
+    /// arm. See `tests::run_imap_raw_search_gmail`.
+    #[test]
+    fn test_imap_raw_search_gmail() {
+        tests::run_imap_raw_search_gmail();
+    }
+
     #[test]
     fn test_imap_refresh_status_stale_when_selected() {
         tests::run_imap_refresh_status_stale_when_selected();
@@ -205,6 +212,16 @@ rusty_fork_test! {
     #[test]
     fn test_imap_fetch_cache_first_empty_cache_commands_unchanged() {
         tests::run_imap_fetch_cache_first(false);
+    }
+
+    /// Semantic-port regression for upstream meli 4f2414a3 ("fetch from
+    /// cache then resync"): with an empty local cache and an online open,
+    /// the server's truth is authoritative for the delivered payload and
+    /// the unseen/exists sets. See `tests::run_imap_fetch_cache_then_resync_no_ghost`.
+    #[cfg(feature = "sqlite3")]
+    #[test]
+    fn test_imap_fetch_cache_then_resync_no_ghost() {
+        tests::run_imap_fetch_cache_then_resync_no_ghost();
     }
 
     #[cfg(feature = "sqlite3")]
@@ -386,6 +403,15 @@ pub mod server {
         /// `* n FETCH` sequence number is still sent). The client must
         /// surface a protocol error, not panic.
         pub uid_fetch_drop_uid_all: bool,
+        /// When `true`, the mock emulates Gmail: the post-auth
+        /// `M3 CAPABILITY` reply additionally advertises `X-GM-EXT-1`,
+        /// and the connection loop gains a `UID SEARCH X-GM-RAW {N}`
+        /// literal continuation arm.
+        pub advertise_x_gm_ext_1: bool,
+        /// The raw literal bytes (query string, without the trailing
+        /// CRLF) received by each `UID SEARCH X-GM-RAW {N}` continuation
+        /// exchange, for assertions.
+        pub x_gm_raw_literals: Vec<Vec<u8>>,
     }
 
     impl ServerState {
@@ -660,10 +686,15 @@ pub mod server {
                             next_fut
                         }
                     };
-                    block_on(tcp_stream.write_all(
-                        b"* CAPABILITY IMAP4rev1 ID IDLE UNSELECT ENABLE\r\nM3 OK Success\r\n",
-                    ))
-                    .unwrap();
+                    // Gmail emulation (see `ServerState::advertise_x_gm_ext_1`):
+                    // append `X-GM-EXT-1` to the post-auth capability list.
+                    let advertise_x_gm_ext_1 = state.lock().unwrap().advertise_x_gm_ext_1;
+                    let m3_reply: &[u8] = if advertise_x_gm_ext_1 {
+                        b"* CAPABILITY IMAP4rev1 ID IDLE UNSELECT ENABLE X-GM-EXT-1\r\nM3 OK Success\r\n"
+                    } else {
+                        b"* CAPABILITY IMAP4rev1 ID IDLE UNSELECT ENABLE\r\nM3 OK Success\r\n"
+                    };
+                    block_on(tcp_stream.write_all(m3_reply)).unwrap();
                     // The capability list above advertises `ID`, so a
                     // client with `use_id` enabled (melib's default) sends
                     // `M4 ID NIL` and waits for its reply before the connect
@@ -785,6 +816,17 @@ pub mod server {
                 Eof,
             }
 
+            /// Extract the first CRLF-terminated line (including its
+            /// CRLF) without IMAP literal-aware skipping: unlike
+            /// `ImapLineSplit::split_rn`, a trailing `{N}` inside the
+            /// line must not make the reader skip `N` bytes — the
+            /// `UID SEARCH X-GM-RAW {N}` continuation arm reads those
+            /// bytes itself after answering the continuation request.
+            fn first_rn_line(buf: &[u8]) -> Option<&[u8]> {
+                let pos = buf.find(b"\r\n")?;
+                Some(&buf[..pos + 2])
+            }
+
             async fn read_line<'a>(
                 tcp_stream: &mut Async<TcpStream>,
                 buf: &'a mut [u8],
@@ -815,7 +857,7 @@ pub mod server {
                         // log::trace!("read_line: returning None");
                         return ReadOutcome::Incomplete;
                     }
-                    let Some(input) = buf[*start..*end].split_rn().next() else {
+                    let Some(input) = first_rn_line(&buf[*start..*end]) else {
                         // log::trace!("read_line: returning None");
                         return ReadOutcome::Incomplete;
                     };
@@ -828,7 +870,7 @@ pub mod server {
                     ReadOutcome::Line(input)
                 } else {
                     let rest = &buf[*start..*end];
-                    let input = rest.split_rn().next().unwrap();
+                    let input = first_rn_line(rest).unwrap();
                     *start += input.len();
                     if *start == *end {
                         *start = 0;
@@ -1190,6 +1232,101 @@ pub mod server {
                                         .unwrap();
                                 }
                                 tcp_stream.write_all(b"\r\n").await.unwrap();
+                            }
+                            tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                            tcp_stream
+                                .write_all(b" OK SEARCH completed\r\n")
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
+                        uid_search_x_gm_raw
+                            if uid_search_x_gm_raw.starts_with("UID SEARCH X-GM-RAW {")
+                                && uid_search_x_gm_raw.ends_with("}\r\n") =>
+                        {
+                            // Gmail `X-GM-EXT-1` raw search: the query arrives
+                            // as a `{N}` literal continuation. Reply `+ `, read
+                            // exactly N+2 bytes (query + CRLF), then answer with
+                            // the UIDs of the mails whose subject contains the
+                            // (case-insensitive) query string.
+                            let n_str = &uid_search_x_gm_raw
+                                ["UID SEARCH X-GM-RAW {".len()..uid_search_x_gm_raw.len() - 3];
+                            let Ok(n) = n_str.parse::<usize>() else {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD could not parse literal size\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            };
+                            if !matches!(session_state, SessionState::SelectedMailbox) {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD no mailbox is selected\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            tcp_stream.write_all(b"+ \r\n").await.unwrap();
+                            tcp_stream.flush().await.unwrap();
+                            // Read exactly `n + 2` bytes: the literal followed
+                            // by its CRLF. Buffered bytes (a pipelined literal)
+                            // are consumed first.
+                            let mut literal = vec![0_u8; n + 2];
+                            let buffered = buf_end - buf_start;
+                            let take = buffered.min(n + 2);
+                            literal[..take].copy_from_slice(&buf[buf_start..buf_start + take]);
+                            buf_start += take;
+                            if buf_start == buf_end {
+                                buf_start = 0;
+                                buf_end = 0;
+                            }
+                            let mut filled = take;
+                            while filled < n + 2 {
+                                let read_bytes =
+                                    tcp_stream.read(&mut literal[filled..]).await.unwrap();
+                                assert!(
+                                    read_bytes != 0,
+                                    "connection closed while awaiting X-GM-RAW literal"
+                                );
+                                filled += read_bytes;
+                            }
+                            let query = String::from_utf8_lossy(&literal[..n]).to_string();
+                            eprintln!(
+                                "{name} loop_handler X-GM-RAW literal ({n} bytes): {query:?}"
+                            );
+                            state
+                                .lock()
+                                .unwrap()
+                                .x_gm_raw_literals
+                                .push(literal[..n].to_vec());
+                            let uids = state
+                                .lock()
+                                .unwrap()
+                                .envelopes
+                                .iter()
+                                .filter(|(_, mail)| {
+                                    mail.envelope()
+                                        .subject()
+                                        .to_lowercase()
+                                        .contains(&query.to_lowercase())
+                                })
+                                .map(|(u, _)| *u)
+                                .collect::<Vec<_>>();
+                            if uids.is_empty() {
+                                tcp_stream.write_all(b"* SEARCH\r\n").await.unwrap();
+                            } else {
+                                let uid_list = uids
+                                    .iter()
+                                    .map(|u| u.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                tcp_stream
+                                    .write_all(format!("* SEARCH {uid_list}\r\n").as_bytes())
+                                    .await
+                                    .unwrap();
                             }
                             tcp_stream.write_all(id.as_bytes()).await.unwrap();
                             tcp_stream
@@ -2317,7 +2454,6 @@ hello world 3.
         }
     }
 
-    #[cfg(feature = "sqlite3")]
     async fn fetch_all_envs(imap: &mut ImapType, inbox_hash: MailboxHash) -> Vec<Envelope> {
         let mut fetch_fut = imap.fetch(inbox_hash).unwrap().into_future();
         let mut envelopes = vec![];
@@ -2694,7 +2830,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -2859,7 +2995,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -3234,13 +3370,19 @@ hello world 4.
             );
         } else {
             assert_eq!(envelopes.len(), 3);
-            // Frozen pre-change startup sequence for an empty cache: the
-            // `CacheFirst` stage must not add, remove or reorder any IMAP
-            // command (it only reads the local sqlite cache).
+            // Frozen startup sequence for an empty cache. The `CacheFirst`
+            // stage must not add, remove or reorder any IMAP command (it
+            // only reads the local sqlite cache).
             // The tags account for the `M4 ID` handshake command: with
             // `use_id` enabled (melib's default) the connect sequence is
             // M1 CAPABILITY, M2 AUTHENTICATE, M3 CAPABILITY, M4 ID, so the
             // first command seen by the loop handler is M5.
+            //
+            // Drift note (semantic port of upstream meli 4f2414a3 "fetch
+            // from cache then resync"): the online `ResyncCache` path now
+            // re-walks the cache stages (`InitialCache`'s `SELECT`) before
+            // falling back to the fresh fetch, adding one `M12 SELECT
+            // INBOX` round-trip; the rest of the sequence is unchanged.
             let expected_commands: Vec<String> = [
                 "M5 LIST \"\" *\r\n",
                 "M6 LSUB \"\" *\r\n",
@@ -3250,10 +3392,11 @@ hello world 4.
                 "M10 UID SEARCH 1:*\r\n",
                 "M11 STATUS INBOX (UIDNEXT)\r\n",
                 "M12 SELECT INBOX\r\n",
-                "M13 EXAMINE INBOX\r\n",
-                "M14 UID SEARCH 1:*\r\n",
-                "M15 STATUS INBOX (UIDNEXT)\r\n",
-                "M16 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
+                "M13 SELECT INBOX\r\n",
+                "M14 EXAMINE INBOX\r\n",
+                "M15 UID SEARCH 1:*\r\n",
+                "M16 STATUS INBOX (UIDNEXT)\r\n",
+                "M17 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
                  BODYSTRUCTURE)\r\n",
             ]
             .iter()
@@ -3262,7 +3405,254 @@ hello world 4.
             assert_eq!(
                 *received_commands.lock().unwrap(),
                 expected_commands,
-                "empty-cache startup command sequence differs from the pre-change behavior"
+                "empty-cache startup command sequence differs from the expected behavior"
+            );
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Semantic-port regression test for upstream meli 4f2414a3
+    /// ("fetch from cache then resync"): when a mailbox is opened with
+    /// an empty local cache while online, the server's truth must be
+    /// authoritative for the delivered payload and the unseen/exists
+    /// sets; the local cache serves first only for UX, and the final
+    /// resync reconciles both against the server.
+    ///
+    /// Stage A (assertion ①, no duplicates): the server is preloaded
+    /// with exactly 3 mails, the local cache is empty, and the online
+    /// open must deliver every mail exactly once in the returned
+    /// payload.
+    ///
+    /// Stage B (assertion ②, no ghosts): after the open, the server
+    /// deletes one of the mails (no push; the deletion is only visible
+    /// in the server's replies). One `refresh` must reconcile the
+    /// unseen/exists sets to exactly the 2 surviving mails: a mail that
+    /// was deleted on the server must not survive as a ghost in the
+    /// sets even though it still exists in the local cache, and the
+    /// surviving mails must appear exactly once.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_fetch_cache_then_resync_no_ghost() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+
+        let new_mail = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: your e-mail
+Message-ID: <h2g7f.z0gy2pgaen5m@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let new_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: your e-mail 2
+Message-ID: <h2g7f.z0gy2pgaen6m@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let new_mail_3 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:02 +0000
+Cc:
+Subject: RE: your e-mail 3
+Message-ID: <h2g7f.z0gy2pgaen7m@example.com>
+Content-Type: text/plain
+
+hello world 3.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let mails: [(UID, &Mail); 3] = [
+            (1 as UID, &*new_mail),
+            (2 as UID, &*new_mail_2),
+            (3 as UID, &*new_mail_3),
+        ];
+        let mut expected = mails
+            .iter()
+            .map(|(_, mail)| mail.envelope.clone())
+            .collect::<Vec<_>>();
+        for env in &mut expected {
+            env.set_hash(EnvelopeHash(0));
+        }
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for (_, mail) in mails {
+                state_lck.insert(Box::new(mail.clone()));
+            }
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let mut imap = ImapType::new(
+            &imap_account_conf(local_addr.port()),
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let listener = smol::Async::new(listener).unwrap();
+        let mut is_online_fut = imap.is_online().unwrap();
+        let (main_conn_sender, main_conn_receiver) = unbounded();
+        let main_conn = ImapServerStream::new(
+            &listener,
+            &mut is_online_fut,
+            (main_conn_sender.clone(), main_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let received_commands = Arc::clone(&main_conn.received_commands);
+        block_on(is_online_fut).unwrap();
+        let mut mailboxes_fut = imap.mailboxes().unwrap();
+        let mut main_conn_loop = Box::pin(main_conn.loop_handler("main"));
+        let mailboxes = match block_on(future::select(
+            mailboxes_fut.as_mut(),
+            main_conn_loop.as_mut(),
+        )) {
+            Either::Left((value1, _)) => value1.unwrap(),
+            Either::Right((value2, _)) => {
+                unreachable!("{:?}", value2);
+            }
+        };
+        let inbox_hash = *mailboxes.keys().next().unwrap();
+        let mailbox_path = {
+            let mailboxes_lck = block_on(imap.uid_store.mailboxes.lock());
+            mailboxes_lck[&inbox_hash].imap_path().to_string()
+        };
+
+        let loops_handle = std::thread::spawn(move || {
+            block_on(main_conn_loop);
+        });
+        let outer_mailbox_path = mailbox_path.clone();
+        // Run inside a thread scope so that `imap` (and its connection)
+        // stays alive until the server loop is quit and joined below;
+        // otherwise the dropped connection makes the mock server's read
+        // loop spin on EOF and starve its command channel.
+        let (exists_after_refresh, unseen_after_refresh) = std::thread::scope(|scope| {
+            let imap = &mut imap;
+            scope
+                .spawn(move || {
+                    block_on(async {
+                        // Stage A: empty local cache, online open.
+                        let envelopes = fetch_all_envs(imap, inbox_hash).await;
+
+                        // Assertion ① (RED carrier): every mail must be
+                        // delivered exactly once.
+                        assert_eq!(
+                            envelopes.len(),
+                            3,
+                            "open with an empty local cache must deliver the 3 server mails, \
+                             got: {:?}",
+                            envelopes
+                                .iter()
+                                .map(|env| env.subject().to_string())
+                                .collect::<Vec<_>>()
+                        );
+                        let mut hash_counts: std::collections::HashMap<EnvelopeHash, usize> =
+                            std::collections::HashMap::new();
+                        for env in &envelopes {
+                            *hash_counts.entry(env.hash()).or_default() += 1;
+                        }
+                        for (uid, mail) in &mails {
+                            let expected_hash = generate_envelope_hash(&mailbox_path, *uid);
+                            assert_eq!(
+                                hash_counts.get(&expected_hash),
+                                Some(&1),
+                                "mail uid {uid} ({}) must appear exactly once in the returned \
+                                 payload; per-hash delivery counts: {hash_counts:?}",
+                                mail.envelope.subject()
+                            );
+                        }
+                        assert_eq!(
+                            normalize_envs(envelopes.clone()),
+                            expected,
+                            "open with an empty local cache delivered wrong envelopes"
+                        );
+
+                        // Stage B: the server deletes one mail (uid 1) with
+                        // no push; the deletion is only reflected in the
+                        // server's later replies.
+                        server_state.lock().unwrap().envelopes.shift_remove(&1);
+                        // Exactly one refresh.
+                        imap.refresh(inbox_hash).unwrap().await.unwrap();
+
+                        let mailboxes_lck = imap.uid_store.mailboxes.lock().await;
+                        let f = &mailboxes_lck[&inbox_hash];
+                        let exists = f.exists.lock().unwrap().clone();
+                        let unseen = f.unseen.lock().unwrap().clone();
+                        (exists, unseen)
+                    })
+                })
+                .join()
+                .unwrap()
+        });
+
+        // Assertion ②: the sets must contain exactly the 2 surviving
+        // mails; the deleted mail must not survive as a ghost.
+        let expected_survivors: std::collections::BTreeSet<EnvelopeHash> = [2 as UID, 3 as UID]
+            .into_iter()
+            .map(|uid| generate_envelope_hash(&outer_mailbox_path, uid))
+            .collect();
+        assert_eq!(
+            exists_after_refresh.not_yet_seen, 0,
+            "exists set must be fully materialized after the refresh"
+        );
+        assert_eq!(
+            exists_after_refresh.set, expected_survivors,
+            "exists set must contain exactly the 2 surviving mails (no ghost of the deleted \
+             mail, no duplicates): {:?}",
+            exists_after_refresh.set
+        );
+        assert_eq!(
+            unseen_after_refresh.not_yet_seen, 0,
+            "unseen set must be fully materialized after the refresh"
+        );
+        assert_eq!(
+            unseen_after_refresh.set, expected_survivors,
+            "unseen set must contain exactly the 2 surviving mails (no ghost of the deleted \
+             mail, no duplicates): {:?}",
+            unseen_after_refresh.set
+        );
+        {
+            // Ground truth that the delete was discovered through a full
+            // resync (the STATUS quick check could not short-circuit:
+            // no status baseline was ever recorded during the empty-cache
+            // open).
+            let lck = received_commands.lock().unwrap();
+            assert!(
+                lck.iter().any(|l| l.contains(" UID FETCH 1:3 FLAGS\r\n")),
+                "the refresh's FLAGS resync command was not sent: {lck:?}"
             );
         }
 
@@ -3481,11 +3871,16 @@ hello world 3.
         }
         assert_eq!(envelopes, expected);
 
+        // Drift note (semantic port of upstream meli 4f2414a3 "fetch from
+        // cache then resync"): the online `ResyncCache` path now re-walks
+        // the cache stages first, adding one `SELECT INBOX` round-trip,
+        // which shifts the initial full fetch's tag from M16 to M17. The
+        // UID FETCH command bytes themselves are unchanged.
         let frozen_uid_fetch = if enabled {
-            "M16 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
+            "M17 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
              BODYSTRUCTURE)\r\n"
         } else {
-            "M16 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)])\r\n"
+            "M17 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)])\r\n"
         };
         {
             let lck = received_commands.lock().unwrap();
@@ -3941,7 +4336,6 @@ hello world 4.
 
     /// Point the process' XDG environment at `temp_dir` so the IMAP
     /// offline cache (and any other state) is created under it.
-    #[cfg(feature = "sqlite3")]
     fn set_test_xdg_env(temp_dir: &TempDir) {
         for var in [
             "HOME",
@@ -4896,7 +5290,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -4934,6 +5328,188 @@ hello new world.
 
         main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
         loops_handle.join().unwrap();
+    }
+
+    /// End-to-end test of `MailBackend::raw_search` against a Gmail
+    /// emulation: the mock advertises `X-GM-EXT-1`, `raw_search` drives
+    /// the `UID SEARCH X-GM-RAW {N}` literal continuation exchange, and
+    /// the returned hashes are those of the matching seed mails. Also
+    /// covers the empty-result edge and the `NotSupported` error when
+    /// the server does not advertise `X-GM-EXT-1`. See upstream
+    /// `c121b79e`.
+    pub(crate) fn run_imap_raw_search_gmail() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = t3_test_mail("RE: gmail raw hit 1", "gm-raw-1@example.com");
+        let seed_mail_2 = t3_test_mail("RE: gmail raw hit 2", "gm-raw-2@example.com");
+        let seed_mail_3 = t3_test_mail("RE: other mail", "gm-other@example.com");
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            advertise_x_gm_ext_1: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+            state_lck.insert(seed_mail_3);
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer.clone(),
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            let server_state = &server_state;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                3,
+                                "initial fetch must load the three seed mails"
+                            );
+
+                            // The Gmail-advertised capability must surface as
+                            // `supports_raw_search`. (Explicit trait call:
+                            // `ImapType` also has an inherent
+                            // `capabilities() -> Vec<String>` that would
+                            // otherwise win method resolution.)
+                            assert!(
+                                MailBackend::capabilities(imap.as_mut()).supports_raw_search,
+                                "X-GM-EXT-1 must set supports_raw_search"
+                            );
+
+                            // Matching query: the two "gmail raw hit" seeds.
+                            // The client must trim the surrounding whitespace
+                            // before sending the literal.
+                            let expected: std::collections::HashSet<EnvelopeHash> = seed_envs
+                                .iter()
+                                .filter(|env| env.subject().contains("gmail raw hit"))
+                                .map(|env| env.hash())
+                                .collect();
+                            assert_eq!(
+                                expected.len(),
+                                2,
+                                "expected two matching seeds, subjects: {:?}",
+                                seed_envs
+                                    .iter()
+                                    .map(|e| e.subject().to_string())
+                                    .collect::<Vec<_>>()
+                            );
+                            let found = imap
+                                .raw_search("  gmail raw hit  ".to_string(), Some(inbox_hash))
+                                .unwrap()
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                found.into_iter().collect::<std::collections::HashSet<_>>(),
+                                expected,
+                                "raw_search must return the hashes of the matching seeds"
+                            );
+
+                            // Empty-result edge: an unmatchable query must
+                            // return an empty vec, not an error.
+                            let found = imap
+                                .raw_search(
+                                    "definitely not in any subject".to_string(),
+                                    Some(inbox_hash),
+                                )
+                                .unwrap()
+                                .await
+                                .unwrap();
+                            assert!(
+                                found.is_empty(),
+                                "unmatchable raw query must yield an empty result, got {found:?}"
+                            );
+
+                            // The server must have recorded exactly the
+                            // trimmed query bytes as the literal.
+                            let literals = server_state.lock().unwrap().x_gm_raw_literals.clone();
+                            assert_eq!(
+                                literals,
+                                vec![
+                                    b"gmail raw hit".to_vec(),
+                                    b"definitely not in any subject".to_vec(),
+                                ],
+                                "server must receive the trimmed queries as literals"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+
+        // Without `X-GM-EXT-1` advertised (the default mock), `raw_search`
+        // must fail synchronously with `ErrorKind::NotSupported` before any
+        // command is sent.
+        let server_state_plain = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        let (
+            mut imap_plain,
+            _listener_plain,
+            main_conn_sender_plain,
+            loops_handle_plain,
+            inbox_hash_plain,
+            _main_commands_plain,
+        ) = warm_start_setup(
+            backend_event_consumer,
+            Arc::clone(&server_state_plain),
+            600,
+            300,
+            true,
+            cfg!(feature = "sqlite3"),
+        );
+        assert!(
+            !MailBackend::capabilities(imap_plain.as_mut()).supports_raw_search,
+            "no X-GM-EXT-1 advertised: supports_raw_search must be false"
+        );
+        let err =
+            match imap_plain.raw_search("from:foo@bar.com".to_string(), Some(inbox_hash_plain)) {
+                Err(err) => err,
+                Ok(_) => panic!("raw_search must fail synchronously without X-GM-EXT-1"),
+            };
+        assert!(
+            matches!(err.kind, ErrorKind::NotSupported),
+            "raw_search without X-GM-EXT-1 must be NotSupported, got {:?}",
+            err.kind
+        );
+        main_conn_sender_plain
+            .unbounded_send(ServerEvent::Quit)
+            .unwrap();
+        loops_handle_plain.join().unwrap();
     }
 
     /// Failing-first regression test for the RFC 4549 §4.3.2 hazard:
@@ -5048,6 +5624,8 @@ hello new world b.
             extra_mailbox: None,
             uid_fetch_flags_drop_uid: false,
             uid_fetch_drop_uid_all: false,
+            advertise_x_gm_ext_1: false,
+            x_gm_raw_literals: vec![],
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
@@ -5062,7 +5640,7 @@ hello new world b.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -5208,7 +5786,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -5395,7 +5973,7 @@ hello new world.
                 2,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -5581,7 +6159,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -5748,7 +6326,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -5969,7 +6547,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -6173,7 +6751,7 @@ hello new world b.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -6349,7 +6927,7 @@ hello world 2.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -6487,7 +7065,7 @@ hello world.
                 2,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -7261,7 +7839,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -7454,7 +8032,7 @@ hello new world.
                     2,
                     300,
                     false,
-                    true,
+                    cfg!(feature = "sqlite3"),
                 );
             {
                 let imap = &mut imap;
@@ -7585,7 +8163,7 @@ hello new world.
                     600,
                     300,
                     true,
-                    true,
+                    cfg!(feature = "sqlite3"),
                 );
             {
                 let imap = &mut imap;
@@ -7754,7 +8332,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -7904,7 +8482,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -8108,7 +8686,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {
@@ -8315,7 +8893,7 @@ hello new world.
                 600,
                 300,
                 true,
-                true,
+                cfg!(feature = "sqlite3"),
             );
 
         {

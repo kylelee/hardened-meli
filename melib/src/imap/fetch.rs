@@ -61,7 +61,6 @@ pub struct FetchState {
 
 impl FetchState {
     pub async fn chunk(&mut self) -> Result<Vec<Envelope>> {
-        let mut resync_payload: Option<Vec<Envelope>> = None;
         loop {
             match self.stage {
                 FetchStage::InitialFresh => {
@@ -137,7 +136,7 @@ impl FetchState {
                     };
                     let res = self.cached_envs(max_uid, cache_batch_size).await;
                     match res {
-                        Ok(Some(cached_payload)) => {
+                        Ok(Some(mut cached_payload)) => {
                             self.stage = match max_uid.saturating_sub(cache_batch_size) {
                                 0 => FetchStage::Finished,
                                 max_uid => FetchStage::FromCache {
@@ -149,13 +148,6 @@ impl FetchState {
                                 let f = &self.uid_store.mailboxes.lock().await[&self.mailbox_hash];
                                 (Arc::clone(&f.exists), Arc::clone(&f.unseen))
                             };
-                            let cached_payload =
-                                if let Some(mut resync_payload) = resync_payload.take() {
-                                    resync_payload.extend(cached_payload);
-                                    resync_payload
-                                } else {
-                                    cached_payload
-                                };
                             unseen.lock().unwrap().insert_existing_set(
                                 cached_payload
                                     .iter()
@@ -171,6 +163,51 @@ impl FetchState {
                             mailbox_exists.lock().unwrap().insert_existing_set(
                                 cached_payload.iter().map(|env| env.hash()).collect::<_>(),
                             );
+                            // The cache served first for fast UX; when the
+                            // cache batches are exhausted, one final resync
+                            // reconciles the payload and the unseen/exists
+                            // sets with the server's truth, so a mail that
+                            // was deleted on the server does not survive
+                            // as a ghost. (Semantic port of upstream meli
+                            // 4f2414a3 "fetch from cache then resync".)
+                            if self.stage == FetchStage::Finished {
+                                let mut conn = self.connection.lock().await?;
+                                match conn.resync(self.mailbox_hash).await {
+                                    Ok(Some(payload)) => {
+                                        unseen.lock().unwrap().insert_existing_set(
+                                            payload
+                                                .iter()
+                                                .filter_map(|env| {
+                                                    if !env.is_seen() {
+                                                        Some(env.hash())
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .collect(),
+                                        );
+                                        mailbox_exists.lock().unwrap().insert_existing_set(
+                                            payload.iter().map(|env| env.hash()).collect::<_>(),
+                                        );
+                                        cached_payload.extend(payload);
+                                    }
+                                    Ok(None) => {}
+                                    Err(err) => {
+                                        // Keep the graceful degradation of
+                                        // the cached payload: log and
+                                        // finish without failing the
+                                        // stream.
+                                        imap_log!(
+                                            error,
+                                            conn,
+                                            "IMAP error: could not resync {} after serving \
+                                             the cache. Reason: {}",
+                                            self.uid_store.account_name,
+                                            err
+                                        );
+                                    }
+                                }
+                            }
                             return Ok(cached_payload);
                         }
                         Err(err) => {
@@ -331,12 +368,22 @@ impl FetchState {
                             );
                         }
                         Ok(()) => {
-                            let mailbox_hash = self.mailbox_hash;
-                            match conn.resync(mailbox_hash).await {
-                                Ok(Some(payload)) => resync_res = Some(payload),
-                                Ok(None) => {}
-                                Err(err) => {
-                                    if self.cache_served_offline {
+                            // Only the offline-served path consumes a
+                            // resync result here (it emits what changed
+                            // since the served cache snapshot). The online
+                            // path must not resync before the cache is
+                            // walked: it re-walks the cache stages below
+                            // and performs one final resync when the cache
+                            // batches finish, so the cache serves first
+                            // and the server's truth corrects the
+                            // payload/sets last. (Semantic port of
+                            // upstream meli 4f2414a3.)
+                            if self.cache_served_offline {
+                                let mailbox_hash = self.mailbox_hash;
+                                match conn.resync(mailbox_hash).await {
+                                    Ok(Some(payload)) => resync_res = Some(payload),
+                                    Ok(None) => {}
+                                    Err(err) => {
                                         imap_log!(
                                             error,
                                             conn,
@@ -360,12 +407,10 @@ impl FetchState {
                         self.stage = FetchStage::Finished;
                         return Ok(resync_res.unwrap_or_default());
                     }
-                    if let Some(payload) = resync_res {
-                        self.stage = FetchStage::InitialCache;
-                        resync_payload = Some(payload);
-                        continue;
-                    }
-                    self.stage = FetchStage::InitialFresh;
+                    // Online: re-walk the cache stages (cache serves
+                    // first); the final resync at the end of the cache
+                    // batches reconciles with the server.
+                    self.stage = FetchStage::InitialCache;
                     continue;
                 }
                 FetchStage::FreshFetch { max_uid } => {

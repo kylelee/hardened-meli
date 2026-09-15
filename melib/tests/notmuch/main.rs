@@ -33,6 +33,13 @@ rusty_fork_test! {
 
 rusty_fork_test! {
     #[test]
+    fn test_notmuch_raw_search() {
+        tests::run_notmuch_raw_search();
+    }
+}
+
+rusty_fork_test! {
+    #[test]
     fn test_notmuch_refresh() {
         tests::run_notmuch_refresh();
     }
@@ -55,7 +62,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    macro_rules! skip_test_if_notmuch_binary_is_missing {
+    macro_rules! skip_test_if_notmuch_not_installed {
         () => {{
             if !matches!(std::process::Command::new("sh")
                 .arg("-c")
@@ -67,6 +74,44 @@ mod tests {
                     log::info!("'notmuch' binary not found in PATH, skipping test.");
                     return;
                 }
+            let mut library_file_path: Option<PathBuf> = None;
+            if cfg!(target_os = "macos") && std::env::var("DYLD_LIBRARY_PATH").is_err() {
+                if let Ok(path) = std::env::var("LD_LIBRARY_PATH") {
+                    std::env::set_var("DYLD_LIBRARY_PATH", path);
+                } else if matches!(std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("command -v brew")
+                    .stdout(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()).output(), Ok(out) if out.status.success())
+                    {
+                        log::info!("Attempting to set DYLD_LIBRARY_PATH=\"$(brew --prefix)/lib\"");
+                        if let Ok(out) = std::process::Command::new("brew").arg("--prefix")
+                            .stdout(std::process::Stdio::piped())
+                                .stdin(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::piped()).output() {
+                                    if out.status.success() {
+                                        let mut prefix_path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                                        prefix_path.push("lib");
+                                        std::env::set_var("DYLD_LIBRARY_PATH", &prefix_path);
+                                        log::info!("set DYLD_LIBRARY_PATH={}", prefix_path.display());
+                                    }
+                                }
+                    }
+                if let Ok(paths) = std::env::var("DYLD_LIBRARY_PATH") {
+                    for mut path in std::env::split_paths(&paths) {
+                        path.push(NotmuchDb::DEFAULT_DYLIB_NAME);
+                        let Ok(path) = path.canonicalize() else {
+                            continue;
+                        };
+                        if matches!(path.try_exists(), Ok(true)) {
+                            library_file_path = Some(path);
+                            break;
+                        }
+                    }
+                }
+            }
+            library_file_path
         }}
     }
 
@@ -95,6 +140,7 @@ mod tests {
 
     fn new_notmuch_backend(
         temp_dir: &TempDir,
+        library_file_path: Option<PathBuf>,
         acc_name: &str,
         event_consumer: BackendEventConsumer,
         with_root_mailbox: bool,
@@ -146,13 +192,17 @@ other_email=test2@example.com;test3@example.com
         } else {
             indexmap::indexmap! {}
         };
-        let extra = if with_root_mailbox {
-            indexmap::indexmap! {
-                "root_mailbox".into() => root_mailbox.display().to_string(),
-            }
-        } else {
-            indexmap::indexmap! {}
-        };
+        let mut extra = indexmap::indexmap! {};
+
+        if with_root_mailbox {
+            extra.insert("root_mailbox".into(), root_mailbox.display().to_string());
+        }
+        if let Some(library_file_path) = library_file_path {
+            extra.insert(
+                "library_file_path".into(),
+                library_file_path.display().to_string(),
+            );
+        }
 
         let account_conf = AccountSettings {
             name: acc_name.to_string(),
@@ -176,7 +226,7 @@ other_email=test2@example.com;test3@example.com
     /// events when altering the mail store in the filesystem.
     pub(crate) fn run_notmuch_watch() {
         let mut _logger = Logger::new_with(LogLevel::TRACE, true);
-        skip_test_if_notmuch_binary_is_missing!();
+        let library_file_path = skip_test_if_notmuch_not_installed!();
         let temp_dir = TempDir::new().unwrap();
         // Store all events in a vector, and compare them at the end with the expected
         // ones.
@@ -217,9 +267,14 @@ other_email=test2@example.com;test3@example.com
             std::env::set_var(var, &dir);
         }
 
-        let (root_mailbox, _settings, mut notmuch) =
-            new_notmuch_backend(&temp_dir, "notmuch", backend_event_consumer.clone(), true)
-                .unwrap();
+        let (root_mailbox, _settings, mut notmuch) = new_notmuch_backend(
+            &temp_dir,
+            library_file_path,
+            "notmuch",
+            backend_event_consumer.clone(),
+            true,
+        )
+        .unwrap();
 
         let is_online_fut = notmuch.is_online().unwrap();
         block_on(is_online_fut).unwrap();
@@ -315,11 +370,168 @@ hello world.
         std::mem::forget(_watch_fut);
     }
 
+    /// `NotmuchDb::raw_search` must pass the raw query string straight to
+    /// libnotmuch, with the mailbox's `query_str` prefixed when a
+    /// mailbox hash is given. See upstream `2825d224`.
+    pub(crate) fn run_notmuch_raw_search() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let library_file_path = skip_test_if_notmuch_not_installed!();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(16)));
+
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+
+        for var in [
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_DIRS",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_DIRS",
+            "XDG_DATA_HOME",
+            "NOTMUCH_CONFIG",
+        ] {
+            std::env::remove_var(var);
+        }
+        for (var, dir) in [
+            ("HOME", temp_dir.path().to_path_buf()),
+            ("XDG_CACHE_HOME", temp_dir.path().join(".cache")),
+            ("XDG_STATE_HOME", temp_dir.path().join(".local/state")),
+            ("XDG_CONFIG_HOME", temp_dir.path().join(".config")),
+            ("XDG_DATA_HOME", temp_dir.path().join(".local/share")),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
+                panic!("Could not create {} path, {}: {}", var, dir.display(), err);
+            });
+            std::env::set_var(var, &dir);
+        }
+
+        let (root_mailbox, _settings, mut notmuch) = new_notmuch_backend(
+            &temp_dir,
+            library_file_path,
+            "notmuch",
+            backend_event_consumer.clone(),
+            true,
+        )
+        .unwrap();
+
+        let is_online_fut = notmuch.is_online().unwrap();
+        block_on(is_online_fut).unwrap();
+        let mut mailboxes_fut = notmuch.mailboxes().unwrap();
+        let mailboxes = block_on(mailboxes_fut.as_mut()).unwrap();
+        let inbox_hash: MailboxHash = *mailboxes.keys().next().unwrap();
+
+        let seed_mail_1 = Mail::new(
+            br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Cc:
+Subject: RE: nm raw seed 1
+Message-ID: <nm-raw-1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+            .to_vec(),
+            None,
+        )
+        .unwrap();
+        let seed_mail_2 = Mail::new(
+            br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Cc:
+Subject: RE: nm raw seed 2
+Message-ID: <nm-raw-2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+            .to_vec(),
+            None,
+        )
+        .unwrap();
+        MaildirType::save_to_mailbox(root_mailbox.clone(), seed_mail_1.bytes, None).unwrap();
+        MaildirType::save_to_mailbox(root_mailbox.clone(), seed_mail_2.bytes, None).unwrap();
+        notmuch_new(false);
+
+        // Load the envelopes through the backend so we have their hashes.
+        let mut fetch_fut = notmuch.fetch(inbox_hash).unwrap().into_future();
+        let mut envs = vec![];
+        loop {
+            let (batch, rest) = block_on(fetch_fut);
+            let Some(batch) = batch else {
+                break;
+            };
+            envs.extend(batch.unwrap());
+            fetch_fut = rest.into_future();
+        }
+        assert_eq!(
+            envs.len(),
+            2,
+            "expected both seed mails to be indexed and fetched, got subjects {:?}",
+            envs.iter()
+                .map(|e| e.subject().to_string())
+                .collect::<Vec<_>>()
+        );
+        let seed_1_hash = envs
+            .iter()
+            .find(|e| e.subject().contains("nm raw seed 1"))
+            .unwrap()
+            .hash();
+        let all_hashes: std::collections::HashSet<EnvelopeHash> =
+            envs.iter().map(|e| e.hash()).collect();
+
+        // Root query (no mailbox prefix): a `*` query returns every indexed
+        // message.
+        let found = block_on(notmuch.raw_search("*".to_string(), None).unwrap()).unwrap();
+        assert_eq!(
+            found.into_iter().collect::<std::collections::HashSet<_>>(),
+            all_hashes,
+            "root raw query '*' must return every indexed message"
+        );
+
+        // Mailbox-scoped query: the mailbox `query_str` prefix is
+        // concatenated in front of the raw query, so a subject query
+        // restricted to the mailbox still matches the single seed.
+        let found = block_on(
+            notmuch
+                .raw_search(
+                    "subject:nm AND subject:seed AND subject:1".to_string(),
+                    Some(inbox_hash),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            found,
+            vec![seed_1_hash],
+            "mailbox-scoped raw search must prefix the mailbox query_str and match only seed 1"
+        );
+
+        // No match at all.
+        let found = block_on(
+            notmuch
+                .raw_search("subject:definitely-no-such-subject".to_string(), None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            found.is_empty(),
+            "unmatchable raw query must yield an empty result, got {found:?}"
+        );
+    }
+
     /// Test that `NotmuchDb::refresh` returns the expected `Refresh` events
     /// when altering the mail store in the filesystem.
     pub(crate) fn run_notmuch_refresh() {
         let mut _logger = Logger::new_with(LogLevel::TRACE, true);
-        skip_test_if_notmuch_binary_is_missing!();
+        let library_file_path = skip_test_if_notmuch_not_installed!();
         let temp_dir = TempDir::new().unwrap();
         // Store all events in a vector, and compare them at the end with the expected
         // ones.
@@ -360,9 +572,14 @@ hello world.
             std::env::set_var(var, &dir);
         }
 
-        let (root_mailbox, _settings, mut notmuch) =
-            new_notmuch_backend(&temp_dir, "notmuch", backend_event_consumer.clone(), true)
-                .unwrap();
+        let (root_mailbox, _settings, mut notmuch) = new_notmuch_backend(
+            &temp_dir,
+            library_file_path,
+            "notmuch",
+            backend_event_consumer.clone(),
+            true,
+        )
+        .unwrap();
 
         let is_online_fut = notmuch.is_online().unwrap();
         block_on(is_online_fut).unwrap();

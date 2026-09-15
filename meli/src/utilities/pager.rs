@@ -1011,7 +1011,7 @@ impl Component for Pager {
                     }
                 }
             }
-            UIEvent::Action(Action::Listing(ListingAction::Search(pattern))) => {
+            UIEvent::Action(Action::Listing(ListingAction::Search { term: pattern, .. })) => {
                 self.search = Some(SearchPattern {
                     pattern: pattern.to_string(),
                     positions: vec![],

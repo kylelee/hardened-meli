@@ -55,9 +55,13 @@ use edit_attachments::*;
 
 pub mod hooks;
 
+#[cfg(feature = "gpgme")]
 const TOGGLE_CHECKED_UNICODE: &str = "☑";
+#[cfg(feature = "gpgme")]
 const TOGGLE_UNCHECKED_UNICODE: &str = "☐";
+#[cfg(feature = "gpgme")]
 const TOGGLE_CHECKED_ASCII: &str = "[x]";
+#[cfg(feature = "gpgme")]
 const TOGGLE_UNCHECKED_ASCII: &str = "[ ]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -784,13 +788,7 @@ To: {}
             account_settings!(context[self.account_hash].shortcuts.composing).key_values();
         let mut shortcuts: ShortcutMaps = Default::default();
         shortcuts.insert(Shortcuts::COMPOSING, our_map);
-        let toggle_shortcut = Key::Char('\n');
         let edit_shortcut = &shortcuts[Shortcuts::COMPOSING]["edit"];
-        let (toggle_checked, toggle_unchecked) = if !grid.ascii_drawing {
-            (TOGGLE_CHECKED_UNICODE, TOGGLE_UNCHECKED_UNICODE)
-        } else {
-            (TOGGLE_CHECKED_ASCII, TOGGLE_UNCHECKED_ASCII)
-        };
         {
             let theme_attr = if self.focus == Focus::Attachments {
                 highlight_attr
@@ -807,7 +805,10 @@ To: {}
                     None,
                     None,
                 );
-                area = area.skip_rows(1);
+                #[cfg(feature = "gpgme")]
+                {
+                    area = area.skip_rows(1);
+                }
             } else {
                 grid.write_string(
                     &format!(
@@ -855,6 +856,12 @@ To: {}
         }
         #[cfg(feature = "gpgme")]
         {
+            let toggle_shortcut = Key::Char('\n');
+            let (toggle_checked, toggle_unchecked) = if !grid.ascii_drawing {
+                (TOGGLE_CHECKED_UNICODE, TOGGLE_UNCHECKED_UNICODE)
+            } else {
+                (TOGGLE_CHECKED_ASCII, TOGGLE_UNCHECKED_ASCII)
+            };
             let theme_attr = if self.focus == Focus::Sign {
                 highlight_attr
             } else {
@@ -1210,7 +1217,13 @@ impl Component for Composer {
                         stopped_message.len(),
                         std::cmp::max(stopped_message_2.len(), STOPPED_MESSAGE_3.len()),
                     );
-                    let inner_area = create_box(grid, area.center_inside((max_len + 5, 5)));
+                    let inner_area = create_box(
+                        grid,
+                        crate::terminal::ratatui_bridge::center_inside_via_layout(
+                            area,
+                            (max_len + 5, 5),
+                        ),
+                    );
                     grid.clear_area(inner_area, theme_default);
                     for (i, l) in [
                         stopped_message.as_str(),
@@ -1294,10 +1307,15 @@ impl Component for Composer {
                 .draw(grid, area, context);
             }
             ViewMode::Send { ref mut widget } | ViewMode::PerformAction { ref mut widget, .. } => {
-                let inner_area = area.center_inside((
-                    area.width().saturating_sub(2),
-                    area.height().saturating_sub(2),
-                ));
+                /* Inner pane centered via ratatui Layout (bridge helper),
+                 * identical to the previous `center_inside` math. */
+                let inner_area = crate::terminal::ratatui_bridge::center_inside_via_layout(
+                    area,
+                    (
+                        area.width().saturating_sub(2),
+                        area.height().saturating_sub(2),
+                    ),
+                );
                 widget.draw(grid, inner_area, context);
             }
             #[cfg(feature = "gpgme")]
@@ -1308,34 +1326,54 @@ impl Component for Composer {
                     keys: _,
                 },
             ) => {
-                let inner_area = area.center_inside((
-                    area.width().saturating_sub(2),
-                    area.height().saturating_sub(2),
-                ));
+                /* Inner pane centered via ratatui Layout (bridge helper),
+                 * identical to the previous `center_inside` math. */
+                let inner_area = crate::terminal::ratatui_bridge::center_inside_via_layout(
+                    area,
+                    (
+                        area.width().saturating_sub(2),
+                        area.height().saturating_sub(2),
+                    ),
+                );
                 widget.draw(grid, inner_area, context);
             }
             #[cfg(feature = "gpgme")]
             ViewMode::SelectKey(_, _) => {}
             ViewMode::SelectRecipients(ref mut s) => {
-                let inner_area = area.center_inside((
-                    area.width().saturating_sub(2),
-                    area.height().saturating_sub(2),
-                ));
+                /* Inner pane centered via ratatui Layout (bridge helper),
+                 * identical to the previous `center_inside` math. */
+                let inner_area = crate::terminal::ratatui_bridge::center_inside_via_layout(
+                    area,
+                    (
+                        area.width().saturating_sub(2),
+                        area.height().saturating_sub(2),
+                    ),
+                );
                 s.draw(grid, inner_area, context);
             }
             ViewMode::Discard(_, ref mut s) => {
-                let inner_area = area.center_inside((
-                    area.width().saturating_sub(2),
-                    area.height().saturating_sub(2),
-                ));
+                /* Inner pane centered via ratatui Layout (bridge helper),
+                 * identical to the previous `center_inside` math. */
+                let inner_area = crate::terminal::ratatui_bridge::center_inside_via_layout(
+                    area,
+                    (
+                        area.width().saturating_sub(2),
+                        area.height().saturating_sub(2),
+                    ),
+                );
                 /* Let user choose whether to quit with/without saving or cancel */
                 s.draw(grid, inner_area, context);
             }
             ViewMode::WaitingForSendResult(ref mut s, _) => {
-                let inner_area = area.center_inside((
-                    area.width().saturating_sub(2),
-                    area.height().saturating_sub(2),
-                ));
+                /* Inner pane centered via ratatui Layout (bridge helper),
+                 * identical to the previous `center_inside` math. */
+                let inner_area = crate::terminal::ratatui_bridge::center_inside_via_layout(
+                    area,
+                    (
+                        area.width().saturating_sub(2),
+                        area.height().saturating_sub(2),
+                    ),
+                );
                 /* Let user choose whether to wait for success or cancel */
                 s.draw(grid, inner_area, context);
             }
@@ -1444,10 +1482,21 @@ impl Component for Composer {
                         widget.buttons.result(),
                         Some(FormButtonAction::Cancel | FormButtonAction::Accept)
                     ) {
+                        let edited = widget.edited;
                         self.mode = ViewMode::Edit;
+                        self.has_changes |= edited;
                     }
                     self.set_dirty(true);
                     return true;
+                }
+                if let UIEvent::Input(ref key) = event {
+                    if shortcut!(key == shortcuts[Shortcuts::COMPOSING]["close"]) {
+                        let edited = widget.edited;
+                        self.mode = ViewMode::Edit;
+                        self.has_changes |= edited;
+                        self.set_dirty(true);
+                        return true;
+                    }
                 }
             }
             (ViewMode::Send { ref widget }, UIEvent::FinishedUIDialog(id, result))
@@ -1591,6 +1640,7 @@ impl Component for Composer {
                     self.draft
                         .set_header(HeaderName::TO, std::mem::take(to_val));
                     self.update_form(context);
+                    self.has_changes = true;
                 }
                 self.mode = ViewMode::Edit;
                 self.set_dirty(true);
@@ -1712,6 +1762,7 @@ impl Component for Composer {
                         self.gpg_state.sign_keys.clear();
                         self.gpg_state.sign_keys = std::mem::take(keys);
                     }
+                    self.has_changes = true;
                 }
                 self.mode = ViewMode::Edit;
                 self.set_dirty(true);
@@ -1799,6 +1850,13 @@ impl Component for Composer {
                         context,
                     ),
                 };
+                return true;
+            }
+            UIEvent::Input(ref key)
+                if shortcut!(key == shortcuts[Shortcuts::COMPOSING]["close"])
+                    && self.mode.is_edit() =>
+            {
+                self.kill(self.id, context);
                 return true;
             }
             UIEvent::EmbeddedInput((Key::Ctrl('z'), _)) => {
@@ -2448,6 +2506,7 @@ impl Component for Composer {
                         return true;
                     }
                     self.draft.attachments_mut().remove(*idx);
+                    self.has_changes = true;
                     context.replies.push_back(UIEvent::Notification {
                         title: None,
                         source: None,
@@ -3096,6 +3155,265 @@ fn attribution_string(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::Component;
+
+    /// Returns true if `replies` contains a `Tab(Kill(id))` action for the
+    /// given component id.
+    fn replies_contain_kill(replies: &[UIEvent], id: ComponentId) -> bool {
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Action(Action::Tab(TabAction::Kill(k))) if *k == id))
+    }
+
+    /// Construct a realized `Composer` backed by a mock context.
+    fn realized_composer(ctx: &mut Context) -> Composer {
+        let account_hash = ctx.accounts[0].hash();
+        let composer = Composer::with_account(account_hash, ctx);
+        composer.realize(None, ctx);
+        let _ = ctx.replies();
+        composer
+    }
+
+    #[test]
+    fn composer_esc_no_changes_closes_tab() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+
+        let mut ev = UIEvent::Input(Key::Esc);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies_contain_kill(&replies, composer.id()),
+            "Esc with no unsaved changes must close the tab; got {replies:?}"
+        );
+    }
+
+    #[test]
+    fn composer_esc_with_changes_opens_discard() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        composer.has_changes = true;
+
+        let mut ev = UIEvent::Input(Key::Esc);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(
+            matches!(composer.mode, ViewMode::Discard(..)),
+            "Esc with unsaved changes must open the discard dialog"
+        );
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            !replies_contain_kill(&replies, composer.id()),
+            "the discard dialog must not close the tab yet; got {replies:?}"
+        );
+    }
+
+    #[test]
+    fn composer_esc_in_discard_dialog_returns_to_edit() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        composer.has_changes = true;
+
+        let mut ev = UIEvent::Input(Key::Esc);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::Discard(..)));
+        let _ = ctx.replies();
+
+        // A second Esc cancels the dialog (UIDialog returns false) without
+        // re-triggering `kill`; the `mode.is_edit()` guard is what keeps the
+        // mode at `Discard` until `ComponentUnrealize` is re-dispatched.
+        let mut ev = UIEvent::Input(Key::Esc);
+        let _ = composer.process_event(&mut ev, &mut ctx);
+        assert!(
+            matches!(composer.mode, ViewMode::Discard(..)),
+            "before re-feeding replies the mode must still be Discard"
+        );
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(!replies_contain_kill(&replies, composer.id()));
+
+        // The main loop feeds replies back in; ComponentUnrealize resets the
+        // mode to Edit.
+        for mut ev in replies {
+            composer.process_event(&mut ev, &mut ctx);
+        }
+        assert!(
+            matches!(composer.mode, ViewMode::Edit),
+            "canceling the discard dialog must return to edit mode"
+        );
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(!replies_contain_kill(&replies, composer.id()));
+    }
+
+    #[test]
+    fn composer_esc_in_edit_attachments_returns_to_edit() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        let account_hash = ctx.accounts[0].hash();
+        composer.mode = ViewMode::EditAttachments {
+            widget: Box::new(EditAttachments::new(account_hash, &ctx)),
+        };
+
+        let mut ev = UIEvent::Input(Key::Esc);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(
+            matches!(composer.mode, ViewMode::Edit),
+            "Esc in the attachments mode must return to the main edit mode"
+        );
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(!replies_contain_kill(&replies, composer.id()));
+    }
+
+    #[test]
+    fn composer_remove_attachment_sets_has_changes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        composer
+            .draft
+            .attachments_mut()
+            .push(AttachmentBuilder::default());
+
+        let mut ev = UIEvent::Action(Action::Tab(TabAction::ComposerAction(
+            ComposerTabAction::RemoveAttachment(0),
+        )));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(
+            composer.has_changes,
+            "removing an attachment must mark the draft as changed"
+        );
+    }
+
+    #[test]
+    fn composer_edit_attachment_accept_sets_has_changes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        let account_hash = ctx.accounts[0].hash();
+        composer
+            .draft
+            .attachments_mut()
+            .push(AttachmentBuilder::default());
+        composer.mode = ViewMode::EditAttachments {
+            widget: Box::new(EditAttachments::new(account_hash, &ctx)),
+        };
+
+        // Move the cursor from the Go Back button onto the single attachment.
+        let mut ev = UIEvent::Input(Key::Up);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        // Enter opens the inner edit form for that attachment.
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+
+        // Two Downs walk the two form fields (Filename, Mime type) and then
+        // focus the Save button.
+        let mut ev = UIEvent::Input(Key::Down);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        let mut ev = UIEvent::Input(Key::Down);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        // Enter triggers Save/Accept, writing back and setting `edited`.
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+
+        // Back in the overview; move to the Go Back button and trigger it.
+        let mut ev = UIEvent::Input(Key::Down);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+
+        assert!(
+            composer.has_changes,
+            "accepting an attachment edit must mark the draft as changed"
+        );
+        assert!(
+            matches!(composer.mode, ViewMode::Edit),
+            "Go Back must return to the main edit mode"
+        );
+    }
+
+    #[test]
+    fn composer_select_recipients_sets_has_changes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+
+        let dialog = UIDialog::new(
+            "select recipients",
+            Vec::<(Address, String)>::new(),
+            false,
+            Some(Box::new(|_id: ComponentId, _results: &[Address]| None)),
+            &ctx,
+        );
+        let dialog_id = dialog.id();
+        composer.mode = ViewMode::SelectRecipients(dialog);
+
+        let mut ev = UIEvent::FinishedUIDialog(dialog_id, Box::new("a@b.example".to_string()));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(
+            composer.has_changes,
+            "confirming a recipient selection must mark the draft as changed"
+        );
+    }
+
+    #[cfg(feature = "gpgme")]
+    #[test]
+    fn composer_select_key_sets_has_changes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+
+        let widget = UIDialog::new(
+            "select key",
+            Vec::<(melib::gpgme::Key, String)>::new(),
+            false,
+            Some(Box::new(
+                |_id: ComponentId, _results: &[melib::gpgme::Key]| None,
+            )),
+            &ctx,
+        );
+        let widget_id = widget.id();
+        composer.mode = ViewMode::SelectKey(
+            false,
+            gpg::KeySelection::Loaded {
+                widget: Box::new(widget),
+                keys: vec![],
+            },
+        );
+
+        let mut ev =
+            UIEvent::FinishedUIDialog(widget_id, Box::new(Some(Vec::<melib::gpgme::Key>::new())));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(
+            composer.has_changes,
+            "confirming a key selection must mark the draft as changed"
+        );
+    }
+
+    /// Composer form golden snapshot (characterization corpus). Lives next to
+    /// the `Composer` definition because the wall-clock `Date` header baked
+    /// into `Draft::default()` must be pinned to a fixed value before the
+    /// lazy first-draw initialization renders it into the form; `draft` is
+    /// private to this module.
+    #[test]
+    fn golden_composer_form() {
+        use crate::components::Component;
+
+        let mut ctx = crate::golden::mock_context();
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        let mut composer = Composer::with_account(account_hash, &ctx);
+        composer.draft.set_header(
+            HeaderName::DATE,
+            "Wed, 1 Jan 2025 10:00:00 +0000".to_string(),
+        );
+        composer.realize(None, &mut ctx);
+
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        crate::golden::record_or_assert("composer_form", screen.grid());
+    }
 
     #[test]
     fn test_compose_reply_subject_prefix() {
@@ -3161,6 +3479,357 @@ hello world.
         assert_eq!(
             &composer.draft.headers()[HeaderName::TO],
             r#"some name <some@example.com>"#
+        );
+    }
+
+    /// End-to-end byte-fidelity verification of the embedded-editor path
+    /// (`UIMode::Embedded`) now that raw bytes come from `encode_key`:
+    /// the `edit` shortcut spawns a scripted `$EDITOR` shim inside a pty
+    /// via `create_pty`, keys flow through `UIEvent::EmbeddedInput` as
+    /// `(Key, encode_key(&Key))` pairs, a `Ctrl-z` stop/resume round-trip
+    /// happens mid-session, and after the shim exits the compose body
+    /// shows the sentinel it wrote into the draft file. The shim's stdin
+    /// log is the byte-fidelity probe: it must equal the `encode_key`
+    /// concatenation exactly, and must NOT contain the `Ctrl-z` byte
+    /// (meli consumes it itself to `SIGSTOP` the child).
+    ///
+    /// Determinism: the shim sets `stty raw -echo` before announcing
+    /// itself, so the tty line discipline cannot mangle or echo the byte
+    /// stream; every wait polls an observable state change (a marker in
+    /// the drawn grid / the sentinel in the compose body) with a bounded
+    /// deadline, never a fixed sleep.
+    #[test]
+    fn embedded_compose_editor_byte_matrix_roundtrip() {
+        use crate::components::Component;
+        use crate::terminal::ratatui_bridge::encode_key;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        /// Bounded spin on `pred` until it holds or the deadline passes.
+        fn wait_until(deadline: Duration, mut pred: impl FnMut() -> bool) -> bool {
+            let start = Instant::now();
+            let mut spins = 0_u64;
+            loop {
+                if pred() {
+                    return true;
+                }
+                assert!(
+                    start.elapsed() < deadline,
+                    "condition not reached within {deadline:?}"
+                );
+                spins += 1;
+                if spins < 1_000 {
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+
+        /// Feed all pending context replies into `component` (like the
+        /// main event loop) and return the `UIMode` targets of any
+        /// `ChangeMode` replies.
+        fn drain_replies(
+            component: &mut dyn crate::components::Component,
+            context: &mut crate::Context,
+        ) -> Vec<UIMode> {
+            let mut modes = Vec::new();
+            for _ in 0..8 {
+                let replies = context.replies();
+                if replies.is_empty() {
+                    break;
+                }
+                for mut event in replies {
+                    if let UIEvent::ChangeMode(mode) = event {
+                        modes.push(mode);
+                        continue;
+                    }
+                    let _ = component.process_event(&mut event, context);
+                }
+            }
+            modes
+        }
+
+        fn dump_grid(grid: &crate::terminal::cells::CellBuffer) -> String {
+            let mut out = String::new();
+            for y in 0..grid.rows {
+                for x in 0..grid.cols {
+                    out.push(grid.get(x, y).map(|c| c.ch()).unwrap_or(' '));
+                }
+                out.push('\n');
+            }
+            out
+        }
+
+        fn grid_contains(grid: &crate::terminal::cells::CellBuffer, needle: &str) -> bool {
+            let needle: Vec<char> = needle.chars().collect();
+            'rows: for y in 0..grid.rows {
+                let mut window: Vec<char> = Vec::with_capacity(needle.len());
+                for x in 0..grid.cols {
+                    let Some(cell) = grid.get(x, y) else {
+                        continue 'rows;
+                    };
+                    window.push(cell.ch());
+                    if window.len() > needle.len() {
+                        window.remove(0);
+                    }
+                    if window == needle {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        // Send `key` through the production embedded-input contract.
+        fn send_embedded_input(
+            composer: &mut Composer,
+            context: &mut crate::Context,
+            key: &crate::terminal::keys::Key,
+        ) {
+            let bytes = encode_key(key);
+            let mut ev = UIEvent::EmbeddedInput((key.clone(), bytes));
+            composer.process_event(&mut ev, context);
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("compose-byte.log");
+        let script = tmp.path().join("shim-editor.sh");
+
+        // `create_pty` locates POSIX `sh` by parsing the raw stdout of
+        // `getconf PATH`, which carries a trailing `\n`. On systems whose
+        // `getconf PATH` is a single component (e.g. Fedora/Arch:
+        // `/usr/bin`), that unstripped newline makes every candidate path
+        // (`/usr/bin\n/sh`) fail `exists()`, so `create_pty` refuses to
+        // spawn anything. This is a pre-existing upstream defect in
+        // `terminal/embedded.rs` (untouched by the ratatui waves, zero
+        // diff vs main; see the task-6 evidence log) and is out of this
+        // todo's mandate to fix. To still verify the embedded path on
+        // this host, prepend a shim `getconf` that prints the same PATH
+        // without the newline artifact - exactly what a host like Debian
+        // (multi-component `getconf PATH`) yields, where the lookup
+        // succeeds. Only the `sh` lookup is affected; no bytes are
+        // altered.
+        let shimbin = tmp.path().join("bin");
+        std::fs::create_dir_all(&shimbin).unwrap();
+        std::fs::write(shimbin.join("getconf"), "#!/bin/sh\nprintf '/usr/bin'\n").unwrap();
+        std::fs::set_permissions(
+            shimbin.join("getconf"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let previous_path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", shimbin.display(), previous_path.to_string_lossy()),
+        );
+
+        // Keys the editor must receive verbatim (`Ctrl-z` excluded: meli
+        // consumes it itself to SIGSTOP the child). The last key is the
+        // exit trigger, consumed by the shim as the final logged byte.
+        let matrix: &[crate::terminal::keys::Key] = &[
+            crate::terminal::keys::Key::Char('h'),
+            crate::terminal::keys::Key::Char('j'),
+            crate::terminal::keys::Key::Char('k'),
+            crate::terminal::keys::Key::Char('l'),
+            crate::terminal::keys::Key::Left,
+            crate::terminal::keys::Key::Down,
+            crate::terminal::keys::Key::Up,
+            crate::terminal::keys::Key::Right,
+            crate::terminal::keys::Key::Home,
+            crate::terminal::keys::Key::End,
+            crate::terminal::keys::Key::PageUp,
+            crate::terminal::keys::Key::PageDown,
+            crate::terminal::keys::Key::Delete,
+            crate::terminal::keys::Key::Insert,
+            crate::terminal::keys::Key::Backspace,
+            crate::terminal::keys::Key::F(1),
+            crate::terminal::keys::Key::F(5),
+            crate::terminal::keys::Key::Ctrl('['),
+            crate::terminal::keys::Key::Alt('e'),
+            crate::terminal::keys::Key::Char('\n'),
+            crate::terminal::keys::Key::Ctrl('x'),
+        ];
+        let ctrl_z_pos = 19; // index in `matrix` after which Ctrl-z is pressed
+        let expected: Vec<u8> = matrix.iter().flat_map(encode_key).collect();
+
+        let mut ctx = crate::golden::mock_context();
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        ctx.settings.composing.editor_command =
+            Some(format!("{} {}", script.display(), log.display()));
+        ctx.settings.composing.embedded_pty = true;
+
+        let shim = format!(
+            r#"#!/bin/sh
+# meli embedded-compose editor shim (generated by a test; do not edit).
+LOG="$1"
+DRAFT="$2"
+COUNT={count}
+stty raw -echo
+printf 'EMBEDDED-EDITOR-READY\r\n'
+dd bs=1 count="$COUNT" of="$LOG" 2>/dev/null
+printf 'EMBEDDED-EDITOR-BYE\r\n'
+printf 'SENTINEL-EDITED-BODY\r\n' >> "$DRAFT"
+exit 0
+"#,
+            count = expected.len(),
+        );
+        std::fs::write(&script, &shim).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut composer = Composer::with_account(account_hash, &ctx);
+        composer.realize(None, &mut ctx);
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        // First draw initializes the form and pins `embedded_dimensions`
+        // to the screen geometry, exactly like the real UI would before
+        // the user presses `e`.
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        drain_replies(&mut composer, &mut ctx);
+
+        // Move field focus onto the body, like a real user would before
+        // pressing the edit shortcut (with focus on a header field the
+        // typed `e` goes into the form widget instead).
+        for _ in 0..8 {
+            if matches!(composer.focus, Focus::Body) {
+                break;
+            }
+            let mut ev = UIEvent::Input(crate::terminal::keys::Key::Down);
+            composer.process_event(&mut ev, &mut ctx);
+            drain_replies(&mut composer, &mut ctx);
+        }
+        assert!(
+            matches!(composer.focus, Focus::Body),
+            "could not focus the compose body"
+        );
+
+        // Spawn the embedded editor via the `edit` shortcut (default `e`);
+        // production sends this as UIEvent::Input while in UIMode::Normal.
+        let mut ev = UIEvent::Input(crate::terminal::keys::Key::Char('e'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        let mut modes = Vec::new();
+        let mut forked_pid: Option<i32> = None;
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for event in replies {
+                match event {
+                    UIEvent::ChangeMode(mode) => modes.push(mode),
+                    UIEvent::Fork(crate::types::ForkedProcess::Embedded { pid, .. }) => {
+                        forked_pid = Some(pid.as_raw());
+                    }
+                    mut other => {
+                        let _ = composer.process_event(&mut other, &mut ctx);
+                    }
+                }
+            }
+        }
+        assert!(
+            modes.contains(&UIMode::Embedded),
+            "expected ChangeMode(UIMode::Embedded) after `e`, got {modes:?}"
+        );
+        assert!(
+            forked_pid.is_some_and(|pid| pid > 0),
+            "expected Fork(ForkedProcess::Embedded) with a live pid after `e`"
+        );
+
+        // Wait until the editor shim announces itself (it is then in raw
+        // mode, so the byte stream below is delivered verbatim).
+        assert!(
+            wait_until(Duration::from_secs(30), || {
+                let area = screen.area();
+                composer.draw(screen.grid_mut(), area, &mut ctx);
+                drain_replies(&mut composer, &mut ctx);
+                grid_contains(screen.grid(), "EMBEDDED-EDITOR-READY")
+            }),
+            "editor never announced itself; grid dump:\n{}",
+            dump_grid(screen.grid())
+        );
+
+        // Feed keys up to the interruption point.
+        for key in &matrix[..ctrl_z_pos] {
+            send_embedded_input(&mut composer, &mut ctx, key);
+        }
+
+        // Ctrl-z round-trip: meli stops the child, returns to
+        // UIMode::Normal and renders the stopped-process box; the `edit`
+        // shortcut wakes the child up again.
+        send_embedded_input(
+            &mut composer,
+            &mut ctx,
+            &crate::terminal::keys::Key::Ctrl('z'),
+        );
+        let modes = drain_replies(&mut composer, &mut ctx);
+        assert_eq!(
+            modes.last(),
+            Some(&UIMode::Normal),
+            "expected ChangeMode(UIMode::Normal) after Ctrl-z, got {modes:?}"
+        );
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        drain_replies(&mut composer, &mut ctx);
+        assert!(
+            grid_contains(screen.grid(), "has stopped."),
+            "stopped-process box not rendered after Ctrl-z; grid dump:\n{}",
+            dump_grid(screen.grid())
+        );
+
+        let mut ev = UIEvent::Input(crate::terminal::keys::Key::Char('e'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        let modes = drain_replies(&mut composer, &mut ctx);
+        assert!(
+            modes.contains(&UIMode::Embedded),
+            "expected ChangeMode(UIMode::Embedded) after resume `e`, got {modes:?}"
+        );
+
+        // Remaining keys, ending with the exit trigger.
+        for key in &matrix[ctrl_z_pos..] {
+            send_embedded_input(&mut composer, &mut ctx, key);
+        }
+
+        // The shim prints BYE as its last output before exiting. Poll for
+        // it with draws only - no EmbeddedInput events are sent here, so
+        // the composer cannot reap the child yet and the embedded grid is
+        // guaranteed to still be on screen.
+        assert!(
+            wait_until(Duration::from_secs(30), || {
+                let area = screen.area();
+                composer.draw(screen.grid_mut(), area, &mut ctx);
+                drain_replies(&mut composer, &mut ctx);
+                grid_contains(screen.grid(), "EMBEDDED-EDITOR-BYE")
+            }),
+            "editor's BYE marker was never rendered in the embedded grid; grid dump:\n{}",
+            dump_grid(screen.grid())
+        );
+
+        // Drive the exit-detection path: each `UIEvent::EmbeddedInput`
+        // write fails with EIO once the child is gone, which makes the
+        // composer reap it (`update_from_file` + back to `ViewMode::Edit`).
+        // Until then the `StillAlive` branch merely re-queues the event,
+        // so retry until the sentinel body renders.
+        assert!(
+            wait_until(Duration::from_secs(30), || {
+                send_embedded_input(
+                    &mut composer,
+                    &mut ctx,
+                    &crate::terminal::keys::Key::Char('x'),
+                );
+                let area = screen.area();
+                composer.draw(screen.grid_mut(), area, &mut ctx);
+                drain_replies(&mut composer, &mut ctx);
+                grid_contains(screen.grid(), "SENTINEL-EDITED-BODY")
+            }),
+            "compose body never showed the sentinel; grid dump:\n{}",
+            dump_grid(screen.grid())
+        );
+
+        let got = std::fs::read(&log).unwrap_or_else(|err| panic!("read {}: {err}", log.display()));
+        assert_eq!(
+            got, expected,
+            "editor stdin log differs from the encode_key byte matrix (note: Ctrl-z must NOT \
+             appear; meli consumes it)"
         );
     }
 }

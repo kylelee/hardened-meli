@@ -1175,6 +1175,30 @@ impl Cell {
         self.keep_attrs = new_val;
         self
     }
+
+    /// Overwrite the cell's glyph, colors, attributes and continuation flag
+    /// while leaving the keep flags (`keep_fg`/`keep_bg`/`keep_attrs`)
+    /// untouched.
+    ///
+    /// This is the write side of the `ratatui_bridge` blits: ratatui cells
+    /// carry no keep-flag counterpart, so a blit must neither copy nor clear
+    /// them. Unlike [`Cell::set_ch`], changing the glyph here does not reset
+    /// the keep flags.
+    pub(super) fn overwrite(
+        &mut self,
+        ch: char,
+        fg: Color,
+        bg: Color,
+        attrs: Attr,
+        empty: bool,
+    ) -> &mut Self {
+        self.ch = ch;
+        self.fg = fg;
+        self.bg = bg;
+        self.attrs = attrs;
+        self.empty = empty;
+        self
+    }
 }
 
 impl Default for Cell {

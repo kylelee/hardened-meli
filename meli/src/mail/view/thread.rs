@@ -35,7 +35,11 @@ use melib::{
 };
 
 use super::*;
-use crate::{components::PageMovement, conf::data_types::ThreadLayout};
+use crate::{
+    components::PageMovement,
+    conf::data_types::ThreadLayout,
+    terminal::{draw_rounded_frame, frame_ring_areas},
+};
 
 #[derive(Debug)]
 struct ThreadEntry {
@@ -674,23 +678,48 @@ impl ThreadView {
             return;
         }
 
+        let tab_focused = crate::conf::value(context, "tab.focused");
+        let tab_unfocused = crate::conf::value(context, "tab.unfocused");
+        /* Rounded pane frames (visual chrome only): the pane holding the
+         * interaction focus is framed with "tab.focused", the other with
+         * "tab.unfocused". In the split state the thread list owns the
+         * cursor, so it is the focused pane. Each pane's content is drawn
+         * inside the frame's inner area (the helper's return value) so the
+         * ring owns its own cells: no content column is clipped and no
+         * content bleeds onto the ring. */
         match self.focus {
             ThreadViewFocus::None => {
-                self.draw_list(grid, area.take_cols(mid.saturating_sub(1)), context);
-                self.entries[self.new_expanded_pos].mailview.draw(
-                    grid,
-                    area.skip_cols(mid + 1),
-                    context,
-                );
+                let list_area = area.take_cols(mid.saturating_sub(1));
+                let list_inner = draw_rounded_frame(grid, list_area, tab_focused);
+                for frame_area in frame_ring_areas(list_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                self.draw_list(grid, list_inner, context);
+                let mail_area = area.skip_cols(mid + 1);
+                let mail_inner = draw_rounded_frame(grid, mail_area, tab_unfocused);
+                for frame_area in frame_ring_areas(mail_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                self.entries[self.new_expanded_pos]
+                    .mailview
+                    .draw(grid, mail_inner, context);
             }
             ThreadViewFocus::Thread => {
                 grid.clear_area(area.skip_cols(mid + 1), theme_default);
-                self.draw_list(grid, area, context);
+                let inner = draw_rounded_frame(grid, area, tab_focused);
+                for frame_area in frame_ring_areas(area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                self.draw_list(grid, inner, context);
             }
             ThreadViewFocus::MailView => {
+                let inner = draw_rounded_frame(grid, area, tab_focused);
+                for frame_area in frame_ring_areas(area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
                 self.entries[self.new_expanded_pos]
                     .mailview
-                    .draw(grid, area, context);
+                    .draw(grid, inner, context);
             }
         }
         context.dirty_areas.push_back(area);
@@ -728,23 +757,47 @@ impl ThreadView {
             return;
         }
 
+        let tab_focused = crate::conf::value(context, "tab.focused");
+        let tab_unfocused = crate::conf::value(context, "tab.unfocused");
+        /* Rounded pane frames (visual chrome only): same convention as the
+         * vertical split — focused pane "tab.focused", other
+         * "tab.unfocused"; in the split state the thread list owns the
+         * cursor. As in the vertical split, each frame is drawn before its
+         * pane's content and the content is placed in the frame's inner
+         * area so the ring never clips a content column. */
         match self.focus {
             ThreadViewFocus::None => {
-                self.draw_list(grid, area.take_rows(mid), context);
-                self.entries[self.new_expanded_pos].mailview.draw(
-                    grid,
-                    area.skip_rows(mid + 1),
-                    context,
-                );
+                let list_area = area.take_rows(mid);
+                let list_inner = draw_rounded_frame(grid, list_area, tab_focused);
+                for frame_area in frame_ring_areas(list_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                self.draw_list(grid, list_inner, context);
+                let mail_area = area.skip_rows(mid + 1);
+                let mail_inner = draw_rounded_frame(grid, mail_area, tab_unfocused);
+                for frame_area in frame_ring_areas(mail_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                self.entries[self.new_expanded_pos]
+                    .mailview
+                    .draw(grid, mail_inner, context);
             }
             ThreadViewFocus::Thread => {
                 self.dirty = true;
-                self.draw_list(grid, area.skip_rows(0), context);
+                let inner = draw_rounded_frame(grid, area, tab_focused);
+                for frame_area in frame_ring_areas(area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                self.draw_list(grid, inner, context);
             }
             ThreadViewFocus::MailView => {
+                let inner = draw_rounded_frame(grid, area, tab_focused);
+                for frame_area in frame_ring_areas(area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
                 self.entries[self.new_expanded_pos]
                     .mailview
-                    .draw(grid, area, context);
+                    .draw(grid, inner, context);
             }
         }
         context.dirty_areas.push_back(area);
@@ -855,9 +908,21 @@ impl Component for ThreadView {
         }
 
         if self.entries.len() == 1 {
+            /* A single-mail thread has no thread-list chrome, but the pane
+             * is still a pane: draw the rounded frame ring unconditionally
+             * (the mail pane is the only visible, interactive pane, so it
+             * takes the focused attribute regardless of `self.focus`,
+             * which the `p`/`t` visibility toggles may have left as
+             * `None`) and render the mail view inside the frame's inner
+             * area. */
+            let tab_focused = crate::conf::value(context, "tab.focused");
+            let inner = draw_rounded_frame(grid, area, tab_focused);
+            for frame_area in frame_ring_areas(area) {
+                context.dirty_areas.push_back(frame_area);
+            }
             self.entries[self.new_expanded_pos]
                 .mailview
-                .draw(grid, area, context);
+                .draw(grid, inner, context);
         } else if matches!(self.thread_layout, ThreadLayout::Horizontal) {
             self.draw_horz(grid, area, context);
         } else {
@@ -964,6 +1029,24 @@ impl Component for ThreadView {
                 .process_event(event, context)
         {
             return true;
+        }
+
+        if let UIEvent::Input(ref key) = *event {
+            // Vertical scroll keys belong to the mail view while it is focused:
+            // once the body reaches its top/bottom edge (headers-walk exhausted,
+            // pager declines to scroll), consume the key as a no-op instead of
+            // letting it bubble into the thread-list scroll arms (which would
+            // switch to the previous/next message). The `is_loaded` gate keeps
+            // Init/LoadingBody/Error scrolls bubbling so the thread list stays
+            // browsable while the body is still loading.
+            if matches!(self.focus, ThreadViewFocus::MailView)
+                && !self.entries.is_empty()
+                && self.entries[self.new_expanded_pos].mailview.is_loaded()
+                && (shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["scroll_up"])
+                    || shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["scroll_down"]))
+            {
+                return true;
+            }
         }
 
         self.process_event_rest(event, context)
@@ -1807,6 +1890,126 @@ mod focus_tests {
         )
     }
 
+    /// The single-mail fast path (`entries.len() == 1`) draws the mailview
+    /// over the whole area with no thread-list chrome; it must still be a
+    /// framed pane like every other: a rounded ring at the area edge (row 0 —
+    /// the fast path has no two-row thread-subject header), the inner area
+    /// left to the mail view, and the ring painted with the `tab.focused`
+    /// attribute — the mail pane is the only visible, interactive pane in
+    /// this state.
+    #[test]
+    fn thread_view_single_mail_frame_ring_inner_and_focus_attr() {
+        let mut ctx = mock_context();
+        let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        view.set_dirty(true);
+
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, &mut ctx);
+
+        let grid = screen.grid();
+        let last_col = area.width() - 1;
+        let last_row = area.height() - 1;
+        assert_eq!(grid[(0, 0)].ch(), '╭', "top-left rounded corner");
+        assert_eq!(grid[(last_col, 0)].ch(), '╮', "top-right rounded corner");
+        assert_eq!(grid[(0, last_row)].ch(), '╰', "bottom-left rounded corner");
+        assert_eq!(
+            grid[(last_col, last_row)].ch(),
+            '╯',
+            "bottom-right rounded corner"
+        );
+
+        // Ring attribute: the focused-pane convention (`tab.focused`), same
+        // as the split layouts' mail-focused state.
+        let tab_focused = crate::conf::value(&ctx, "tab.focused");
+        assert_eq!(grid[(0, 0)].fg(), tab_focused.fg);
+
+        // Ring owns exactly its edge cells (bars on the edge rows/columns),
+        // with no glyph bleeding into the inner area the mail view cleared.
+        assert_eq!(grid[(5, 0)].ch(), '─', "top edge horizontal bar");
+        assert_eq!(grid[(0, 5)].ch(), '│', "left edge vertical bar");
+        assert_eq!(grid[(5, last_row)].ch(), '─', "bottom edge horizontal bar");
+        assert_eq!(grid[(last_col, 5)].ch(), '│', "right edge vertical bar");
+        assert_eq!(
+            grid[(2, 2)].ch(),
+            ' ',
+            "no ring glyph may bleed into the inner area"
+        );
+
+        // Content clip guard (the b1 lesson): drive the expanded entry's
+        // mail view to the `Loaded` state through the public
+        // `MailViewState::load_bytes` (same helper as the sibling focus
+        // tests) and redraw — the From value must render contiguous inside
+        // the ring's inner area, starting at its left edge (x == 1), never
+        // under or over the ring columns.
+        load_expanded_entry(&mut view, &mut ctx, ROOT_MAIL_BYTES);
+        view.set_dirty(true);
+        view.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        let row_string = |y: usize| -> String {
+            (0..area.width())
+                .map(|x| grid[(x, y)].ch())
+                .collect::<String>()
+        };
+        let header_y = (0..area.height())
+            .find(|&y| row_string(y).contains("a@b.example"))
+            .expect("From header value must render");
+        let header_row = row_string(header_y);
+        let header_x = header_row
+            .find("a@b.example")
+            .expect("substring presence checked above");
+        assert!(
+            header_x >= 1,
+            "content must start inside the ring, not on the ring column"
+        );
+        assert_eq!(
+            header_row.chars().next(),
+            Some('│'),
+            "the ring column must stay intact on a content row"
+        );
+        // The body line renders flush under the header block, inside the
+        // ring: `│root` (the Message-ID header row also contains "root",
+        // so anchor the match at the ring column + line start).
+        assert!(
+            (0..area.height())
+                .map(row_string)
+                .any(|s| s.trim_start().starts_with("│root")),
+            "mail body must render inside the ring"
+        );
+    }
+
+    /// The single-mail fast path draws its frame unconditionally: the `p`/`t`
+    /// visibility toggles can leave `focus` at `None` (the toggle branches
+    /// have no single-mail guard), and the frame must not depend on that
+    /// state.
+    #[test]
+    fn thread_view_single_mail_frame_at_focus_none() {
+        let mut ctx = mock_context();
+        let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        view.set_dirty(true);
+
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, &mut ctx);
+
+        let grid = screen.grid();
+        let last_col = area.width() - 1;
+        let last_row = area.height() - 1;
+        assert_eq!(grid[(0, 0)].ch(), '╭', "top-left rounded corner");
+        assert_eq!(grid[(last_col, last_row)].ch(), '╯', "bottom-right corner");
+        let tab_focused = crate::conf::value(&ctx, "tab.focused");
+        assert_eq!(
+            grid[(0, 0)].fg(),
+            tab_focused.fg,
+            "frame is unconditionally focused-styled at focus None"
+        );
+        println!("thread_view_single_mail_frame_at_focus_none: pinned");
+    }
+
     /// Left at the terminal `Thread` state must pass through unconsumed so
     /// the listing component's `Focus::Entry + focus_left → set_focus(None)`
     /// branch closes the view and refocuses the grid.
@@ -2119,6 +2322,80 @@ Date: Thu, 1 Jan 2026 00:01:00 +0000\r\n\
 \r\n\
 reply\r\n";
 
+    /// Raw bytes of a long-body reply variant used by the scroll-to-bottom
+    /// case: same headers as `REPLY_MAIL_BYTES` (so loading it into the
+    /// expanded reply entry rewrites no header values), but with a ~60-line
+    /// body that overflows an 80x24 mail pane, making the pager actually
+    /// scroll instead of sitting at its bottom edge from the start.
+    const LONG_MAIL_BYTES: &[u8] = b"From: c@d.example\r\n\
+To: a@b.example\r\n\
+Subject: Re: focus\r\n\
+Message-ID: <focus-reply@x.example>\r\n\
+In-Reply-To: <focus-root@x.example>\r\n\
+Date: Thu, 1 Jan 2026 00:01:00 +0000\r\n\
+\r\n\
+Long body line 01: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 02: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 03: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 04: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 05: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 06: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 07: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 08: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 09: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 10: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 11: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 12: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 13: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 14: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 15: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 16: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 17: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 18: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 19: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 20: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 21: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 22: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 23: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 24: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 25: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 26: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 27: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 28: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 29: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 30: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 31: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 32: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 33: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 34: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 35: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 36: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 37: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 38: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 39: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 40: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 41: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 42: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 43: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 44: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 45: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 46: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 47: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 48: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 49: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 50: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 51: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 52: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 53: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 54: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 55: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 56: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 57: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 58: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 59: the quick brown fox jumps over the lazy dog again.\r\n\
+Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
+";
+
     /// Drive the expanded entry's mail view to the `Loaded` state through the
     /// public `MailViewState::load_bytes` (simpler than hand-building the
     /// `Loaded` variant).
@@ -2225,6 +2502,227 @@ reply\r\n";
         assert_eq!(
             view.new_cursor_pos, 0,
             "thread cursor must not move at focus MailView"
+        );
+    }
+
+    /// Core: at focus `MailView`, once the headers-walk is exhausted and the
+    /// (short-body) pager sits at its bottom edge, Down must be consumed as
+    /// a no-op instead of bubbling into the thread-list scroll arm (which
+    /// would switch to the next message).
+    #[test]
+    fn thread_view_input_down_at_mailview_body_end_stops_no_mail_switch() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        view.new_cursor_pos = 0;
+
+        // 6 = 5 headers-walk steps + 1 bubble past the body bottom;
+        // coupled to REPLY_MAIL_BYTES and the headers_no construction
+        // default of 5 (no draw: rows_lt_height stays at its construction
+        // default false, i.e. a body already at its bottom edge).
+        for _ in 0..6 {
+            let mut event = UIEvent::Input(Key::Down);
+            assert!(
+                view.process_event(&mut event, &mut ctx),
+                "Down must stay consumed at every step"
+            );
+        }
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "Down at the body bottom must not switch to the next message"
+        );
+    }
+
+    /// Up twin: at focus `MailView`, with the headers-walk at its start and
+    /// the pager at its top edge, Up must be consumed as a no-op instead of
+    /// bubbling into the thread-list scroll-up arm (previous message).
+    #[test]
+    fn thread_view_input_up_at_mailview_body_top_stops_no_mail_switch() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        view.new_cursor_pos = 1;
+        // The rest scroll_up arm guards on the OLD value of cursor_pos; set
+        // it explicitly instead of relying on construction defaults.
+        view.cursor_pos = 1;
+
+        let mut event = UIEvent::Input(Key::Up);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "Up must be consumed");
+        assert_eq!(
+            view.new_cursor_pos, 1,
+            "Up at the body top must not switch to the previous message"
+        );
+    }
+
+    /// Status quo lock: while the expanded body is still loading (state not
+    /// `Loaded`), Down must keep bubbling to the thread list so the thread
+    /// stays browsable — probes the `is_loaded` gate of the interception.
+    #[test]
+    fn thread_view_input_down_while_body_loading_moves_thread_cursor() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        // No load_expanded_entry: the expanded entry's init_futures fail on
+        // the mock backend, so its mail view state stays Init.
+        view.new_cursor_pos = 0;
+
+        let mut event = UIEvent::Input(Key::Down);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "Down must be consumed by the thread list");
+        assert_eq!(
+            view.new_cursor_pos, 1,
+            "Down must keep moving the thread cursor while the body is loading"
+        );
+    }
+
+    /// Guard: the interception is scoped to focus `MailView` — at focus
+    /// `Thread` (thread list fullscreen) a thread-view `scroll_down` must
+    /// keep moving the thread list cursor (no mail view is involved).
+    #[test]
+    fn thread_view_input_down_at_thread_focus_moves_cursor() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+        view.new_cursor_pos = 0;
+
+        let mut event = UIEvent::Input(Key::Down);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "Down must be consumed");
+        assert_eq!(
+            view.new_cursor_pos, 1,
+            "thread list cursor must advance at focus Thread"
+        );
+    }
+
+    /// Up twin of `thread_view_input_down_at_thread_focus_moves_cursor`:
+    /// at focus `Thread`, a thread-view `scroll_up` must keep moving the
+    /// thread list cursor up.
+    #[test]
+    fn thread_view_input_up_at_thread_focus_moves_cursor() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+        // The rest scroll_up arm guards on the OLD value of cursor_pos; set
+        // it explicitly instead of relying on construction defaults.
+        view.cursor_pos = 1;
+        view.new_cursor_pos = 1;
+
+        let mut event = UIEvent::Input(Key::Up);
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "Up must be consumed");
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "thread list cursor must move up at focus Thread"
+        );
+    }
+
+    /// Guard: the interception covers only the vertical scroll keys — a
+    /// non-vertical thread-view key (`collapse_subtree`, rebound to a fresh
+    /// 'x' to avoid the default 'h' colliding with the envelope view's
+    /// `toggle_expand_headers`) must still reach its `process_event_rest`
+    /// arm at focus `MailView` and flip `hidden`.
+    #[test]
+    fn thread_view_non_vertical_key_collapse_subtree_not_intercepted_at_mailview() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.collapse_subtree = Key::Char('x');
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        // Construction leaves the thread-list cursor on the expanded (newest)
+        // mail; the collapse arm toggles the entry under that cursor.
+
+        let mut event = UIEvent::Input(Key::Char('x'));
+        let consumed = view.process_event(&mut event, &mut ctx);
+
+        assert!(consumed, "'x' must be consumed");
+        assert!(
+            view.entries[view.new_expanded_pos].hidden,
+            "collapse_subtree must still toggle the entry at focus MailView"
+        );
+    }
+
+    /// EnvelopeView-level contract the thread-view interception relies on:
+    /// the headers-walk consumes exactly `headers_no` Downs (construction
+    /// default 5), the next Down falls through unconsumed (default pager
+    /// sits at its bottom edge, `rows_lt_height == false`), and Ups walk
+    /// back up to the top.
+    #[test]
+    fn envelope_view_headers_walk_down_then_fallthrough_roundtrip() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        let mail = Mail::new(REPLY_MAIL_BYTES.to_vec(), None).expect("could not parse reply mail");
+        let mut env_view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+
+        for step in 1..=5 {
+            let mut event = UIEvent::Input(Key::Down);
+            assert!(
+                env_view.process_event(&mut event, &mut ctx),
+                "Down #{step} must be consumed by the headers walk"
+            );
+        }
+        assert_eq!(env_view.headers_cursor, 5, "headers walk must be exhausted");
+
+        let mut event = UIEvent::Input(Key::Down);
+        assert!(
+            !env_view.process_event(&mut event, &mut ctx),
+            "Down past the body bottom must fall through unconsumed"
+        );
+
+        for step in 1..=5 {
+            let mut event = UIEvent::Input(Key::Up);
+            assert!(
+                env_view.process_event(&mut event, &mut ctx),
+                "Up #{step} must be consumed by the headers walk"
+            );
+        }
+        assert_eq!(
+            env_view.headers_cursor, 0,
+            "headers walk must return to the top"
+        );
+    }
+
+    /// Single-mail status quo lock (green before and after the fix): a
+    /// single-entry thread has no mail switching; every Down (headers-walk,
+    /// then the body-edge no-op) and the final Up must be consumed with the
+    /// cursor never moving.
+    #[test]
+    fn thread_view_single_mail_input_no_mail_switch() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        load_expanded_entry(&mut view, &mut ctx, ROOT_MAIL_BYTES);
+        view.new_cursor_pos = 0;
+
+        for _ in 0..6 {
+            let mut event = UIEvent::Input(Key::Down);
+            assert!(
+                view.process_event(&mut event, &mut ctx),
+                "Down must stay consumed in a single-mail thread"
+            );
+        }
+        let mut event = UIEvent::Input(Key::Up);
+        assert!(
+            view.process_event(&mut event, &mut ctx),
+            "Up must be consumed in a single-mail thread"
+        );
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "single-mail thread cursor must never move"
         );
     }
 
@@ -2358,5 +2856,110 @@ reply\r\n";
                 );
             }
         }
+    }
+
+    /// Long-body scroll-to-bottom (two assertions in one, the strongest
+    /// green-state scenario): with focus `MailView` over a body taller than
+    /// the pane, (a) every Down before the bottom must scroll the body —
+    /// consumed by the mail view with the thread cursor frozen, proving the
+    /// interception does not swallow genuine body scrolling — and (b) the
+    /// first Down after the pager really reaches the last line must stop
+    /// there as a consumed no-op instead of switching to the next mail.
+    /// Red-state reference: without the interception, the first Down that
+    /// hits the body edge would bubble into the thread-list `scroll_down`
+    /// arm and advance `new_cursor_pos`.
+    ///
+    /// Unlike the short-body cases this needs draws between keys: the
+    /// `EnvelopeView` lazily builds its pager on its first draw, and the
+    /// pager only consumes Down once a draw has computed `rows_lt_height`.
+    ///
+    /// Draw count is empirically anchored at ONE draw per Down (no priming
+    /// draw): `load_bytes` leaves the mail view `initialized`, so
+    /// `MailView::draw`'s `!initialized` early return does not apply, and
+    /// the fresh pager draws dirty on the very first draw and pushes its
+    /// `ScrollUpdate` right away. The consumed key itself keeps the chain
+    /// dirty (headers-walk/pager `set_dirty(true)` bubbles up through
+    /// `ThreadView::is_dirty`'s mailview term), so each draw goes through
+    /// the production redraw path with no manual `set_dirty`.
+    ///
+    /// Bottom detection uses the pager's `StatusEvent::ScrollUpdate`
+    /// (pushed at the end of `Pager::draw`): `Update` carries `shown_lines`
+    /// and `total_lines` plus `has_more_lines`, which only reports the lazy
+    /// line breaker (finished after the first draw for a 60-line body, as
+    /// `PAGES_AHEAD_TO_RENDER_NO` is 16), so the bottom condition is
+    /// `!has_more_lines && shown_lines >= total_lines`; `End` (content
+    /// fits the pane, search only) is treated as the bottom too. Replies
+    /// are drained and matched per event type: the mock backend's
+    /// `set_flags` and init-futures `Notification`s are noise here.
+    #[test]
+    fn thread_view_input_down_long_body_scrolls_to_bottom_then_stops() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        load_expanded_entry(&mut view, &mut ctx, LONG_MAIL_BYTES);
+        view.new_cursor_pos = 0;
+
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+
+        let mut reached_bottom = false;
+        let mut rounds = 0;
+        while rounds < 100 {
+            rounds += 1;
+            let mut event = UIEvent::Input(Key::Down);
+            assert!(
+                view.process_event(&mut event, &mut ctx),
+                "Down #{rounds} must be consumed while the body scrolls"
+            );
+            assert_eq!(
+                view.new_cursor_pos, 0,
+                "Down #{rounds} scrolls the body, not the thread list"
+            );
+
+            view.draw(screen.grid_mut(), area, &mut ctx);
+
+            let mut bottom = false;
+            for reply in ctx.replies.drain(0..) {
+                bottom |= match reply {
+                    UIEvent::StatusEvent(StatusEvent::ScrollUpdate(
+                        crate::components::ScrollUpdate::End(_),
+                    )) => true,
+                    UIEvent::StatusEvent(StatusEvent::ScrollUpdate(
+                        crate::components::ScrollUpdate::Update {
+                            context:
+                                crate::components::ScrollContext {
+                                    shown_lines,
+                                    total_lines,
+                                    has_more_lines,
+                                },
+                            ..
+                        },
+                    )) => !has_more_lines && shown_lines >= total_lines,
+                    _ => false,
+                };
+            }
+            if bottom {
+                reached_bottom = true;
+                break;
+            }
+        }
+        assert!(
+            reached_bottom,
+            "the long body must reach its bottom within 100 Down+draw rounds \
+             (stopped after {rounds})"
+        );
+
+        let mut event = UIEvent::Input(Key::Down);
+        assert!(
+            view.process_event(&mut event, &mut ctx),
+            "Down at the body bottom must be consumed as a no-op"
+        );
+        assert_eq!(
+            view.new_cursor_pos, 0,
+            "Down at the body bottom must not switch to the next mail"
+        );
     }
 }

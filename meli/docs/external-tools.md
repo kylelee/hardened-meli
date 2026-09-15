@@ -108,16 +108,7 @@ By default `meli` renders HTML e-mail with a built-in renderer: the HTML is
 sanitized with an allow-list (ammonia) and converted to plain text with 
 `html2text` at the terminal's width — no external dependency is required.
 
-[w3m](https://github.com/tats/w3m) is optional: if you prefer an external 
-renderer, set the `pager.html_filter` setting to a command string and the 
-HTML of the e-mail is piped into that command's standard input:
-
-```toml
-[pager]
-html_filter = "w3m -I utf-8 -T text/html -o display_link_number=1"
-```
-
-That is, the HTML is handed over to the configured command for rendering.
+If you prefer an external renderer, set the `pager.html_filter` setting to a command string: the HTML of the e-mail is piped into that command's standard input, and its standard output replaces the rendered body.
 
 ## Externally refreshing e-mail accounts
 

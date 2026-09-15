@@ -4,11 +4,11 @@
 
 **A security-hardened and UX-optimized version of meli — BSD/Linux/macos terminal email client with support for multiple accounts and Maildir / mbox / notmuch / IMAP / JMAP / NNTP (Usenet).**
 
-Hardened and based on <https://github.com/meli/meli> <https://gitlab.com/meli-project/meli>
+Hardened and based on <https://github.com/meli/meli>
 
 ## Highlights
 
-This repository is a security-hardened and UX-optimized fork of meli: on top of the original it received a full code audit, hardening and refactoring, plus several real-world usability improvements. Three core highlights:
+This repository is a security-hardened and UX-optimized fork of meli: on top of the original it received a full code audit, hardening and refactoring, plus several real-world usability improvements. Four core highlights:
 
 ### 1. Security hardening: four lines of defense against e-mail attacks
 
@@ -17,7 +17,7 @@ A comprehensive code audit and refactor of the original meli fixed 18 audit find
 1. **Parse tolerance**: when an IMAP ENVELOPE field fails strict parsing, it automatically falls back to raw-bytes parsing — any single malformed field can no longer abort the fetch of an entire mailbox;
 2. **Ingestion sanitization**: address fields (From/Sender/Reply-To/To/Cc/Bcc) are validated and normalized before being written to the cache; fixable ones are automatically quoted and re-verified, unfixable ones are replaced with a safe placeholder — new data can never produce "poison rows";
 3. **Visible quarantine**: legacy poisoned cache rows no longer trigger a whole-database reset; they are quarantined row by row into an `invalid_envelopes` table and shown as visible placeholder e-mails (with error-detail headers), self-healing after the server re-fetch — eliminating "one poison e-mail nukes the entire cache".
-4. **Sanitize HTML**: HTML e-mail bodies are rendered by a built-in HTML renderer — the mail is sanitized with an allow-list (ammonia), keeping only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), then converted to plain text (html2text) at the terminal's width, all in-process with no external dependency (the standalone sanitizer binary is gone, absorbed into `meli`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view. [w3m](https://github.com/tats/w3m) is now optional: set `pager.html_filter` to a command string to render with an external program instead.
+4. **Sanitize HTML**: HTML e-mail bodies are rendered by a built-in HTML renderer — the mail is sanitized with an allow-list (ammonia), keeping only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), then converted to plain text (html2text) at the terminal's width, all in-process with no external dependency (the standalone sanitizer binary is gone, absorbed into `meli`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view.
 
 ### 2. UX: browse the whole mailbox with the arrow keys
 
@@ -26,6 +26,10 @@ Thread view navigation was fully strengthened: **Up/Down** move through the thre
 ### 3. UX: cache-first, near-instant startup
 
 IMAP startup is now fully cache-first: the mail list and bodies are rendered immediately from the local sqlite cache (stale-while-revalidate, with network deltas syncing silently in the background); the mailbox folder list is persisted to the cache so startup no longer waits for an online check; combined with STATUS counter short-circuiting (RFC 4549) and MSN index persistence, full-scan commands are eliminated from startup. Measured on a real account (QQ Mail INBOX, ~5000 messages): warm-start wait dropped from minutes to seconds (median ~2.7 s, best ~1 s).
+
+### 4. UI: entire interface rebuilt on ratatui, much better looks
+
+The whole product interface was rebuilt with the beautiful [ratatui](https://ratatui.rs) library — layout solving, border rendering and dialog/OSD placement now run through ratatui's `Layout` and `Block` primitives, with terminal I/O migrated to crossterm — greatly improving the visual aesthetics.
 
 **Table of contents**:
 
@@ -53,9 +57,7 @@ IMAP startup is now fully cache-first: the mail list and bodies are rendered imm
 
 HTML e-mail is rendered out of the box by a built-in renderer (ammonia
 sanitizing + html2text at terminal width), so there is no required external
-dependency. [w3m](https://github.com/tats/w3m) is optional: it is used only
-if you explicitly configure a `pager.html_filter` command string, e.g.
-`html_filter = "w3m -I utf-8 -T text/html"`.
+dependency.
 
 ## Build
 
@@ -64,6 +66,8 @@ Run `make` or `cargo build --release`.
 See `make help` output for information on how to use the `Makefile`.
 
 For detailed building instructions, see [`BUILD.md`](./BUILD.md)
+
+For the upstream meli sync log, see [`SYNC.md`](./SYNC.md).
 
 ### Cargo Compile-time Features
 
@@ -185,10 +189,7 @@ See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)
 HTML mail is rendered by the built-in renderer by default: meli sanitizes
 it with an allow-list (ammonia, removing scripts and dangerous links) and
 converts it to plain text (html2text) at the terminal's width — no external
-dependency is required. [w3m](https://github.com/tats/w3m) is optional and
-used only if you configure `pager.html_filter` with a command string, e.g.
-`html_filter = "w3m -I utf-8 -T text/html"`, in which case the HTML is
-piped through that program instead. For more details consult
+dependency is required. For more details consult
 [`meli.conf(5)`](./meli/docs/meli.conf.5).
 
 

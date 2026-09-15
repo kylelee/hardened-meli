@@ -45,6 +45,7 @@ fn main() {
         let mut out_dir_path = Path::new(&out_dir).to_path_buf();
 
         let mut cl = |filepath: &str, output: &str, source: bool| {
+            println!("cargo:rerun-if-changed={}", filepath);
             out_dir_path.push(output);
             let output = if source {
                 std::fs::read_to_string(filepath).unwrap().into_bytes()

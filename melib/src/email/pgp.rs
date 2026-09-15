@@ -19,15 +19,123 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-//! Verification of `OpenPGP` signatures.
+//! `OpenPGP` signatures and encryption.
+
+use serde::{
+    de::{self, Deserialize},
+    Deserializer, Serialize, Serializer,
+};
+
 use crate::{
     email::{
-        attachment_types::{ContentType, MultipartType},
+        attachment_types::{ContentType, MultipartType, Text},
         attachments::Attachment,
         parser::BytesExt,
     },
     error::{Error, ErrorKind, Result},
 };
+
+bitflags! {
+    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct LocateKey: u8 {
+        /// Locate a key using DNS CERT, as specified in RFC-4398.
+        const CERT = 0b1;
+        /// Locate a key using DNS PKA.
+        const PKA  = 0b10;
+        /// Locate a key using DANE, as specified in draft-ietf-dane-openpgpkey-05.txt.
+        const DANE  = 0b100;
+        /// Locate a key using the Web Key Directory protocol.
+        const WKD  = 0b1000;
+        /// Using DNS Service Discovery, check the domain in question for any LDAP keyservers to use. If this fails, attempt to locate the key using the PGP Universal method of checking ‘ldap://keys.(thedomain)’.
+        const LDAP = 0b10000;
+        /// Locate a key using a keyserver.
+        const KEYSERVER  = 0b100000;
+        /// In addition, a keyserver URL as used in the dirmngr configuration may be used here to query that particular keyserver.
+        const KEYSERVER_URL = 0b1000000;
+        /// Locate the key using the local keyrings. This mechanism allows the user to select the order a local key lookup is done. Thus using ‘--auto-key-locate local’ is identical to --no-auto-key-locate.
+        const LOCAL = 0b10000000;
+        /// This flag disables the standard local key lookup, done before any of the mechanisms defined by the --auto-key-locate are tried. The position of this mechanism in the list does not matter. It is not required if local is also used.
+        const NODEFAULT = 0;
+    }
+}
+
+impl<'de> Deserialize<'de> for LocateKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        <String>::deserialize(deserializer).map_or_else(
+            |_| Err(de::Error::custom("LocateKey value must be a string.")),
+            |s| Self::from_string_de::<'de, D, String>(s),
+        )
+    }
+}
+
+impl Serialize for LocateKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl LocateKey {
+    pub fn from_string_de<'de, D, T: AsRef<str>>(s: T) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match s.as_ref().trim() {
+            s if s.eq_ignore_ascii_case("cert") => Self::CERT,
+            s if s.eq_ignore_ascii_case("pka") => Self::PKA,
+            s if s.eq_ignore_ascii_case("dane") => Self::DANE,
+            s if s.eq_ignore_ascii_case("wkd") => Self::WKD,
+            s if s.eq_ignore_ascii_case("ldap") => Self::LDAP,
+            s if s.eq_ignore_ascii_case("keyserver") => Self::KEYSERVER,
+            s if s.eq_ignore_ascii_case("keyserver-url") => Self::KEYSERVER_URL,
+            s if s.eq_ignore_ascii_case("local") => Self::LOCAL,
+            combination if combination.contains(',') => {
+                let mut ret = Self::NODEFAULT;
+                for c in combination.trim().split(',') {
+                    ret |= Self::from_string_de::<'de, D, &str>(c.trim())?;
+                }
+                ret
+            }
+            _ => {
+                return Err(de::Error::custom(
+                    r#"Takes valid auto-key-locate GPG values: "cert", "pka", "dane", "wkd", "ldap", "keyserver", "keyserver-URL", "local", "nodefault""#,
+                ))
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for LocateKey {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if *self == Self::NODEFAULT {
+            write!(fmt, "clear,nodefault")
+        } else {
+            let mut accum = String::new();
+            macro_rules! is_set {
+                ($flag:expr, $string:literal) => {{
+                    if self.intersects($flag) {
+                        accum.push_str($string);
+                        accum.push(',');
+                    }
+                }};
+            }
+            is_set!(Self::CERT, "cert");
+            is_set!(Self::PKA, "pka");
+            is_set!(Self::WKD, "wkd");
+            is_set!(Self::LDAP, "ldap");
+            is_set!(Self::KEYSERVER, "keyserver");
+            is_set!(Self::KEYSERVER_URL, "keyserver-url");
+            is_set!(Self::LOCAL, "local");
+            accum.pop();
+            write!(fmt, "{accum}")
+        }
+    }
+}
 
 /// Convert raw attachment to the form needed for signature verification ([RFC3156](https://tools.ietf.org/html/rfc3156))
 ///
@@ -54,8 +162,17 @@ pub fn convert_attachment_to_rfc_spec(input: &[u8]) -> Vec<u8> {
     input.to_vec()
 }
 
-// [ref:TODO]: add cleartext support
-pub fn verify_signature(a: &Attachment) -> Result<(Vec<u8>, &Attachment)> {
+pub enum UnverifiedSignature<'a> {
+    Detached {
+        signed_part: Vec<u8>,
+        signature: &'a Attachment,
+    },
+    Cleartext {
+        text: Vec<u8>,
+    },
+}
+
+pub fn extract_unverified_signature(a: &'_ Attachment) -> Result<UnverifiedSignature<'_>> {
     match a.content_type {
         ContentType::Multipart {
             kind: MultipartType::Signed,
@@ -116,9 +233,27 @@ pub fn verify_signature(a: &Attachment) -> Result<(Vec<u8>, &Attachment)> {
                         .set_kind(ErrorKind::ValueError),
                 );
             };
-            Ok((signed_part, signature))
+            Ok(UnverifiedSignature::Detached {
+                signed_part,
+                signature,
+            })
         }
-        _ => Err(Error::new("Not a multipart/signed attachment").set_kind(ErrorKind::ValueError)),
+        ContentType::Text {
+            charset: _,
+            kind: Text::Plain,
+            parameters: _,
+        } => {
+            let text = a.decode(Default::default());
+            if text
+                .strip_prefix(b"-----BEGIN PGP SIGNED MESSAGE-----")
+                .and_then(|t| t.trim_end().strip_suffix(b"-----END PGP SIGNATURE-----"))
+                .is_none()
+            {
+                return Err(Error::new("Not a signed attachment").set_kind(ErrorKind::ValueError));
+            };
+            Ok(UnverifiedSignature::Cleartext { text })
+        }
+        _ => Err(Error::new("Not a signed attachment").set_kind(ErrorKind::ValueError)),
     }
 }
 
@@ -142,6 +277,7 @@ pub struct Signature {
     pub cert: Recipient,
     pub validity: Validity,
     pub validity_reason: Option<String>,
+    pub cleartext: bool,
 }
 
 impl From<Signature> for Result<()> {
@@ -269,5 +405,144 @@ impl<'a> std::fmt::Display for ValidityStringRepresentation<'a> {
             Validity::Full => write!(fmt, "f"),
             Validity::Ultimate => write!(fmt, "u"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLEARTEXT: &[u8] = b"-----BEGIN PGP SIGNED MESSAGE-----\r\nHash: SHA512\r\n\r\nSample text for gpg signing\r\n\r\n-----BEGIN PGP SIGNATURE-----\r\n\r\nsignature\r\nplaceholder\r\n-----END PGP SIGNATURE-----\r\n";
+
+    #[test]
+    fn test_extract_unverified_signature_cleartext() {
+        let a = Attachment::new(
+            ContentType::default(),
+            Default::default(),
+            CLEARTEXT.to_vec(),
+        );
+        match extract_unverified_signature(&a) {
+            Ok(UnverifiedSignature::Cleartext { text }) => {
+                assert_eq!(text, CLEARTEXT.to_vec());
+            }
+            _ => panic!("expected Cleartext variant"),
+        }
+    }
+
+    #[test]
+    fn test_extract_unverified_signature_detached() {
+        let signed_part = Attachment::new(
+            ContentType::default(),
+            Default::default(),
+            b"Sample text for gpg signing".to_vec(),
+        );
+        let signature = Attachment::new(
+            ContentType::PGPSignature,
+            Default::default(),
+            b"-----BEGIN PGP SIGNATURE-----\r\n[...]\r\n-----END PGP SIGNATURE-----".to_vec(),
+        );
+        let a = Attachment::new(
+            ContentType::Multipart {
+                boundary: b"b".to_vec(),
+                parameters: vec![
+                    (b"micalg".to_vec(), b"pgp-sha512".to_vec()),
+                    (b"protocol".to_vec(), b"application/pgp-signature".to_vec()),
+                ],
+                kind: MultipartType::Signed,
+                parts: vec![signed_part, signature],
+            },
+            Default::default(),
+            Vec::new(),
+        );
+        match extract_unverified_signature(&a) {
+            Ok(UnverifiedSignature::Detached {
+                signed_part,
+                signature,
+            }) => {
+                assert_eq!(signed_part, b"Sample text for gpg signing".to_vec());
+                assert_eq!(
+                    signature.raw(),
+                    b"-----BEGIN PGP SIGNATURE-----\r\n[...]\r\n-----END PGP SIGNATURE-----"
+                );
+            }
+            _ => panic!("expected Detached variant"),
+        }
+    }
+
+    #[test]
+    fn test_extract_unverified_signature_detached_missing_micalg() {
+        let signed_part = Attachment::new(
+            ContentType::default(),
+            Default::default(),
+            b"Sample text for gpg signing".to_vec(),
+        );
+        let signature = Attachment::new(
+            ContentType::PGPSignature,
+            Default::default(),
+            b"-----BEGIN PGP SIGNATURE-----\r\n[...]\r\n-----END PGP SIGNATURE-----".to_vec(),
+        );
+        let a = Attachment::new(
+            ContentType::Multipart {
+                boundary: b"b".to_vec(),
+                parameters: vec![(b"protocol".to_vec(), b"application/pgp-signature".to_vec())],
+                kind: MultipartType::Signed,
+                parts: vec![signed_part, signature],
+            },
+            Default::default(),
+            Vec::new(),
+        );
+        let Err(err) = extract_unverified_signature(&a) else {
+            panic!("expected error for multipart/signed without micalg parameter");
+        };
+        assert_eq!(err.kind, crate::error::ErrorKind::ValueError);
+        assert!(err.to_string().contains("micalg"));
+    }
+
+    #[test]
+    fn test_extract_unverified_signature_detached_invalid_protocol() {
+        let signed_part = Attachment::new(
+            ContentType::default(),
+            Default::default(),
+            b"Sample text for gpg signing".to_vec(),
+        );
+        let signature = Attachment::new(
+            ContentType::PGPSignature,
+            Default::default(),
+            b"-----BEGIN PGP SIGNATURE-----\r\n[...]\r\n-----END PGP SIGNATURE-----".to_vec(),
+        );
+        let a = Attachment::new(
+            ContentType::Multipart {
+                boundary: b"b".to_vec(),
+                parameters: vec![
+                    (b"micalg".to_vec(), b"pgp-sha512".to_vec()),
+                    (
+                        b"protocol".to_vec(),
+                        b"application/pkcs7-signature".to_vec(),
+                    ),
+                ],
+                kind: MultipartType::Signed,
+                parts: vec![signed_part, signature],
+            },
+            Default::default(),
+            Vec::new(),
+        );
+        let Err(err) = extract_unverified_signature(&a) else {
+            panic!("expected error for multipart/signed with non-PGP protocol parameter");
+        };
+        assert_eq!(err.kind, crate::error::ErrorKind::ValueError);
+        assert!(err.to_string().contains("protocol"));
+    }
+
+    #[test]
+    fn test_extract_unverified_signature_invalid() {
+        let a = Attachment::new(
+            ContentType::default(),
+            Default::default(),
+            b"Sample text for gpg signing".to_vec(),
+        );
+        let Err(err) = extract_unverified_signature(&a) else {
+            panic!("expected error for plain text attachment without signature")
+        };
+        assert_eq!(err.kind, crate::error::ErrorKind::ValueError);
     }
 }

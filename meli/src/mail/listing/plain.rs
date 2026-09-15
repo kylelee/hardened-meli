@@ -370,7 +370,7 @@ impl ListingTrait for PlainListing {
 
         let row_attr = row_attr!(
             self.color_cache,
-            even: idx % 2 == 0,
+            even: idx.is_multiple_of(2),
             unseen: !envelope.is_seen(),
             highlighted: self.cursor_pos.2 == idx,
             selected: self.rows.selection.get(&i).copied().unwrap_or(false)
@@ -444,7 +444,11 @@ impl ListingTrait for PlainListing {
                 self.data_columns
                     .draw(grid, idx, self.cursor_pos.2, grid.bounds_iter(new_area));
                 if highlight {
-                    let row_attr = row_attr!(self.color_cache, even: idx % 2 == 0, unseen: false, highlighted: true, selected: false);
+                    let selected = self
+                        .get_env_under_cursor(idx)
+                        .map(|h| self.rows.selection.get(&h).copied().unwrap_or(false))
+                        .unwrap_or(false);
+                    let row_attr = row_attr!(self.color_cache, even: idx % 2 == 0, unseen: false, highlighted: true, selected: selected);
                     grid.change_theme(new_area, row_attr);
                 } else if let Some(row_attr) = self.rows.row_attr_cache.get(&idx) {
                     grid.change_theme(new_area, *row_attr);
@@ -485,12 +489,16 @@ impl ListingTrait for PlainListing {
         }
 
         /* highlight cursor */
+        let selected = self
+            .get_env_under_cursor(self.cursor_pos.2)
+            .map(|h| self.rows.selection.get(&h).copied().unwrap_or(false))
+            .unwrap_or(false);
         let row_attr = row_attr!(
             self.color_cache,
-            even: self.cursor_pos.2 % 2 == 0,
+            even: self.cursor_pos.2.is_multiple_of(2),
             unseen: false,
             highlighted: true,
-            selected: false
+            selected: selected
         );
         grid.change_theme(area.nth_row(self.cursor_pos.2 % rows), row_attr);
 
@@ -779,7 +787,7 @@ impl PlainListing {
             }
             let row_attr = row_attr!(
                 self.color_cache,
-                even: self.length % 2 == 0,
+                even: self.length.is_multiple_of(2),
                 unseen: !envelope.is_seen(),
                 highlighted: false,
                 selected: false
@@ -1098,7 +1106,7 @@ impl PlainListing {
         let idx = self.rows.env_order[&env_hash];
         let row_attr = row_attr!(
             self.color_cache,
-            even: idx % 2 == 0,
+            even: idx.is_multiple_of(2),
             unseen: !envelope.is_seen(),
             highlighted: false,
             selected: self.rows.selection.get(&env_hash).copied().unwrap_or(false)
@@ -1331,13 +1339,13 @@ impl PlainListing {
                     .unwrap_or(false);
                 row_attr!(
                     self.color_cache,
-                    even: (top_idx + i) % 2 == 0,
+                    even: (top_idx + i).is_multiple_of(2),
                     unseen: unseen,
                     highlighted: self.cursor_pos.2 == (top_idx + i),
                     selected: self.rows.selection.get(&env_hash).copied().unwrap_or(false)
                 )
             } else {
-                row_attr!(self.color_cache, even: (top_idx + i) % 2 == 0, unseen: false, highlighted: true, selected: false)
+                row_attr!(self.color_cache, even: (top_idx + i).is_multiple_of(2), unseen: false, highlighted: true, selected: false)
             };
 
             grid.clear_area(area.nth_row(i), row_attr);
@@ -1445,6 +1453,14 @@ impl Component for PlainListing {
             }
 
             let rows = area.height();
+            if rows == 0 {
+                /* Initialize coordinates/rows via `draw_list`'s refresh
+                 * path; its own `rows == 0` guard then stops it before
+                 * rendering anything. */
+                self.draw_list(grid, area, context);
+                self.dirty = false;
+                return;
+            }
 
             if let Some(modifier) = self.modifier_command.take() {
                 if let Some(mvm) = self.movement.as_ref() {
@@ -1627,7 +1643,7 @@ impl Component for PlainListing {
                         .get_env(env_hash);
                     let row_attr = row_attr!(
                         self.color_cache,
-                        even: row % 2 == 0,
+                        even: row.is_multiple_of(2),
                         unseen: !envelope.is_seen(),
                         highlighted: false,
                         selected: self.rows.selection.get(&env_hash).copied().unwrap_or(false)
@@ -1832,9 +1848,13 @@ impl Component for PlainListing {
                 self.refresh_mailbox(context, false);
                 return true;
             }
-            UIEvent::Action(Action::Listing(Search(ref filter_term))) if !self.unfocused() => {
+            UIEvent::Action(Action::Listing(Search {
+                term: ref filter_term,
+                raw_search,
+            })) if !self.unfocused() => {
                 match context.accounts[&self.cursor_pos.0].search(
                     filter_term,
+                    raw_search,
                     self.sort,
                     self.cursor_pos.1,
                 ) {
@@ -1861,9 +1881,13 @@ impl Component for PlainListing {
                 self.set_dirty(true);
                 return true;
             }
-            UIEvent::Action(Action::Listing(Select(ref search_term))) if !self.unfocused() => {
+            UIEvent::Action(Action::Listing(Select {
+                term: ref search_term,
+                raw_search,
+            })) if !self.unfocused() => {
                 match context.accounts[&self.cursor_pos.0].search(
                     search_term,
+                    raw_search,
                     self.sort,
                     self.cursor_pos.1,
                 ) {

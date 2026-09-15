@@ -180,6 +180,12 @@ impl MailView {
             || self.state.has_active_modal()
     }
 
+    /// Whether the mail body has finished loading; see
+    /// [`MailViewState::is_loaded`].
+    pub(crate) fn is_loaded(&self) -> bool {
+        self.state.is_loaded()
+    }
+
     /// Bridge across the module-private `state` field for tests in sibling
     /// modules: opens the force charset selector inside a `Loaded` mail view.
     #[cfg(test)]

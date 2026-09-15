@@ -208,6 +208,14 @@ impl MailViewState {
     pub(crate) fn has_active_modal(&self) -> bool {
         matches!(self, Self::Loaded { ref env_view, .. } if env_view.has_active_modal())
     }
+
+    /// Whether the mail body has finished loading into this view. Used by
+    /// `ThreadView`'s key interception gate: while not `Loaded`, vertical
+    /// scroll keys still bubble up to drive the thread list, preserving the
+    /// ability to browse while loading.
+    pub(crate) fn is_loaded(&self) -> bool {
+        matches!(self, Self::Loaded { .. })
+    }
 }
 
 impl Default for MailViewState {
@@ -215,5 +223,91 @@ impl Default for MailViewState {
         Self::Init {
             pending_action: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jobs::{IsAsync, JobExecutor};
+
+    fn loaded_state() -> MailViewState {
+        let bytes = b"From: a@b.example\r\nTo: c@d.example\r\nSubject: s\r\nMessage-ID: \
+                      <state-test-1@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+                      Content-Type: text/plain; charset=utf-8\r\n\r\nhello\r\n"
+            .to_vec();
+        let mail = Mail::new(bytes.clone(), None).expect("could not parse test mail");
+        let (sender, _receiver) = crossbeam::channel::unbounded();
+        let handler = crate::MainLoopHandler {
+            sender,
+            job_executor: std::sync::Arc::new(JobExecutor::new(crossbeam::channel::unbounded().0)),
+        };
+        let env_view = Box::new(EnvelopeView::new(
+            Mail {
+                envelope: mail.envelope.clone(),
+                bytes: bytes.clone(),
+            },
+            None,
+            None,
+            None,
+            handler,
+        ));
+        MailViewState::Loaded {
+            bytes,
+            env: Box::new(mail.envelope),
+            env_view,
+            stack: vec![],
+        }
+    }
+
+    #[test]
+    fn test_mail_view_state_is_loaded_truth_table() {
+        assert!(!MailViewState::default().is_loaded());
+        assert!(!MailViewState::Error {
+            err: Error::new("err")
+        }
+        .is_loaded());
+        // `LoadingBody` needs a spawned `JoinHandle`; spawn a trivial future
+        // on a throwaway executor to cover it cheaply.
+        let executor = JobExecutor::new(crossbeam::channel::unbounded().0);
+        let handle = executor.spawn(
+            std::borrow::Cow::Borrowed("test"),
+            async { Ok(Vec::new()) },
+            IsAsync::Async,
+        );
+        assert!(!MailViewState::LoadingBody {
+            main_loop_handler: crate::MainLoopHandler {
+                sender: crossbeam::channel::unbounded().0,
+                job_executor: std::sync::Arc::new(executor),
+            },
+            handle,
+            pending_action: None,
+        }
+        .is_loaded());
+        assert!(loaded_state().is_loaded());
+    }
+
+    #[test]
+    fn test_mail_view_is_loaded_forwards_state() {
+        let (sender, _receiver) = crossbeam::channel::unbounded();
+        let main_loop_handler = crate::MainLoopHandler {
+            sender,
+            job_executor: std::sync::Arc::new(JobExecutor::new(crossbeam::channel::unbounded().0)),
+        };
+        let view = MailView {
+            coordinates: None,
+            dirty: true,
+            contact_selector: None,
+            forward_dialog: None,
+            unsubscribe_dialog: None,
+            pending_unsubscribe: None,
+            theme_default: Default::default(),
+            active_jobs: Default::default(),
+            initialized: false,
+            state: loaded_state(),
+            main_loop_handler,
+            id: Default::default(),
+        };
+        assert!(view.is_loaded());
     }
 }

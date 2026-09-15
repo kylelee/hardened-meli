@@ -53,7 +53,6 @@ pub struct ContactList {
     data_columns: DataColumns<4>,
     initialized: bool,
     theme_default: ThemeAttribute,
-    highlight_theme: ThemeAttribute,
 
     id_positions: Vec<CardId>,
 
@@ -99,7 +98,6 @@ impl ContactList {
             mode: ViewMode::List,
             data_columns: DataColumns::new(theme_default),
             theme_default,
-            highlight_theme: crate::conf::value(context, "highlight"),
             initialized: false,
             dirty: true,
             movement: None,
@@ -238,12 +236,18 @@ impl ContactList {
         }
     }
 
-    fn highlight_line(&self, grid: &mut CellBuffer, area: Area, idx: usize) {
+    fn highlight_line(&self, grid: &mut CellBuffer, area: Area, idx: usize, context: &Context) {
         /* Reset previously highlighted line */
         let mut theme = if idx == self.new_cursor_pos {
-            self.highlight_theme
+            if idx.is_multiple_of(2) {
+                crate::conf::value(context, "mail.listing.plain.even_selected")
+            } else {
+                crate::conf::value(context, "mail.listing.plain.odd_selected")
+            }
+        } else if idx.is_multiple_of(2) {
+            crate::conf::value(context, "mail.listing.plain.even")
         } else {
-            self.theme_default
+            crate::conf::value(context, "mail.listing.plain.odd")
         };
         if !grid.use_color {
             theme.attrs |= Attr::REVERSE;
@@ -410,7 +414,7 @@ impl ContactList {
                     continue;
                 }
                 let new_area = area.nth_row(*idx % rows);
-                self.highlight_line(grid, new_area, *idx);
+                self.highlight_line(grid, new_area, *idx, context);
                 context.dirty_areas.push_back(new_area);
             }
             return;
@@ -467,13 +471,30 @@ impl ContactList {
                 self.theme_default,
             );
         }
-        self.highlight_line(grid, area.nth_row(self.cursor_pos % rows), self.cursor_pos);
+        // zebra parity base colors for the visible rows
+        for i in top_idx..self.length.min(top_idx + rows) {
+            let theme = if i.is_multiple_of(2) {
+                crate::conf::value(context, "mail.listing.plain.even")
+            } else {
+                crate::conf::value(context, "mail.listing.plain.odd")
+            };
+            grid.change_theme(area.nth_row(i % rows), theme);
+        }
+        self.highlight_line(
+            grid,
+            area.nth_row(self.cursor_pos % rows),
+            self.cursor_pos,
+            context,
+        );
         context.dirty_areas.push_back(total_area);
     }
 }
 
 impl Component for ContactList {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        /* Keep content clear of the Tabbed rounded frame ring, which is
+         * drawn over this tab body area's outermost cells. */
+        let area = area.skip(1, 1).skip_cols_from_end(1).skip_rows_from_end(1);
         if let ViewMode::View(ref mut mgr) = self.mode {
             mgr.draw(grid, area, context);
             return;
