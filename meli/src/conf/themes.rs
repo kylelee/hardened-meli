@@ -827,7 +827,6 @@ impl<'de> Deserialize<'de> for Themes {
 
 impl Themes {
     fn validate_keys(name: &str, theme: &Theme, hash_set: &HashSet<&'static str>) -> Result<()> {
-        #[allow(unused_mut)]
         let mut keys = theme
             .keys()
             .filter_map(|k| {
