@@ -80,15 +80,34 @@ impl<'s> Parser<'s> {
     /// - the remainders of the lib do accept a lone LF as a line termination (a
     ///   bit laxer than RFC 5545)
     /// - CR alone [is not acceptable content] (<https://tools.ietf.org/html/rfc5545#section-3.1>)
+    ///
+    /// Iterative equivalent of the original recursive implementation. The
+    /// recursion was unbounded in the number of consecutive CR bytes and
+    /// folded `\n<SP>`/`\n<TAB>` continuations, so a long run of bare CRs or
+    /// blank CRLF lines in a vCard/iCalendar file aborted the process with a
+    /// stack overflow (CWE-674), which callers cannot catch.
     fn peek_at(&self, at: usize) -> Option<(char, usize)> {
-        match self.input[self.pos + at..].chars().next() {
-            None => None,
-            Some('\r') => self.peek_at(at + 1),
-            Some('\n') => match self.peek_at(at + 1) {
-                Some((' ', offset)) | Some(('\t', offset)) => self.peek_at(offset),
-                _ => Some(('\n', at + 1)),
-            },
-            Some(x) => Some((x, at + x.len_utf8())),
+        let bytes = self.input.as_bytes();
+        // `cursor` is an offset relative to `self.pos`, always on a UTF-8 char
+        // boundary (it only ever advances over ASCII CR/LF/SP/TAB).
+        let mut cursor = at;
+        loop {
+            while bytes.get(self.pos + cursor) == Some(&b'\r') {
+                cursor += 1;
+            }
+            let c = self.input.get(self.pos + cursor..)?.chars().next()?;
+            if c != '\n' {
+                return Some((c, cursor + c.len_utf8()));
+            }
+            // At an LF: skip any CRs and check for a folded continuation.
+            let mut n = cursor + 1;
+            while bytes.get(self.pos + n) == Some(&b'\r') {
+                n += 1;
+            }
+            match self.input.get(self.pos + n..)?.chars().next() {
+                Some(d @ (' ' | '\t')) => cursor = n + d.len_utf8(),
+                _ => return Some(('\n', cursor + 1)),
+            }
         }
     }
 

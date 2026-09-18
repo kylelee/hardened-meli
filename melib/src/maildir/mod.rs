@@ -353,9 +353,12 @@ impl MailBackend for MaildirType {
         let refresh_fut = self.refresh(mailbox_hash)?;
 
         Ok(Box::pin(async move {
-            {
+            // Resolve everything that needs the index under the lock, then
+            // release it before doing any filesystem I/O.
+            let renames: Vec<(PathBuf, PathBuf)> = {
                 let mut hash_indexes_lck = cache.hash_indexes.lock().unwrap();
                 let hash_index = hash_indexes_lck.entry(mailbox_hash).or_default();
+                let mut renames = Vec::with_capacity(env_hashes.len());
 
                 for env_hash in env_hashes.iter() {
                     let path = {
@@ -379,10 +382,14 @@ impl MailBackend for MaildirType {
                     }
 
                     let new_name: PathBuf = path.set_flags(new_flags, &config)?;
-                    log::debug!("renaming {path:?} to {new_name:?}");
-                    fs::rename(path, &new_name)?;
-                    log::debug!("success in rename");
+                    renames.push((path, new_name));
                 }
+                renames
+            };
+            for (path, new_name) in renames {
+                log::debug!("renaming {path:?} to {new_name:?}");
+                fs::rename(path, &new_name)?;
+                log::debug!("success in rename");
             }
             refresh_fut.await?;
             Ok(())
@@ -406,9 +413,12 @@ impl MailBackend for MaildirType {
         let refresh_fut = self.refresh(mailbox_hash)?;
         let cache = self.cache.clone();
         Ok(Box::pin(async move {
-            {
+            // Resolve the paths to delete under the lock, then release it
+            // before doing any filesystem I/O.
+            let paths: Vec<PathBuf> = {
                 let mut hash_indexes_lck = cache.hash_indexes.lock().unwrap();
                 let hash_index = hash_indexes_lck.entry(mailbox_hash).or_default();
+                let mut paths = Vec::with_capacity(env_hashes.len());
 
                 for env_hash in env_hashes.iter() {
                     let path = {
@@ -425,8 +435,12 @@ impl MailBackend for MaildirType {
                         }
                     };
 
-                    fs::remove_file(&path)?;
+                    paths.push(path);
                 }
+                paths
+            };
+            for path in paths {
+                fs::remove_file(&path)?;
             }
             refresh_fut.await?;
             Ok(())
@@ -476,9 +490,13 @@ impl MailBackend for MaildirType {
         let cache = self.cache.clone();
         let config = self.config.clone();
         Ok(Box::pin(async move {
-            {
+            // Resolve the source and destination paths under the lock, record
+            // the in-memory index changes, then release the lock before doing
+            // any filesystem I/O.
+            let transfers: Vec<(PathBuf, PathBuf)> = {
                 let mut hash_indexes_lck = cache.hash_indexes.lock().unwrap();
                 let hash_index = hash_indexes_lck.entry(source_mailbox_hash).or_default();
+                let mut transfers = Vec::with_capacity(env_hashes.len());
 
                 for env_hash in env_hashes.iter() {
                     let path_src = {
@@ -497,31 +515,35 @@ impl MailBackend for MaildirType {
                     let dest_path = path_src.place_in_dir(&dest_dir, &config)?;
                     hash_index.entry(env_hash).or_default().modified =
                         Some(PathMod::Path(dest_path.clone()));
-                    if move_ {
-                        log::trace!("renaming {path_src:?} to {dest_path:?}");
-                        fs::rename(&path_src, &dest_path)
-                            .chain_err_summary(|| {
-                                format!(
-                                    "Could not rename {} to {}",
-                                    path_src.display(),
-                                    dest_path.display()
-                                )
-                            })
-                            .chain_err_related_path(&path_src)?;
-                        log::trace!("success in rename");
-                    } else {
-                        log::trace!("copying {path_src:?} to {dest_path:?}");
-                        fs::copy(&path_src, &dest_path)
-                            .chain_err_summary(|| {
-                                format!(
-                                    "Could not copy {} to {}",
-                                    path_src.display(),
-                                    dest_path.display()
-                                )
-                            })
-                            .chain_err_related_path(&path_src)?;
-                        log::trace!("success in copy");
-                    }
+                    transfers.push((path_src, dest_path));
+                }
+                transfers
+            };
+            for (path_src, dest_path) in transfers {
+                if move_ {
+                    log::trace!("renaming {path_src:?} to {dest_path:?}");
+                    fs::rename(&path_src, &dest_path)
+                        .chain_err_summary(|| {
+                            format!(
+                                "Could not rename {} to {}",
+                                path_src.display(),
+                                dest_path.display()
+                            )
+                        })
+                        .chain_err_related_path(&path_src)?;
+                    log::trace!("success in rename");
+                } else {
+                    log::trace!("copying {path_src:?} to {dest_path:?}");
+                    fs::copy(&path_src, &dest_path)
+                        .chain_err_summary(|| {
+                            format!(
+                                "Could not copy {} to {}",
+                                path_src.display(),
+                                dest_path.display()
+                            )
+                        })
+                        .chain_err_related_path(&path_src)?;
+                    log::trace!("success in copy");
                 }
             }
             refresh_fut.await?;
@@ -682,17 +704,34 @@ impl MaildirType {
                 )));
             }
             let mut children = Vec::new();
-            for mut f in fs::read_dir(&p).unwrap() {
+            for mut f in fs::read_dir(&p).chain_err_summary(|| {
+                format!("Could not read maildir directory {}", p.as_ref().display())
+            })? {
                 'entries: for f in f.iter_mut() {
                     {
                         let path = f.path();
                         if path.ends_with("cur") || path.ends_with("new") || path.ends_with("tmp") {
                             continue 'entries;
                         }
+                        // Maildir mailbox paths must round-trip through
+                        // `String` (they are rebuilt into `PathBuf`s for
+                        // every filesystem operation), so a directory whose
+                        // name is not valid UTF-8 cannot be represented.
+                        // Skip it with a warning instead of panicking on
+                        // `to_str().unwrap()`.
+                        let (Some(path_str), Some(file_name_str)) =
+                            (path.to_str(), path.file_name().and_then(|f| f.to_str()))
+                        else {
+                            log::warn!(
+                                "Skipping maildir directory with non-UTF-8 name: {:?}",
+                                path
+                            );
+                            continue 'entries;
+                        };
                         if path.is_dir() {
                             if let Ok(mut f) = MaildirMailbox::new(
-                                path.to_str().unwrap().to_string(),
-                                path.file_name().unwrap().to_str().unwrap().to_string(),
+                                path_str.to_string(),
+                                file_name_str.to_string(),
                                 None,
                                 Vec::new(),
                                 false,
@@ -715,8 +754,8 @@ impl MaildirType {
                                 let subdirs = recurse_mailboxes(mailboxes, config, &path)?;
                                 if !subdirs.is_empty() {
                                     if let Ok(f) = MaildirMailbox::new(
-                                        path.to_str().unwrap().to_string(),
-                                        path.file_name().unwrap().to_str().unwrap().to_string(),
+                                        path_str.to_string(),
+                                        file_name_str.to_string(),
                                         None,
                                         subdirs,
                                         true,
@@ -753,8 +792,20 @@ impl MaildirType {
             )));
         }
 
+        // The maildir backend rebuilds paths from `String`s, so a root
+        // mailbox whose path is not valid UTF-8 cannot be supported: fail
+        // with a configuration error instead of panicking on
+        // `to_str().unwrap()`.
+        let Some(root_mailbox_str) = root_mailbox.to_str() else {
+            return Err(Error::new(format!(
+                "Configuration error ({}): root_mailbox `{}` is not valid UTF-8.",
+                settings.name,
+                root_mailbox.display()
+            ))
+            .set_kind(ErrorKind::Configuration));
+        };
         let (is_root_a_mailbox, root_mailbox_name) = if let Ok(f) = MaildirMailbox::new_root_mailbox(
-            root_mailbox.to_str().unwrap().to_string(),
+            root_mailbox_str.to_string(),
             root_mailbox
                 .file_name()
                 .unwrap_or_default()
@@ -916,6 +967,25 @@ impl MaildirType {
             .write_all(&bytes)
             .chain_err_summary(|| format!("Could not write bytes to new file {}", path.display()))
             .chain_err_related_path(&path)?;
+        writer
+            .flush()
+            .chain_err_summary(|| {
+                format!(
+                    "Could not flush written bytes to new file {}",
+                    path.display()
+                )
+            })
+            .chain_err_related_path(&path)?;
+        let file = writer
+            .into_inner()
+            .map_err(|err| Error::from(err.into_error()))
+            .chain_err_summary(|| {
+                format!("Could not finish writing to new file {}", path.display())
+            })
+            .chain_err_related_path(&path)?;
+        file.sync_all()
+            .chain_err_summary(|| format!("Could not sync new file {} to disk", path.display()))
+            .chain_err_related_path(&path)?;
         Ok(path)
     }
 
@@ -1038,7 +1108,17 @@ impl MaildirType {
         } else {
             PathBuf::from(&suffix)
         };
-        let name = fs_path.file_name().unwrap().to_str().unwrap().to_string();
+        let Some(name) = fs_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .map(str::to_string)
+        else {
+            return Err(Error::new(format!(
+                "Could not derive a mailbox name from `{}`: the path has no UTF-8 file name.",
+                fs_path.display()
+            ))
+            .set_kind(ErrorKind::ValueError));
+        };
         let new_mailbox = MaildirMailbox {
             hash: mailbox_hash,
             path,

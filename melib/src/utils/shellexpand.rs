@@ -161,29 +161,30 @@ pub mod impls {
                 {
                     if entry.path().is_dir() && !entry.path().as_os_str().as_bytes().ends_with(b"/")
                     {
-                        let mut s = unsafe {
-                            String::from_utf8_unchecked(
-                                entry
-                                    .path()
-                                    .as_os_str()
-                                    .ext_trim_prefix(prefix.as_os_str())
-                                    .as_bytes()[_match.as_bytes().len()..]
-                                    .to_vec(),
-                            )
-                        };
+                        // File names are arbitrary bytes on Unix; a lossy
+                        // conversion avoids constructing an invalid `String`
+                        // (`from_utf8_unchecked` was UB for non-UTF-8 names).
+                        let mut s = String::from_utf8_lossy(
+                            &entry
+                                .path()
+                                .as_os_str()
+                                .ext_trim_prefix(prefix.as_os_str())
+                                .as_bytes()[_match.as_bytes().len()..],
+                        )
+                        .into_owned();
                         s.push('/');
                         entries.push(s);
                     } else {
-                        entries.push(unsafe {
-                            String::from_utf8_unchecked(
-                                entry
+                        entries.push(
+                            String::from_utf8_lossy(
+                                &entry
                                     .path()
                                     .as_os_str()
                                     .ext_trim_prefix(prefix.as_os_str())
-                                    .as_bytes()[_match.as_bytes().len()..]
-                                    .to_vec(),
+                                    .as_bytes()[_match.as_bytes().len()..],
                             )
-                        });
+                            .into_owned(),
+                        );
                     }
                 }
             }
@@ -288,19 +289,18 @@ pub mod impls {
                     && entry.to_bytes().starts_with(_match.as_bytes())
                 {
                     if dir[0].d_type == ::libc::DT_DIR && !entry.to_bytes().ends_with(b"/") {
-                        let mut s = unsafe {
-                            String::from_utf8_unchecked(
-                                entry.to_bytes()[_match.as_bytes().len()..].to_vec(),
-                            )
-                        };
+                        // Lossy conversion: directory entry names are not
+                        // guaranteed to be UTF-8 (see the generic impl).
+                        let mut s =
+                            String::from_utf8_lossy(&entry.to_bytes()[_match.as_bytes().len()..])
+                                .into_owned();
                         s.push('/');
                         entries.push(s);
                     } else {
-                        entries.push(unsafe {
-                            String::from_utf8_unchecked(
-                                entry.to_bytes()[_match.as_bytes().len()..].to_vec(),
-                            )
-                        });
+                        entries.push(
+                            String::from_utf8_lossy(&entry.to_bytes()[_match.as_bytes().len()..])
+                                .into_owned(),
+                        );
                     }
                 }
                 pos += dir[0].d_reclen as usize;

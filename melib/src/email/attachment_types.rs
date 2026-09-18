@@ -623,7 +623,10 @@ impl std::fmt::Display for ContentTransferEncoding {
             Self::Base64 => write!(f, "base64"),
             Self::QuotedPrintable => write!(f, "quoted-printable"),
             Self::Other { tag: ref t } => {
-                panic!("unknown encoding {:?}", str::from_utf8(t))
+                // `Other` holds an arbitrary, attacker-supplied token (e.g.
+                // `Content-Transfer-Encoding: x-whatever`), so this must never
+                // panic: display it lossily instead.
+                write!(f, "{}", String::from_utf8_lossy(t))
             }
         }
     }

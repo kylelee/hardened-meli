@@ -54,6 +54,37 @@ use melib::{
 use smallvec::SmallVec;
 
 use super::*;
+
+/// Debug-build tracing span for draw paths: logs `begin` on construction
+/// and `done in <elapsed>` on drop, so *any* exit path (early return,
+/// `?`, panic unwinding) leaves its trail. A freeze report's last `begin`
+/// without its `done` names the exact draw that never returned.
+///
+/// Compiles to nothing in release builds (logging is compiled out there
+/// anyway, and the guard is only constructed from debug code paths).
+#[cfg(debug_assertions)]
+pub(crate) struct DrawSpan {
+    name: String,
+    start: std::time::Instant,
+}
+
+#[cfg(debug_assertions)]
+impl DrawSpan {
+    pub(crate) fn enter(name: &str) -> Self {
+        log::debug!("draw: {name} begin");
+        Self {
+            name: name.to_string(),
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for DrawSpan {
+    fn drop(&mut self) {
+        log::debug!("draw: {} done in {:?}", self.name, self.start.elapsed());
+    }
+}
 use crate::{
     conf::data_types::SearchBackend,
     jobs::JobExecutor,
@@ -85,21 +116,38 @@ impl InputHandler {
         let resize_tx = self.state_tx.clone();
         thread::Builder::new()
             .name("input-thread".to_string())
-            .spawn(move || {
-                get_events(
-                    |i| {
-                        tx.send(ThreadEvent::Input(i)).unwrap();
-                    },
-                    |cols, rows| {
-                        log::trace!("terminal resized to {cols}x{rows}");
-                        resize_tx
-                            .send(ThreadEvent::UIEvent(UIEvent::Resize))
-                            .unwrap();
-                    },
-                    &rx,
-                    &pipe,
-                    working,
-                )
+            .spawn(move || loop {
+                // A panic anywhere in the parse/delivery chain (crossterm,
+                // the fd swap guards, the send callbacks) must not kill the
+                // thread: with it gone, no input ever reaches the main loop
+                // again and the UI looks frozen to the user. The fd swap
+                // guards restore their descriptions during unwinding, so a
+                // restart re-enters `get_events` on a clean state. If the
+                // panic is deterministic, back off instead of spinning.
+                let run = std::panic::AssertUnwindSafe(|| {
+                    let working = working.clone();
+                    get_events(
+                        |i| {
+                            tx.send(ThreadEvent::Input(i)).unwrap();
+                        },
+                        |cols, rows| {
+                            log::trace!("terminal resized to {cols}x{rows}");
+                            resize_tx
+                                .send(ThreadEvent::UIEvent(UIEvent::Resize))
+                                .unwrap();
+                        },
+                        &rx,
+                        &pipe,
+                        working,
+                    )
+                });
+                if std::panic::catch_unwind(run).is_err() {
+                    log::error!("input thread panicked; restarting it");
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+                // `get_events` returns only on a kill command.
+                break;
             })
             .unwrap();
         self.control = control;
@@ -215,7 +263,10 @@ impl Context {
     }
 
     pub fn is_online(&mut self, account_hash: AccountHash) -> Result<()> {
-        let idx = self.accounts.get_index_of(&account_hash).unwrap();
+        let idx = self
+            .accounts
+            .get_index_of(&account_hash)
+            .ok_or_else(|| Error::new("Unknown account.").set_kind(ErrorKind::Configuration))?;
         self.is_online_idx(idx)
     }
 
@@ -230,7 +281,14 @@ impl Context {
         let input_thread_pipe = crate::types::pipe().unwrap();
         let backends = Backends::new();
         let config_file = ConfigFile::new(IMAP_CONFIG, dir).unwrap();
-        let settings = Box::new(Settings::from_path(config_file.path.clone()).unwrap());
+        let mut settings = Box::new(Settings::from_path(config_file.path.clone()).unwrap());
+        // Pin the color decision: `TerminalSettings::use_color()` also
+        // consults the `NO_COLOR` environment variable, so a developer shell
+        // with it set (or unset) would drift golden baselines and any other
+        // test that renders UI attributes. An explicit `false` matches the
+        // recorded corpus (its `Attr::REVERSE` fallback accents are part of
+        // the pinned frames) and is independent of the environment.
+        settings.terminal.use_color = melib::ToggleFlag::False;
         let accounts = vec![{
             let name = "test".to_string();
             let mut account_conf = crate::conf::AccountConf::default();
@@ -363,6 +421,9 @@ pub struct State {
     draw_rate_limit: RateLimit,
     child: Option<ForkedProcess>,
     pub mode: UIMode,
+    /// Set when a `UIEvent::Exit` request arrives; the main loop checks
+    /// it after draining replies and performs the actual shutdown.
+    pub exit_requested: bool,
     overlay: IndexMap<ComponentId, Box<dyn Component>>,
     components: IndexMap<ComponentId, Box<dyn Component>>,
     component_tree: IndexMap<ComponentId, ComponentPath>,
@@ -433,6 +494,18 @@ impl State {
         } else {
             Settings::new()?
         });
+
+        // A configuration without accounts cannot start: the mail listing
+        // needs an account to point its offline fallback at, and indexing
+        // an empty account map used to panic on startup. Fail with a clear
+        // configuration error instead.
+        if settings.accounts.is_empty() {
+            return Err(Error::new(
+                "No accounts are configured. Add at least one `[accounts.<name>]` section to your \
+                 configuration file; see the `accounts` section of meli.conf(5).",
+            )
+            .set_kind(ErrorKind::Configuration));
+        }
 
         let (cols, rows) = crossterm::terminal::size().chain_err_summary(|| {
             "Could not determine terminal size. Are you running this on a tty? If yes, do you need \
@@ -505,6 +578,7 @@ impl State {
             screen,
             child: None,
             mode: UIMode::Normal,
+            exit_requested: false,
             components: IndexMap::default(),
             overlay: IndexMap::default(),
             component_tree: IndexMap::default(),
@@ -565,6 +639,17 @@ impl State {
             }
         }
         s.context.restore_input();
+        // Non-fatal configuration problems were logged at load time; surface
+        // them to the user as well instead of silently defaulting.
+        let config_warnings = s.context.settings.config_warnings.clone();
+        for warning in config_warnings {
+            s.context.replies.push_back(UIEvent::Notification {
+                title: Some("Configuration warning".into()),
+                body: warning.into(),
+                source: None,
+                kind: Some(NotificationType::Error(ErrorKind::Configuration)),
+            });
+        }
         Ok(s)
     }
 
@@ -580,34 +665,42 @@ impl State {
         mailbox_hash: MailboxHash,
         events: Vec<RefreshEventKind>,
     ) {
-        if self.context.accounts[&account_hash]
-            .mailbox_entries
-            .contains_key(&mailbox_hash)
+        // `account_hash` and `mailbox_hash` originate in backend refresh
+        // events; an unknown hash must be ignored, not indexed into the maps.
+        let known_mailbox = self
+            .context
+            .accounts
+            .get(&account_hash)
+            .is_some_and(|acc| acc.mailbox_entries.contains_key(&mailbox_hash));
+        if !known_mailbox {
+            return;
+        }
+        if self
+            .context
+            .accounts
+            .get_mut(&account_hash)
+            .is_some_and(|acc| acc.load(mailbox_hash, false).is_err())
         {
-            if self.context.accounts[&account_hash]
-                .load(mailbox_hash, false)
-                .is_err()
-            {
-                self.context.accounts[&account_hash]
-                    .event_queue
+            if let Some(acc) = self.context.accounts.get_mut(&account_hash) {
+                acc.event_queue
                     .entry(mailbox_hash)
                     .or_default()
                     .extend(events);
-                return;
             }
-            let Context {
-                ref mut accounts, ..
-            } = &mut *self.context;
+            return;
+        }
+        let notifications = self
+            .context
+            .accounts
+            .get_mut(&account_hash)
+            .and_then(|acc| acc.consume_refresh_events(events, mailbox_hash));
 
-            if let Some(notifications) =
-                accounts[&account_hash].consume_refresh_events(events, mailbox_hash)
-            {
-                for n in notifications {
-                    if matches!(n, UIEvent::Notification { .. }) {
-                        self.rcv_event(UIEvent::MailboxUpdate((account_hash, mailbox_hash)));
-                    }
-                    self.rcv_event(n);
+        if let Some(notifications) = notifications {
+            for n in notifications {
+                if matches!(n, UIEvent::Notification { .. }) {
+                    self.rcv_event(UIEvent::MailboxUpdate((account_hash, mailbox_hash)));
                 }
+                self.rcv_event(n);
             }
         }
     }
@@ -641,6 +734,8 @@ impl State {
         if !self.draw_rate_limit.tick() {
             return;
         }
+        log::debug!("redraw: begin");
+        let __redraw_span = DrawSpan::enter("redraw total");
 
         for i in 0..self.components.len() {
             self.draw_component(i);
@@ -734,12 +829,15 @@ impl State {
                 let area = self.screen.area();
                 self.message_box
                     .draw(self.screen.overlay_grid_mut(), area, &mut self.context);
-                for row in self
-                    .screen
-                    .overlay_grid()
-                    .bounds_iter(self.message_box.cached_area())
-                {
-                    self.screen.draw_overlay(row.cols(), row.row_index());
+                let cached_area = self.message_box.cached_area();
+                // A cached area from before a resize belongs to a different
+                // grid generation; iterating it would trip the `bounds_iter`
+                // generation assert. Skip the frame (same guard as the
+                // `message_box.active` clear-out path above).
+                if cached_area.generation() == self.screen.overlay_grid().area().generation() {
+                    for row in self.screen.overlay_grid().bounds_iter(cached_area) {
+                        self.screen.draw_overlay(row.cols(), row.row_index());
+                    }
                 }
             }
             self.message_box.set_dirty(false);
@@ -785,8 +883,10 @@ impl State {
         let component = &mut self.components[idx];
 
         if component.is_dirty() {
+            let __span = DrawSpan::enter(&format!("component[{idx}] {}", component));
             let area = self.screen.area();
             component.draw(self.screen.grid_mut(), area, &mut self.context);
+            drop(__span);
         }
     }
 
@@ -963,14 +1063,7 @@ impl State {
                 self.rcv_event(UIEvent::StatusEvent(StatusEvent::SetMouse(new_val)));
             }
             Quit => {
-                self.context
-                    .main_loop_handler
-                    .sender
-                    .send(ThreadEvent::Input((
-                        self.context.settings.shortcuts.general.quit.clone(),
-                        vec![],
-                    )))
-                    .unwrap();
+                self.context.replies.push_back(UIEvent::Exit);
             }
             #[cfg(feature = "cli-docs")]
             Tab(Man(manpage)) => match manpage
@@ -1001,10 +1094,22 @@ impl State {
 
     /// The application's main loop sends `UIEvents` to state via this method.
     pub fn rcv_event(&mut self, mut event: UIEvent) {
+        #[cfg(debug_assertions)]
+        let __rcv_span = DrawSpan::enter(&format!(
+            "rcv_event {}",
+            format!("{event:?}").chars().take(120).collect::<String>()
+        ));
         if let UIEvent::Input(_) = event {
             if self.message_box.expiration_start.is_none() {
                 self.message_box.expiration_start = Some(datetime::now());
             }
+        }
+
+        // Exit requests are recorded for the main loop; components must
+        // not see (or re-handle) them.
+        if matches!(event, UIEvent::Exit) {
+            self.exit_requested = true;
+            return;
         }
 
         match event {
@@ -1123,9 +1228,15 @@ impl State {
                     level,
                 },
             ) => {
+                let account_name = self
+                    .context
+                    .accounts
+                    .get(&account_hash)
+                    .map(|a| a.name())
+                    .unwrap_or("unknown account");
                 let msg = format!(
                     "{}: {}{}{}",
-                    self.context.accounts[&account_hash].name(),
+                    account_name,
                     description.as_str(),
                     if content.is_some() { ": " } else { "" },
                     content.as_ref().map(|s| s.as_str()).unwrap_or("")
@@ -1184,19 +1295,25 @@ impl State {
                 return;
             }
             UIEvent::Input(ref key)
-                if *key
-                    == self
-                        .context
-                        .settings
-                        .shortcuts
-                        .general
-                        .info_message_previous =>
+                if self
+                    .context
+                    .settings
+                    .shortcuts
+                    .general
+                    .info_message_previous
+                    .contains(key) =>
             {
                 self.message_box.show_previous();
                 return;
             }
             UIEvent::Input(ref key)
-                if *key == self.context.settings.shortcuts.general.info_message_next =>
+                if self
+                    .context
+                    .settings
+                    .shortcuts
+                    .general
+                    .info_message_next
+                    .contains(key) =>
             {
                 self.message_box.show_next();
                 return;

@@ -399,16 +399,29 @@ impl Collection {
         }
     }
 
+    /// A read guard for `hash`'s envelope, or `None` when the envelope is no
+    /// longer in the collection.
+    ///
+    /// Callers routinely hold a hash captured earlier (from a listing row, a
+    /// thread node or an async job), and the envelope can be removed in
+    /// between: validate here instead of panicking on a later dereference
+    /// (`EnvelopeRef`'s `Deref` is only meant as a defence-in-depth check).
     #[inline]
-    pub fn get_env(&'_ self, hash: EnvelopeHash) -> EnvelopeRef<'_> {
+    pub fn get_env(&'_ self, hash: EnvelopeHash) -> Option<EnvelopeRef<'_>> {
         let guard: RwLockReadGuard<'_, _> = self.envelopes.read().unwrap();
-        EnvelopeRef { guard, hash }
+        guard
+            .contains_key(&hash)
+            .then_some(EnvelopeRef { guard, hash })
     }
 
+    /// A write guard for `hash`'s envelope, or `None` when the envelope is no
+    /// longer in the collection.
     #[inline]
-    pub fn get_env_mut(&'_ self, hash: EnvelopeHash) -> EnvelopeRefMut<'_> {
+    pub fn get_env_mut(&'_ self, hash: EnvelopeHash) -> Option<EnvelopeRefMut<'_>> {
         let guard = self.envelopes.write().unwrap();
-        EnvelopeRefMut { guard, hash }
+        guard
+            .contains_key(&hash)
+            .then_some(EnvelopeRefMut { guard, hash })
     }
 
     #[inline]

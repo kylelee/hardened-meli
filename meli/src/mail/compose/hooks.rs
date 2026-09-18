@@ -113,11 +113,20 @@ impl Hook {
                     .take()
                     .ok_or_else(|| Error::new("failed to get stdin"))?;
 
+                // A hook that exits (or closes its stdin) before reading the
+                // whole draft body gives EPIPE here. Log it and let the
+                // child's exit status decide the outcome below instead of
+                // panicking inside the scoped thread (which would abort the
+                // composer).
+                let hook_name = name_.clone();
                 thread::scope(|s| {
                     s.spawn(move || {
-                        stdin
-                            .write_all(draft.body.as_bytes())
-                            .expect("failed to write to stdin");
+                        if let Err(err) = stdin.write_all(draft.body.as_bytes()) {
+                            melib::log::warn!(
+                                "compose hook `{hook_name}`: could not write the draft body to \
+                                 its stdin: {err}"
+                            );
+                        }
                     });
                 });
                 let output = child.wait_with_output().map_err(|err| -> Error {

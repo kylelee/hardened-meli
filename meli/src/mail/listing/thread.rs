@@ -238,6 +238,13 @@ impl MailListingTrait for ThreadListing {
             self.sort,
             &context.accounts[&self.cursor_pos.0].collection.envelopes,
         );
+        // Release the read guard before `redraw_threads_list` runs: it
+        // re-acquires the same `threads` lock through
+        // `Collection::get_threads`, and a recursive read on a
+        // write-preferring `RwLock` can deadlock (documented as possibly
+        // panicking) if a backend thread queued for `threads.write()` in
+        // between.
+        drop(threads);
 
         let previous_selection = self.rows.clear(same_mailbox);
         self.redraw_threads_list(
@@ -324,7 +331,10 @@ impl MailListingTrait for ThreadListing {
             let thread_node = &thread_nodes[&thread_node_hash];
 
             if let Some(env_hash) = thread_node.message() {
-                let envelope: EnvelopeRef = account.collection.get_env(env_hash);
+                let Some(envelope) = account.collection.get_env(env_hash) else {
+                    // Stale thread node: the envelope was removed, skip the row.
+                    continue;
+                };
                 use melib::search::QueryTrait;
                 if let Some(filter_query) = mailbox_settings!(
                     context[self.new_cursor_pos.0][&self.new_cursor_pos.1]
@@ -358,7 +368,7 @@ impl MailListingTrait for ThreadListing {
                 hide_from = !threaded_repeat_identical_from_values
                     && matches!(
                         iter.peek(),
-                        Some((_, tnh, _)) if thread_nodes[tnh].message().map(|next| account.collection.get_env(next).from() == envelope.from()
+                        Some((_, tnh, _)) if thread_nodes[tnh].message().map(|next| account.collection.get_env(next).is_some_and(|next_env| next_env.from() == envelope.from())
                                              && threads.find_group(thread_nodes[tnh].group) == prev_group).unwrap_or(false)
                     );
                 row_widths.1.push(
@@ -645,9 +655,13 @@ impl ListingTrait for ThreadListing {
             return;
         };
 
-        let envelope: EnvelopeRef = context.accounts[&self.cursor_pos.0]
+        let Some(envelope) = context.accounts[&self.cursor_pos.0]
             .collection
-            .get_env(env_hash);
+            .get_env(env_hash)
+        else {
+            // Stale row (the envelope was removed by a refresh): skip it.
+            return;
+        };
 
         let row_attr = row_attr!(
             self.color_cache,
@@ -974,6 +988,12 @@ impl ThreadListing {
         );
         let columns = &mut self.data_columns.columns;
         let mut itoa_buffer = itoa::Buffer::new();
+        // Resolved once per draw: `text_format_regexps` returns the
+        // formatter list *by value* (an `IndexMap` lookup plus per-entry
+        // `ThemeValue` → `FormatTag` resolution, copying up to 64 inline
+        // entries), and it used to be re-resolved twice per visible row.
+        let from_formatters = crate::conf::text_format_regexps(context, "listing.from");
+        let subject_formatters = crate::conf::text_format_regexps(context, "listing.subject");
         for (idx, ((_thread_hash, env_hash), strings)) in self
             .rows
             .entries
@@ -1044,8 +1064,7 @@ impl ThreadListing {
                     None,
                 );
                 {
-                    for text_formatter in crate::conf::text_format_regexps(context, "listing.from")
-                    {
+                    for text_formatter in &from_formatters {
                         let t = columns[2].grid_mut().insert_tag(text_formatter.tag);
                         for (start, end) in text_formatter.regexp.find_iter(strings.from.as_str()) {
                             columns[2].grid_mut().set_tag(
@@ -1118,9 +1137,7 @@ impl ThreadListing {
                     None,
                 ));
                 {
-                    for text_formatter in
-                        crate::conf::text_format_regexps(context, "listing.subject")
-                    {
+                    for text_formatter in &subject_formatters {
                         let t = columns[4].grid_mut().insert_tag(text_formatter.tag);
                         for (start, end) in
                             text_formatter.regexp.find_iter(strings.subject.as_str())
@@ -1168,7 +1185,15 @@ impl ThreadListing {
             // event to arrive
             return;
         }
-        let envelope: EnvelopeRef = account.collection.get_env(env_hash);
+        let Some(envelope) = account.collection.get_env(env_hash) else {
+            // The envelope has been renamed or removed, so wait for the
+            // appropriate event to arrive
+            log::error!(
+                "Could not update thread listing row: envelope {env_hash} is no longer in the \
+                 mailbox"
+            );
+            return;
+        };
         let thread_hash = self.rows.env_to_thread[&env_hash];
         let idx = self.rows.env_order[&env_hash];
         let row_attr = row_attr!(
@@ -1264,6 +1289,9 @@ impl ThreadListing {
     fn draw_relative_numbers(&self, grid: &mut CellBuffer, area: Area, top_idx: usize) {
         let width = self.data_columns.widths[0];
         let area = area.take_cols(width);
+        // Stack-formatted per row: `to_string()` allocated a `String` for
+        // every visible row on every draw.
+        let mut itoa_buffer = itoa::Buffer::new();
         for i in 0..area.height() {
             if top_idx + i >= self.length {
                 break;
@@ -1281,14 +1309,13 @@ impl ThreadListing {
             };
 
             grid.clear_area(area.nth_row(i), row_attr);
+            let number: isize = if self.new_cursor_pos.2.saturating_sub(top_idx) == i {
+                self.new_cursor_pos.2 as isize
+            } else {
+                (i as isize - (self.new_cursor_pos.2 - top_idx) as isize).abs()
+            };
             grid.write_string(
-                &if self.new_cursor_pos.2.saturating_sub(top_idx) == i {
-                    self.new_cursor_pos.2.to_string()
-                } else {
-                    (i as isize - (self.new_cursor_pos.2 - top_idx) as isize)
-                        .abs()
-                        .to_string()
-                },
+                itoa_buffer.format(number),
                 row_attr.fg,
                 row_attr.bg,
                 row_attr.attrs,
@@ -1573,9 +1600,16 @@ impl Component for ThreadListing {
                     }
                     self.update_line(context, env_hash);
                     let row: usize = self.rows.env_order[&env_hash];
-                    let envelope: EnvelopeRef = context.accounts[&self.new_cursor_pos.0]
+                    let Some(envelope) = context.accounts[&self.new_cursor_pos.0]
                         .collection
-                        .get_env(env_hash);
+                        .get_env(env_hash)
+                    else {
+                        // Removed between the `env_to_thread` check and here:
+                        // rebuild the listing instead of drawing a stale row.
+                        self.refresh_mailbox(context, true);
+                        self.set_dirty(true);
+                        break;
+                    };
                     let row_attr = row_attr!(
                         self.color_cache,
                         even: row.is_multiple_of(2),
@@ -1606,7 +1640,15 @@ impl Component for ThreadListing {
     }
 
     fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
-        let shortcuts = self.shortcuts(context);
+        // Only the `UIEvent::Input` arms below resolve shortcut
+        // bindings, so skip rebuilding (and re-hashing) the shortcut
+        // maps for every other event: backend syncs can deliver
+        // hundreds of non-key events per second.
+        let shortcuts = if matches!(event, UIEvent::Input(_)) {
+            self.shortcuts(context)
+        } else {
+            ShortcutMaps::default()
+        };
 
         match (&event, self.focus) {
             (UIEvent::Input(ref k), Focus::Entry)
@@ -1645,7 +1687,8 @@ impl Component for ThreadListing {
             }
             UIEvent::Input(ref k)
                 if !matches!(self.focus, Focus::None)
-                    && shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"]) =>
+                    && (shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"])
+                        || context.settings.shortcuts.general.quit.contains(k)) =>
             {
                 self.set_focus(Focus::None, context);
                 return true;
@@ -1691,8 +1734,9 @@ impl Component for ThreadListing {
                 }
                 self.rows.rename_env(*old_hash, *new_hash);
                 self.seen_cache.shift_remove(old_hash);
-                self.seen_cache
-                    .insert(*new_hash, account.collection.get_env(*new_hash).is_seen());
+                if let Some(env) = account.collection.get_env(*new_hash) {
+                    self.seen_cache.insert(*new_hash, env.is_seen());
+                }
                 if let Some(&row) = self.rows.env_order.get(new_hash) {
                     (self.rows.entries[row].0).1 = *new_hash;
                 }
@@ -1713,8 +1757,9 @@ impl Component for ThreadListing {
                 }
                 if self.rows.contains_env(*env_hash) {
                     self.rows.row_updates.push(*env_hash);
-                    self.seen_cache
-                        .insert(*env_hash, account.collection.get_env(*env_hash).is_seen());
+                    if let Some(env) = account.collection.get_env(*env_hash) {
+                        self.seen_cache.insert(*env_hash, env.is_seen());
+                    }
                 }
 
                 self.set_dirty(true);

@@ -33,6 +33,14 @@ use args::*;
 use meli::*;
 
 fn main() {
+    // Route panics into the log file: a thread that panics (e.g. the async
+    // job executor's worker, whose death freezes every remote operation)
+    // otherwise leaves no trace when stderr is covered by the TUI.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        log::error!("panic: {info}");
+    }));
     let opt = Opt::from_args();
     ::std::process::exit(match run_app(opt) {
         Ok(()) => 0,
@@ -90,14 +98,13 @@ fn run_app(mut opt: Opt) -> Result<()> {
             &state.context,
         )));
     }
-    let enter_command_mode: Key = state
+    let enter_command_mode: ShortcutKeys = state
         .context
         .settings
         .shortcuts
         .general
         .enter_command_mode
         .clone();
-    let quit_key: Key = state.context.settings.shortcuts.general.quit.clone();
 
     /* Keep track of the input mode. See UIMode for details */
     'main: loop {
@@ -108,6 +115,15 @@ fn run_app(mut opt: Opt) -> Result<()> {
             let events: smallvec::SmallVec<[UIEvent; 8]> = state.context.replies();
             for e in events {
                 state.rcv_event(e);
+            }
+            if state.exit_requested {
+                state.exit_requested = false;
+                if state.can_quit_cleanly() {
+                    drop(state);
+                    break 'main;
+                }
+                // Not clean (e.g. the unsaved-changes dialog is now up):
+                // fall through to the redraw below.
             }
             state.redraw();
 
@@ -147,15 +163,7 @@ fn run_app(mut opt: Opt) -> Result<()> {
                             match state.mode {
                                 UIMode::Normal => {
                                     match k {
-                                        _ if k == quit_key => {
-                                            if state.can_quit_cleanly() {
-                                                drop(state);
-                                                break 'main;
-                                            } else {
-                                                state.redraw();
-                                            }
-                                        },
-                                        _ if k == enter_command_mode => {
+                                        _ if enter_command_mode.contains(&k) => {
                                             state.mode = UIMode::Command;
                                             state.rcv_event(UIEvent::ChangeMode(UIMode::Command));
                                             state.redraw();
@@ -218,6 +226,10 @@ fn run_app(mut opt: Opt) -> Result<()> {
                             state.redraw();
                         }
                         ThreadEvent::UIEvent(e) => {
+                            log::debug!(
+                                "main loop: UIEvent {}",
+                                format!("{e:?}").chars().take(120).collect::<String>()
+                            );
                             state.rcv_event(e);
                             state.redraw();
                         },
@@ -225,7 +237,7 @@ fn run_app(mut opt: Opt) -> Result<()> {
                             state.pulse();
                         },
                         ThreadEvent::JobFinished(id) => {
-                            log::trace!("Job finished {}", id);
+                            log::debug!("main loop: JobFinished {id}");
                             state.context.main_loop_handler.job_executor.set_job_finished(id);
                             for account in state.context.accounts.values_mut() {
                                 if account.process_event(&id) {

@@ -415,7 +415,7 @@ fn test_sqlite3_reindex() {
             .get_mailbox(root_mailbox_hash)
             .clone()
             .into_iter()
-            .map(|env_hash| collection.get_env(env_hash).clone())
+            .filter_map(|env_hash| collection.get_env(env_hash).map(|env| (*env).clone()))
             .filter(|env| env.other_headers()[HeaderName::TO].contains("marc.stevens@cwi.nl"))
             .map(|env| env.hash())
             .collect::<HashSet<EnvelopeHash>>()

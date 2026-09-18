@@ -628,6 +628,12 @@ pub async fn examine_updates(
             ..
         } in v.iter_mut()
         {
+            // A FETCH response parsed across literal-continuation lines can
+            // be missing its UID or ENVELOPE item; skip such malformed
+            // entries instead of panicking on the `unwrap()`s below.
+            if uid.is_none() || envelope.is_none() {
+                continue;
+            }
             let uid = uid.unwrap();
             let env = envelope.as_mut().unwrap();
             env.set_hash(generate_envelope_hash(mailbox.imap_path(), &uid));

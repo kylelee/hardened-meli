@@ -97,7 +97,16 @@ pub struct DbConnection {
 
 impl DbConnection {
     pub fn new(path: &Path, lib: Arc<NotmuchLibrary>, write: bool) -> Result<Self> {
-        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+        // Use the raw OS bytes: a non-UTF-8 path (or a non-UTF-8 `$HOME`
+        // expanding the `~` in the configured path) must not panic. Only an
+        // interior NUL is unrepresentable in a `CString`.
+        let path_c = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            Error::new(format!(
+                "notmuch database path contains a NUL byte: `{}`",
+                path.display()
+            ))
+            .set_kind(ErrorKind::ValueError)
+        })?;
         let path_ptr = path_c.as_ptr();
         let mut database: *mut ffi::notmuch_database_t = std::ptr::null_mut();
         let status = unsafe {
@@ -190,7 +199,15 @@ impl DbConnection {
                     let mut current_subdirs = HashSet::new();
                     for entry in std::fs::read_dir(OsStr::from_bytes(path.as_bytes()))? {
                         let dir = entry?;
-                        let entry_path = CString::new(dir.path().as_os_str().as_bytes()).unwrap();
+                        // A NUL byte cannot be represented in a `CString`:
+                        // skip the entry with a warning instead of panicking.
+                        let Ok(entry_path) = CString::new(dir.path().as_os_str().as_bytes()) else {
+                            log::warn!(
+                                "Skipping notmuch database path with a NUL byte: {:?}",
+                                dir.path()
+                            );
+                            continue;
+                        };
                         if dir.file_type()?.is_dir() {
                             // Pass 1: For each directory in current_subdirs, add to stack to visit
                             // in the next loops
@@ -723,7 +740,16 @@ impl MailBackend for NotmuchDb {
                 }
                 {
                     let mailboxes_lck = self.mailboxes.read().unwrap();
-                    let mailbox = mailboxes_lck.get(&self.mailbox_hash).unwrap();
+                    // The mailbox can be removed while a fetch is in flight
+                    // (another client, or a notmuch database change); report
+                    // it instead of panicking on the map lookup.
+                    let Some(mailbox) = mailboxes_lck.get(&self.mailbox_hash) else {
+                        return Err(Error::new(format!(
+                            "Mailbox {} was removed while it was being fetched",
+                            self.mailbox_hash
+                        ))
+                        .set_kind(ErrorKind::NotFound));
+                    };
                     let mut unseen_lck = mailbox.unseen.lock().unwrap();
                     *unseen_lck += unseen_count;
                 }
@@ -746,7 +772,10 @@ impl MailBackend for NotmuchDb {
         let v: Vec<CString>;
         {
             let mailboxes_lck = mailboxes.read().unwrap();
-            let mailbox = mailboxes_lck.get(&mailbox_hash).unwrap();
+            let Some(mailbox) = mailboxes_lck.get(&mailbox_hash) else {
+                return Err(Error::new(format!("Mailbox {mailbox_hash} does not exist"))
+                    .set_kind(ErrorKind::NotFound));
+            };
             let query: Query = Query::new(&database, mailbox.query_str.as_str())?;
             {
                 let mut total_lck = mailbox.total.lock().unwrap();
@@ -994,11 +1023,20 @@ impl MailBackend for NotmuchDb {
                         FlagOp::Set(Flag::TRASHED) => add_tag!(c"trashed"),
                         FlagOp::UnSet(Flag::TRASHED) => remove_tag!(c"trashed"),
                         FlagOp::SetTag(tag) => {
-                            let c_tag = CString::new(tag.as_str()).unwrap();
+                            // Tags come from the notmuch database; a NUL byte
+                            // cannot be passed through the C API, so skip it
+                            // with a warning rather than panicking.
+                            let Ok(c_tag) = CString::new(tag.as_str()) else {
+                                log::warn!("Skipping tag with a NUL byte: {tag:?}");
+                                continue;
+                            };
                             add_tag!(&c_tag.as_ref());
                         }
                         FlagOp::UnSetTag(tag) => {
-                            let c_tag = CString::new(tag.as_str()).unwrap();
+                            let Ok(c_tag) = CString::new(tag.as_str()) else {
+                                log::warn!("Skipping tag with a NUL byte: {tag:?}");
+                                continue;
+                            };
                             remove_tag!(&c_tag.as_ref());
                         }
                         _ => log::debug!("flag_op is {:?}", op),

@@ -285,7 +285,15 @@ impl Composer {
         context: &Context,
     ) -> Result<Self> {
         let mut ret = Self::with_account(account_hash, context);
-        let envelope: EnvelopeRef = context.accounts[&account_hash].collection.get_env(env_hash);
+        let envelope: EnvelopeRef = context.accounts[&account_hash]
+            .collection
+            .get_env(env_hash)
+            .ok_or_else(|| {
+                melib::Error::new(format!(
+                    "Could not edit email {env_hash}: it is no longer in the mailbox"
+                ))
+                .set_kind(melib::error::ErrorKind::NotFound)
+            })?;
         ret.draft = Draft::edit(&envelope, bytes, Text::Plain)?;
         let mut past_date_warn_hook = hooks::PASTDATEWARN;
         if let Err(err) = past_date_warn_hook(context, &ret.draft) {
@@ -327,10 +335,16 @@ impl Composer {
         reply_body: String,
         context: &Context,
         mut reply_to_all: bool,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut ret = Self::with_account(account_hash, context);
         let account = &context.accounts[&account_hash];
-        let envelope = account.collection.get_env(coordinates.2);
+        let envelope = account.collection.get_env(coordinates.2).ok_or_else(|| {
+            melib::Error::new(format!(
+                "Could not reply to email {}: it is no longer in the mailbox",
+                coordinates.2
+            ))
+            .set_kind(melib::error::ErrorKind::NotFound)
+        })?;
         let subject = {
             let subject = envelope.subject();
             let prefix_list = account_settings!(
@@ -420,7 +434,7 @@ impl Composer {
 
             if let Some(actions) = list_management::ListActions::detect(&envelope) {
                 if let Some(post) = actions.post {
-                    if let list_management::ListAction::Email(list_post_addr) = post[0] {
+                    if let Some(list_management::ListAction::Email(list_post_addr)) = post.first() {
                         if let Ok(list_address) =
                             melib::email::parser::generic::mailto(list_post_addr)
                                 .map(|(_, m)| m.address)
@@ -500,31 +514,40 @@ impl Composer {
 
         ret.account_hash = coordinates.0;
         ret.reply_context = Some((coordinates.1, coordinates.2));
-        ret
+        Ok(ret)
     }
 
     pub fn reply_to_select(
         coordinates @ (account_hash, _, _): (AccountHash, MailboxHash, EnvelopeHash),
         reply_body: String,
         context: &Context,
-    ) -> Self {
-        let mut ret = Self::reply_to(coordinates, reply_body, context, false);
+    ) -> Result<Self> {
+        let mut ret = Self::reply_to(coordinates, reply_body, context, false)?;
         let account = &context.accounts[&account_hash];
-        let parent_message = account.collection.get_env(coordinates.2);
+        let Some(parent_message) = account.collection.get_env(coordinates.2) else {
+            // `reply_to` above already validated the envelope; if it vanished in
+            // the meantime there is nothing to select recipients from.
+            return Ok(ret);
+        };
         /* If message is from a mailing list and we detect a List-Post header, ask
          * user if they want to reply to the mailing list or the submitter of
          * the message */
         if let Some(actions) = list_management::ListActions::detect(&parent_message) {
             if let Some(post) = actions.post {
-                if let list_management::ListAction::Email(list_post_addr) = post[0] {
+                if let Some(list_management::ListAction::Email(list_post_addr)) = post.first() {
                     if let Ok((_, mailto)) = melib::email::parser::generic::mailto(list_post_addr) {
-                        let mut addresses = vec![(
-                            parent_message.from()[0].clone(),
-                            parent_message.field_from_to_string(),
-                        )];
+                        let mut addresses = Vec::new();
+                        // A message with no `From` has an empty slice: there is
+                        // simply no submitter entry to offer.
+                        if let Some(from) = parent_message.from().first() {
+                            addresses.push((from.clone(), parent_message.field_from_to_string()));
+                        }
                         for add in mailto.address {
                             let add_s = add.to_string();
                             addresses.push((add, add_s));
+                        }
+                        if addresses.is_empty() {
+                            return Ok(ret);
                         }
                         ret.mode = ViewMode::SelectRecipients(UIDialog::new(
                             "select recipients",
@@ -548,14 +571,14 @@ impl Composer {
                 }
             }
         }
-        ret
+        Ok(ret)
     }
 
     pub fn reply_to_author(
         coordinates: (AccountHash, MailboxHash, EnvelopeHash),
         reply_body: String,
         context: &Context,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::reply_to(coordinates, reply_body, context, false)
     }
 
@@ -563,7 +586,7 @@ impl Composer {
         coordinates: (AccountHash, MailboxHash, EnvelopeHash),
         reply_body: String,
         context: &Context,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::reply_to(coordinates, reply_body, context, true)
     }
 
@@ -1859,8 +1882,21 @@ impl Component for Composer {
                 self.kill(self.id, context);
                 return true;
             }
+            UIEvent::Input(ref key)
+                if context.settings.shortcuts.general.quit.contains(key) && self.mode.is_edit() =>
+            {
+                // Layered quit: the quit binding closes the composer
+                // tab (with the unsaved-changes dialog when dirty)
+                // instead of exiting the application.
+                self.kill(self.id, context);
+                return true;
+            }
             UIEvent::EmbeddedInput((Key::Ctrl('z'), _)) => {
-                self.embedded_pty.as_ref().unwrap().lock().unwrap().stop();
+                // Tolerate a missing PTY (the embedded process may already
+                // have been reaped) instead of unwrapping.
+                if let Some(pty) = self.embedded_pty.as_ref() {
+                    pty.lock().unwrap().stop();
+                }
                 if let Some(EmbeddedPty {
                     running: _,
                     terminal,
@@ -2220,8 +2256,10 @@ impl Component for Composer {
                 return true;
             }
             UIEvent::Input(Key::Ctrl('c'))
-                if self.embedded_pty.is_some()
-                    && self.embedded_pty.as_ref().unwrap().is_stopped() =>
+                if self
+                    .embedded_pty
+                    .as_ref()
+                    .is_some_and(|pty| pty.is_stopped()) =>
             {
                 if let Some(EmbeddedPty {
                     running: _,
@@ -2280,20 +2318,17 @@ impl Component for Composer {
                     account_settings!(context[self.account_hash].composing.wrap_header_preamble)
                         .clone(),
                 );
-                let filename = format!(
-                    "{date}_{subject}_{to}_{in_reply_to}",
-                    date = self.draft.headers.get(HeaderName::DATE).unwrap_or_default(),
-                    subject = self
-                        .draft
+                let filename = editor_temp_filename(
+                    self.draft.headers.get(HeaderName::DATE).unwrap_or_default(),
+                    self.draft
                         .headers
                         .get(HeaderName::SUBJECT)
                         .unwrap_or_default(),
-                    to = self.draft.headers.get(HeaderName::TO).unwrap_or_default(),
-                    in_reply_to = self
-                        .draft
+                    self.draft.headers.get(HeaderName::TO).unwrap_or_default(),
+                    self.draft
                         .headers
                         .get(HeaderName::IN_REPLY_TO)
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
                 );
 
                 let f = match File::create_temp_file(
@@ -2820,6 +2855,13 @@ impl Component for Composer {
             return true;
         }
 
+        if matches!(self.mode, ViewMode::Discard(..)) {
+            // The unsaved-changes dialog is already up: it owns the
+            // decision, so veto the quit without rebuilding it (the
+            // dialog's `x`/`y` choices kill the tab themselves).
+            return false;
+        }
+
         let id = self.id;
         /* Play it safe and ask user for confirmation */
         self.mode = ViewMode::Discard(
@@ -2843,6 +2885,17 @@ impl Component for Composer {
         );
         self.set_dirty(true);
         false
+    }
+}
+
+#[cfg(test)]
+impl Composer {
+    /// Test-only: mark the draft as changed so the unsaved-changes
+    /// (`can_quit_cleanly` / `kill`) paths can be exercised by tests
+    /// living outside this module (e.g. the `Tabbed` layered-quit
+    /// regression tests in `crate::golden`).
+    pub(crate) fn set_has_changes_for_tests(&mut self, value: bool) {
+        self.has_changes = value;
     }
 }
 
@@ -3124,6 +3177,31 @@ pub fn send_draft_async(
  * %+n — the sender's name (or email address, if no name is included).
  * %+a — the sender's email address.
  */
+/// Maximum byte length of the `$EDITOR` temp-file *name* (a single path
+/// component).
+///
+/// File systems cap one component at 255 bytes, but editors derive
+/// longer names from the file (Vim's `.{name}.swp` swap file, the
+/// `#{name}#` unlock/mode checks), so the base name is kept well below
+/// the cap: long CJK subjects and long Message-IDs used to push the
+/// generated name past the limit and break `$EDITOR` (ENAMETOOLONG).
+const EDITOR_TEMP_FILENAME_MAX_BYTES: usize = 128;
+
+/// Builds the `$EDITOR` temp-file name from the draft headers as
+/// `{date}_{subject}_{to}_{in_reply_to}`, truncated on a UTF-8 character
+/// boundary to [`EDITOR_TEMP_FILENAME_MAX_BYTES`].
+fn editor_temp_filename(date: &str, subject: &str, to: &str, in_reply_to: &str) -> String {
+    let mut name = format!("{date}_{subject}_{to}_{in_reply_to}");
+    if name.len() > EDITOR_TEMP_FILENAME_MAX_BYTES {
+        let mut end = EDITOR_TEMP_FILENAME_MAX_BYTES;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+    }
+    name
+}
+
 fn attribution_string(
     fmt: Option<&str>,
     sender: Option<&Address>,
@@ -3163,6 +3241,45 @@ mod tests {
         replies
             .iter()
             .any(|ev| matches!(ev, UIEvent::Action(Action::Tab(TabAction::Kill(k))) if *k == id))
+    }
+
+    /// The `$EDITOR` temp-file name must stay short enough for the file
+    /// system *and* for editor-derived names (Vim's `.{name}.swp`,
+    /// `#{name}#`): a long CJK subject plus a long Message-ID used to
+    /// overflow the 255-byte component limit.
+    #[test]
+    fn editor_temp_filename_is_truncated_safely() {
+        let date = "Thu-17-Sep-2026-00-32-23-0800";
+        let subject = "回复-深圳新泓雨科技有限公司-第36类“XAME”商标驳回复审及撤三事宜-".repeat(3);
+        let to = "mayue@ccpit-patent.com.cn";
+        let in_reply_to =
+            "<SH0PR01MB06201FD4632B9B52CFB7075CA9E42@SH0PR01MB0620.CHNPR01.prod.outlook.com>";
+        let name = editor_temp_filename(date, &subject, to, in_reply_to);
+
+        assert!(
+            name.len() <= EDITOR_TEMP_FILENAME_MAX_BYTES,
+            "name is {} bytes: {name:?}",
+            name.len()
+        );
+        // The truncation keeps the useful prefix (date + subject start).
+        assert!(name.starts_with(date));
+
+        // The real file creation succeeds on the first try with such a
+        // name (no reliance on `create_temp_file`'s slow shrink-and-retry
+        // loop, which editors' derived names could still overflow).
+        let f = File::create_temp_file(b"body", Some(&name), None, Some("eml"), true)
+            .expect("temp file with the truncated name must be created");
+        assert!(f.path().exists());
+    }
+
+    /// Multi-byte characters: the cut at the byte limit must land on a
+    /// UTF-8 character boundary, never inside a character.
+    #[test]
+    fn editor_temp_filename_truncates_on_char_boundary() {
+        // '中' is 3 bytes; "d_" + 42 of them is exactly 128 bytes.
+        let subject = "中".repeat(100);
+        let name = editor_temp_filename("d", &subject, "t", "i");
+        assert_eq!(name, "d_".to_string() + &"中".repeat(42));
     }
 
     /// Construct a realized `Composer` backed by a mock context.
@@ -3442,7 +3559,8 @@ hello world.
             String::new(),
             &context,
             false,
-        );
+        )
+        .expect("reply_to must succeed for an inserted envelope");
         assert_eq!(
             &composer.draft.headers()[HeaderName::SUBJECT],
             "RE: your e-mail"
@@ -3471,7 +3589,8 @@ hello world.
             String::new(),
             &context,
             false,
-        );
+        )
+        .expect("reply_to must succeed for an inserted envelope");
         assert_eq!(
             &composer.draft.headers()[HeaderName::SUBJECT],
             "Re: your e-mail"
@@ -3480,6 +3599,104 @@ hello world.
             &composer.draft.headers()[HeaderName::TO],
             r#"some name <some@example.com>"#
         );
+    }
+
+    /// `Collection::get_env` now reports a hash that is no longer in the
+    /// collection as `None`. The reply/edit constructors cannot produce a
+    /// meaningful composer without the envelope, so they must return a
+    /// descriptive `NotFound` error instead of panicking or fabricating a
+    /// blank draft.
+    #[test]
+    fn reply_and_edit_with_missing_envelope_return_error() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let context = Context::new_mock(&tempdir);
+        let account_hash = context.accounts[0].hash();
+        let mailbox_hash = MailboxHash::default();
+        let missing = EnvelopeHash::from_bytes(b"this-hash-is-not-in-the-collection");
+        assert!(!context.accounts[0].collection.contains_key(&missing));
+
+        let results = [
+            Composer::reply_to(
+                (account_hash, mailbox_hash, missing),
+                String::new(),
+                &context,
+                false,
+            )
+            .map(|_| ()),
+            Composer::reply_to_select(
+                (account_hash, mailbox_hash, missing),
+                String::new(),
+                &context,
+            )
+            .map(|_| ()),
+            Composer::reply_to_author(
+                (account_hash, mailbox_hash, missing),
+                String::new(),
+                &context,
+            )
+            .map(|_| ()),
+            Composer::reply_to_all(
+                (account_hash, mailbox_hash, missing),
+                String::new(),
+                &context,
+            )
+            .map(|_| ()),
+            Composer::edit(account_hash, missing, b"", &context).map(|_| ()),
+        ];
+        for result in results {
+            let err = result.expect_err("a missing envelope must produce an error, not a composer");
+            assert_eq!(
+                err.kind,
+                melib::error::ErrorKind::NotFound,
+                "unexpected error kind: {err}"
+            );
+        }
+    }
+
+    /// `reply_to_select` used to index `parent_message.from()[0]`: a message
+    /// without a `From` header (empty slice) and a malformed `List-Post` header
+    /// must not panic — the reply simply has no submitter entry to offer.
+    #[test]
+    fn reply_to_select_handles_empty_from_and_malformed_list_post() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let context = Context::new_mock(&tempdir);
+        let account_hash = context.accounts[0].hash();
+        let mailbox_hash = MailboxHash::default();
+
+        let mails: [&[u8]; 2] = [
+            // No `From` header, with a valid `List-Post`.
+            b"To: me@example.com\r\n\
+              Subject: list post without a sender\r\n\
+              Message-ID: <empty-from@x.example>\r\n\
+              List-Post: <mailto:list@example.com>\r\n\
+              \r\n\
+              body\r\n",
+            // Malformed (empty) `List-Post` value.
+            b"From: someone@example.com\r\n\
+              To: me@example.com\r\n\
+              Subject: malformed list post\r\n\
+              Message-ID: <empty-post@x.example>\r\n\
+              List-Post:\r\n\
+              \r\n\
+              body\r\n",
+        ];
+        for raw_mail in mails {
+            let envelope = Envelope::from_bytes(raw_mail, None).expect("could not parse mail");
+            let env_hash = envelope.hash();
+            context.accounts[0]
+                .collection
+                .insert(envelope, mailbox_hash);
+            let composer = Composer::reply_to_select(
+                (account_hash, mailbox_hash, env_hash),
+                String::new(),
+                &context,
+            )
+            .expect("reply_to_select must not fail for a live envelope");
+            assert!(
+                composer.draft.headers().contains_key(&HeaderName::SUBJECT),
+                "the reply must still carry a subject"
+            );
+        }
     }
 
     /// End-to-end byte-fidelity verification of the embedded-editor path

@@ -43,7 +43,9 @@ impl UText {
 
     /// Set cursor to position. If new value is out of bounds, do nothing.
     pub fn set_cursor(&mut self, cursor_pos: usize) {
-        if cursor_pos > self.content.len() {
+        // Reject a position that is not on a UTF-8 character boundary as well:
+        // `split_at` would panic on it.
+        if cursor_pos > self.content.len() || !self.content.is_char_boundary(cursor_pos) {
             return;
         }
 
@@ -231,5 +233,27 @@ impl UText {
                 self.cursor_inc();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UText;
+
+    /// `set_cursor` must reject a byte offset that is not on a UTF-8 character
+    /// boundary; `split_at` would panic on it.
+    #[test]
+    fn set_cursor_rejects_non_char_boundary() {
+        let mut text = UText::new("é".to_string()); // 2 bytes, 1 grapheme
+        text.set_cursor(1); // inside 'é'
+        assert_eq!(text.cursor_pos, 2);
+        assert_eq!(text.grapheme_cursor_pos, 1);
+
+        text.set_cursor(2);
+        assert_eq!(text.cursor_pos, 2);
+        assert_eq!(text.grapheme_cursor_pos, 1);
+
+        text.set_cursor(3); // out of bounds
+        assert_eq!(text.cursor_pos, 2);
     }
 }

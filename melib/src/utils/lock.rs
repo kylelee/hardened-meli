@@ -150,13 +150,14 @@ where
 }
 
 impl<T: AsRawFd> FileLock<T> {
-    pub fn into_inner(mut self) -> T {
-        // SAFETY: Drop is not executed because we call `forget` afterwards.
-        let inner = std::mem::replace(&mut self.0, unsafe {
-            std::mem::MaybeUninit::zeroed().assume_init()
-        });
-        std::mem::forget(self);
-        inner
+    pub fn into_inner(self) -> T {
+        // `ManuallyDrop` prevents `FileLock::drop` from running, so the inner
+        // value can be moved out. The previous implementation replaced `self.0`
+        // with `MaybeUninit::zeroed().assume_init()`, which is UB for any `T`
+        // for which the all-zero bit pattern is invalid.
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `this` is never dropped and the field is read exactly once.
+        unsafe { std::ptr::read(std::ptr::addr_of!(this.0)) }
     }
 }
 

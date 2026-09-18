@@ -134,6 +134,8 @@ impl ThreadView {
         focus: Option<ThreadViewFocus>,
         context: &mut Context,
     ) -> Self {
+        #[cfg(debug_assertions)]
+        let __span = crate::state::DrawSpan::enter("ThreadView::new");
         let theme_default = crate::conf::value(context, "theme_default");
         let mut view = Self {
             reversed: false,
@@ -241,33 +243,6 @@ impl ThreadView {
         go_to_first_unread: bool,
         context: &mut Context,
     ) {
-        #[inline(always)]
-        fn make_entry(
-            i: (usize, ThreadNodeHash, usize),
-            (account_hash, mailbox_hash, msg_hash): (AccountHash, MailboxHash, EnvelopeHash),
-            seen: bool,
-            initialize_now: bool,
-            timestamp: UnixTimestamp,
-            context: &mut Context,
-        ) -> ThreadEntry {
-            let (ind, _, _) = i;
-            ThreadEntry {
-                index: i,
-                indentation: ind,
-                mailview: Box::new(MailView::new(
-                    Some((account_hash, mailbox_hash, msg_hash)),
-                    initialize_now,
-                    context,
-                )),
-                msg_hash,
-                seen,
-                dirty: true,
-                hidden: false,
-                heading: String::new(),
-                timestamp,
-            }
-        }
-
         let collection = context.accounts[&self.coordinates.0].collection.clone();
         let threads = collection.get_threads(self.coordinates.1);
 
@@ -281,17 +256,16 @@ impl ThreadView {
         //
         // This helps skip initializing the whole thread at once, which will make the UI
         // loading slower.
-        //
-        // This won't help at all if the latest entry is a reply to an older entry but
-        // oh well.
+
         let mut total_entries = vec![];
         for (_, thread_node_hash) in threads.thread_iter(self.thread_group) {
             if let Some(msg_hash) = threads.thread_nodes()[&thread_node_hash].message() {
                 if Some(msg_hash) == expanded_hash {
                     continue;
                 }
-                let env_ref = collection.get_env(msg_hash);
-                total_entries.push((msg_hash, env_ref.timestamp));
+                if let Some(env_ref) = collection.get_env(msg_hash) {
+                    total_entries.push((msg_hash, env_ref.timestamp));
+                }
             };
         }
         total_entries.sort_by_key(|e| cmp::Reverse(e.1));
@@ -308,47 +282,108 @@ impl ThreadView {
         self.entries.clear();
         let mut earliest_unread = 0;
         let mut earliest_unread_entry = 0;
+        // Phase 1 - while the `threads` read guard is alive, collect every
+        // datum the entries need, including the fully rendered heading.
+        // The `MailView` construction is deferred to phase 2: it may
+        // synchronously fetch the mail body (when the offline cache can
+        // serve it instantly), which takes the collection's `envelopes`
+        // write lock. Holding `threads.read()` across that deadlocks
+        // against the watch thread's resync, which takes `threads.write()`
+        // while holding the envelopes lock (lock-order inversion: this
+        // path takes threads -> envelopes, the resync path takes
+        // envelopes -> threads).
+        let mut prepared = vec![];
+        let mut width = 0;
         for (line, (ind, thread_node_hash)) in thread_iter.enumerate() {
-            let entry = if let Some(msg_hash) = threads.thread_nodes()[&thread_node_hash].message()
-            {
-                let (is_seen, timestamp) = {
-                    let env_ref = collection.get_env(msg_hash);
-                    if !env_ref.is_seen()
-                        && (earliest_unread == 0 || env_ref.timestamp < earliest_unread)
-                    {
-                        earliest_unread = env_ref.timestamp;
-                        earliest_unread_entry = self.entries.len();
+            let Some(msg_hash) = threads.thread_nodes()[&thread_node_hash].message() else {
+                // Stale thread node: the envelope is gone, skip the row
+                // instead of fabricating one.
+                continue;
+            };
+            let Some(env_ref) = collection.get_env(msg_hash) else {
+                continue;
+            };
+            let (is_seen, timestamp) = {
+                if !env_ref.is_seen()
+                    && (earliest_unread == 0 || env_ref.timestamp < earliest_unread)
+                {
+                    earliest_unread = env_ref.timestamp;
+                    earliest_unread_entry = prepared.len();
+                }
+                (env_ref.is_seen(), env_ref.timestamp)
+            };
+            let initialize_now = if total_entries.is_empty() {
+                false
+            } else {
+                // ExtractIf but it hasn't been stabilized yet.
+                // https://doc.rust-lang.org/std/vec/struct.Vec.html#method.extract_if
+                let mut i = 0;
+                let mut result = false;
+                while i < total_entries.len() {
+                    if total_entries[i].0 == msg_hash {
+                        total_entries.remove(i);
+                        result = true;
+                        break;
+                    } else {
+                        i += 1;
                     }
-                    (env_ref.is_seen(), env_ref.timestamp)
-                };
-                let initialize_now = if total_entries.is_empty() {
-                    false
-                } else {
-                    // ExtractIf but it hasn't been stabilized yet.
-                    // https://doc.rust-lang.org/std/vec/struct.Vec.html#method.extract_if
-                    let mut i = 0;
-                    let mut result = false;
-                    while i < total_entries.len() {
-                        if total_entries[i].0 == msg_hash {
-                            total_entries.remove(i);
-                            result = true;
-                            break;
-                        } else {
-                            i += 1;
-                        }
-                    }
-                    result
-                };
-                make_entry(
-                    (ind, thread_node_hash, line),
-                    (account_hash, mailbox_hash, msg_hash),
-                    is_seen,
-                    initialize_now || expanded_hash == Some(msg_hash),
-                    timestamp,
-                    context,
+                }
+                result
+            };
+            let thread_node = &threads.thread_nodes()[&thread_node_hash];
+            let from = Address::display_name_slice(env_ref.from(), None);
+            let date = timestamp_to_string(env_ref.date(), Some("%Y-%m-%d %H:%M\0"), true);
+            let heading = if thread_node.show_subject() {
+                let subject = env_ref.subject();
+                format!(
+                    "{date} {subject:`>indent$} {from}",
+                    indent = 2 * ind + subject.grapheme_width(),
                 )
             } else {
-                continue;
+                format!(
+                    "{date} {from:`>indent$}",
+                    indent = 2 * ind + from.grapheme_width()
+                )
+            };
+            width = width.max(heading.grapheme_width() + 1);
+            prepared.push((
+                (ind, thread_node_hash, line),
+                (account_hash, mailbox_hash, msg_hash),
+                is_seen,
+                initialize_now || expanded_hash == Some(msg_hash),
+                timestamp,
+                heading,
+            ));
+        }
+        // Release the threads read guard before phase 2 (see the
+        // lock-order comment above).
+        drop(threads);
+
+        // Phase 2 - no `threads` guard held: `MailView::new` may
+        // synchronously fetch and load the mail body here.
+        for (
+            (ind, thread_node_hash, line),
+            (account_hash, mailbox_hash, msg_hash),
+            is_seen,
+            initialize_now,
+            timestamp,
+            heading,
+        ) in prepared
+        {
+            let entry = ThreadEntry {
+                index: (ind, thread_node_hash, line),
+                indentation: ind,
+                mailview: Box::new(MailView::new(
+                    Some((account_hash, mailbox_hash, msg_hash)),
+                    initialize_now,
+                    context,
+                )),
+                msg_hash,
+                seen: is_seen,
+                dirty: true,
+                hidden: false,
+                heading,
+                timestamp,
             };
             match expanded_hash {
                 Some(expanded_hash) if expanded_hash == entry.msg_hash => {
@@ -375,29 +410,6 @@ impl ThreadView {
         }
 
         let height = self.entries.len();
-        let mut width = 0;
-
-        for e in &mut self.entries {
-            let envelope: EnvelopeRef = context.accounts[&self.coordinates.0]
-                .collection
-                .get_env(e.msg_hash);
-            let thread_node = &threads.thread_nodes()[&e.index.1];
-            let from = Address::display_name_slice(envelope.from(), None);
-            let date = timestamp_to_string(envelope.date(), Some("%Y-%m-%d %H:%M\0"), true);
-            e.heading = if thread_node.show_subject() {
-                let subject = envelope.subject();
-                format!(
-                    "{date} {subject:`>indent$} {from}",
-                    indent = 2 * e.index.0 + subject.grapheme_width(),
-                )
-            } else {
-                format!(
-                    "{date} {from:`>indent$}",
-                    indent = 2 * e.index.0 + from.grapheme_width()
-                )
-            };
-            width = width.max(e.heading.grapheme_width() + 1);
-        }
         if !self.content.resize_with_context(width, height, context) {
             return;
         }
@@ -627,18 +639,34 @@ impl ThreadView {
         self.content.area().width().min(self.last_width / 2) > 62
     }
 
-    fn thread_root_envelope_hash(&self, context: &Context) -> EnvelopeHash {
+    /// The root envelope of the expanded entry's thread, or `None` when the
+    /// thread is no longer available.
+    ///
+    /// `self.thread_group` is captured when the entry is opened; a later
+    /// refresh can re-thread the mailbox and drop the group, and both
+    /// `Threads::thread_iter` and `thread_nodes()` index their maps (so they
+    /// panic on a stale hash). Callers draw the pane without the subject
+    /// header instead of crashing.
+    fn thread_root_envelope_hash(&self, context: &Context) -> Option<EnvelopeHash> {
         let account = &context.accounts[&self.coordinates.0];
         let threads = account.collection.get_threads(self.coordinates.1);
-        let thread_root = threads.thread_iter(self.thread_group).next().unwrap().1;
-        let thread_node = &threads.thread_nodes()[&thread_root];
-        thread_node.message().unwrap_or_else(|| {
-            let mut iter_ptr = thread_node.children()[0];
-            while threads.thread_nodes()[&iter_ptr].message().is_none() {
-                iter_ptr = threads.thread_nodes()[&iter_ptr].children()[0];
+        if !threads.groups.contains_key(&self.thread_group) {
+            return None;
+        }
+        let thread_root = threads.thread_iter(self.thread_group).next()?.1;
+        // Walk down the first-child chain to the first node that carries a
+        // message; bounded by the node count so a corrupted (cyclic)
+        // structure cannot spin forever.
+        let mut iter_ptr = thread_root;
+        for _ in 0..=threads.thread_nodes().len() {
+            let node = threads.thread_nodes().get(&iter_ptr)?;
+            if let Some(h) = node.message() {
+                return Some(h);
             }
-            threads.thread_nodes()[&iter_ptr].message().unwrap()
-        })
+            iter_ptr = *node.children().first()?;
+        }
+        melib::log::warn!("Thread node chain did not terminate; skipping the thread subject");
+        None
     }
 
     fn draw_vert(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
@@ -656,21 +684,23 @@ impl ThreadView {
         // First draw the thread subject on the first row
         if self.dirty {
             grid.clear_area(area, theme_default);
-            let i = self.thread_root_envelope_hash(context);
-            let envelope: EnvelopeRef = context.accounts[&self.coordinates.0].collection.get_env(i);
-
-            let (_, y) = grid.write_string(
-                &envelope.subject(),
-                theme_default.fg,
-                theme_default.bg,
-                theme_default.attrs,
-                area,
-                None,
-                Some(0),
-            );
-            context.dirty_areas.push_back(area);
-            grid.clear_area(area.nth_col(mid), theme_default);
-            grid.clear_area(area.skip(mid, y + 1), theme_default);
+            if let Some(i) = self.thread_root_envelope_hash(context) {
+                if let Some(envelope) = context.accounts[&self.coordinates.0].collection.get_env(i)
+                {
+                    let (_, y) = grid.write_string(
+                        &envelope.subject(),
+                        theme_default.fg,
+                        theme_default.bg,
+                        theme_default.attrs,
+                        area,
+                        None,
+                        Some(0),
+                    );
+                    context.dirty_areas.push_back(area);
+                    grid.clear_area(area.nth_col(mid), theme_default);
+                    grid.clear_area(area.skip(mid, y + 1), theme_default);
+                }
+            }
         };
         let area = area.skip_rows(2);
         let (width, height) = self.content.area().size();
@@ -736,19 +766,21 @@ impl ThreadView {
         // First draw the thread subject on the first row
         if self.dirty {
             grid.clear_area(area, theme_default);
-            let i = self.thread_root_envelope_hash(context);
-            let envelope: EnvelopeRef = context.accounts[&self.coordinates.0].collection.get_env(i);
-
-            grid.write_string(
-                &envelope.subject(),
-                theme_default.fg,
-                theme_default.bg,
-                theme_default.attrs,
-                area,
-                None,
-                Some(0),
-            );
-            context.dirty_areas.push_back(area);
+            if let Some(i) = self.thread_root_envelope_hash(context) {
+                if let Some(envelope) = context.accounts[&self.coordinates.0].collection.get_env(i)
+                {
+                    grid.write_string(
+                        &envelope.subject(),
+                        theme_default.fg,
+                        theme_default.bg,
+                        theme_default.attrs,
+                        area,
+                        None,
+                        Some(0),
+                    );
+                    context.dirty_areas.push_back(area);
+                }
+            }
         };
 
         let area = area.skip_rows(2);
@@ -894,6 +926,8 @@ impl std::fmt::Display for ThreadView {
 
 impl Component for ThreadView {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        #[cfg(debug_assertions)]
+        let __draw_span = crate::state::DrawSpan::enter("ThreadView");
         if self.entries.is_empty() {
             self.set_dirty(false);
         }
@@ -1067,23 +1101,6 @@ impl Component for ThreadView {
     }
 
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
-        let mut map = if !self.entries.is_empty() {
-            self.entries[self.new_expanded_pos]
-                .mailview
-                .shortcuts(context)
-        } else {
-            ShortcutMaps::default()
-        };
-
-        map.insert(
-            Shortcuts::GENERAL,
-            mailbox_settings!(
-                context[self.coordinates.0][&self.coordinates.1]
-                    .shortcuts
-                    .general
-            )
-            .key_values(),
-        );
         let mut thread_view_map = mailbox_settings!(
             context[self.coordinates.0][&self.coordinates.1]
                 .shortcuts
@@ -1098,10 +1115,56 @@ impl Component for ThreadView {
                     .thread_view
                     .commands
             ) {
-                thread_view_map.retain(|_, shortcut| shortcut != &command.shortcut);
+                // Shadow only the colliding key (see `Listing::shortcuts`).
+                thread_view_map.retain(|_, shortcut| {
+                    shortcut.0.retain(|k| k != &command.shortcut);
+                    !shortcut.0.is_empty()
+                });
             }
         }
-        map.insert(Shortcuts::THREAD_VIEW, thread_view_map);
+        let mailview_map = if !self.entries.is_empty() {
+            self.entries[self.new_expanded_pos]
+                .mailview
+                .shortcuts(context)
+        } else {
+            ShortcutMaps::default()
+        };
+        // Section order mirrors `process_event` dispatch priority for the
+        // current focus, so readers that walk the maps in insertion
+        // order (statusbar hints, the help overlay) resolve the same
+        // binding the keyboard handler would:
+        //
+        // - `Thread`: the mail view does not participate at all — its
+        //   sections are omitted entirely.
+        // - `None` (split): thread-list keys win via the
+        //   `is_thread_view_input` pre-detection; the mail view only
+        //   sees the keys that don't match.
+        // - `MailView`: the mail view consumes keys first; THREAD_VIEW
+        //   scroll keys are even swallowed as no-ops at the body
+        //   edges (see the `is_loaded` gate in `process_event`).
+        let mut map = ShortcutMaps::default();
+        match self.focus {
+            ThreadViewFocus::MailView => {
+                map.extend_shortcuts(mailview_map);
+                map.insert(Shortcuts::THREAD_VIEW, thread_view_map);
+            }
+            ThreadViewFocus::None => {
+                map.insert(Shortcuts::THREAD_VIEW, thread_view_map);
+                map.extend_shortcuts(mailview_map);
+            }
+            ThreadViewFocus::Thread => {
+                map.insert(Shortcuts::THREAD_VIEW, thread_view_map);
+            }
+        }
+        map.insert(
+            Shortcuts::GENERAL,
+            mailbox_settings!(
+                context[self.coordinates.0][&self.coordinates.1]
+                    .shortcuts
+                    .general
+            )
+            .key_values(),
+        );
 
         map
     }
@@ -1291,9 +1354,11 @@ impl ThreadView {
                 for e in self.entries.iter_mut() {
                     if e.msg_hash == *old_hash {
                         e.msg_hash = *new_hash;
-                        let seen: bool = account.collection.get_env(*new_hash).is_seen();
-                        e.dirty = e.seen != seen;
-                        e.seen = seen;
+                        if let Some(env) = account.collection.get_env(*new_hash) {
+                            let seen: bool = env.is_seen();
+                            e.dirty = e.seen != seen;
+                            e.seen = seen;
+                        }
                         e.mailview.process_event(
                             &mut UIEvent::EnvelopeRename(*old_hash, *new_hash),
                             context,
@@ -1308,9 +1373,11 @@ impl ThreadView {
                 let account = &context.accounts[&self.coordinates.0];
                 for e in self.entries.iter_mut() {
                     if e.msg_hash == *env_hash {
-                        let seen: bool = account.collection.get_env(*env_hash).is_seen();
-                        e.dirty = e.seen != seen;
-                        e.seen = seen;
+                        if let Some(env) = account.collection.get_env(*env_hash) {
+                            let seen: bool = env.is_seen();
+                            e.dirty = e.seen != seen;
+                            e.seen = seen;
+                        }
                         e.mailview
                             .process_event(&mut UIEvent::EnvelopeUpdate(*env_hash), context);
                         self.set_dirty(true);
@@ -1466,11 +1533,25 @@ impl ThreadView {
                         let bytes: Vec<Vec<u8>> = try_join_all(futures?).await?;
                         let envs: Vec<_> = envs_to_set
                             .iter()
-                            .map(|&env_hash| collection.get_env(env_hash))
-                            .collect();
+                            .map(|&env_hash| {
+                                collection.get_env(env_hash).ok_or_else(|| {
+                                    melib::Error::new(format!(
+                                        "Could not export thread: envelope {env_hash} is no \
+                                         longer in the mailbox"
+                                    ))
+                                    .set_kind(melib::error::ErrorKind::NotFound)
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
                         if path.is_dir() {
+                            let Some(first_env) = envs.first() else {
+                                return Err(melib::Error::new(
+                                    "Could not export thread: there is nothing to export",
+                                )
+                                .set_kind(melib::error::ErrorKind::NotFound));
+                            };
                             let mut filename = if envs.len() == 1 {
-                                format!("{}.mbox", envs[0].message_id()).into()
+                                format!("{}.mbox", first_env.message_id()).into()
                             } else {
                                 let now = melib::utils::datetime::timestamp_to_string(
                                     melib::utils::datetime::now(),
@@ -1480,7 +1561,7 @@ impl ThreadView {
                                 format!(
                                     "{}-{}-{}_envelopes.mbox",
                                     now,
-                                    envs[0].message_id(),
+                                    first_env.message_id(),
                                     envs.len(),
                                 )
                                 .into()
@@ -1616,9 +1697,9 @@ impl ThreadView {
         if shortcuts
             .get(Shortcuts::THREAD_VIEW)
             .map(|section| {
-                section
-                    .iter()
-                    .any(|(name, k)| !matches!(name, &"focus_left" | &"focus_right") && k == key)
+                section.iter().any(|(name, k)| {
+                    !matches!(name, &"focus_left" | &"focus_right") && k.contains(key)
+                })
             })
             .unwrap_or(false)
         {
@@ -1629,7 +1710,7 @@ impl ThreadView {
             .map(|section| {
                 ["home_page", "end_page", "open_entry"]
                     .iter()
-                    .any(|name| section.get(name).map(|k| k == key).unwrap_or(false))
+                    .any(|name| section.get(name).map(|k| k.contains(key)).unwrap_or(false))
             })
             .unwrap_or(false)
         {
@@ -1645,6 +1726,17 @@ impl ThreadView {
             )
             .iter()
             .any(|cmd| cmd.shortcut == *key)
+    }
+
+    /// Test-only: drive the expanded entry's mail view to the `Loaded`
+    /// state via [`MailViewState::load_bytes`], so its shortcut sections
+    /// (pager, envelope-view) exist — `MailViewState::shortcuts` returns
+    /// an empty map until the body bytes arrive. Mirrors the unit tests'
+    /// `load_expanded_entry` helper for out-of-module callers.
+    #[cfg(test)]
+    pub(crate) fn load_expanded_entry_for_tests(&mut self, bytes: Vec<u8>, context: &mut Context) {
+        let expanded_pos = self.new_expanded_pos;
+        MailViewState::load_bytes(&mut self.entries[expanded_pos].mailview, bytes, context);
     }
 }
 
@@ -2127,7 +2219,7 @@ mod focus_tests {
     #[test]
     fn thread_view_focus_right_at_none_opens_cursor_selected_mail() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
         assert_eq!(
             view.new_cursor_pos, view.new_expanded_pos,
@@ -2161,7 +2253,7 @@ mod focus_tests {
     #[test]
     fn thread_view_focus_right_at_thread_opens_cursor_selected_mail() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
 
         let mut up = UIEvent::Input(Key::Up);
@@ -2240,7 +2332,7 @@ mod focus_tests {
     #[test]
     fn thread_view_scroll_switches_mail_content_live() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
         assert_eq!(view.new_cursor_pos, 1, "sanity: cursor starts on the reply");
 
@@ -2414,8 +2506,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_down_at_focus_none_moves_thread_cursor() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
-        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
         load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
         view.new_cursor_pos = 0;
@@ -2437,8 +2529,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_up_at_focus_none_moves_thread_cursor() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
-        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up.into();
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
         load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
         view.new_cursor_pos = 1;
@@ -2462,8 +2554,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
         // 'j' is simultaneously the thread `scroll_down` and the Selector's
         // GENERAL `scroll_down` (both injected: the arrow-key defaults no
         // longer bind 'j').
-        ctx.settings.shortcuts.thread_view.scroll_down = Key::Char('j');
-        ctx.settings.shortcuts.general.scroll_down = Key::Char('j');
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Char('j').into();
+        ctx.settings.shortcuts.general.scroll_down = Key::Char('j').into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
         load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
         view.new_cursor_pos = 0;
@@ -2486,8 +2578,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_down_at_focus_mailview_keeps_status_quo() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
-        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
         load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
         view.new_cursor_pos = 0;
@@ -2512,8 +2604,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_down_at_mailview_body_end_stops_no_mail_switch() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
-        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
         load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
         view.new_cursor_pos = 0;
@@ -2541,8 +2633,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_up_at_mailview_body_top_stops_no_mail_switch() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
-        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up.into();
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
         load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
         view.new_cursor_pos = 1;
@@ -2566,8 +2658,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_down_while_body_loading_moves_thread_cursor() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
-        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
         // No load_expanded_entry: the expanded entry's init_futures fail on
         // the mock backend, so its mail view state stays Init.
@@ -2589,8 +2681,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_down_at_thread_focus_moves_cursor() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
-        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
         view.new_cursor_pos = 0;
 
@@ -2610,8 +2702,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_up_at_thread_focus_moves_cursor() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
-        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up.into();
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
         // The rest scroll_up arm guards on the OLD value of cursor_pos; set
         // it explicitly instead of relying on construction defaults.
@@ -2628,24 +2720,61 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
         );
     }
 
+    /// Navigation key group in the thread list: the default
+    /// `thread_view.scroll_up`/`scroll_down` doubles (Up/k, Down/j) all
+    /// move the thread-list cursor at focus `Thread`.
+    #[test]
+    fn thread_view_navigation_keygroup_moves_cursor() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+
+        for key in [Key::Down, Key::Char('j')] {
+            view.cursor_pos = 0;
+            view.new_cursor_pos = 0;
+            let mut event = UIEvent::Input(key.clone());
+            assert!(
+                view.process_event(&mut event, &mut ctx),
+                "{key:?} must be consumed at focus Thread"
+            );
+            assert_eq!(
+                view.new_cursor_pos, 1,
+                "{key:?} must advance the thread list cursor"
+            );
+        }
+        for key in [Key::Up, Key::Char('k')] {
+            view.cursor_pos = 1;
+            view.new_cursor_pos = 1;
+            let mut event = UIEvent::Input(key.clone());
+            assert!(
+                view.process_event(&mut event, &mut ctx),
+                "{key:?} must be consumed at focus Thread"
+            );
+            assert_eq!(
+                view.new_cursor_pos, 0,
+                "{key:?} must move the thread list cursor up"
+            );
+        }
+    }
+
     /// Guard: the interception covers only the vertical scroll keys — a
-    /// non-vertical thread-view key (`collapse_subtree`, rebound to a fresh
-    /// 'x' to avoid the default 'h' colliding with the envelope view's
-    /// `toggle_expand_headers`) must still reach its `process_event_rest`
-    /// arm at focus `MailView` and flip `hidden`.
+    /// non-vertical thread-view key (`collapse_subtree`, rebound to a free
+    /// 'z' so the default envelope/pager bindings — `scroll_left` h,
+    /// `toggle_expand_headers` x — cannot consume it first) must still
+    /// reach its `process_event_rest` arm at focus `MailView` and flip
+    /// `hidden`.
     #[test]
     fn thread_view_non_vertical_key_collapse_subtree_not_intercepted_at_mailview() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.collapse_subtree = Key::Char('x');
+        ctx.settings.shortcuts.thread_view.collapse_subtree = Key::Char('z').into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
         load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
         // Construction leaves the thread-list cursor on the expanded (newest)
         // mail; the collapse arm toggles the entry under that cursor.
 
-        let mut event = UIEvent::Input(Key::Char('x'));
+        let mut event = UIEvent::Input(Key::Char('z'));
         let consumed = view.process_event(&mut event, &mut ctx);
 
-        assert!(consumed, "'x' must be consumed");
+        assert!(consumed, "'z' must be consumed");
         assert!(
             view.entries[view.new_expanded_pos].hidden,
             "collapse_subtree must still toggle the entry at focus MailView"
@@ -2660,8 +2789,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn envelope_view_headers_walk_down_then_fallthrough_roundtrip() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
-        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up.into();
         let mail = Mail::new(REPLY_MAIL_BYTES.to_vec(), None).expect("could not parse reply mail");
         let mut env_view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
 
@@ -2700,10 +2829,10 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_single_mail_input_no_mail_switch() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
-        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up;
-        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
-        ctx.settings.shortcuts.pager.scroll_up = Key::Up;
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.thread_view.scroll_up = Key::Up.into();
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.pager.scroll_up = Key::Up.into();
         let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
         load_expanded_entry(&mut view, &mut ctx, ROOT_MAIL_BYTES);
         view.new_cursor_pos = 0;
@@ -2815,11 +2944,11 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
         let mut thread_keys: Vec<&Key> = shortcuts[Shortcuts::THREAD_VIEW]
             .iter()
             .filter(|(name, _)| !matches!(**name, "focus_left" | "focus_right"))
-            .map(|(_, key)| key)
+            .flat_map(|(_, keys)| keys.0.iter())
             .collect();
         for name in ["home_page", "end_page", "open_entry"] {
-            if let Some(key) = shortcuts[Shortcuts::GENERAL].get(name) {
-                thread_keys.push(key);
+            if let Some(keys) = shortcuts[Shortcuts::GENERAL].get(name) {
+                thread_keys.extend(keys.0.iter());
             }
         }
         for key in &thread_keys {
@@ -2828,13 +2957,28 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
                 "thread-view key {key:?} must be detected"
             );
         }
+        // Focus keys are handled exclusively by the pre-arms, so their
+        // bindings are excluded from the detected set — unless a key is
+        // shared with another thread-view binding (e.g. default `h` is
+        // both `focus_left` and `collapse_subtree`); the pre-arm runs
+        // first there, so detection via the other binding is expected.
+        let shared_keys: Vec<&Key> = shortcuts[Shortcuts::THREAD_VIEW]
+            .iter()
+            .filter(|(name, _)| !matches!(**name, "focus_left" | "focus_right"))
+            .flat_map(|(_, keys)| keys.0.iter())
+            .collect();
         for name in ["focus_left", "focus_right"] {
-            if let Some(key) = shortcuts[Shortcuts::THREAD_VIEW].get(name) {
-                assert!(
-                    !view.is_thread_view_input(key, &ctx),
-                    "focus key {name:?} ({key:?}) must NOT be detected — it is handled \
-                     exclusively by the pre-arms"
-                );
+            if let Some(keys) = shortcuts[Shortcuts::THREAD_VIEW].get(name) {
+                for key in keys.0.iter() {
+                    if shared_keys.contains(&key) {
+                        continue;
+                    }
+                    assert!(
+                        !view.is_thread_view_input(key, &ctx),
+                        "focus key {name:?} ({key:?}) must NOT be detected — it is handled \
+                         exclusively by the pre-arms"
+                    );
+                }
             }
         }
 
@@ -2844,18 +2988,73 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
             (&ctx.settings.shortcuts.general.key_values(), "general"),
         ];
         for (section, label) in sections {
-            for (name, key) in section.iter() {
+            for (name, keys) in section.iter() {
                 // Skip keys that collide with thread keys by default (e.g.
                 // pager 'j'/'k', listing Left/Right, general 'h'/'l').
-                if thread_keys.contains(&key) {
+                if keys.0.iter().any(|key| thread_keys.contains(&key)) {
                     continue;
                 }
-                assert!(
-                    !view.is_thread_view_input(key, &ctx),
-                    "{label} key {name:?} ({key:?}) must not be detected as thread input"
-                );
+                for key in keys.0.iter() {
+                    assert!(
+                        !view.is_thread_view_input(key, &ctx),
+                        "{label} key {name:?} ({key:?}) must not be detected as thread input"
+                    );
+                }
             }
         }
+    }
+
+    /// `shortcuts()` section order must mirror `process_event` dispatch
+    /// priority for the current focus, so insertion-order readers (statusbar
+    /// hints, help overlay) resolve the binding the keyboard handler would:
+    /// `Thread` omits the mail view's sections entirely, `None` puts
+    /// `THREAD_VIEW` before them, `MailView` puts them before `THREAD_VIEW`.
+    /// `MailViewState::shortcuts` returns an empty map until the body
+    /// bytes arrive, so the split/mail assertions load the expanded
+    /// entry first.
+    #[test]
+    fn thread_view_shortcuts_order_follows_focus() {
+        let mut ctx = mock_context();
+
+        let view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+        let shortcuts = view.shortcuts(&ctx);
+        assert!(
+            !shortcuts.contains_key(Shortcuts::PAGER),
+            "thread-focused view must not expose the mail view's pager section"
+        );
+        assert_eq!(
+            shortcuts.get_index_of(Shortcuts::THREAD_VIEW),
+            Some(0),
+            "THREAD_VIEW must lead when the thread list owns the keyboard"
+        );
+
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        let shortcuts = view.shortcuts(&ctx);
+        let thread = shortcuts
+            .get_index_of(Shortcuts::THREAD_VIEW)
+            .expect("THREAD_VIEW section present at split focus");
+        let pager = shortcuts
+            .get_index_of(Shortcuts::PAGER)
+            .expect("mail view sections present at split focus once loaded");
+        assert!(
+            thread < pager,
+            "split focus: THREAD_VIEW ({thread}) must precede PAGER ({pager})"
+        );
+
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+        let shortcuts = view.shortcuts(&ctx);
+        let thread = shortcuts
+            .get_index_of(Shortcuts::THREAD_VIEW)
+            .expect("THREAD_VIEW section present at mail focus");
+        let pager = shortcuts
+            .get_index_of(Shortcuts::PAGER)
+            .expect("mail view sections present at mail focus once loaded");
+        assert!(
+            pager < thread,
+            "mail focus: PAGER ({pager}) must precede THREAD_VIEW ({thread})"
+        );
     }
 
     /// Long-body scroll-to-bottom (two assertions in one, the strongest
@@ -2894,8 +3093,8 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
     #[test]
     fn thread_view_input_down_long_body_scrolls_to_bottom_then_stops() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down;
-        ctx.settings.shortcuts.pager.scroll_down = Key::Down;
+        ctx.settings.shortcuts.thread_view.scroll_down = Key::Down.into();
+        ctx.settings.shortcuts.pager.scroll_down = Key::Down.into();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
         load_expanded_entry(&mut view, &mut ctx, LONG_MAIL_BYTES);
         view.new_cursor_pos = 0;

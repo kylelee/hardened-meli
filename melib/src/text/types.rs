@@ -30,7 +30,10 @@ macro_rules! define_line_break_class {
             fn from(val: &str) -> Self {
                 match val {
                     $(stringify!($classname) => Self::$classname),*,
-                    other => panic!("{other}"),
+                    // `From` cannot fail, and the input can come from parsed
+                    // data; fall back to the UAX#14 default resolved class for
+                    // unknown/XX code points instead of panicking.
+                    _ => Self::AL,
                 }
             }
         }

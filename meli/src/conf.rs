@@ -261,6 +261,42 @@ pub struct FileSettings {
     pub terminal: terminal::TerminalSettings,
     #[serde(default)]
     pub log: LogSettings,
+    /// Non-fatal configuration problems found while loading; the invalid value
+    /// has been replaced with a safe default. Surfaced to the user as
+    /// notifications once the UI starts.
+    #[serde(skip)]
+    pub config_warnings: Vec<String>,
+}
+
+impl FileSettings {
+    /// Replace configuration values that would otherwise panic when used with
+    /// a safe default, recording a user-facing warning for each.
+    ///
+    /// This runs at load time so that the problem is reported once, with the
+    /// field name, instead of aborting the process later.
+    fn fixup_non_fatal(&mut self) {
+        let empty_custom_frames = matches!(
+            self.terminal.progress_spinner_sequence.as_ref(),
+            Some(terminal::ProgressSpinnerSequence::Custom { frames, .. }) if frames.is_empty()
+        );
+        if empty_custom_frames {
+            let msg =
+                "terminal.progress_spinner_sequence: a custom sequence must contain at least \
+                       one frame; using the default spinner instead.";
+            melib::log::error!("{msg}");
+            self.config_warnings.push(msg.to_string());
+            self.terminal.progress_spinner_sequence = None;
+        }
+        if self.listing.sidebar_ratio > 100 {
+            let ratio = self.listing.sidebar_ratio;
+            let msg = format!(
+                "listing.sidebar_ratio: {ratio} is out of the valid range 0..=100; clamped to 100."
+            );
+            melib::log::error!("{msg}");
+            self.config_warnings.push(msg);
+            self.listing.sidebar_ratio = 100;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -419,6 +455,7 @@ impl FileSettings {
                     .set_source(Some(Arc::new(err)))
                     .set_kind(ErrorKind::Configuration)
             })?;
+        s.fixup_non_fatal();
         let backends = melib::backends::Backends::new();
         let Themes {
             light: default_light,
@@ -521,6 +558,7 @@ impl FileSettings {
                 .set_source(Some(Arc::new(err)))
                 .set_kind(ErrorKind::Configuration)
         })?;
+        s.fixup_non_fatal();
         let backends = melib::backends::Backends::new();
         let Themes {
             light: default_light,
@@ -620,6 +658,10 @@ pub struct Settings {
     pub pgp: pgp::PGPSettings,
     pub terminal: terminal::TerminalSettings,
     pub log: LogSettings,
+    /// Non-fatal configuration problems found at load time; the UI surfaces
+    /// these as notifications (see `State::new`).
+    #[serde(skip)]
+    pub config_warnings: Vec<String>,
     #[serde(skip)]
     pub _logger: Logger,
 }
@@ -644,6 +686,13 @@ impl Settings {
             _logger.change_log_level(fs.log.maximum_level)
         }
 
+        #[cfg(debug_assertions)]
+        apply_debug_default_logging(&_logger, &fs.log);
+
+        if let Some(ref log_path) = fs.log.log_file {
+            _logger.change_log_dest(log_path.into());
+        }
+
         let mut s: IndexMap<String, AccountConf> = IndexMap::new();
 
         for (id, x) in fs.accounts {
@@ -651,10 +700,6 @@ impl Settings {
             ac.account.name.clone_from(&id);
 
             s.insert(id, ac);
-        }
-
-        if let Some(ref log_path) = fs.log.log_file {
-            _logger.change_log_dest(log_path.into());
         }
 
         Ok(Self {
@@ -668,6 +713,7 @@ impl Settings {
             pgp: fs.pgp,
             terminal: fs.terminal,
             log: fs.log,
+            config_warnings: fs.config_warnings,
             _logger,
         })
     }
@@ -680,6 +726,9 @@ impl Settings {
         if _logger.log_level() != fs.log.maximum_level {
             _logger.change_log_level(fs.log.maximum_level)
         }
+
+        #[cfg(debug_assertions)]
+        apply_debug_default_logging(&_logger, &fs.log);
 
         if let Some(ref log_path) = fs.log.log_file {
             _logger.change_log_dest(log_path.into());
@@ -696,6 +745,7 @@ impl Settings {
             pgp: fs.pgp,
             terminal: fs.terminal,
             log: fs.log,
+            config_warnings: fs.config_warnings,
             _logger,
         })
     }
@@ -807,3 +857,47 @@ pub struct LogSettings {
 }
 
 pub use data_types::dotaddressable::*;
+
+/// Debug builds default the logger to one file per run under `./log/` in
+/// the current directory at `DEBUG` level, so a field bug report comes with
+/// a trace of what the app was doing (the release build keeps the XDG
+/// data-dir default).
+///
+/// An explicit `[logging] log_file` in the configuration wins, and setting
+/// `MELI_DEBUG_LOG=0` opts out. Failures never abort startup: if `./log/`
+/// cannot be created, the previous destination is kept.
+#[cfg(debug_assertions)]
+fn apply_debug_default_logging(logger: &Logger, log: &LogSettings) {
+    // `cfg!(test)` (not `#[cfg(test)]`): unit tests construct `Settings`
+    // too, and must not litter the crate's working directory with log
+    // files.
+    if cfg!(test) {
+        return;
+    }
+    if std::env::var_os("MELI_DEBUG_LOG").is_some_and(|v| v == "0") {
+        return;
+    }
+    // The caller applies an explicit `log_file` right after; do not fight it.
+    if log.log_file.is_some() {
+        return;
+    }
+    if logger.log_level() < melib::LogLevel::TRACE {
+        logger.change_log_level(melib::LogLevel::TRACE);
+    }
+    let dir = Path::new("log");
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        eprintln!(
+            "debug logging disabled: could not create `{}`: {err}",
+            dir.display()
+        );
+        return;
+    }
+    let ts = melib::utils::datetime::timestamp_to_string(
+        melib::utils::datetime::now(),
+        Some("%Y%m%d-%H%M%S"),
+        false,
+    );
+    let path = dir.join(format!("meli-debug-{ts}.log"));
+    logger.change_log_dest(path.clone());
+    melib::log::info!("debug build: logging to {}", path.display());
+}

@@ -520,6 +520,9 @@ impl Screen<Tty> {
                 if c.attrs().intersects(Attr::FORCE_TEXT) {
                     _ = write!(stdout, "\u{FE0E}");
                 }
+                if c.attrs().intersects(Attr::FORCE_EMOJI) {
+                    _ = write!(stdout, "\u{FE0F}");
+                }
             }
         }
         if current_uri.take().is_some() {
@@ -546,6 +549,9 @@ impl Screen<Tty> {
                 write!(stdout, "{}", c.ch()).unwrap();
                 if c.attrs().intersects(Attr::FORCE_TEXT) {
                     _ = write!(stdout, "\u{FE0E}");
+                }
+                if c.attrs().intersects(Attr::FORCE_EMOJI) {
+                    _ = write!(stdout, "\u{FE0F}");
                 }
             }
         }

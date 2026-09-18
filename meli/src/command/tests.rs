@@ -281,3 +281,68 @@ fn test_command_error_display() {
          conversations"
     );
 }
+
+/// Extra arguments must yield `WrongNumberOfArguments`, not abort the process.
+///
+/// These parsers used to declare a `min_arg`/`max_arg` that disagreed with the
+/// number of `ArgCheck::inc` calls, so `ArgCheck::finish` tripped an `assert!`
+/// (active in release too) for trailing input.
+#[test]
+fn test_arg_count_mismatch_is_reported_not_panicked() {
+    use crate::command::parser;
+
+    macro_rules! check_wrong_arg_count {
+        ($cmd:literal, $bytes:literal, $parser:path) => {{
+            let (_, res) = $parser($bytes)
+                .unwrap_or_else(|err| panic!("{:?} failed to parse at all: {err:?}", $cmd));
+            match res {
+                Ok(action) => panic!("{:?} should have been rejected, got {action:?}", $cmd),
+                Err(err) => assert!(
+                    matches!(err, CommandError::WrongNumberOfArguments { .. }),
+                    "{:?} produced {err:?}",
+                    $cmd
+                ),
+            }
+        }};
+    }
+
+    check_wrong_arg_count!("flag set junk extra", b"flag set junk extra", parser::flag);
+    check_wrong_arg_count!(
+        "flag unset junk extra",
+        b"flag unset junk extra",
+        parser::flag
+    );
+    check_wrong_arg_count!("tag add foo extra", b"tag add foo extra", parser::_tag);
+    check_wrong_arg_count!(
+        "tag remove foo extra",
+        b"tag remove foo extra",
+        parser::_tag
+    );
+    check_wrong_arg_count!(
+        "create-mailbox a b extra",
+        b"create-mailbox a b extra",
+        parser::create_mailbox
+    );
+}
+
+/// An attachment index that cannot be incremented must be rejected by the
+/// parser: the handler computes `idx + 1` and would overflow on `usize::MAX`.
+#[test]
+fn test_remove_attachment_index_overflow_is_rejected() {
+    use crate::command::parser::remove_attachment;
+
+    for cmd in [
+        "remove-attachment 18446744073709551615",
+        "remove-attachment 0",
+    ] {
+        let (_, res) = remove_attachment(cmd.as_bytes()).unwrap();
+        if cmd.ends_with("18446744073709551615") {
+            assert!(
+                matches!(res, Err(CommandError::BadValue { .. })),
+                "huge index must be rejected, got {res:?}"
+            );
+        } else {
+            assert!(res.is_ok(), "valid index must still parse: {res:?}");
+        }
+    }
+}

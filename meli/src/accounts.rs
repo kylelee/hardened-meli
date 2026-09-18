@@ -199,7 +199,18 @@ impl Account {
     ) -> Result<Self> {
         let name: Arc<str> = name.into();
         let s = settings.clone();
-        let mut backend = map.get(&settings.account().format)(
+        // An unknown/misspelled `format` is a configuration error: report it
+        // instead of panicking (validation already ran, but it lowercases the
+        // format, so this is the authoritative check).
+        let backend_creator = map
+            .get(&settings.account().format)
+            .map_err(|err| -> Error {
+                Error::new(format!(
+                    "Account `{name}` has an invalid `format` setting: {err}"
+                ))
+                .set_kind(ErrorKind::Configuration)
+            })?;
+        let mut backend = backend_creator(
             settings.account(),
             (Box::new(move |path: &str| {
                 // disjoint-capture-in-closures
@@ -1610,13 +1621,23 @@ impl Account {
                             self.mailbox_entries
                                 .entry(mailbox_hash)
                                 .and_modify(|entry| {
-                                    let prev_len =
-                                        if let MailboxStatus::Parsing(prev_len, _) = entry.status {
-                                            prev_len
+                                    // Preserve both the running done count and
+                                    // the total: the total is known at fetch
+                                    // start (the autoload path set it from the
+                                    // backend's LIST-STATUS count, and the
+                                    // manual path keeps whatever the previous
+                                    // state recorded). Discarding it here
+                                    // would zero out the gauge every batch.
+                                    let (prev_len, prev_total) =
+                                        if let MailboxStatus::Parsing(prev_len, prev_total) =
+                                            entry.status
+                                        {
+                                            (prev_len, prev_total)
                                         } else {
-                                            0
+                                            (0, 0)
                                         };
-                                    entry.status = MailboxStatus::Parsing(prev_len + len, 0);
+                                    entry.status =
+                                        MailboxStatus::Parsing(prev_len + len, prev_total);
                                 });
                             self.main_loop_handler.send(ThreadEvent::UIEvent(
                                 UIEvent::MailboxUpdate((self.hash, mailbox_hash)),

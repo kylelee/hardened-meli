@@ -200,21 +200,27 @@ impl MailView {
 
     fn init_futures(&mut self, context: &mut Context) {
         log::trace!("MailView::init_futures");
+        #[cfg(debug_assertions)]
+        let __span = crate::state::DrawSpan::enter("MailView::init_futures");
         self.theme_default = crate::conf::value(context, "mail.view.body");
         let mut pending_action = None;
         let Some(coordinates) = self.coordinates else {
+            log::debug!("init_futures: no coordinates");
             return;
         };
         let account = &mut context.accounts[&coordinates.0];
         if account.contains_key(coordinates.2) {
             {
+                log::debug!("init_futures: requesting envelope bytes");
                 match account.envelope_bytes_by_hash(coordinates.2) {
                     Ok(fut) => {
+                        log::debug!("init_futures: spawning fetch-envelope");
                         let mut handle = account.main_loop_handler.job_executor.spawn(
                             "fetch-envelope".into(),
                             fut,
                             account.is_async(),
                         );
+                        log::debug!("init_futures: fetch-envelope spawned, waiting up to 3ms");
                         let job_id = handle.job_id;
                         pending_action = if let MailViewState::Init {
                             ref mut pending_action,
@@ -224,16 +230,28 @@ impl MailView {
                         } else {
                             None
                         };
-                        if let Ok(Some(bytes_result)) = try_recv_timeout!(&mut handle.chan) {
+                        #[cfg(debug_assertions)]
+                        let got_bytes = if let Ok(Some(bytes_result)) =
+                            try_recv_timeout!(&mut handle.chan)
+                        {
+                            log::debug!("init_futures: fetch-envelope completed synchronously");
                             match bytes_result {
                                 Ok(bytes) => {
+                                    log::debug!(
+                                        "init_futures: load_bytes begin ({} bytes)",
+                                        bytes.len()
+                                    );
                                     MailViewState::load_bytes(self, bytes, context);
+                                    log::debug!("init_futures: load_bytes done");
                                 }
                                 Err(err) => {
+                                    log::debug!("init_futures: fetch-envelope errored: {err}");
                                     self.state = MailViewState::Error { err };
                                 }
                             }
+                            true
                         } else {
+                            log::debug!("init_futures: fetch-envelope still running; LoadingBody");
                             self.state = MailViewState::LoadingBody {
                                 main_loop_handler: self.main_loop_handler.clone(),
                                 handle,
@@ -243,7 +261,9 @@ impl MailView {
                             context
                                 .replies
                                 .push_back(UIEvent::StatusEvent(StatusEvent::NewJob(job_id)));
-                        }
+                            false
+                        };
+                        let _ = got_bytes;
                     }
                     Err(err) => {
                         context.replies.push_back(UIEvent::Notification {
@@ -289,26 +309,38 @@ impl MailView {
             }
         };
         let composer = match action {
-            PendingReplyAction::Reply => Box::new(Composer::reply_to_select(
-                coordinates,
-                reply_body.to_string(),
-                context,
-            )),
-            PendingReplyAction::ReplyToAuthor => Box::new(Composer::reply_to_author(
-                coordinates,
-                reply_body.to_string(),
-                context,
-            )),
-            PendingReplyAction::ReplyToAll => Box::new(Composer::reply_to_all(
-                coordinates,
-                reply_body.to_string(),
-                context,
-            )),
+            PendingReplyAction::Reply => {
+                Composer::reply_to_select(coordinates, reply_body.to_string(), context)
+            }
+            PendingReplyAction::ReplyToAuthor => {
+                Composer::reply_to_author(coordinates, reply_body.to_string(), context)
+            }
+            PendingReplyAction::ReplyToAll => {
+                Composer::reply_to_all(coordinates, reply_body.to_string(), context)
+            }
             PendingReplyAction::ForwardAttachment => {
-                Box::new(Composer::forward(coordinates, bytes, env, true, context))
+                Ok(Composer::forward(coordinates, bytes, env, true, context))
             }
             PendingReplyAction::ForwardInline => {
-                Box::new(Composer::forward(coordinates, bytes, env, false, context))
+                Ok(Composer::forward(coordinates, bytes, env, false, context))
+            }
+        };
+        let composer = match composer {
+            Ok(composer) => Box::new(composer),
+            Err(err) => {
+                let kind = err.kind;
+                let err_string = format!(
+                    "Could not open reply: envelope {} is no longer available: {err}",
+                    coordinates.2
+                );
+                log::error!("{err_string}");
+                context.replies.push_back(UIEvent::Notification {
+                    title: Some("Could not open reply".into()),
+                    source: Some(err),
+                    body: err_string.into(),
+                    kind: Some(NotificationType::Error(kind)),
+                });
+                return;
             }
         };
 
@@ -339,15 +371,6 @@ impl MailView {
             return;
         };
         let account = &context.accounts[&coordinates.0];
-        if !account.contains_key(coordinates.2) {
-            context.replies.push_back(UIEvent::Notification {
-                title: None,
-                source: None,
-                body: "Email not found".into(),
-                kind: None,
-            });
-            return;
-        }
         // First retrieve user's identities, and remove them from the final address
         // list.
         let mut seen = {
@@ -357,7 +380,15 @@ impl MailView {
             ret.insert(account.settings.account().main_identity_address());
             ret
         };
-        let envelope: EnvelopeRef = account.collection.get_env(coordinates.2);
+        let Some(envelope) = account.collection.get_env(coordinates.2) else {
+            context.replies.push_back(UIEvent::Notification {
+                title: None,
+                source: None,
+                body: "Email not found".into(),
+                kind: None,
+            });
+            return;
+        };
 
         let mut entries: IndexMap<Card, (Card, String)> = IndexMap::default();
         for addr in envelope
@@ -467,6 +498,8 @@ impl MailView {
 
 impl Component for MailView {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        #[cfg(debug_assertions)]
+        let __draw_span = crate::state::DrawSpan::enter("MailView");
         if !self.is_dirty() {
             return;
         }
@@ -493,7 +526,11 @@ impl Component for MailView {
         {
             {
                 let account = &mut context.accounts[&coordinates.0];
-                if !account.collection.get_env(coordinates.2).is_seen() {
+                if account
+                    .collection
+                    .get_env(coordinates.2)
+                    .is_some_and(|env| !env.is_seen())
+                {
                     if let Err(err) = account.set_flags(
                         coordinates.2.into(),
                         coordinates.1,
@@ -838,17 +875,28 @@ impl Component for MailView {
                      * event to arrive */
                     return true;
                 }
-                let envelope: EnvelopeRef = account.collection.get_env(coordinates.2);
+                let Some(envelope) = account.collection.get_env(coordinates.2) else {
+                    /* The envelope has been renamed or removed, so wait for the
+                     * appropriate event to arrive */
+                    log::error!(
+                        "Could not perform mailing list action: envelope {} no longer exists",
+                        coordinates.2
+                    );
+                    return true;
+                };
                 let detect = list_management::ListActions::detect(&envelope);
                 if let Some(ref actions) = detect {
                     match e {
                         MailingListAction::ListPost if actions.post.is_some() => {
                             /* open composer */
                             let mut failure = true;
-                            if let list_management::ListAction::Email(list_post_addr) =
-                                actions.post.as_ref().unwrap()[0]
+                            // `post` can be `Some(empty)` for a malformed
+                            // `List-Post` value: take the first entry
+                            // fallibly instead of indexing `[0]`.
+                            if let Some(list_management::ListAction::Email(list_post_addr)) =
+                                actions.post.as_deref().and_then(|p| p.first())
                             {
-                                if let Ok(mailto) = Mailto::try_from(list_post_addr) {
+                                if let Ok(mailto) = Mailto::try_from(*list_post_addr) {
                                     let draft: Draft = mailto.into();
                                     let mut composer =
                                         Composer::with_account(coordinates.0, context);
@@ -871,9 +919,9 @@ impl Component for MailView {
                         }
                         MailingListAction::ListUnsubscribe if actions.unsubscribe.is_some() => {
                             /* Ask for confirmation before proceeding with an action */
-                            if let Some(action) =
-                                unsubscribe_action(actions.unsubscribe.as_ref().unwrap())
-                            {
+                            if let Some(action) = unsubscribe_action(
+                                actions.unsubscribe.as_deref().unwrap_or_default(),
+                            ) {
                                 let entry =
                                     format!("List-Unsubscribe: {}", action.target_description());
                                 self.pending_unsubscribe = Some(action);
@@ -1014,7 +1062,11 @@ impl Component for MailView {
                             .envelope_view
                             .commands
                     ) {
-                        envelope_view_map.retain(|_, shortcut| shortcut != &command.shortcut);
+                        // Shadow only the colliding key (see `Listing::shortcuts`).
+                        envelope_view_map.retain(|_, shortcut| {
+                            shortcut.0.retain(|k| k != &command.shortcut);
+                            !shortcut.0.is_empty()
+                        });
                     }
                 }
             }

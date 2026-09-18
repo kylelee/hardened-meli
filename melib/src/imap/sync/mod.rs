@@ -233,8 +233,12 @@ impl ImapConnection {
         } else {
             crate::imap::email::common_attributes_light()
         };
-        self.send_command(CommandBody::fetch(lastseenuid + 1.., attributes, true)?)
-            .await?;
+        self.send_command(CommandBody::fetch(
+            lastseenuid.saturating_add(1)..,
+            attributes,
+            true,
+        )?)
+        .await?;
         self.read_response(&mut response, required_responses)
             .await?;
         let (_, mut v, _) = protocol_parser::fetch_responses(&response)?;
@@ -577,7 +581,7 @@ impl ImapConnection {
                 crate::imap::email::common_attributes_light()
             };
             self.send_command(CommandBody::Fetch {
-                sequence_set: ((lastseenuid + 1)..).try_into()?,
+                sequence_set: ((lastseenuid.saturating_add(1))..).try_into()?,
                 macro_or_item_names,
                 uid: true,
                 modifiers: vec![FetchModifier::ChangedSince(cached_highestmodseq.into())],

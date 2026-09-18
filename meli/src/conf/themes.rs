@@ -1816,9 +1816,11 @@ pub fn is_cyclic(theme: &Theme) -> std::result::Result<(), String> {
                         let course = match (course, field) {
                             (Course::ColorAliasFg, ColorField::LikeSelf) => Course::Fg,
                             (Course::ColorAliasBg, ColorField::LikeSelf) => Course::Bg,
-                            (_, ColorField::LikeSelf) => unsafe {
-                                std::hint::unreachable_unchecked()
-                            },
+                            (_, ColorField::LikeSelf) => {
+                                unreachable!(
+                                    "only `*_alias_fg`/`*_alias_bg` courses can link `LikeSelf`"
+                                )
+                            }
                             (_, ColorField::Fg) => Course::Fg,
                             (_, ColorField::Bg) => Course::Bg,
                         };

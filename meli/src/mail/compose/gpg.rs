@@ -187,11 +187,16 @@ impl Component for KeySelection {
                 {
                     let mut main_handle_ref = &mut (*main_handle);
                     let is_main = *id == main_handle_ref.job_id;
-                    let other_handle_ref_opt = other_handles.iter_mut().find(|h| h.job_id == *id);
+                    let Some(other_handle_ref) = other_handles.iter_mut().find(|h| h.job_id == *id)
+                    else {
+                        // Neither the main handle nor an auxiliary one: a
+                        // stale job-finished event, nothing to do.
+                        return true;
+                    };
                     let handle = if is_main {
                         &mut main_handle_ref
                     } else {
-                        &mut (*other_handle_ref_opt.unwrap())
+                        other_handle_ref
                     };
                     match handle.chan.try_recv() {
                         Err(_) => { /* Job was canceled */ }

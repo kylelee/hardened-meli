@@ -55,7 +55,7 @@ use melib::{
     backends::{
         AccountHash, BackendMailbox, Mailbox, MailboxHash, MailboxPermissions, SpecialUsageMailbox,
     },
-    Result,
+    Result, ToggleFlag,
 };
 
 use crate::{
@@ -66,6 +66,7 @@ use crate::{
         CompactListing, ConversationsListing, Listing, ListingTrait, PlainListing, ThreadListing,
     },
     mail::view::{ThreadView, ThreadViewFocus},
+    mail::Composer,
     terminal::{Area, Attr, CellBuffer, Color, Screen, Virtual},
     types::UIEvent,
     utilities::{Pager, Selector, StatusBar, Tabbed, UIConfirmationDialog},
@@ -316,7 +317,12 @@ impl BackendMailbox for TestMailbox {
 /// process-global, so parallel tests must not race each other by pointing
 /// them at tempdirs that get deleted while another test constructs its
 /// `Context` (which reads `MELI_CONFIG`/XDG vars).
-fn shared_test_home() -> &'static tempfile::TempDir {
+///
+/// Other test modules (e.g. `accounts::tests`) reuse this accessor for the
+/// same reason: one process-wide static home means no env flipping between
+/// parallel tests.
+#[cfg(test)]
+pub(crate) fn shared_test_home() -> &'static tempfile::TempDir {
     static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
     HOME.get_or_init(|| {
         let tempdir = tempfile::tempdir().unwrap();
@@ -494,8 +500,8 @@ fn draw_selection_row_batch(
     area: Area,
     context: &mut Context,
 ) {
-    context.settings.shortcuts.listing.select_entry = Key::Char('V');
-    context.settings.shortcuts.listing.scroll_down = Key::Down;
+    context.settings.shortcuts.listing.select_entry = Key::Char('V').into();
+    context.settings.shortcuts.listing.scroll_down = Key::Down.into();
     listing.draw(grid, area, context);
     listing.set_movement(PageMovement::Down(1));
     listing.draw(grid, area, context);
@@ -599,7 +605,7 @@ fn open_entry_under_cursor(
     grid: &mut CellBuffer,
     area: Area,
 ) {
-    context.settings.shortcuts.listing.open_entry = Key::Char('\n');
+    context.settings.shortcuts.listing.open_entry = Key::Char('\n').into();
     listing.draw(grid, area, context);
     let mut event = UIEvent::Input(Key::Char('\n'));
     assert!(
@@ -798,7 +804,7 @@ fn golden_conversations_entry_thread_split() {
 fn golden_conversations_entry_close_no_residue() {
     let mut ctx = mock_context();
     ctx.settings.listing.index_style = IndexStyle::Conversations;
-    ctx.settings.shortcuts.listing.exit_entry = Key::Char('i');
+    ctx.settings.shortcuts.listing.exit_entry = Key::Char('i').into();
     let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
     insert_solo_mail(&ctx, inbox_hash);
 
@@ -893,6 +899,72 @@ fn golden_plain_listing_row_batch() {
     let area = screen.area();
     listing.draw(screen.grid_mut(), area, &mut ctx);
     record_or_assert("listing_plain_row_batch", screen.grid());
+}
+
+/// A cached listing row whose envelope has since been removed from the
+/// collection is exactly the stale-hash race `Collection::get_env` now reports
+/// as `None`. Highlighting such a row (which resolves the cursor to a cached
+/// envelope hash and then looks it up) must return early instead of
+/// dereferencing a dead guard, and must not paint a fabricated envelope in its
+/// place.
+#[test]
+fn stale_listing_row_is_skipped_without_fabricating_content() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+
+    // Each listing gets its own screen: the rows of one listing must not be
+    // compared against a grid another listing drew over.
+    let mut plain = PlainListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx);
+    let mut thread = ThreadListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx);
+    let mut plain_screen = golden_screen(&ctx, 80, 24);
+    let mut thread_screen = golden_screen(&ctx, 80, 24);
+    let plain_area = plain_screen.area();
+    let thread_area = thread_screen.area();
+    plain.draw(plain_screen.grid_mut(), plain_area, &mut ctx);
+    thread.draw(thread_screen.grid_mut(), thread_area, &mut ctx);
+
+    let non_empty_rows = |grid: &CellBuffer| {
+        (0..grid.rows)
+            .filter(|&y| !grid_row_text(grid, y).trim().is_empty())
+            .count()
+    };
+    let plain_rows_before = non_empty_rows(plain_screen.grid());
+    let thread_rows_before = non_empty_rows(thread_screen.grid());
+
+    // Drop one envelope straight from the collection, leaving both listings'
+    // cached rows pointing at a hash that no longer resolves.
+    let stale_hash = {
+        let account = ctx.accounts.get(&account_hash).unwrap();
+        *account
+            .collection
+            .get_mailbox(inbox_hash)
+            .iter()
+            .next()
+            .unwrap()
+    };
+    ctx.accounts[&account_hash]
+        .collection
+        .remove(stale_hash, inbox_hash);
+    assert!(!ctx.accounts[&account_hash].contains_key(stale_hash));
+
+    // `highlight_line` for every row, including the stale one: it must not
+    // panic, and must not add or drop a drawn row (only cell attributes may
+    // change, e.g. the flagged column of a live row).
+    for idx in 0..8 {
+        plain.highlight_line(plain_screen.grid_mut(), plain_area, idx, &ctx);
+        thread.highlight_line(thread_screen.grid_mut(), thread_area, idx, &ctx);
+    }
+    assert_eq!(
+        non_empty_rows(plain_screen.grid()),
+        plain_rows_before,
+        "highlighting a stale plain-listing row must not fabricate a row"
+    );
+    assert_eq!(
+        non_empty_rows(thread_screen.grid()),
+        thread_rows_before,
+        "highlighting a stale thread-listing row must not fabricate a row"
+    );
 }
 
 /// `CompactListing` with a selected row under the cursor.
@@ -1046,7 +1118,7 @@ fn golden_shortcuts_help_overlay() {
     let mut ctx = mock_context();
     // Pin the shortcut this test drives so that a `MELI_CONFIG` template
     // drift cannot change what the key means.
-    ctx.settings.shortcuts.general.toggle_help = Key::Char('?');
+    ctx.settings.shortcuts.general.toggle_help = Key::Char('?').into();
     let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
     insert_golden_mails(&ctx, inbox_hash);
 
@@ -1084,7 +1156,7 @@ fn golden_listing_sidebar_focus_frame() {
         let mut ctx = mock_context();
         // Pin the shortcut this test drives so that a `MELI_CONFIG` template
         // drift cannot change what the key means.
-        ctx.settings.shortcuts.listing.focus_left = Key::Left;
+        ctx.settings.shortcuts.listing.focus_left = Key::Left.into();
         let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
         insert_golden_mails(&ctx, inbox_hash);
 
@@ -1215,9 +1287,9 @@ fn golden_listing_frame_inner_content() {
 #[test]
 fn golden_listing_status_page_inside_frame() {
     let mut ctx = mock_context();
-    ctx.settings.shortcuts.listing.focus_left = Key::Left;
-    ctx.settings.shortcuts.listing.focus_right = Key::Right;
-    ctx.settings.shortcuts.listing.scroll_up = Key::Up;
+    ctx.settings.shortcuts.listing.focus_left = Key::Left.into();
+    ctx.settings.shortcuts.listing.focus_right = Key::Right.into();
+    ctx.settings.shortcuts.listing.scroll_up = Key::Up.into();
     let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
     insert_golden_mails(&ctx, inbox_hash);
 
@@ -1225,7 +1297,7 @@ fn golden_listing_status_page_inside_frame() {
     listing.realize(None, &mut ctx);
     pump_replies(&mut listing, &mut ctx);
     for key in [Key::Left, Key::Up, Key::Right] {
-        let mut event = UIEvent::Input(key);
+        let mut event = UIEvent::Input(key.clone());
         listing.process_event(&mut event, &mut ctx);
     }
 
@@ -1478,4 +1550,1045 @@ fn golden_tz_determinism_pin() {
         "2026-01-01 00:00:00",
         "local-time rendering must be pinned to UTC for the golden corpus"
     );
+}
+
+// ----------------------------------------------------------------------------
+// statusbar-gauge-spinner corpus (T5).
+//
+// Behaviour assertions are made on the rendered row text instead of the
+// StatusBar's dirty flag — events that do not match the focused mailbox
+// can bubble back from the StatusBar without ever flipping it.
+// ----------------------------------------------------------------------------
+
+use crate::{accounts::MailboxStatus, jobs::JobId};
+
+/// Read the bottom row of a freshly drawn status-bar screen as plain
+/// text. The status bar is always the last row of the frame in
+/// `State`'s real layout, and the T5 corpus draws directly into the
+/// same area to assert layout decisions.
+/// Read the status-bar content row of a freshly drawn status-bar screen.
+/// The strip is framed (rounded border ring), so its last row is the
+/// frame's lower border — the content sits one row above it.
+fn statusbar_row_text(grid: &CellBuffer) -> String {
+    let content_row = grid.rows.saturating_sub(2);
+    grid_row_text(grid, content_row)
+}
+
+/// UT1: focus injection. Feeding `FocusMailbox(acc, mb)` followed by a
+/// matching `MailboxUpdate`/`AccountStatusChange` must update the
+/// rendered row (positive); a non-matching event after a focus must
+/// leave the row text unchanged (negative).
+#[test]
+fn statusbar_focus_injection() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    // Baseline: the tabbed listing auto-reports focus during the initial
+    // reply pump (Tabbed's `push_focus_updates` fires on the initial
+    // cursor sync), so the row already carries the status icon and the
+    // mail counts.
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let baseline = statusbar_row_text(screen.grid());
+    assert!(
+        baseline.contains('\u{1F4E7}'),
+        "auto-reported focus must render the mail counts, got {baseline:?}"
+    );
+    assert!(
+        baseline.contains('\u{1F4EB}'),
+        "idle focused mailbox must render the fixed 📫 icon, got {baseline:?}"
+    );
+
+    // No-focus negative: a container without a listing child reports no
+    // `status_watch`, so its row must carry no chip/label.
+    let mut bare = StatusBar::new(
+        &ctx,
+        Box::new(Tabbed::new(vec![Box::new(ContactList::new(&ctx))], &ctx)),
+    );
+    bare.realize(None, &mut ctx);
+    pump_replies(&mut bare, &mut ctx);
+    let mut bare_screen = golden_screen(&ctx, 80, 24);
+    let bare_area = bare_screen.area();
+    bare.draw(bare_screen.grid_mut(), bare_area, &mut ctx);
+    let bare_row = statusbar_row_text(bare_screen.grid());
+    assert!(
+        !bare_row.contains('\u{1F4E7}')
+            && !bare_row.contains('\u{1F4E9}')
+            && !bare_row.contains('\u{1F4EB}'),
+        "no-listing container must not render a status icon or counts, got {bare_row:?}"
+    );
+
+    // Inject focus on INBOX.
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let focused_row = statusbar_row_text(screen.grid());
+    assert!(
+        focused_row.contains('\u{1F4E7}'),
+        "focused row should carry the mail counts, got {focused_row:?}"
+    );
+    assert!(
+        focused_row.contains('\u{1F4E9}'),
+        "focused row should carry the unread-mail glyph, got {focused_row:?}"
+    );
+
+    // A MailboxUpdate for a different mailbox must not change the row.
+    let (_account_hash_2, _inbox_hash_2, archive_hash_2) = register_two_mailboxes(&mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::MailboxUpdate((account_hash, archive_hash_2)),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let negative_row = statusbar_row_text(screen.grid());
+    assert_eq!(
+        negative_row, focused_row,
+        "non-matching MailboxUpdate must not change the status bar row"
+    );
+
+    // AccountStatusChange for the second (non-focused) account must also
+    // be a no-op. The bogus-account variant crashes upstream callers
+    // (the listing rejects unknown hashes), so the negative case uses
+    // a second valid account hash.
+    let (_account_hash_3, _, _) = register_two_mailboxes(&mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::AccountStatusChange(_account_hash_3, None),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    assert_eq!(
+        statusbar_row_text(screen.grid()),
+        focused_row,
+        "non-matching AccountStatusChange must not change the status bar row"
+    );
+}
+
+/// UT8: status-icon branch. An online focused account renders the fixed
+/// idle `📫`; an account in an error state renders `✘` instead (the
+/// mock's default `is_online` is `Uninit`, which also renders `📫`).
+#[test]
+fn statusbar_chip_branch() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    ctx.accounts.get_mut(&account_hash).unwrap().is_online = crate::accounts::IsOnline::True;
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains('\u{1F4EB}'),
+        "online idle mailbox must render the fixed 📫 icon, got {row:?}"
+    );
+
+    // Offline (Err): the icon must carry the ✘ glyph instead.
+    ctx.accounts.get_mut(&account_hash).unwrap().is_online = crate::accounts::IsOnline::Err {
+        value: melib::error::Error::new("offline"),
+        retries: 1,
+    };
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains('\u{2718}'),
+        "offline mailbox must render the ✘ icon, got {row:?}"
+    );
+    assert!(
+        !row.contains('\u{1F4EB}'),
+        "offline mailbox must not render the idle 📫 icon, got {row:?}"
+    );
+}
+
+/// UT9: mailbox-status carousel. While refresh work is in flight the
+/// status icon keeps cycling even with the centre gauge active (the
+/// carousel is the activity indicator, the gauge the progress bar);
+/// once the last job finishes and the mailbox is `Available`, the icon
+/// settles on the fixed idle `📫`.
+#[test]
+fn statusbar_carousel_runs_with_gauge_and_stops() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    // A custom single-frame carousel keeps the frame glyph (`◑`)
+    // distinct from every other status-bar glyph, so its presence and
+    // absence can be asserted by row text without ambiguity.
+    ctx.settings.terminal.progress_spinner_sequence =
+        Some(crate::conf::terminal::ProgressSpinnerSequence::Custom {
+            frames: vec!["◑".to_string()],
+            interval_ms: 80,
+        });
+    // Provide a non-zero total so the gauge is active.
+    ctx.accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .mailbox_entries
+        .get_mut(&inbox_hash)
+        .unwrap()
+        .status = MailboxStatus::Parsing(12, 250);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    let job_id = JobId::new();
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::NewJob(job_id)),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains('◑'),
+        "carousel must keep cycling while the gauge is active, got {row:?}"
+    );
+
+    // Finish the job and flip the mailbox to Available: the carousel
+    // stops and the icon settles on the fixed idle glyph.
+    ctx.accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .mailbox_entries
+        .get_mut(&inbox_hash)
+        .unwrap()
+        .status = MailboxStatus::Available;
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::JobFinished(job_id)),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains('\u{1F4EB}') && !row.contains('◑'),
+        "idle mailbox must settle on the fixed 📫 icon once work finishes, \
+         got {row:?}"
+    );
+}
+
+/// UT6: `ascii_drawing=true`. The whole rendered row must be ASCII; no
+/// emoji envelope, no ✓/✘ glyphs.
+#[test]
+fn statusbar_ascii_drawing_is_all_ascii() {
+    let mut ctx = mock_context();
+    ctx.settings.terminal.ascii_drawing = true;
+    // ascii_drawing disables emoji rendering entirely.
+    ctx.settings.terminal.emoji_capable = ToggleFlag::InternalVal(false);
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    let account = ctx.accounts.get_mut(&account_hash).unwrap();
+    account.settings.account.format = "imap".to_string();
+    account.is_online = crate::accounts::IsOnline::True;
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    // The rounded frame picks its border set from the grid flag (mirrors
+    // the runtime init that copies the setting into the buffer).
+    screen.grid_mut().ascii_drawing = true;
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.is_ascii(),
+        "ascii_drawing row must contain only ASCII chars, got {row:?}"
+    );
+    // ASCII substitutes: idle status icon `#` (offline `!`), counts as
+    // `new:N unread:N total:N`, envelope/carousel emoji dropped.
+    assert!(
+        row.contains("#"),
+        "idle status icon must fall back to '#' in ascii_drawing, got {row:?}"
+    );
+    assert!(
+        row.contains("new:"),
+        "mail counts must fall back to ASCII labels in ascii_drawing, got {row:?}"
+    );
+    assert!(
+        !row.contains('\u{2713}') && !row.contains('\u{1F4E9}'),
+        "ascii_drawing must drop the ✓ and envelope glyph, got {row:?}"
+    );
+}
+
+/// UT7: hint keys are taken from the user's shortcut binding. Changing
+/// `shortcuts.listing.scroll_up` (which also lives in the `general`
+/// catch-all as a fallback) changes the rendered `(key:label)` segment
+/// accordingly — the focused view's section wins, with `general` only
+/// filling in for fields the focused view doesn't expose.
+#[test]
+fn statusbar_hints_follow_keybinding() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    let mut screen = golden_screen(&ctx, 200, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    // The key glyph must render green: scan the content row's cells for
+    // the `?` of `(?:Help)` (the only `?` in the strip) — cell scanning
+    // avoids char-index/column drift from wide glyphs and the frame's
+    // border columns.
+    let y = screen.grid().rows.saturating_sub(2);
+    let help_col = screen
+        .grid()
+        .bounds_iter(area.nth_row(y))
+        .flatten()
+        .find(|(x, yy)| screen.grid()[(*x, *yy)].ch() == '?')
+        .map(|(x, _)| x)
+        .expect("help key glyph '?' must be on the status row");
+    assert_eq!(
+        screen.grid()[(help_col, y)].fg(),
+        Color::Green,
+        "hint key glyphs must render green, got row {row:?}"
+    );
+    assert!(
+        row.contains("?:Help") && row.contains("(<Up>/k:Scroll Up)"),
+        "default hints must render as `(?:Help)` and `(<Up>/k:Scroll Up)`, got {row:?}"
+    );
+    // Rebind the listing section — the focused view's section wins
+    // over the `general` catch-all even though both define `scroll_up`.
+    ctx.settings.shortcuts.listing.scroll_up = Key::Char('j').into();
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("(j:Scroll Up)") && !row.contains("Up:Scroll Up"),
+        "rebound listing.scroll_up must surface as `(j:Scroll Up)`, got {row:?}"
+    );
+}
+
+/// `UT7b`: hint pickers only render for fields the focused view exposes.
+/// On the composing view, `composing.close` exists, so the hint must
+/// include `(Esc:Close View)`; on the contact-list view, `focus_left`
+/// is not in `ContactListShortcuts`, so `Switch Left View` must not
+/// appear in the hint.
+#[test]
+fn statusbar_hints_follow_view_section() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let composer = Composer::with_account(account_hash, &ctx);
+    let tabbed = Tabbed::new(vec![Box::new(composer)], &ctx);
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    let mut screen = golden_screen(&ctx, 200, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("(<Esc>:Close View)"),
+        "composing view must surface `composing.close` as `(<Esc>:Close View)`, got {row:?}"
+    );
+
+    // ContactList has no `focus_left` / `focus_right` — the
+    // `Switch Left/Right View` hints must not appear.
+    let bare = StatusBar::new(
+        &ctx,
+        Box::new(Tabbed::new(vec![Box::new(ContactList::new(&ctx))], &ctx)),
+    );
+    let mut bare = bare;
+    bare.realize(None, &mut ctx);
+    pump_replies(&mut bare, &mut ctx);
+    let mut screen2 = golden_screen(&ctx, 200, 24);
+    let area2 = screen2.area();
+    bare.draw(screen2.grid_mut(), area2, &mut ctx);
+    let row2 = statusbar_row_text(screen2.grid());
+    assert!(
+        !row2.contains("Switch Left View") && !row2.contains("Switch Right View"),
+        "contact-list view must drop Switch Left/Right View hints (no binding), got {row2:?}"
+    );
+}
+
+/// Layered quit: on a non-pinned tab (a composer opened via `Tab(New)`),
+/// the quit binding must close that tab through the `Tab(Kill)` reply
+/// path instead of reaching the application-level exit.
+#[test]
+fn quit_key_closes_unpinned_tab() {
+    use crate::command::{actions::Action, TabAction};
+
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let mut tabbed = Tabbed::new(
+        vec![
+            Box::new(Listing::new(&mut ctx)),
+            Box::new(ContactList::new(&ctx)),
+        ],
+        &ctx,
+    );
+    tabbed.realize(None, &mut ctx);
+    pump_replies(&mut tabbed, &mut ctx);
+    let composer = Composer::with_account(account_hash, &ctx);
+    let mut event = UIEvent::Action(Action::Tab(TabAction::New(Some(Box::new(composer)))));
+    assert!(tabbed.process_event(&mut event, &mut ctx));
+    pump_replies(&mut tabbed, &mut ctx);
+    let before = tabbed.children().len();
+    assert_eq!(before, 3, "precondition: composer tab added");
+
+    let mut event = UIEvent::Input(Key::Char('q'));
+    assert!(
+        tabbed.process_event(&mut event, &mut ctx),
+        "quit on a non-pinned tab must be consumed by Tabbed"
+    );
+    pump_replies(&mut tabbed, &mut ctx);
+    assert_eq!(
+        tabbed.children().len(),
+        before - 1,
+        "quit must close the non-pinned composer tab"
+    );
+}
+
+/// Layered quit, dirty draft: the quit binding must never discard unsaved
+/// work. The first quit key is consumed by the composer (it opens the
+/// unsaved-changes dialog), and a second quit key — which the dialog does
+/// not consume — must be vetoed by the child's `can_quit_cleanly` instead
+/// of closing the tab and losing the draft. Regression: `Tabbed`'s quit
+/// arm used to treat "child returned false" as "close the tab", so
+/// pressing `q` twice (or `Esc` twice, or `Esc` from the recipient /
+/// attachment sub-views) silently discarded the draft.
+#[test]
+fn quit_key_never_discards_dirty_draft() {
+    use crate::command::{actions::Action, TabAction};
+
+    for key in [Key::Char('q'), Key::Esc] {
+        let mut ctx = mock_context();
+        let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+        insert_golden_mails(&ctx, inbox_hash);
+        let mut tabbed = Tabbed::new(
+            vec![
+                Box::new(Listing::new(&mut ctx)),
+                Box::new(ContactList::new(&ctx)),
+            ],
+            &ctx,
+        );
+        tabbed.realize(None, &mut ctx);
+        pump_replies(&mut tabbed, &mut ctx);
+        let mut composer = Composer::with_account(account_hash, &ctx);
+        composer.set_has_changes_for_tests(true);
+        let mut event = UIEvent::Action(Action::Tab(TabAction::New(Some(Box::new(composer)))));
+        assert!(tabbed.process_event(&mut event, &mut ctx));
+        pump_replies(&mut tabbed, &mut ctx);
+        let before = tabbed.children().len();
+        assert_eq!(before, 3, "precondition: dirty composer tab added");
+
+        // Every quit key press, however many, must leave the tab (and the
+        // draft) alone: only the dialog's own x/y choices may close it.
+        for round in 0..3 {
+            let mut event = UIEvent::Input(key.clone());
+            let _ = tabbed.process_event(&mut event, &mut ctx);
+            pump_replies(&mut tabbed, &mut ctx);
+            assert_eq!(
+                tabbed.children().len(),
+                before,
+                "{key:?} on round {round}: quit must not discard the dirty draft"
+            );
+        }
+    }
+}
+
+/// Layered quit, top level: in Normal mode, when the focused pinned view
+/// does not consume the quit binding, `StatusBar` must turn it into a
+/// `UIEvent::Exit` reply for the main loop (the app-level exit path)
+/// instead of dropping the key.
+#[test]
+fn statusbar_quit_unconsumed_requests_exit() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let tabbed = Tabbed::new(
+        vec![
+            Box::new(Listing::new(&mut ctx)),
+            Box::new(ContactList::new(&ctx)),
+        ],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+
+    for key in [Key::Esc, Key::Char('q')] {
+        let mut event = UIEvent::Input(key.clone());
+        assert!(status_bar.process_event(&mut event, &mut ctx));
+        assert!(
+            ctx.replies().iter().any(|r| matches!(r, UIEvent::Exit)),
+            "{key:?} must surface as a UIEvent::Exit request when no view consumes it"
+        );
+    }
+}
+
+/// The help overlay closes on any quit-group key (not just `Esc`):
+/// with the overlay open, `q` must toggle it off and be consumed, and
+/// no `UIEvent::Exit` may surface — the app-level exit path only sees
+/// quit keys once the overlay (and every sub-view) is gone.
+#[test]
+fn quit_key_closes_help_overlay() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let tabbed = Tabbed::new(vec![Box::new(Listing::new(&mut ctx))], &ctx);
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+
+    for key in [Key::Char('q'), Key::Esc] {
+        // Open the help overlay.
+        let mut event = UIEvent::Input(Key::Char('?'));
+        assert!(
+            status_bar.process_event(&mut event, &mut ctx),
+            "toggle_help must open the overlay"
+        );
+        // Either quit key closes the overlay instead of leaking to the
+        // top-level exit path.
+        let mut event = UIEvent::Input(key.clone());
+        assert!(
+            status_bar.process_event(&mut event, &mut ctx),
+            "{key:?} must be consumed by the help overlay"
+        );
+        assert!(
+            !ctx.replies().iter().any(|r| matches!(r, UIEvent::Exit)),
+            "{key:?} with the help overlay open must not request app exit"
+        );
+    }
+}
+
+/// The framed status strip must keep both side border columns intact at
+/// every terminal width (the emoji-presentation cluster fix keeps the
+/// grid's column accounting in sync with the terminal, so the content
+/// never visually overruns the right frame border).
+#[test]
+fn statusbar_frame_columns_intact_at_all_widths() {
+    for cols in (114usize..=200).chain([79, 80, 100]) {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+        insert_golden_mails(&ctx, inbox_hash);
+        ctx.settings.shortcuts.listing.scroll_up = Key::Char('j').into();
+        ctx.settings.shortcuts.listing.scroll_down = Key::Char('k').into();
+        let listing = Listing::new(&mut ctx);
+        let tabbed = Tabbed::new(
+            vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+            &ctx,
+        );
+        let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+        status_bar.realize(None, &mut ctx);
+        pump_replies(&mut status_bar, &mut ctx);
+        let mut screen = golden_screen(&ctx, cols, 10);
+        let area = screen.area();
+        status_bar.draw(screen.grid_mut(), area, &mut ctx);
+        let y = screen.grid().rows - 2;
+        let last = screen.grid()[(cols - 1, y)].ch();
+        let second_last = screen.grid()[(cols - 2, y)].ch();
+        let first = screen.grid()[(0, y)].ch();
+        println!("cols={cols} first={first:?} second_last={second_last:?} last={last:?}");
+        assert_eq!(first, '\u{2502}', "left border missing at cols={cols}");
+        assert_eq!(last, '\u{2502}', "right border missing at cols={cols}");
+    }
+}
+
+/// `UT7c`: with a thread open, the scroll hints must come from the
+/// `thread-view` section — the section `ThreadView::process_event`
+/// actually dispatches on — not from the embedded mail view's `pager`
+/// section, which also defines `scroll_up`/`scroll_down` and used to
+/// shadow thread-view rebinds in the hints.
+#[test]
+fn statusbar_hints_follow_thread_view_section() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_thread_mails(&ctx, inbox_hash);
+    let mut view =
+        golden_two_mail_thread_view(&mut ctx, account_hash, inbox_hash, ThreadViewFocus::None);
+    // Drive the expanded mail view to `Loaded`: `MailViewState::shortcuts`
+    // is empty until the body bytes arrive, and the pager section (which
+    // also defines `scroll_up`) only exists once the EnvelopeView does —
+    // this is the state where the pager used to shadow thread-view
+    // rebinds in the hints.
+    view.load_expanded_entry_for_tests(GOLDEN_REPLY_MAIL.to_vec(), &mut ctx);
+    let mut status_bar = StatusBar::new(&ctx, Box::new(view));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    let mut screen = golden_screen(&ctx, 200, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    // Rebind both contenders: the thread-view section (the dispatcher at
+    // split focus) and the pager section (the former shadow). The
+    // rendered hint must follow the thread-view binding.
+    ctx.settings.shortcuts.thread_view.scroll_up = Key::Char('k').into();
+    ctx.settings.shortcuts.pager.scroll_up = Key::Char('p').into();
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("(k:Scroll Up)") && !row.contains("p:Scroll Up"),
+        "thread view must surface thread_view.scroll_up, not the pager's, got {row:?}"
+    );
+}
+
+/// UT10: status-bar counts come from the account's collection (the same
+/// envelopes the listing renders), not the backend's mailbox metadata.
+/// After inserting the golden corpus (3 mails, 1 unseen) the row must
+/// show `📨0 📩1 ✉️3`, and a further unseen arrival delivered via
+/// `MailboxUpdate` must surface as `📨1 📩2` — the repeated
+/// `FocusMailbox` co-emission that rides along every status refresh
+/// must not re-baseline the floor.
+#[test]
+fn statusbar_counts_from_collection() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("📨 0") && row.contains("📩 1") && row.contains("📧 3"),
+        "counts must mirror the collection (1 unseen of 3), got {row:?}"
+    );
+    // A new unseen arrival: flip a seen envelope and deliver the same
+    // MailboxUpdate the backend would send (the listing co-emits another
+    // FocusMailbox for the same mailbox while handling it).
+    let seen_hash = {
+        let account = ctx.accounts.get(&account_hash).unwrap();
+        account
+            .collection
+            .get_mailbox(inbox_hash)
+            .iter()
+            .copied()
+            .find(|h| {
+                account
+                    .collection
+                    .get_env(*h)
+                    .is_some_and(|env| env.is_seen())
+            })
+            .expect("golden corpus contains seen mails")
+    };
+    if let Some(mut env) = ctx
+        .accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .collection
+        .get_env_mut(seen_hash)
+    {
+        env.set_unseen();
+    } else {
+        panic!("seen_hash {seen_hash} vanished from the golden collection");
+    }
+    status_bar.process_event(
+        &mut UIEvent::MailboxUpdate((account_hash, inbox_hash)),
+        &mut ctx,
+    );
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("📨 1") && row.contains("📩 2"),
+        "a new unseen arrival must surface in the 📨 counter even with a \
+         repeated FocusMailbox, got {row:?}"
+    );
+
+    // An *incremental* sync (the mailbox was already populated when the
+    // parse session started) must not absorb arrivals: further unseen
+    // mail surfaces in 📨 even while `Parsing`. Only a first fetch
+    // (empty mailbox) absorbs — see `statusbar_counts_initial_fetch_absorbed`.
+    let last_seen_hash = {
+        let account = ctx.accounts.get(&account_hash).unwrap();
+        account
+            .collection
+            .get_mailbox(inbox_hash)
+            .iter()
+            .copied()
+            .find(|h| {
+                account
+                    .collection
+                    .get_env(*h)
+                    .is_some_and(|env| env.is_seen())
+            })
+            .expect("one seen mail remains in the corpus")
+    };
+    ctx.accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .mailbox_entries
+        .get_mut(&inbox_hash)
+        .unwrap()
+        .status = MailboxStatus::Parsing(3, 3);
+    if let Some(mut env) = ctx
+        .accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .collection
+        .get_env_mut(last_seen_hash)
+    {
+        env.set_unseen();
+    } else {
+        panic!("last_seen_hash {last_seen_hash} vanished from the golden collection");
+    }
+    status_bar.process_event(
+        &mut UIEvent::MailboxUpdate((account_hash, inbox_hash)),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("📨 2") && row.contains("📩 3"),
+        "unseen arrivals during an incremental sync must count as new \
+         mail, got {row:?}"
+    );
+}
+
+/// A mailbox that was empty when its first parse session started absorbs
+/// the synced-in mail: those arrivals belong to the initial fetch and
+/// must not surface as `📨 new`.
+#[test]
+fn statusbar_counts_initial_fetch_absorbed() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    // The initial fetch starts on an empty mailbox.
+    ctx.accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .mailbox_entries
+        .get_mut(&inbox_hash)
+        .unwrap()
+        .status = MailboxStatus::Parsing(0, 0);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    // First observation during the parse session: settled total is 0, so
+    // the session is classified as the initial fetch.
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    // Mail synced in by the initial fetch.
+    insert_golden_mails(&ctx, inbox_hash);
+    status_bar.process_event(
+        &mut UIEvent::MailboxUpdate((account_hash, inbox_hash)),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("📨 0") && row.contains("📩 1") && row.contains("📧 3"),
+        "initial-fetch arrivals must be absorbed, got {row:?}"
+    );
+    // Once the fetch settles, a further arrival surfaces again.
+    ctx.accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .mailbox_entries
+        .get_mut(&inbox_hash)
+        .unwrap()
+        .status = MailboxStatus::Available;
+    let seen_hash = {
+        let account = ctx.accounts.get(&account_hash).unwrap();
+        account
+            .collection
+            .get_mailbox(inbox_hash)
+            .iter()
+            .copied()
+            .find(|h| {
+                account
+                    .collection
+                    .get_env(*h)
+                    .is_some_and(|env| env.is_seen())
+            })
+            .expect("golden corpus contains seen mails")
+    };
+    if let Some(mut env) = ctx
+        .accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .collection
+        .get_env_mut(seen_hash)
+    {
+        env.set_unseen();
+    } else {
+        panic!("seen_hash {seen_hash} vanished from the golden collection");
+    }
+    status_bar.process_event(
+        &mut UIEvent::MailboxUpdate((account_hash, inbox_hash)),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("📨 1") && row.contains("📩 2"),
+        "arrivals after the initial fetch settle must surface, got {row:?}"
+    );
+}
+
+/// UT11: status-bar falls back to non-emoji analogues when the terminal
+/// can't render them. With `emoji_capable = false` the row contains
+/// only ASCII or braille (no envelope / mailbox / keyboard glyphs).
+#[test]
+fn statusbar_no_emoji_fallback() {
+    let mut ctx = mock_context();
+    ctx.settings.terminal.emoji_capable = ToggleFlag::InternalVal(false);
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    ctx.accounts.get_mut(&account_hash).unwrap().is_online = crate::accounts::IsOnline::True;
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        !row.contains('📫')
+            && !row.contains('📩')
+            && !row.contains('📨')
+            && !row.contains('📧')
+            && !row.contains('⌨'),
+        "emoji glyphs must be replaced when emoji_capable is false, got {row:?}"
+    );
+    // Idle online icon is the ASCII fallback `#` (ascii_drawing still
+    // defaults to false so we get the braille-analogue hierarchy).
+    assert!(
+        row.contains('#'),
+        "idle icon should fall back to '#', got {row:?}"
+    );
+
+    // With NewJob fired, the carousel runs. With emoji off + ascii off
+    // (braille mode), the carousel frames are the braille analogues.
+    let job_id = JobId::new();
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::NewJob(job_id)),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+            .iter()
+            .any(|g| row.contains(*g)),
+        "a braille carousel frame must be rendered, got {row:?}"
+    );
+}
+
+/// GT3: Parsing(12, 250) + active job. The centre segment renders a
+/// `LineGauge` with label `Fetch 12/250` in the status row (anchored to
+/// the gauge segment, not the grid origin), with the carousel cycling
+/// at the left edge.
+#[test]
+fn golden_statusbar_gauge_active() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    ctx.accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .mailbox_entries
+        .get_mut(&inbox_hash)
+        .unwrap()
+        .status = MailboxStatus::Parsing(12, 250);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::NewJob(JobId::new())),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let row = statusbar_row_text(screen.grid());
+    assert!(
+        row.contains("Fetch 12/250"),
+        "the gauge label must render in the status row, got {row:?}"
+    );
+    assert!(
+        row.contains('▱'),
+        "the gauge bar must render unfilled cells for ratio 12/250, got {row:?}"
+    );
+    record_or_assert("statusbar_gauge_active", screen.grid());
+}
+
+/// GT4: Parsing(5, 0) (incremental batch, total unknown) + active job.
+/// No gauge segment; the mailbox-status carousel cycles at the left
+/// edge of the status row.
+#[test]
+fn golden_statusbar_spinner_only() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    ctx.accounts
+        .get_mut(&account_hash)
+        .unwrap()
+        .mailbox_entries
+        .get_mut(&inbox_hash)
+        .unwrap()
+        .status = MailboxStatus::Parsing(5, 0);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::NewJob(JobId::new())),
+        &mut ctx,
+    );
+    status_bar.set_dirty(true);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    record_or_assert("statusbar_spinner_only", screen.grid());
+}
+
+/// GT5: status bar must not panic at degenerate widths or tiny screens.
+/// Mirrors `golden_listing_tiny_sizes_no_panic`. The (40, 6) frame is
+/// recorded as a golden so a regression on the layout's truncation
+/// logic (hint `…`, gauge `#/.`, focus chip) is caught by `make test`.
+#[test]
+fn golden_statusbar_tiny_sizes_no_panic() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::FocusMailbox(
+            account_hash,
+            inbox_hash,
+        )),
+        &mut ctx,
+    );
+    status_bar.process_event(
+        &mut UIEvent::StatusEvent(crate::types::StatusEvent::NewJob(JobId::new())),
+        &mut ctx,
+    );
+    for (cols, rows) in [(40, 6), (60, 6), (20, 3), (10, 4)] {
+        let mut screen = golden_screen(&ctx, cols, rows);
+        let area = screen.area();
+        status_bar.set_dirty(true);
+        status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    }
+    // Record the (40, 6) frame as the GT5 golden.
+    let mut screen = golden_screen(&ctx, 40, 6);
+    let area = screen.area();
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    record_or_assert("statusbar_tiny_sizes", screen.grid());
 }

@@ -282,7 +282,11 @@ impl ResponseCode {
             Self::Uidnext(
                 UID::from_str(&String::from_utf8_lossy(
                     val.find(b"]")
-                        .map(|end| &val[b"UIDNEXT ".len()..end])
+                        // `.get()` instead of `&val[..]`: a short/malformed
+                        // response code such as `[UIDNEXT]` puts the `]`
+                        // before the end of the keyword, which would panic
+                        // on the reversed slice range.
+                        .and_then(|end| val.get(b"UIDNEXT ".len()..end))
                         .unwrap_or(b"0".as_slice()),
                 ))
                 .unwrap_or(0),
@@ -291,7 +295,7 @@ impl ResponseCode {
             Self::Uidvalidity(
                 UIDVALIDITY::from_str(&String::from_utf8_lossy(
                     val.find(b"]")
-                        .map(|end| &val[b"UIDVALIDITY ".len()..end])
+                        .and_then(|end| val.get(b"UIDVALIDITY ".len()..end))
                         .unwrap_or(b"0".as_slice()),
                 ))
                 .unwrap_or(0),
@@ -300,7 +304,7 @@ impl ResponseCode {
             Self::Unseen(
                 usize::from_str(&String::from_utf8_lossy(
                     val.find(b"]")
-                        .map(|end| &val[b"UNSEEN ".len()..end])
+                        .and_then(|end| val.get(b"UNSEEN ".len()..end))
                         .unwrap_or(b"0".as_slice()),
                 ))
                 .unwrap_or(0),
@@ -346,15 +350,25 @@ impl TryFrom<&'_ [u8]> for ImapResponse {
         }
 
         Ok(if val.starts_with(b"OK") {
-            Self::Ok(ResponseCode::from(&val[b"OK ".len()..]))
+            Self::Ok(ResponseCode::from(
+                val.get(b"OK ".len()..).unwrap_or_default(),
+            ))
         } else if val.starts_with(b"NO") {
-            Self::No(ResponseCode::from(&val[b"NO ".len()..]))
+            Self::No(ResponseCode::from(
+                val.get(b"NO ".len()..).unwrap_or_default(),
+            ))
         } else if val.starts_with(b"BAD") {
-            Self::Bad(ResponseCode::from(&val[b"BAD ".len()..]))
+            Self::Bad(ResponseCode::from(
+                val.get(b"BAD ".len()..).unwrap_or_default(),
+            ))
         } else if val.starts_with(b"PREAUTH") {
-            Self::Preauth(ResponseCode::from(&val[b"PREAUTH ".len()..]))
+            Self::Preauth(ResponseCode::from(
+                val.get(b"PREAUTH ".len()..).unwrap_or_default(),
+            ))
         } else if val.starts_with(b"BYE") {
-            Self::Bye(ResponseCode::from(&val[b"BYE ".len()..]))
+            Self::Bye(ResponseCode::from(
+                val.get(b"BYE ".len()..).unwrap_or_default(),
+            ))
         } else {
             return Err(Error::new(format!(
                 "Expected tagged IMAP response (OK,NO,BAD, etc) but found {:?}",
@@ -536,8 +550,16 @@ pub fn list_mailbox_result(input: &[u8]) -> IResult<&[u8], ImapMailbox> {
             };
             f.name = if let Some(pos) = f.imap_path.as_bytes().iter().rposition(|&c| c == separator)
             {
-                f.parent = Some(MailboxHash::from_bytes(&f.imap_path.as_bytes()[..pos]));
-                f.imap_path[pos + 1..].to_string()
+                // `separator` is an arbitrary wire byte; when it matches a
+                // byte in the middle of a multi-byte UTF-8 character,
+                // `pos + 1` is not a char boundary. Fall back to the whole
+                // path instead of panicking on the slice.
+                if let Some(name) = f.imap_path.get(pos + 1..) {
+                    f.parent = Some(MailboxHash::from_bytes(&f.imap_path.as_bytes()[..pos]));
+                    name.to_string()
+                } else {
+                    f.imap_path.clone()
+                }
             } else {
                 f.imap_path.clone()
             };
@@ -638,10 +660,17 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
         raw_fetch_value: &[],
     };
 
+    // `i` may already be at the end of input (e.g. a bare `* ` line), so
+    // bounds-check before the first indexing access below.
+    bounds!();
     while input[i].is_ascii_digit() {
         let b: u8 = input[i] - 0x30;
-        ret.message_sequence_number *= 10;
-        ret.message_sequence_number += b as MessageSequenceNumber;
+        // Saturating arithmetic: a server-controlled run of digits longer
+        // than the type's range must not overflow-panic in debug builds.
+        ret.message_sequence_number = ret
+            .message_sequence_number
+            .saturating_mul(10)
+            .saturating_add(b as MessageSequenceNumber);
         i += 1;
         bounds!();
     }
@@ -660,8 +689,15 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                 take_while::<_, &[u8], (&[u8], nom::error::ErrorKind)>(is_digit)(&input[i..])
             {
                 i += input.len() - i - rest.len();
-                ret.uid =
-                    Some(UID::from_str(unsafe { std::str::from_utf8_unchecked(uid) }).unwrap());
+                ret.uid = Some(UID::from_str(to_str!(uid)).map_err(|err| {
+                    Error::new(format!(
+                        "Could not parse UID in UID FETCH response: {err}. Got: `{}`",
+                        String::from_utf8_lossy(&input[i..])
+                            .as_ref()
+                            .trim_at_boundary(40)
+                    ))
+                    .set_kind(ErrorKind::ProtocolError)
+                })?);
             } else {
                 log::debug!(
                     "Unexpected input while parsing UID FETCH response. Got: `{}`",
@@ -1040,12 +1076,23 @@ pub fn search_results<'a>(input: &'a [u8]) -> IResult<&'a [u8], Vec<ImapNum>> {
     alt((
         |input: &'a [u8]| -> IResult<&'a [u8], Vec<ImapNum>> {
             let (input, _) = tag("* SEARCH ")(input)?;
-            let (input, list) = separated_list1(
-                tag(b" "),
-                map_res(is_not(" \r\n"), |s: &[u8]| {
-                    ImapNum::from_str(unsafe { std::str::from_utf8_unchecked(s) })
-                }),
-            )(input)?;
+            let (input, list) = separated_list1(tag(b" "), |input: &'a [u8]| {
+                // `is_not` accepts arbitrary bytes, so the field must be
+                // checked as UTF-8 before parsing instead of going through
+                // `from_utf8_unchecked` (UB on non-UTF-8 remote bytes).
+                let (rest, field) = is_not(" \r\n")(input)?;
+                let field = std::str::from_utf8(field).map_err(|_| {
+                    nom::Err::Error(
+                        (input, "search_results(): invalid UTF-8 in search result").into(),
+                    )
+                })?;
+                let num = ImapNum::from_str(field).map_err(|_| {
+                    nom::Err::Error(
+                        (input, "search_results(): invalid search result number").into(),
+                    )
+                })?;
+                Ok((rest, num))
+            })(input)?;
             let (input, _) = tag(CRLF)(input)?;
             Ok((input, list))
         },
@@ -1112,33 +1159,62 @@ pub struct SelectResponse {
 pub fn select_response(input: &[u8]) -> Result<SelectResponse> {
     if input.contains_subsequence(b"* OK") {
         let mut ret = SelectResponse::default();
+        let malformed_line = |l: &[u8]| {
+            Error::new(format!(
+                "Malformed IMAP select response line {:?}",
+                String::from_utf8_lossy(l)
+            ))
+            .set_kind(ErrorKind::ProtocolError)
+        };
         for l in input.split_rn() {
-            if l.starts_with(UNTAGGED_PREFIX) && l.ends_with(b" EXISTS\r\n") {
-                ret.exists = ImapNum::from_str(&String::from_utf8_lossy(
-                    &l[UNTAGGED_PREFIX.len()..l.len() - b" EXISTS\r\n".len()],
-                ))?;
-            } else if l.starts_with(UNTAGGED_PREFIX) && l.ends_with(b" RECENT\r\n") {
-                ret.recent = ImapNum::from_str(&String::from_utf8_lossy(
-                    &l[UNTAGGED_PREFIX.len()..l.len() - b" RECENT\r\n".len()],
-                ))?;
+            // Match the numeric prefixes/suffixes structurally instead of
+            // slicing at fixed offsets: a partially matching line such as a
+            // bare `* EXISTS\r\n` would otherwise build a reversed slice
+            // range (`l[2..1]`) and panic.
+            if let Some(num) = l
+                .strip_prefix(UNTAGGED_PREFIX)
+                .and_then(|rest| rest.strip_suffix(b" EXISTS\r\n"))
+            {
+                ret.exists = ImapNum::from_str(&String::from_utf8_lossy(num))?;
+            } else if let Some(num) = l
+                .strip_prefix(UNTAGGED_PREFIX)
+                .and_then(|rest| rest.strip_suffix(b" RECENT\r\n"))
+            {
+                ret.recent = ImapNum::from_str(&String::from_utf8_lossy(num))?;
             } else if l.starts_with(b"* FLAGS (") {
-                ret.flags = flags(&l[b"* FLAGS (".len()..l.len() - b")".len()]).map(|(_, v)| v)?;
+                ret.flags = flags(
+                    l.get(b"* FLAGS (".len()..l.len().saturating_sub(b")".len()))
+                        .ok_or_else(|| malformed_line(l))?,
+                )
+                .map(|(_, v)| v)?;
             } else if l.starts_with(b"* OK [UNSEEN ") {
+                let end = l.find(b"]").ok_or_else(|| malformed_line(l))?;
                 ret.first_unseen = MessageSequenceNumber::from_str(&String::from_utf8_lossy(
-                    &l[b"* OK [UNSEEN ".len()..l.find(b"]").unwrap()],
+                    l.get(b"* OK [UNSEEN ".len()..end)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| malformed_line(l))?,
                 ))?;
             } else if l.starts_with(b"* OK [UIDVALIDITY ") {
+                let end = l.find(b"]").ok_or_else(|| malformed_line(l))?;
                 ret.uidvalidity = UIDVALIDITY::from_str(&String::from_utf8_lossy(
-                    &l[b"* OK [UIDVALIDITY ".len()..l.find(b"]").unwrap()],
+                    l.get(b"* OK [UIDVALIDITY ".len()..end)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| malformed_line(l))?,
                 ))?;
             } else if l.starts_with(b"* OK [UIDNEXT ") {
+                let end = l.find(b"]").ok_or_else(|| malformed_line(l))?;
                 ret.uidnext = UID::from_str(&String::from_utf8_lossy(
-                    &l[b"* OK [UIDNEXT ".len()..l.find(b"]").unwrap()],
+                    l.get(b"* OK [UIDNEXT ".len()..end)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| malformed_line(l))?,
                 ))?;
             } else if l.starts_with(b"* OK [PERMANENTFLAGS (") {
-                ret.permanentflags =
-                    flags(&l[b"* OK [PERMANENTFLAGS (".len()..l.find(b")").unwrap()])
-                        .map(|(_, v)| v)?;
+                let end = l.find(b")").ok_or_else(|| malformed_line(l))?;
+                ret.permanentflags = flags(
+                    l.get(b"* OK [PERMANENTFLAGS (".len()..end)
+                        .ok_or_else(|| malformed_line(l))?,
+                )
+                .map(|(_, v)| v)?;
                 ret.can_create_flags = l.contains_subsequence(b"\\*");
             } else if l.contains_subsequence(b"OK [READ-WRITE]" as &[u8]) {
                 ret.read_only = false;
@@ -1893,7 +1969,29 @@ pub fn uid_fetch_envelopes_response<'a>(
     )(input)
 }
 
+/// Maximum nesting depth accepted while scanning a `BODYSTRUCTURE`
+/// response.
+///
+/// `bodystructure_has_attachments` recurses for every nested part list, so
+/// an unbounded run of `(` from a malicious server would overflow the
+/// stack. Real MIME part trees are only a handful of levels deep; 64 is
+/// far above any legitimate value while keeping the recursion bounded.
+const MAX_BODYSTRUCTURE_DEPTH: usize = 64;
+
 pub fn bodystructure_has_attachments(input: &[u8]) -> IResult<&[u8], bool> {
+    bodystructure_has_attachments_depth(input, 0)
+}
+
+fn bodystructure_has_attachments_depth(input: &[u8], depth: usize) -> IResult<&[u8], bool> {
+    if depth > MAX_BODYSTRUCTURE_DEPTH {
+        return Err(nom::Err::Error(
+            (
+                input,
+                "bodystructure_has_attachments(): maximum nesting depth exceeded",
+            )
+                .into(),
+        ));
+    }
     let (input, _) = eat_whitespace(input)?;
     let (input, _) = tag("(")(input)?;
     let (mut input, _) = eat_whitespace(input)?;
@@ -1907,7 +2005,7 @@ pub fn bodystructure_has_attachments(input: &[u8]) -> IResult<&[u8], bool> {
                 has_attachments |= token.eq_ignore_ascii_case(b"attachment");
             }
         } else if input.starts_with(b"(") {
-            let (_input, _has_attachments) = bodystructure_has_attachments(input)?;
+            let (_input, _has_attachments) = bodystructure_has_attachments_depth(input, depth + 1)?;
             has_attachments |= _has_attachments;
             input = _input;
         }

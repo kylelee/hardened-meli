@@ -1162,3 +1162,59 @@ fn test_jmap_server_get_method_and_response() {
         );
     }
 }
+
+#[test]
+fn test_jmap_empty_method_responses_is_protocol_error() {
+    use crate::{error::ErrorKind, jmap::methods::MethodResponse};
+
+    let mut v = crate::jmap::deserialize_from_str::<MethodResponse>(
+        r#"{"methodResponses":[],"createdIds":{},"sessionState":"s"}"#,
+    )
+    .unwrap();
+    assert_eq!(v.take_first().unwrap_err().kind, ErrorKind::ProtocolError);
+    assert_eq!(v.take_last().unwrap_err().kind, ErrorKind::ProtocolError);
+    assert_eq!(v.last().unwrap_err().kind, ErrorKind::ProtocolError);
+}
+
+#[test]
+fn test_jmap_wrong_method_name_is_protocol_error() {
+    use serde_json::value::RawValue;
+
+    use crate::{
+        error::ErrorKind,
+        jmap::{
+            email::EmailObject,
+            methods::{ChangesResponse, QueryResponse, SetResponse},
+        },
+    };
+
+    // Each server reply below carries a valid response body but a method
+    // name that does not match the requested method; the `TryFrom` impls
+    // used to `assert_eq!` and panic on exactly this shape.
+    let query = r#"["Email/changes",{"accountId":"a","queryState":"s","canCalculateChanges":false,"position":0,"ids":[]},"m0"]"#;
+    let query_raw: &RawValue = serde_json::from_str(query).unwrap();
+    assert_eq!(
+        QueryResponse::<EmailObject>::try_from(query_raw)
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProtocolError
+    );
+
+    let changes = r#"["Email/get",{"accountId":"a","oldState":"o","newState":"n","hasMoreChanges":false,"created":[],"updated":[],"destroyed":[]},"m0"]"#;
+    let changes_raw: &RawValue = serde_json::from_str(changes).unwrap();
+    assert_eq!(
+        ChangesResponse::<EmailObject>::try_from(changes_raw)
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProtocolError
+    );
+
+    let set = r#"["Mailbox/set",{"accountId":"a","newState":"s"},"m0"]"#;
+    let set_raw: &RawValue = serde_json::from_str(set).unwrap();
+    assert_eq!(
+        SetResponse::<EmailObject>::try_from(set_raw)
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProtocolError
+    );
+}

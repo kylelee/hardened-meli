@@ -315,9 +315,13 @@ impl MailListingTrait for ConversationsListing {
 
                 continue 'items_for_loop;
             }
-            let root_envelope: &EnvelopeRef = &context.accounts[&self.cursor_pos.0]
+            let Some(root_envelope) = context.accounts[&self.cursor_pos.0]
                 .collection
-                .get_env(root_env_hash);
+                .get_env(root_env_hash)
+            else {
+                // Stale thread root: skip the conversation row.
+                continue 'items_for_loop;
+            };
             use melib::search::QueryTrait;
             if let Some(filter_query) = mailbox_settings!(
                 context[self.cursor_pos.0][&self.cursor_pos.1]
@@ -342,13 +346,13 @@ impl MailListingTrait for ConversationsListing {
                         threads.thread_nodes()[&h].show_subject(),
                     ))
                 })
-                .map(|(env_hash, show_subject)| {
-                    (
+                .filter_map(|(env_hash, show_subject)| {
+                    Some((
                         context.accounts[&self.cursor_pos.0]
                             .collection
-                            .get_env(env_hash),
+                            .get_env(env_hash)?,
                         show_subject,
-                    )
+                    ))
                 })
             {
                 if show_subject {
@@ -370,7 +374,7 @@ impl MailListingTrait for ConversationsListing {
             }
 
             let strings = self.make_entry_string(
-                root_envelope,
+                &root_envelope,
                 context,
                 &tags_lck,
                 &from_address_list,
@@ -820,13 +824,13 @@ impl ConversationsListing {
                     .message()
                     .map(|env_hash| (env_hash, threads.thread_nodes()[&h].show_subject()))
             })
-            .map(|(env_hash, show_subject)| {
-                (
+            .filter_map(|(env_hash, show_subject)| {
+                Some((
                     context.accounts[&self.cursor_pos.0]
                         .collection
-                        .get_env(env_hash),
+                        .get_env(env_hash)?,
                     show_subject,
-                )
+                ))
             })
         {
             if show_subject {
@@ -845,7 +849,14 @@ impl ConversationsListing {
                 from_address_list.push(addr.clone());
             }
         }
-        let envelope: EnvelopeRef = account.collection.get_env(env_hash);
+        let Some(envelope) = account.collection.get_env(env_hash) else {
+            // Stale row: the envelope was removed, leave the previous entry
+            // strings in place instead of fabricating a row.
+            log::error!(
+                "Could not update conversation row: envelope {env_hash} is no longer in the mailbox"
+            );
+            return;
+        };
         let strings = self.make_entry_string(
             &envelope,
             context,
@@ -875,12 +886,22 @@ impl ConversationsListing {
             let area = area.skip_rows(3 * (idx - top_idx)).take_rows(3);
             let thread = threads.thread_ref(*thread_hash);
 
+            // The four `row_attr!` inputs are shared by the flag, subject,
+            // date and from rows: evaluate them once per row. In
+            // particular `is_thread_selected` walks the whole thread (one
+            // `selection` HashMap lookup per envelope), so calling it per
+            // themed column cost 4 × thread length lookups per row/frame.
+            let even = idx.is_multiple_of(2);
+            let unseen = thread.unseen() > 0;
+            let highlighted = self.cursor_pos.2 == idx;
+            let selected = self.rows.is_thread_selected(*thread_hash);
+
             let row_attr = row_attr!(
                 self.color_cache,
-                even: idx.is_multiple_of(2),
-                unseen: thread.unseen() > 0,
-                highlighted: self.cursor_pos.2 == idx,
-                selected: self.rows.is_thread_selected(*thread_hash)
+                even: even,
+                unseen: unseen,
+                highlighted: highlighted,
+                selected: selected
             );
             // draw flags
             let (mut x, _) = grid.write_string(
@@ -901,10 +922,10 @@ impl ConversationsListing {
             let subject_attr = row_attr!(
                 subject,
                 self.color_cache,
-                even: idx.is_multiple_of(2),
-                unseen: thread.unseen() > 0,
-                highlighted: self.cursor_pos.2 == idx,
-                selected: self.rows.is_thread_selected(*thread_hash)
+                even: even,
+                unseen: unseen,
+                highlighted: highlighted,
+                selected: selected
             );
             // draw subject
             let (x_, subject_overflowed) = grid.write_string(
@@ -955,10 +976,10 @@ impl ConversationsListing {
             let date_attr = row_attr!(
                 date,
                 self.color_cache,
-                even: idx.is_multiple_of(2),
-                unseen: thread.unseen() > 0,
-                highlighted: self.cursor_pos.2 == idx,
-                selected: self.rows.is_thread_selected(*thread_hash)
+                even: even,
+                unseen: unseen,
+                highlighted: highlighted,
+                selected: selected
             );
             x = 0;
             x += grid
@@ -979,10 +1000,10 @@ impl ConversationsListing {
             let from_attr = row_attr!(
                 from,
                 self.color_cache,
-                even: idx.is_multiple_of(2),
-                unseen: thread.unseen() > 0,
-                highlighted: self.cursor_pos.2 == idx,
-                selected: self.rows.is_thread_selected(*thread_hash)
+                even: even,
+                unseen: unseen,
+                highlighted: highlighted,
+                selected: selected
             );
             // draw from
             x += grid
@@ -1344,7 +1365,15 @@ impl Component for ConversationsListing {
     }
 
     fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
-        let shortcuts = self.shortcuts(context);
+        // Only the `UIEvent::Input` arms below resolve shortcut
+        // bindings, so skip rebuilding (and re-hashing) the shortcut
+        // maps for every other event: backend syncs can deliver
+        // hundreds of non-key events per second.
+        let shortcuts = if matches!(event, UIEvent::Input(_)) {
+            self.shortcuts(context)
+        } else {
+            ShortcutMaps::default()
+        };
 
         match (&event, self.focus) {
             (UIEvent::VisibilityChange(true), _) => {
@@ -1386,7 +1415,8 @@ impl Component for ConversationsListing {
                 }
                 UIEvent::Input(ref k)
                     if !matches!(self.focus, Focus::None)
-                        && shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"]) =>
+                        && (shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"])
+                            || context.settings.shortcuts.general.quit.contains(k)) =>
                 {
                     self.set_focus(Focus::None, context);
                     return true;

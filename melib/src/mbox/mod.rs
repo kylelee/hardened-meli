@@ -187,8 +187,9 @@ impl BackendMailbox for MboxMailbox {
     }
 
     fn path(&self) -> &str {
-        /* We know it's valid UTF-8 because we supplied it */
-        self.path.to_str().unwrap()
+        // The path comes from the user's configuration; if it is not valid
+        // UTF-8, fall back to the mailbox name instead of panicking.
+        self.path.to_str().unwrap_or(self.name.as_str())
     }
 
     fn clone(&self) -> Mailbox {
@@ -655,11 +656,27 @@ pub struct MessageIterator<'a> {
 impl MessageIterator<'_> {
     /// Returns the bytes of a specific envelope.
     ///
-    /// This function will panic if the hash is not included in the index, check
-    /// for its presence before you call it if you are not sure.
-    pub fn env_bytes(&'_ self, hash: &EnvelopeHash) -> &'_ [u8] {
-        let (offset, length) = self.index.lock().unwrap()[hash];
-        &self.input[offset..][..length]
+    /// Returns an error if `hash` is not in the index (only envelopes this
+    /// iterator has already yielded are indexed) or if the recorded range
+    /// does not fit the input buffer.
+    pub fn env_bytes(&'_ self, hash: &EnvelopeHash) -> Result<&'_ [u8]> {
+        let index = self.index.lock().unwrap();
+        let Some(&(offset, length)) = index.get(hash) else {
+            return Err(
+                Error::new(format!("Envelope {hash} is not in the mbox index"))
+                    .set_kind(ErrorKind::NotFound),
+            );
+        };
+        self.input
+            .get(offset..)
+            .and_then(|rest| rest.get(..length))
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "Envelope {hash} has an out-of-range mbox range ({offset}..{})",
+                    offset.saturating_add(length)
+                ))
+                .set_kind(ErrorKind::ValueError)
+            })
     }
 }
 
@@ -667,24 +684,25 @@ impl Iterator for MessageIterator<'_> {
     type Item = Result<Envelope>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.input.trim().is_empty()
-            || self.input[self.offset + self.file_offset..]
-                .trim()
-                .is_empty()
-        {
+        // `get` instead of indexing: a caller may construct the iterator
+        // with offsets past the end of the buffer.
+        let base = self.offset.saturating_add(self.file_offset);
+        let rest = self.input.get(base..)?;
+        if self.input.trim().is_empty() || rest.trim().is_empty() {
             return None;
         }
 
-        let (next_input, env) = match self
-            .format
-            .parse(&self.input[self.offset + self.file_offset..], self.is_crlf)
-        {
+        let (next_input, env) = match self.format.parse(rest, self.is_crlf) {
             Ok(v) => v,
             Err((error_location, err)) => {
-                let error_offset = self.input.len() - error_location.len();
+                let error_offset = self.input.len().saturating_sub(error_location.len());
                 let line_number = 1 + String::from_utf8_lossy(&self.input[..error_offset])
                     .lines()
                     .count();
+                // Make progress even though this call returns an error: a
+                // caller that keeps iterating (or retries the fetch) must not
+                // re-parse the same failing bytes forever.
+                self.offset = base.saturating_add(1).min(self.input.len());
                 return Some(Err(err.set_details(format!(
                     "Location: line {line_number}\n{:?}",
                     String::from_utf8_lossy(error_location)
@@ -693,29 +711,41 @@ impl Iterator for MessageIterator<'_> {
                 ))));
             }
         };
-        let start: Offset = self.input[self.offset + self.file_offset..]
+        let start: Offset = rest
             .find(b"From ")
             .map(|from_offset| {
-                self.input[self.offset + self.file_offset + from_offset..]
+                rest[from_offset..]
                     .find(if self.is_crlf {
                         &b"\r\n"[..]
                     } else {
                         &b"\n"[..]
                     })
                     .map(|v| v + if self.is_crlf { 2 } else { 1 })
-                    .unwrap_or_else(|| {
-                        self.input[self.offset + self.file_offset + from_offset..]
-                            .len()
-                            .saturating_sub(2)
-                    })
+                    .unwrap_or_else(|| rest[from_offset..].len().saturating_sub(2))
             })
             .unwrap_or(0);
-        let len = self.input.len() - next_input.len() - self.offset - self.file_offset - start;
+        // `next_input` is a suffix of `rest`, so the parser consumed
+        // `rest.len() - next_input.len()` bytes. A malformed mbox can make
+        // the `From ` separator look longer than what the parser consumed;
+        // report that instead of underflowing the subtraction (which panics
+        // in debug and wraps in release).
+        let consumed = rest.len().saturating_sub(next_input.len());
+        let Some(len) = consumed.checked_sub(start) else {
+            // Stop iterating: the offsets are inconsistent (a parser bug or a
+            // pathological mbox), and returning an error without advancing
+            // would spin a caller that ignores it.
+            self.offset = self.input.len();
+            return Some(Err(Error::new(format!(
+                "Malformed mbox: the parser consumed {consumed} bytes but the `From ` separator \
+                 was {start} bytes long"
+            ))
+            .set_kind(ErrorKind::ValueError)));
+        };
         self.index
             .lock()
             .unwrap()
-            .insert(env.hash(), (self.offset + self.file_offset + start, len));
-        self.offset += len + start;
+            .insert(env.hash(), (base.saturating_add(start), len));
+        self.offset = self.offset.saturating_add(len).saturating_add(start);
 
         Some(Ok(env))
     }
@@ -1435,5 +1465,86 @@ impl MboxType {
             })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GOOD_MBOX: &[u8] = b"From a@example.org Mon Jan  1 00:00:00 2024\n\
+From: a@example.org\n\
+To: b@example.org\n\
+Subject: first\n\
+Message-ID: <first@example.org>\n\
+\n\
+body one\n\
+From b@example.org Mon Jan  1 00:00:01 2024\n\
+From: b@example.org\n\
+To: a@example.org\n\
+Subject: second\n\
+Message-ID: <second@example.org>\n\
+\n\
+body two\n";
+
+    /// Run an iterator to exhaustion, asserting that it terminates and never
+    /// panics; errors are expected for malformed input.
+    fn drain(input: &[u8], format: MboxFormat, is_crlf: bool) {
+        let iter = MessageIterator {
+            index: Default::default(),
+            input,
+            offset: 0,
+            file_offset: 0,
+            format,
+            is_crlf,
+        };
+        let mut steps = 0;
+        for res in iter {
+            let _ = res;
+            steps += 1;
+            assert!(
+                steps <= input.len() + 8,
+                "iterator must make progress and terminate"
+            );
+        }
+    }
+
+    /// Truncating a well-formed mbox at every byte offset must never panic and
+    /// must always terminate (malformed input yields `Err`/`None`).
+    #[test]
+    fn truncated_mbox_does_not_panic() {
+        for len in 0..=GOOD_MBOX.len() {
+            for format in [
+                MboxFormat::MboxO,
+                MboxFormat::MboxRd,
+                MboxFormat::MboxCl,
+                MboxFormat::MboxCl2,
+            ] {
+                for is_crlf in [false, true] {
+                    drain(&GOOD_MBOX[..len], format, is_crlf);
+                }
+            }
+        }
+    }
+
+    /// Hostile mbox shapes (bare `From `, NUL bytes, folded garbage, CRLF
+    /// mixes) must not panic either.
+    #[test]
+    fn hostile_mbox_shapes_do_not_panic() {
+        for input in [
+            &b"From "[..],
+            &b"From \n"[..],
+            &b"From \n\n"[..],
+            &b"From \nFrom \nFrom \n"[..],
+            &b"\n\nFrom \n"[..],
+            &b"From \0\0\0\n"[..],
+            &b"From a\n\tfolded\n"[..],
+            &b"From \r\n\r\nFrom \r\n"[..],
+            &b"From a\nFrom: x\n\n\xff\xfe\xfd\n"[..],
+        ] {
+            for is_crlf in [false, true] {
+                drain(input, MboxFormat::MboxO, is_crlf);
+            }
+        }
     }
 }

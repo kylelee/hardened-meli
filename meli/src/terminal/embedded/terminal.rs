@@ -122,8 +122,8 @@ impl Terminal {
     pub fn set_terminal_size(&mut self, new_val: (usize, usize)) {
         self.grid.set_terminal_size(new_val);
         let winsize = Winsize {
-            ws_row: <u16>::try_from(new_val.1).unwrap(),
-            ws_col: <u16>::try_from(new_val.0).unwrap(),
+            ws_row: <u16>::try_from(new_val.1).unwrap_or(u16::MAX),
+            ws_col: <u16>::try_from(new_val.0).unwrap_or(u16::MAX),
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
@@ -212,6 +212,48 @@ pub struct EmbeddedGrid {
     screen_buffer: ScreenBuffer,
     tab_width: u8,
     dirty: bool,
+}
+
+/// Parse a parameter buffer accumulated by the escape-sequence state machine as
+/// a `usize`.
+///
+/// The state machine only pushes ASCII digits (and spaces in the first CSI
+/// field), but a malformed sequence such as `ESC[1 2G` or an out-of-range
+/// number such as `ESC[99999999999999999999G` must not panic: return `None`
+/// for those, and let the caller supply the VT default.
+fn parse_esc_param(buf: &[u8]) -> Option<usize> {
+    std::str::from_utf8(buf).ok()?.trim().parse::<usize>().ok()
+}
+
+/// Same as [`parse_esc_param`] but for single-byte parameters (`u8`).
+fn parse_esc_param_u8(buf: &[u8]) -> Option<u8> {
+    std::str::from_utf8(buf).ok()?.trim().parse::<u8>().ok()
+}
+
+/// Decode a byte sequence accumulated by the state machine as a single `char`.
+///
+/// The bytes come from arbitrary terminal or pasted data, so an invalid UTF-8
+/// sequence must neither be reinterpreted as UTF-8 (undefined behaviour) nor
+/// panic; fall back to U+FFFD.
+fn decode_utf8_char(bytes: &[u8]) -> char {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|s| s.chars().next())
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
+}
+
+/// Upper bound on a single accumulated escape-sequence parameter, in bytes.
+///
+/// Without it a hostile child can stream digits into one CSI/OSC sequence
+/// forever, growing the parameter buffer without bound (denial of service).
+const MAX_ESC_PARAM_LEN: usize = 32;
+
+/// Append `c` to an escape-sequence parameter buffer, ignoring bytes beyond
+/// [`MAX_ESC_PARAM_LEN`].
+fn push_esc_param(buf: &mut SmallVec<[u8; 8]>, c: u8) {
+    if buf.len() < MAX_ESC_PARAM_LEN {
+        buf.push(c);
+    }
 }
 
 impl Default for EmbeddedGrid {
@@ -398,16 +440,16 @@ impl EmbeddedGrid {
             }};
         }
         macro_rules! cursor_y {
-            () => {
+            () => {{
                 if is_alternate {
                     std::cmp::min(
-                        cursor.1 + scroll_region.top,
+                        cursor.1.saturating_add(scroll_region.top),
                         terminal_size.1.saturating_sub(1),
                     )
                 } else {
                     cursor.1
                 }
-            };
+            }};
         }
         macro_rules! cursor_val {
             () => {
@@ -576,7 +618,11 @@ impl EmbeddedGrid {
                         .scroll_up(scroll_region, scroll_region.top, 1);
                     *dirty = true;
                 } else {
-                    cursor.1 += 1;
+                    // Clamp instead of incrementing past the last row: a cursor
+                    // parked below the scroll region (e.g. by CUP with origin
+                    // mode off) must not be moved out of the grid.
+                    let max = screen.grid().rows().saturating_sub(1);
+                    cursor.1 = std::cmp::min(cursor.1.saturating_add(1), max);
                 }
                 *wrap_next = false;
                 *state = State::Normal;
@@ -615,7 +661,7 @@ impl EmbeddedGrid {
             }
             /* OSC stuff */
             (c, State::Osc1(ref mut buf)) if c.is_ascii_digit() || c == b'?' => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (b';', State::Osc1(ref mut buf1_p)) => {
                 let buf1 = std::mem::take(buf1_p);
@@ -623,7 +669,7 @@ impl EmbeddedGrid {
                 *state = State::Osc2(buf1, buf2);
             }
             (c, State::Osc2(_, ref mut buf)) if c.is_ascii_digit() || c == b'?' => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             /* Normal */
             (b'\r', State::Normal) => {
@@ -679,17 +725,11 @@ impl EmbeddedGrid {
                         }
                         CodepointBuf::TwoCodepoints(b) => {
                             //log::trace!("two byte char = ");
-                            unsafe { std::str::from_utf8_unchecked(&[*b, c]) }
-                                .chars()
-                                .next()
-                                .unwrap()
+                            decode_utf8_char(&[*b, c])
                         }
                         CodepointBuf::ThreeCodepoints(b, Some(b1)) => {
                             //log::trace!("three byte char = ",);
-                            unsafe { std::str::from_utf8_unchecked(&[*b, *b1, c]) }
-                                .chars()
-                                .next()
-                                .unwrap()
+                            decode_utf8_char(&[*b, *b1, c])
                         }
                         CodepointBuf::ThreeCodepoints(_, ref mut b @ None) => {
                             *b = Some(c);
@@ -697,10 +737,7 @@ impl EmbeddedGrid {
                         }
                         CodepointBuf::FourCodepoints(b, Some(b1), Some(b2)) => {
                             //log::trace!("four byte char = ",);
-                            unsafe { std::str::from_utf8_unchecked(&[*b, *b1, *b2, c]) }
-                                .chars()
-                                .next()
-                                .unwrap()
+                            decode_utf8_char(&[*b, *b1, *b2, c])
                         }
                         CodepointBuf::FourCodepoints(_, ref mut b1 @ None, None) => {
                             *b1 = Some(c);
@@ -729,7 +766,9 @@ impl EmbeddedGrid {
                             .grid_mut()
                             .scroll_up(scroll_region, scroll_region.top, 1);
                     } else {
-                        cursor.1 += 1;
+                        // Clamp to the last row of the *active* grid.
+                        let max = screen.grid().rows().saturating_sub(1);
+                        cursor.1 = std::cmp::min(cursor.1.saturating_add(1), max);
                     }
                     cursor.0 = 0;
                 }
@@ -801,7 +840,7 @@ impl EmbeddedGrid {
             }
             /* CSI ? stuff */
             (c, State::CsiQ(ref mut buf)) if c.is_ascii_digit() => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (b'h', State::CsiQ(ref buf)) => {
                 match buf.as_slice() {
@@ -826,6 +865,15 @@ impl EmbeddedGrid {
                         *dirty = true;
                     }
                     b"1047" | b"1049" => {
+                        // The normal grid grows on demand (`increase_cursor_y`),
+                        // so the alternate buffer may be smaller than the
+                        // shared `terminal_size`. Re-sync it before switching
+                        // so every coordinate bounded by `terminal_size` is
+                        // inside the active grid.
+                        _ = alternate_screen.resize(
+                            std::cmp::max(1, terminal_size.0),
+                            std::cmp::max(1, terminal_size.1),
+                        );
                         *screen_buffer = ScreenBuffer::Alternate;
                     }
                     _ => {
@@ -914,9 +962,7 @@ impl EmbeddedGrid {
             (b'L', State::Csi) | (b'L', State::Csi1(_)) => {
                 /* Insert n blank lines (default 1) */
                 let n = if let State::Csi1(ref buf1) = state {
-                    unsafe { std::str::from_utf8_unchecked(buf1) }
-                        .parse::<usize>()
-                        .unwrap()
+                    parse_esc_param(buf1.as_slice()).unwrap_or(1)
                 } else {
                     1
                 };
@@ -930,9 +976,7 @@ impl EmbeddedGrid {
             (b'M', State::Csi) | (b'M', State::Csi1(_)) => {
                 /* Delete n lines (default 1) */
                 let n = if let State::Csi1(ref buf1) = state {
-                    unsafe { std::str::from_utf8_unchecked(buf1) }
-                        .parse::<usize>()
-                        .unwrap()
+                    parse_esc_param(buf1.as_slice()).unwrap_or(1)
                 } else {
                     1
                 };
@@ -1034,9 +1078,7 @@ impl EmbeddedGrid {
             }
             (b'X', State::Csi1(ref buf)) => {
                 /* Erase Ps Character(s) (default = 1) (ECH).. */
-                let ps = unsafe { std::str::from_utf8_unchecked(buf) }
-                    .parse::<usize>()
-                    .unwrap();
+                let ps = parse_esc_param(buf.as_slice()).unwrap_or(1);
 
                 let mut ctr = 0;
                 let (mut cur_x, mut cur_y) = cursor_val!();
@@ -1062,16 +1104,14 @@ impl EmbeddedGrid {
                     // Ps = 18 → Report the size of the text area in characters as CSI 8 ; height ;
                     // width t debug!("report size of the text area");
                     //log::trace!("got {}", EscCode::from((&(*state), byte)));
-                    stdin.write_all(b"\x1b[8;").unwrap();
-                    stdin
-                        .write_all((terminal_size.1).to_string().as_bytes())
-                        .unwrap();
-                    stdin.write_all(b";").unwrap();
-                    stdin
-                        .write_all((terminal_size.0).to_string().as_bytes())
-                        .unwrap();
-                    stdin.write_all(b"t").unwrap();
-                    stdin.flush().unwrap();
+                    let response = format!("\x1b[8;{};{}t", terminal_size.1, terminal_size.0);
+                    if let Err(err) = stdin
+                        .write_all(response.as_bytes())
+                        .and_then(|()| stdin.flush())
+                    {
+                        // The child may have exited and closed the pty.
+                        log::error!("Could not report embedded terminal size: {err}");
+                    }
                 } else {
                     //log::trace!("ignoring unknown code {}",
                     // EscCode::from((&(*state), byte)));
@@ -1083,23 +1123,22 @@ impl EmbeddedGrid {
                 // Result is CSI r ; c R
                 //log::trace!("report cursor position");
                 //log::trace!("got {}", EscCode::from((&(*state), byte)));
-                stdin.write_all(b"\x1b[").unwrap();
-                stdin
-                    .write_all((cursor.1 + 1).to_string().as_bytes())
-                    .unwrap();
-                stdin.write_all(b";").unwrap();
-                stdin
-                    .write_all((cursor.0 + 1).to_string().as_bytes())
-                    .unwrap();
-                stdin.write_all(b"R").unwrap();
-                stdin.flush().unwrap();
+                let response = format!(
+                    "\x1b[{};{}R",
+                    cursor.1.saturating_add(1),
+                    cursor.0.saturating_add(1)
+                );
+                if let Err(err) = stdin
+                    .write_all(response.as_bytes())
+                    .and_then(|()| stdin.flush())
+                {
+                    log::error!("Could not report embedded terminal cursor position: {err}");
+                }
                 *state = State::Normal;
             }
             (b'A', State::Csi1(buf)) => {
                 // Move cursor up n lines
-                let offset = unsafe { std::str::from_utf8_unchecked(buf) }
-                    .parse::<usize>()
-                    .unwrap();
+                let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
                 //log::trace!("cursor up {} times, cursor was: {:?}", offset, cursor);
                 if cursor.1 >= offset {
                     cursor.1 -= offset;
@@ -1111,24 +1150,22 @@ impl EmbeddedGrid {
             }
             (b'B', State::Csi1(buf)) => {
                 // ESC[{buf}B   CSI Cursor Down {buf} Times
-                let offset = unsafe { std::str::from_utf8_unchecked(buf) }
-                    .parse::<usize>()
-                    .unwrap();
+                let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
                 //log::trace!("cursor down {} times, cursor was: {:?}", offset, cursor);
                 if cursor.1 == scroll_region.bottom {
                     /* scroll down */
                     for y in scroll_region.top..scroll_region.bottom {
-                        for x in 0..terminal_size.1 {
+                        for x in 0..terminal_size.0 {
                             screen.grid_mut()[(x, y)] = screen.grid()[(x, y + 1)];
                         }
                     }
-                    for x in 0..terminal_size.1 {
+                    for x in 0..terminal_size.0 {
                         screen.grid_mut()[(x, scroll_region.bottom)] = Cell::default();
                     }
-                } else if offset + cursor.1 < terminal_size.1 {
+                } else if offset.saturating_add(cursor.1) < terminal_size.1 {
                     cursor.1 += offset;
                 }
-                if scroll_region.top + cursor.1 >= terminal_size.1 {
+                if scroll_region.top.saturating_add(cursor.1) >= terminal_size.1 {
                     cursor.1 = terminal_size.1.saturating_sub(1);
                 }
                 *wrap_next = false;
@@ -1137,9 +1174,7 @@ impl EmbeddedGrid {
             }
             (b'D', State::Csi1(buf)) => {
                 // ESC[{buf}D   CSI Cursor Backward {buf} Times
-                let offset = unsafe { std::str::from_utf8_unchecked(buf) }
-                    .parse::<usize>()
-                    .unwrap();
+                let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
                 if cursor.0 >= offset {
                     cursor.0 -= offset;
                 }
@@ -1151,17 +1186,15 @@ impl EmbeddedGrid {
             }
             (b'E', State::Csi1(buf)) => {
                 // ESC[{buf}E   CSI Cursor Next Line {buf} Times
-                let offset = unsafe { std::str::from_utf8_unchecked(buf) }
-                    .parse::<usize>()
-                    .unwrap();
+                let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
                 //log::trace!(
                 //    "cursor next line {} times, cursor was: {:?}",
                 //    offset, cursor
                 //);
-                if offset + cursor.1 < terminal_size.1 {
+                if offset.saturating_add(cursor.1) < terminal_size.1 {
                     cursor.1 += offset;
                 }
-                if scroll_region.top + cursor.1 >= terminal_size.1 {
+                if scroll_region.top.saturating_add(cursor.1) >= terminal_size.1 {
                     cursor.1 = terminal_size.1.saturating_sub(1);
                 }
                 cursor.0 = 0;
@@ -1171,9 +1204,7 @@ impl EmbeddedGrid {
             }
             (b'F', State::Csi1(buf)) => {
                 // ESC[{buf}F   CSI Cursor Previous Line {buf} Times
-                let offset = unsafe { std::str::from_utf8_unchecked(buf) }
-                    .parse::<usize>()
-                    .unwrap();
+                let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
                 //log::trace!(
                 //    "cursor previous line {} times, cursor was: {:?}",
                 //    offset, cursor
@@ -1187,9 +1218,7 @@ impl EmbeddedGrid {
             (b'G', State::Csi1(_)) | (b'G', State::Csi) => {
                 // ESC[{buf}G   Cursor Character Absolute  [column={buf}] (default = [row,1])
                 let new_col = if let State::Csi1(buf) = state {
-                    unsafe { std::str::from_utf8_unchecked(buf) }
-                        .parse::<usize>()
-                        .unwrap()
+                    parse_esc_param(buf.as_slice()).unwrap_or(1)
                 } else {
                     1
                 };
@@ -1209,11 +1238,9 @@ impl EmbeddedGrid {
             }
             (b'C', State::Csi1(buf)) => {
                 // ESC[{buf}C   CSI Cursor Forward {buf} Times
-                let offset = unsafe { std::str::from_utf8_unchecked(buf) }
-                    .parse::<usize>()
-                    .unwrap();
+                let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
                 //log::trace!("cursor forward {} times, cursor was: {:?}", offset, cursor);
-                if cursor.0 + offset < terminal_size.0 {
+                if offset.saturating_add(cursor.0) < terminal_size.0 {
                     cursor.0 += offset;
                 }
                 //log::trace!("cursor became: {:?}", cursor);
@@ -1222,12 +1249,14 @@ impl EmbeddedGrid {
             (b'P', State::Csi1(_)) | (b'P', State::Csi) => {
                 // ESC[{buf}P   CSI Delete {buf} characters, default = 1
                 let offset = if let State::Csi1(buf) = state {
-                    unsafe { std::str::from_utf8_unchecked(buf) }
-                        .parse::<usize>()
-                        .unwrap()
+                    parse_esc_param(buf.as_slice()).unwrap_or(1)
                 } else {
                     1
                 };
+                // An oversized count (e.g. `ESC[18446744073709551615P`) must not
+                // underflow the width arithmetic below. Deleting more characters
+                // than fit on the line is equivalent to deleting the remainder.
+                let offset = std::cmp::min(offset, terminal_size.0.saturating_sub(cursor.0));
 
                 for i in 0..(terminal_size.0 - cursor.0 - offset) {
                     screen.grid_mut()[(cursor.0 + i, cursor.1)] =
@@ -1246,9 +1275,7 @@ impl EmbeddedGrid {
             (b'd', State::Csi1(_)) | (b'd', State::Csi) => {
                 /* CSI Pm d Line Position Absolute [row] (default = [1,column]) (VPA). */
                 let row = if let State::Csi1(buf) = state {
-                    unsafe { std::str::from_utf8_unchecked(buf) }
-                        .parse::<usize>()
-                        .unwrap()
+                    parse_esc_param(buf.as_slice()).unwrap_or(1)
                 } else {
                     1
                 };
@@ -1257,7 +1284,7 @@ impl EmbeddedGrid {
                 //    row, cursor
                 //);
                 cursor.1 = row.saturating_sub(1);
-                if scroll_region.top + cursor.1 >= terminal_size.1 {
+                if scroll_region.top.saturating_add(cursor.1) >= terminal_size.1 {
                     cursor.1 = terminal_size.1.saturating_sub(1);
                 }
                 *wrap_next = false;
@@ -1318,7 +1345,7 @@ impl EmbeddedGrid {
                 *state = State::Normal;
             }
             (c, State::Csi1(ref mut buf)) if c.is_ascii_digit() || c == b' ' => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (b';', State::Csi2(ref mut buf1_p, ref mut buf2_p)) => {
                 let buf1 = std::mem::take(buf1_p);
@@ -1338,12 +1365,8 @@ impl EmbeddedGrid {
                 //Cursor Position [row;column] (default = [1,1]) (CUP).
                 let (orig_x, mut orig_y) = if let State::Csi2(ref y, ref x) = state {
                     (
-                        unsafe { std::str::from_utf8_unchecked(x) }
-                            .parse::<usize>()
-                            .unwrap_or(1),
-                        unsafe { std::str::from_utf8_unchecked(y) }
-                            .parse::<usize>()
-                            .unwrap_or(1),
+                        parse_esc_param(x.as_slice()).unwrap_or(1),
+                        parse_esc_param(y.as_slice()).unwrap_or(1),
                     )
                 } else {
                     (1, 1)
@@ -1351,14 +1374,15 @@ impl EmbeddedGrid {
 
                 let (min_y, max_y) = if *origin_mode {
                     //log::trace!(*origin_mode);
-                    orig_y += scroll_region.top;
+                    orig_y = orig_y.saturating_add(scroll_region.top);
                     (scroll_region.top, scroll_region.bottom)
                 } else {
                     (0, terminal_size.1.saturating_sub(1))
                 };
 
-                cursor.0 = std::cmp::min(orig_x - 1, terminal_size.0.saturating_sub(1));
-                cursor.1 = std::cmp::max(min_y, std::cmp::min(max_y, orig_y - 1));
+                cursor.0 =
+                    std::cmp::min(orig_x.saturating_sub(1), terminal_size.0.saturating_sub(1));
+                cursor.1 = std::cmp::max(min_y, std::cmp::min(max_y, orig_y.saturating_sub(1)));
                 *wrap_next = false;
 
                 //log::trace!("{}", EscCode::from((&(*state), byte)),);
@@ -1371,27 +1395,27 @@ impl EmbeddedGrid {
                 *state = State::Normal;
             }
             (c, State::Csi2(_, ref mut buf)) if c.is_ascii_digit() => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (b'r', State::Csi2(_, _)) | (b'r', State::Csi) => {
                 /* CSI Ps ; Ps r Set Scrolling Region [top;bottom] (default = full size of
                  * window) (DECSTBM). */
                 let (top, bottom) = if let State::Csi2(ref top, ref bottom) = state {
                     (
-                        unsafe { std::str::from_utf8_unchecked(top) }
-                            .parse::<usize>()
-                            .unwrap_or(1),
-                        unsafe { std::str::from_utf8_unchecked(bottom) }
-                            .parse::<usize>()
-                            .unwrap_or(1),
+                        parse_esc_param(top.as_slice()).unwrap_or(1),
+                        parse_esc_param(bottom.as_slice()).unwrap_or(1),
                     )
                 } else {
                     (1, terminal_size.1)
                 };
 
-                if bottom > top {
-                    scroll_region.top = top - 1;
-                    scroll_region.bottom = bottom - 1;
+                // `0` is not a valid 1-based line number: treat it as the
+                // default. Clamp to the screen so that later scroll operations
+                // cannot index outside the grid.
+                let top = top.max(1);
+                if bottom > top && terminal_size.1 > 0 {
+                    scroll_region.top = (top - 1).min(terminal_size.1 - 1);
+                    scroll_region.bottom = (bottom - 1).min(terminal_size.1 - 1);
                     *cursor = (0, 0);
                     *wrap_next = false;
                 }
@@ -1405,15 +1429,13 @@ impl EmbeddedGrid {
             }
 
             (c, State::Csi3(_, _, ref mut buf)) if c.is_ascii_digit() => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (b'm', State::Csi3(ref buf1, ref buf2, ref buf3))
                 if buf1.as_ref() == b"38" && buf2.as_ref() == b"5" =>
             {
                 /* Set character attributes | foreground color */
-                *fg_color = if let Ok(byte) =
-                    unsafe { std::str::from_utf8_unchecked(buf3) }.parse::<u8>()
-                {
+                *fg_color = if let Some(byte) = parse_esc_param_u8(buf3.as_slice()) {
                     //log::trace!("parsed buf as {}", byte);
                     Color::Byte(byte)
                 } else {
@@ -1427,9 +1449,7 @@ impl EmbeddedGrid {
                 if buf1.as_ref() == b"48" && buf2.as_ref() == b"5" =>
             {
                 /* Set character attributes | background color */
-                *bg_color = if let Ok(byte) =
-                    unsafe { std::str::from_utf8_unchecked(buf3) }.parse::<u8>()
-                {
+                *bg_color = if let Some(byte) = parse_esc_param_u8(buf3.as_slice()) {
                     //log::trace!("parsed buf as {}", byte);
                     Color::Byte(byte)
                 } else {
@@ -1456,7 +1476,7 @@ impl EmbeddedGrid {
                 *state = State::Normal;
             }
             (c, State::Csi3(_, _, ref mut buf)) if c.is_ascii_digit() => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (b';', State::Csi3(ref mut buf1_p, ref mut buf2_p, ref mut buf3_p)) => {
                 let buf1 = std::mem::take(buf1_p);
@@ -1469,7 +1489,7 @@ impl EmbeddedGrid {
                 *state = State::Csi4(buf1, buf2, buf3, buf4);
             }
             (c, State::Csi4(_, _, _, ref mut buf)) if c.is_ascii_digit() => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (b';', State::Csi4(ref mut buf1_p, ref mut buf2_p, ref mut buf3_p, ref mut buf4_p)) => {
                 let buf1 = std::mem::take(buf1_p);
@@ -1483,7 +1503,7 @@ impl EmbeddedGrid {
                 *state = State::Csi5(buf1, buf2, buf3, buf4, buf5);
             }
             (c, State::Csi5(_, _, _, _, ref mut buf)) if c.is_ascii_digit() => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (
                 b';',
@@ -1507,7 +1527,7 @@ impl EmbeddedGrid {
                 *state = State::Csi6(buf1, buf2, buf3, buf4, buf5, buf6);
             }
             (c, State::Csi6(_, _, _, _, _, ref mut buf)) if c.is_ascii_digit() => {
-                buf.push(c);
+                push_esc_param(buf, c);
             }
             (
                 b'm',
@@ -1522,11 +1542,11 @@ impl EmbeddedGrid {
             ) if buf1.as_ref() == b"38" && buf2.as_ref() == b"2" => {
                 /* Set true foreground color */
                 *fg_color = match (
-                    unsafe { std::str::from_utf8_unchecked(r_buf) }.parse::<u8>(),
-                    unsafe { std::str::from_utf8_unchecked(g_buf) }.parse::<u8>(),
-                    unsafe { std::str::from_utf8_unchecked(b_buf) }.parse::<u8>(),
+                    parse_esc_param_u8(r_buf.as_slice()),
+                    parse_esc_param_u8(g_buf.as_slice()),
+                    parse_esc_param_u8(b_buf.as_slice()),
                 ) {
-                    (Ok(r), Ok(g), Ok(b)) => Color::Rgb(r, g, b),
+                    (Some(r), Some(g), Some(b)) => Color::Rgb(r, g, b),
                     _ => Color::Default,
                 };
                 screen.grid_mut()[cursor_val!()].set_fg(*fg_color);
@@ -1546,11 +1566,11 @@ impl EmbeddedGrid {
             ) if buf1.as_ref() == b"48" && buf2.as_ref() == b"2" => {
                 /* Set true background color */
                 *bg_color = match (
-                    unsafe { std::str::from_utf8_unchecked(r_buf) }.parse::<u8>(),
-                    unsafe { std::str::from_utf8_unchecked(g_buf) }.parse::<u8>(),
-                    unsafe { std::str::from_utf8_unchecked(b_buf) }.parse::<u8>(),
+                    parse_esc_param_u8(r_buf.as_slice()),
+                    parse_esc_param_u8(g_buf.as_slice()),
+                    parse_esc_param_u8(b_buf.as_slice()),
                 ) {
-                    (Ok(r), Ok(g), Ok(b)) => Color::Rgb(r, g, b),
+                    (Some(r), Some(g), Some(b)) => Color::Rgb(r, g, b),
                     _ => Color::Default,
                 };
                 screen.grid_mut()[cursor_val!()].set_bg(*bg_color);
@@ -1593,11 +1613,11 @@ impl EmbeddedGrid {
             ) if buf1.as_ref() == b"38" && buf2.as_ref() == b"2" => {
                 /* Set true foreground color */
                 *fg_color = match (
-                    unsafe { std::str::from_utf8_unchecked(r_buf) }.parse::<u8>(),
-                    unsafe { std::str::from_utf8_unchecked(g_buf) }.parse::<u8>(),
-                    unsafe { std::str::from_utf8_unchecked(b_buf) }.parse::<u8>(),
+                    parse_esc_param_u8(r_buf.as_slice()),
+                    parse_esc_param_u8(g_buf.as_slice()),
+                    parse_esc_param_u8(b_buf.as_slice()),
                 ) {
-                    (Ok(r), Ok(g), Ok(b)) => Color::Rgb(r, g, b),
+                    (Some(r), Some(g), Some(b)) => Color::Rgb(r, g, b),
                     _ => Color::Default,
                 };
                 screen.grid_mut()[cursor_val!()].set_fg(*fg_color);
@@ -1616,11 +1636,11 @@ impl EmbeddedGrid {
             ) if buf1.as_ref() == b"48" && buf2.as_ref() == b"2" => {
                 /* Set true background color */
                 *bg_color = match (
-                    unsafe { std::str::from_utf8_unchecked(r_buf) }.parse::<u8>(),
-                    unsafe { std::str::from_utf8_unchecked(g_buf) }.parse::<u8>(),
-                    unsafe { std::str::from_utf8_unchecked(b_buf) }.parse::<u8>(),
+                    parse_esc_param_u8(r_buf.as_slice()),
+                    parse_esc_param_u8(g_buf.as_slice()),
+                    parse_esc_param_u8(b_buf.as_slice()),
                 ) {
-                    (Ok(r), Ok(g), Ok(b)) => Color::Rgb(r, g, b),
+                    (Some(r), Some(g), Some(b)) => Color::Rgb(r, g, b),
                     _ => Color::Default,
                 };
                 screen.grid_mut()[cursor_val!()].set_bg(*bg_color);
@@ -1675,13 +1695,13 @@ impl EmbeddedGrid {
                 };
             }
             (c, State::Csi58_5_ { ref mut ps }) if c.is_ascii_digit() => {
-                ps.push(c);
+                push_esc_param(ps, c);
             }
             (b'm', State::Csi58_5_ { ps: _ }) => {
                 *state = State::Normal;
             }
             (c, State::Csi58_2_1 { ref mut ps_1 }) if c.is_ascii_digit() => {
-                ps_1.push(c);
+                push_esc_param(ps_1, c);
             }
             (b':', State::Csi58_2_1 { ref mut ps_1 }) => {
                 *state = State::Csi58_2_2 {
@@ -1696,7 +1716,7 @@ impl EmbeddedGrid {
                     ref mut ps_2,
                 },
             ) if c.is_ascii_digit() => {
-                ps_2.push(c);
+                push_esc_param(ps_2, c);
             }
             (
                 b':',
@@ -1719,7 +1739,7 @@ impl EmbeddedGrid {
                     ref mut ps_3,
                 },
             ) if c.is_ascii_digit() => {
-                ps_3.push(c);
+                push_esc_param(ps_3, c);
             }
             (
                 b':',
@@ -1766,7 +1786,9 @@ impl EmbeddedGrid {
                 *state = State::CsiLarge(vec![a, b, c, d, e, f]);
             }
             (b';', State::CsiLarge(ref mut bufs)) => {
-                bufs.push(vec![]);
+                if bufs.len() < MAX_ESC_PARAM_LEN {
+                    bufs.push(vec![]);
+                }
             }
             (b'm', State::CsiLarge(_)) => {
                 log::trace!(
@@ -1776,7 +1798,11 @@ impl EmbeddedGrid {
                 *state = State::Normal;
             }
             (other, State::CsiLarge(ref mut bufs)) => {
-                bufs.last_mut().unwrap().push(other);
+                if let Some(last) = bufs.last_mut() {
+                    if last.len() < MAX_ESC_PARAM_LEN {
+                        last.push(other);
+                    }
+                }
             }
             (
                 _,
@@ -1814,5 +1840,123 @@ impl EmbeddedGrid {
                 *state = State::Normal;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    fn feed(grid: &mut EmbeddedGrid, bytes: &[u8]) {
+        // The state machine writes DSR/size replies back to the child; a
+        // scratch sink keeps the tests from needing a real pty.
+        let mut sink = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .expect("/dev/null is writable");
+        for &byte in bytes {
+            grid.process_byte(&mut sink, byte);
+        }
+    }
+
+    fn new_grid(cols: usize, rows: usize) -> EmbeddedGrid {
+        let mut grid = EmbeddedGrid::new();
+        grid.set_terminal_size((cols, rows));
+        grid
+    }
+
+    /// Malformed or absurd CSI parameters must be clamped/defaulted, never
+    /// panic (previously `parse::<usize>().unwrap()` plus `usize` subtraction
+    /// underflows).
+    #[test]
+    fn malformed_csi_parameters_do_not_panic() {
+        let mut grid = new_grid(20, 24);
+        for seq in [
+            &b"\x1b[1 2G"[..],
+            b"\x1b[ G",
+            b"\x1b[99999999999999999999999999G",
+            b"\x1b[18446744073709551615P",
+            b"\x1b[0;0H",
+            b"\x1b[0;5r",
+            b"\x1b[99999999L",
+            b"\x1b[99999999M",
+            b"\x1b[99999X",
+            b"\x1b[99999999999999999B",
+            b"\x1b[99999999999999999C",
+            b"\x1b[99999999999999999A",
+            b"\x1b[99999999999999999d",
+            b"\x1b[99999999999999999E",
+            b"\x1b[99999999999999999F",
+            b"\x1b[38;5;99999999999999m",
+            b"\x1b[38;2;999;999;999m",
+            b"\x1b[",
+        ] {
+            feed(&mut grid, seq);
+        }
+    }
+
+    /// A cursor parked below the scroll region (possible via CUP when origin
+    /// mode is off) plus `ESC D`, or a narrow-and-tall grid, used to index
+    /// outside the active grid.
+    #[test]
+    fn cursor_outside_scroll_region_does_not_panic() {
+        let mut grid = new_grid(5, 40);
+        feed(&mut grid, b"\x1b[1;2r");
+        // Hit the CSI B scroll branch on a grid narrower than it is tall: the
+        // column loop used `terminal_size.1` (rows) as the column bound.
+        feed(&mut grid, b"\x1b[2;1H\x1b[1B");
+        feed(&mut grid, b"\x1b[40;1H");
+        feed(&mut grid, b"\x1bD");
+        feed(&mut grid, b"\x1b[K\x1b[?25h");
+        feed(&mut grid, b"\x1b[99999999M");
+        feed(&mut grid, b"\x1b[99999999L");
+        feed(&mut grid, b"\x1b[99999999B");
+        feed(&mut grid, b"\x1b[99999999P");
+        feed(&mut grid, b"\x1b[2J");
+    }
+
+    /// Bytes that do not form valid UTF-8 must not be reinterpreted as a
+    /// `str` (UB) nor panic.
+    #[test]
+    fn invalid_utf8_sequences_do_not_panic() {
+        let mut grid = new_grid(20, 24);
+        for seq in [
+            &[0xC3, 0x28][..],
+            &[0xE2, 0x28, 0x41],
+            &[0xF0, 0x28, 0x41, 0x42],
+            &[0x80, 0x80, 0x80],
+            &[0xFF, 0xFE],
+        ] {
+            feed(&mut grid, seq);
+        }
+    }
+
+    /// Growing the normal grid used to desynchronise `terminal_size` from the
+    /// alternate grid, letting coordinates exceed the alternate buffer.
+    #[test]
+    fn alternate_screen_stays_sized_after_normal_grid_growth() {
+        let mut grid = new_grid(20, 24);
+        feed(&mut grid, b"\x1b[24;1H");
+        for _ in 0..4 {
+            feed(&mut grid, b"\n");
+        }
+        feed(&mut grid, b"\x1b[?1049h");
+        // Cursor row 27 is valid on the grown normal grid but outside the
+        // alternate grid unless it is re-synced on switch.
+        feed(&mut grid, b"\x1b[K");
+        feed(&mut grid, b"\x1b[?25h");
+        feed(&mut grid, b"\x1b[?1049l");
+    }
+
+    /// A hostile child can stream digits into one escape sequence; the
+    /// parameter buffer must stay bounded.
+    #[test]
+    fn huge_parameter_run_is_bounded() {
+        let mut grid = new_grid(20, 24);
+        let mut bytes = Vec::with_capacity(100_002);
+        bytes.extend_from_slice(b"\x1b[");
+        bytes.extend(vec![b'9'; 100_000]);
+        bytes.push(b'G');
+        feed(&mut grid, &bytes);
     }
 }

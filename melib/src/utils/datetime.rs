@@ -466,17 +466,18 @@ where
             continue;
         }
         let rest = unsafe { CStr::from_ptr(ret) };
-        let tm_gmtoff = if rest.to_bytes().len() > 4
-            && rest.to_bytes().is_ascii()
-            && rest.to_bytes()[1..3].iter().all(u8::is_ascii_digit)
-            && rest.to_bytes()[4..6].iter().all(u8::is_ascii_digit)
+        let rest_bytes = rest.to_bytes();
+        let tm_gmtoff = if rest_bytes.len() >= 6
+            && rest_bytes.is_ascii()
+            && rest_bytes[1..3].iter().all(u8::is_ascii_digit)
+            && rest_bytes[4..6].iter().all(u8::is_ascii_digit)
         {
             // safe since rest.to_bytes().is_ascii()
-            let offset = unsafe { std::str::from_utf8_unchecked(&rest.to_bytes()[0..6]) };
+            let offset = unsafe { std::str::from_utf8_unchecked(&rest_bytes[0..6]) };
             if let (Ok(mut hr_offset), Ok(mut min_offset)) =
                 (offset[1..3].parse::<i64>(), offset[4..6].parse::<i64>())
             {
-                if rest.to_bytes()[0] == b'-' {
+                if rest_bytes[0] == b'-' {
                     hr_offset = -hr_offset;
                     min_offset = -min_offset;
                 }
@@ -485,10 +486,10 @@ where
                 0
             }
         } else {
-            let rest = if rest.to_bytes().starts_with(b"(") && rest.to_bytes().ends_with(b")") {
-                &rest.to_bytes()[1..rest.to_bytes().len() - 1]
+            let rest = if rest_bytes.starts_with(b"(") && rest_bytes.ends_with(b")") {
+                &rest_bytes[1..rest_bytes.len() - 1]
             } else {
-                rest.to_bytes()
+                rest_bytes
             };
 
             TIMEZONE_ABBR
@@ -749,29 +750,56 @@ pub mod lib {
     use super::*;
 
     // Algorithm: http://howardhinnant.github.io/date_algorithms.html
-    pub fn days_from_epoch(mut y: i32, m: i32, d: i32) -> i32 {
-        y -= i32::from(m <= 2);
+    //
+    // Computed in `i64`: an extreme `tm_year` from a public `timegm()` caller
+    // overflows the intermediate `era * 146097` in `i32` (CWE-190). The
+    // division semantics match the previous `i32` version (truncation toward
+    // zero), so valid dates are unaffected.
+    pub fn days_from_epoch(y: i32, m: i32, d: i32) -> i32 {
+        let y = i64::from(y) - i64::from(m <= 2);
+        let m = i64::from(m);
+        let d = i64::from(d);
         let era = y / 400;
         let yoe = y - era * 400; // [0, 399]
         let doy = (153 * (m + (if m > 2 { -3 } else { 9 })) + 2) / 5 + d - 1; // [0, 365]
         let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-        era * 146097 + doe - 719468
+        let days = era * 146097 + doe - 719468;
+        i32::try_from(days).unwrap_or(if days < 0 { i32::MIN } else { i32::MAX })
     }
 
     // It  does not modify broken-down time
     pub fn timegm(t: tm) -> UnixTimestamp {
-        let mut year = t.tm_year + 1900;
+        let Some(mut year) = t.tm_year.checked_add(1900) else {
+            return 0;
+        };
         let mut month = t.tm_mon; // 0-11
         if month > 11 {
-            year += month / 12;
+            let Some(y) = year.checked_add(month / 12) else {
+                return 0;
+            };
+            year = y;
             month %= 12;
         } else if month < 0 {
-            let years_diff = (11 - month) / 12;
-            year -= years_diff;
-            month += 12 * years_diff;
+            let Some(diff) = 11i32.checked_sub(month) else {
+                return 0;
+            };
+            let years_diff = diff / 12;
+            let Some(y) = year.checked_sub(years_diff) else {
+                return 0;
+            };
+            let Some(m) = years_diff
+                .checked_mul(12)
+                .and_then(|v| month.checked_add(v))
+            else {
+                return 0;
+            };
+            year = y;
+            month = m;
         }
-        let days_since_epoch =
-            u64::try_from(days_from_epoch(year, month + 1, t.tm_mday)).unwrap_or(0);
+        let Some(month) = month.checked_add(1) else {
+            return 0;
+        };
+        let days_since_epoch = u64::try_from(days_from_epoch(year, month, t.tm_mday)).unwrap_or(0);
 
         60 * (60 * (24 * days_since_epoch + u64::try_from(t.tm_hour).unwrap_or(0))
             + u64::try_from(t.tm_min).unwrap_or(0))
@@ -899,5 +927,51 @@ mod tests {
             rfc822_to_timestamp("Mon, 16 Mar 2020 10:23:01 +0200").unwrap(),
             1584346981
         );
+    }
+
+    /// Regression (CWE-1287): the UTC-offset probe in `rfc3339_to_timestamp`
+    /// indexed `rest[4..6]` while only checking `len > 4`, so a trailing
+    /// 5-byte offset such as `+0530` (RFC3339 allows the colon-less form)
+    /// panicked with an out-of-range slice. It must now be handled gracefully.
+    #[test]
+    fn test_rfc3339_short_offset_no_panic() {
+        // These inputs reach the offset probe; none may panic.
+        for input in [
+            "2017-04-24T17:36:34+0530",
+            "2017-04-24T17:36:34-0800",
+            "2017-04-24T17:36:34",
+            "2017-04-24",
+            "",
+            "+",
+            "0000-00-00T00:00:00+",
+        ] {
+            let r = std::panic::catch_unwind(|| rfc3339_to_timestamp(input));
+            assert!(r.is_ok(), "rfc3339_to_timestamp({input:?}) panicked");
+        }
+        // The colon form keeps its offset (5h30m east of UTC).
+        assert_eq!(
+            rfc3339_to_timestamp("2017-04-24T17:36:34+05:30").unwrap(),
+            rfc3339_to_timestamp("2017-04-24T12:06:34+00:00").unwrap()
+        );
+    }
+
+    /// Regression (CWE-190): `lib::timegm` / `lib::days_from_epoch` used
+    /// unchecked `i32` arithmetic, so an extreme `tm_year`/`tm_mon` overflowed
+    /// (debug panic / wrong result). The public entry points must be total.
+    #[test]
+    fn test_timegm_extreme_tm_no_panic() {
+        for (tm_year, tm_mon) in [
+            (i32::MAX, 0),
+            (i32::MIN, 0),
+            (i32::MAX - 1900, i32::MAX),
+            (i32::MIN + 1900, i32::MIN),
+            (100_000, i32::MAX),
+            (0, i32::MIN),
+        ] {
+            let mut t: libc::tm = unsafe { std::mem::zeroed() };
+            t.tm_year = tm_year;
+            t.tm_mon = tm_mon;
+            let _ = lib::timegm(t);
+        }
     }
 }

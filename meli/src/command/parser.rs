@@ -259,7 +259,7 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
         tag("flag"),
         alt((
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
-                let mut check = arg_init! { min_arg:2, max_arg: 2, flag};
+                let mut check = arg_init! { min_arg:1, max_arg: 1, flag};
                 let (input, _) = tag("set")(input.trim())?;
                 arg_chk!(start check, input);
                 let (input, _) = is_a(" ")(input)?;
@@ -279,7 +279,7 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
                 Ok((input, Ok(Listing(Flag(FlagAction::Set(flag))))))
             },
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
-                let mut check = arg_init! { min_arg:2, max_arg: 2, flag};
+                let mut check = arg_init! { min_arg:1, max_arg: 1, flag};
                 let (input, _) = tag("unset")(input.trim())?;
                 arg_chk!(start check, input);
                 let (input, _) = is_a(" ")(input)?;
@@ -393,7 +393,7 @@ pub fn copymove<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, Command
             Ok((input, Ok(Listing(MoveTo(path.to_string())))))
         },
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
-            let mut check = arg_init! { min_arg:1, max_arg: 1, moveto};
+            let mut check = arg_init! { min_arg:2, max_arg: 2, moveto};
             let (input, _) = tag("moveto")(input.trim())?;
             println!("input len is {}", input.len());
             arg_chk!(start check, input);
@@ -779,6 +779,18 @@ pub fn remove_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, CommandE
     let (input, _) = is_a(" ")(input)?;
     arg_chk!(inc check, input);
     let (input, idx) = map_res(quoted_argument, usize::from_str)(input)?;
+    // The consumer compares `idx + 1` against the attachment count; an index
+    // that cannot be incremented (`usize::MAX`) would overflow there, so
+    // reject it here instead of letting it reach the handler.
+    if idx.checked_add(1).is_none() {
+        return Ok((
+            b"",
+            Err(CommandError::BadValue {
+                inner: "attachment index is out of range".into(),
+                suggestions: None,
+            }),
+        ));
+    }
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((
@@ -808,7 +820,7 @@ pub fn discard_draft(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError
     ))
 }
 pub fn create_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    let mut check = arg_init! { min_arg:1, max_arg: 1, create_malbox};
+    let mut check = arg_init! { min_arg:2, max_arg: 2, create_malbox};
     let (input, _) = tag("create-mailbox")(input.trim())?;
     arg_chk!(start check, input);
     let (input, _) = is_a(" ")(input)?;
@@ -1077,7 +1089,7 @@ pub fn _tag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
         tag("tag"),
         alt((
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
-                let mut check = arg_init! { min_arg:2, max_arg: 2, tag};
+                let mut check = arg_init! { min_arg:1, max_arg: 1, tag};
                 let (input, _) = tag("add")(input.trim())?;
                 arg_chk!(start check, input);
                 let (input, _) = is_a(" ")(input)?;
@@ -1088,7 +1100,7 @@ pub fn _tag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
                 Ok((input, Ok(Listing(Tag(TagAction::Add(tag.to_string()))))))
             },
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
-                let mut check = arg_init! { min_arg:2, max_arg: 2, tag};
+                let mut check = arg_init! { min_arg:1, max_arg: 1, tag};
                 let (input, _) = tag("remove")(input.trim())?;
                 arg_chk!(start check, input);
                 let (input, _) = is_a(" ")(input)?;

@@ -555,13 +555,16 @@ impl FetchState {
                             else {
                                 continue;
                             };
+                            // The MSN is untrusted wire data and the parser
+                            // accepts a leading `0`; saturate instead of
+                            // underflowing (`0 - 1`) on such a response.
                             uid_store
                                 .msn_index
                                 .lock()
                                 .unwrap()
                                 .entry(mailbox_hash)
                                 .or_default()
-                                .insert(message_sequence_number - 1, uid);
+                                .insert(message_sequence_number.saturating_sub(1), uid);
                             uid_store
                                 .hash_index
                                 .lock()

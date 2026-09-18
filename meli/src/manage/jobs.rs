@@ -644,11 +644,11 @@ impl Component for JobManager {
             Shortcuts::GENERAL,
             context.settings.shortcuts.general.key_values(),
         );
-        map[Shortcuts::GENERAL].insert("sort by 1st column", Key::Char('1'));
-        map[Shortcuts::GENERAL].insert("sort by 2nd column", Key::Char('2'));
-        map[Shortcuts::GENERAL].insert("sort by 3rd column", Key::Char('3'));
-        map[Shortcuts::GENERAL].insert("sort by 4th column", Key::Char('4'));
-        map[Shortcuts::GENERAL].insert("sort by 5th column", Key::Char('5'));
+        map[Shortcuts::GENERAL].insert("sort by 1st column", Key::Char('1').into());
+        map[Shortcuts::GENERAL].insert("sort by 2nd column", Key::Char('2').into());
+        map[Shortcuts::GENERAL].insert("sort by 3rd column", Key::Char('3').into());
+        map[Shortcuts::GENERAL].insert("sort by 4th column", Key::Char('4').into());
+        map[Shortcuts::GENERAL].insert("sort by 5th column", Key::Char('5').into());
 
         map
     }

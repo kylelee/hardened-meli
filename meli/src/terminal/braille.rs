@@ -147,33 +147,28 @@ pub struct BraillePixelIter {
 
 impl From<&[u16]> for BraillePixelIter {
     fn from(from: &[u16]) -> Self {
+        // A slice shorter than 12 elements (the three 16-bit columns this
+        // iterator consumes) must not panic; missing words are treated as
+        // blank pixels.
+        let bit = |i: usize| {
+            from.get(i)
+                .copied()
+                .unwrap_or(0)
+                .swap_bytes()
+                .reverse_bits()
+        };
         Self {
             columns: [
                 Braille16bitColumn {
-                    bitmaps: (
-                        from[0].swap_bytes().reverse_bits(),
-                        from[3].swap_bytes().reverse_bits(),
-                        from[6].swap_bytes().reverse_bits(),
-                        from[9].swap_bytes().reverse_bits(),
-                    ),
+                    bitmaps: (bit(0), bit(3), bit(6), bit(9)),
                     bitcolumn: 1,
                 },
                 Braille16bitColumn {
-                    bitmaps: (
-                        from[1].swap_bytes().reverse_bits(),
-                        from[4].swap_bytes().reverse_bits(),
-                        from[7].swap_bytes().reverse_bits(),
-                        from[10].swap_bytes().reverse_bits(),
-                    ),
+                    bitmaps: (bit(1), bit(4), bit(7), bit(10)),
                     bitcolumn: 1,
                 },
                 Braille16bitColumn {
-                    bitmaps: (
-                        from[2].swap_bytes().reverse_bits(),
-                        from[5].swap_bytes().reverse_bits(),
-                        from[8].swap_bytes().reverse_bits(),
-                        from[11].swap_bytes().reverse_bits(),
-                    ),
+                    bitmaps: (bit(2), bit(5), bit(8), bit(11)),
                     bitcolumn: 1,
                 },
             ],
@@ -486,5 +481,17 @@ mod tests {
             }
             assert_eq!(printed.as_bytes(), output.as_bytes());
         }
+    }
+
+    /// `From<&[u16]>` used to index `0..11` unconditionally; a shorter slice
+    /// must be padded instead of panicking.
+    #[test]
+    fn short_slice_does_not_panic() {
+        for len in 0..=11 {
+            let pixels = vec![0xFFFFu16; len];
+            let _ = super::BraillePixelIter::from(pixels.as_slice()).count();
+        }
+        let pixels = vec![0xAAAAu16; 12];
+        assert_eq!(super::BraillePixelIter::from(pixels.as_slice()).count(), 24);
     }
 }

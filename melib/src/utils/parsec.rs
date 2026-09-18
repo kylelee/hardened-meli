@@ -205,9 +205,14 @@ pub fn quoted_slice<'a>() -> impl Parser<'a, &'a str> {
             return Err(input);
         }
 
+        // Scan bytes rather than `input[i..]`: incrementing a byte index over
+        // a multi-byte UTF-8 character used to slice mid-character and panic
+        // (e.g. the two-byte value `"é"`). A `"` byte is always a char
+        // boundary, so the slices below are safe once one is found.
+        let bytes = input.as_bytes();
         let mut i = 1;
-        while i < input.len() {
-            if input[i..].starts_with('\"') && !input[i - 1..].starts_with('\\') {
+        while i < bytes.len() {
+            if bytes[i] == b'"' && bytes[i - 1] != b'\\' {
                 return Ok((&input[i + 1..], &input[1..i]));
             }
             i += 1;
@@ -768,5 +773,28 @@ mod test {
                 .unwrap_err(),
             r#"{"a":false,"b":false,}"#
         );
+    }
+
+    /// Regression (CWE-1287): `quoted_slice` used to slice `input[i..]` while
+    /// incrementing `i` one byte at a time, so a quoted value containing a
+    /// multi-byte character (e.g. `"é"`) panicked on a non-char-boundary
+    /// slice. It must return the enclosed value instead.
+    #[test]
+    fn test_quoted_slice_multibyte_no_panic() {
+        assert_eq!(quoted_slice().parse(r#""abc""#), Ok(("", "abc")));
+        assert_eq!(quoted_slice().parse(r#""é""#), Ok(("", "é")));
+        assert_eq!(quoted_slice().parse(r#""aé☃b""#), Ok(("", "aé☃b")));
+        assert_eq!(quoted_slice().parse(r#""a\"b""#), Ok(("", r#"a\"b"#)));
+        // No closing quote -> error, never a panic.
+        quoted_slice().parse(r#""é"#).unwrap_err();
+        quoted_slice().parse(r#"""#).unwrap_err();
+        // Every char-boundary truncation of a multi-byte value must not panic.
+        let good = r#""aé☃b""#;
+        for n in 0..=good.len() {
+            if !good.is_char_boundary(n) {
+                continue;
+            }
+            let _ = quoted_slice().parse(&good[..n]);
+        }
     }
 }

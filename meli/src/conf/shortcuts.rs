@@ -23,14 +23,14 @@ use indexmap::IndexMap;
 use melib::{Error, Result};
 
 use super::DotAddressable;
-use crate::terminal::Key;
+use crate::terminal::{Key, ShortcutKeys};
 
 #[macro_export]
 macro_rules! shortcut {
     ($key:ident == $shortcuts:ident[$section:expr][$val:literal]) => {
         $shortcuts
             .get($section)
-            .and_then(|s| s.get($val).map(|v| v == $key))
+            .and_then(|s| s.get($val).map(|v| v.contains($key)))
             .unwrap_or(false)
     };
 }
@@ -108,12 +108,12 @@ macro_rules! shortcut_key_values {
         #[serde(rename = $cname)]
         pub struct $name {
             pub commands: Vec<CommandShortcut>,
-            $(pub $fname : Key),*
+            $(pub $fname : ShortcutKeys),*
         }
 
         impl $name {
             /// Returns a hashmap of all shortcuts and their values
-            pub fn key_values(&self) -> IndexMap<&'static str, Key> {
+            pub fn key_values(&self) -> IndexMap<&'static str, ShortcutKeys> {
                 [
                 $((stringify!($fname),(self.$fname).clone()),)*
                 ].iter().cloned().collect()
@@ -152,134 +152,134 @@ macro_rules! shortcut_key_values {
 shortcut_key_values! { "listing",
     /// Shortcut listing for a mail listing.
     pub struct ListingShortcuts {
-        scroll_up |> "Scroll up list." |> Key::Up,
-        scroll_down |> "Scroll down list." |> Key::Down,
-        new_mail |> "Start new mail draft in new tab." |>  Key::Char('m'),
-        next_account |> "Go to next account." |> Key::Char('H'),
-        next_mailbox |> "Go to next mailbox." |> Key::Char('J'),
-        next_page |> "Go to next page." |> Key::PageDown,
-        prev_account |> "Go to previous account." |> Key::Char('L'),
-        prev_mailbox |> "Go to previous mailbox." |> Key::Char('K'),
-        open_mailbox |> "Open selected mailbox." |> Key::Char('\n'),
-        toggle_mailbox_collapse |> "Toggle mailbox collapse in menu." |> Key::Char(' '),
-        prev_page |> "Go to previous page." |> Key::PageUp,
-        search |> "Search within list of e-mails." |> Key::Char('/'),
-        refresh |> "Manually request a mailbox refresh." |> Key::F(5),
-        set_seen |> "Set thread as seen." |> Key::Char('n'),
-        send_to_trash |> "Send entry to trash folder." |> Key::Char('D'),
-        union_modifier |> "Union modifier." |> Key::Ctrl('u'),
-        diff_modifier |> "Difference modifier." |> Key::Ctrl('d'),
-        intersection_modifier |> "Intersection modifier." |> Key::Ctrl('i'),
-        select_entry |> "Select thread entry." |> Key::Char('V'),
-        select_motion |> "Perform select motion with a movement." |> Key::Char('v'),
-        increase_sidebar |> "Increase sidebar width." |> Key::Ctrl('f'),
-        decrease_sidebar |> "Decrease sidebar width." |> Key::Ctrl('d'),
-        next_entry |> "Focus on next entry." |> Key::Ctrl('n'),
-        previous_entry |> "Focus on previous entry." |> Key::Ctrl('p'),
-        toggle_menu_visibility |> "Toggle visibility of side menu in mail list." |> Key::Char('`'),
-        focus_left |> "Switch focus on the left." |> Key::Left,
-        focus_right |> "Open selected sidebar entry and switch focus on the right." |> Key::Right,
-        exit_entry |> "Exit e-mail entry." |> Key::Char('i'),
-        open_entry |> "Open e-mail entry." |> Key::Char('\n')
+        scroll_up |> "Scroll up list." |> ShortcutKeys::double(Key::Up, Key::Char('k')),
+        scroll_down |> "Scroll down list." |> ShortcutKeys::double(Key::Down, Key::Char('j')),
+        new_mail |> "Start new mail draft in new tab." |>  ShortcutKeys::single(Key::Char('m')),
+        next_account |> "Go to next account." |> ShortcutKeys::single(Key::Char('H')),
+        next_mailbox |> "Go to next mailbox." |> ShortcutKeys::single(Key::Char('J')),
+        next_page |> "Go to next page." |> ShortcutKeys::single(Key::PageDown),
+        prev_account |> "Go to previous account." |> ShortcutKeys::single(Key::Char('L')),
+        prev_mailbox |> "Go to previous mailbox." |> ShortcutKeys::single(Key::Char('K')),
+        open_mailbox |> "Open selected mailbox." |> ShortcutKeys::single(Key::Char('\n')),
+        toggle_mailbox_collapse |> "Toggle mailbox collapse in menu." |> ShortcutKeys::single(Key::Char(' ')),
+        prev_page |> "Go to previous page." |> ShortcutKeys::single(Key::PageUp),
+        search |> "Search within list of e-mails." |> ShortcutKeys::single(Key::Char('/')),
+        refresh |> "Manually request a mailbox refresh." |> ShortcutKeys::single(Key::F(5)),
+        set_seen |> "Set thread as seen." |> ShortcutKeys::single(Key::Char('n')),
+        send_to_trash |> "Send entry to trash folder." |> ShortcutKeys::single(Key::Char('D')),
+        union_modifier |> "Union modifier." |> ShortcutKeys::single(Key::Ctrl('u')),
+        diff_modifier |> "Difference modifier." |> ShortcutKeys::single(Key::Ctrl('d')),
+        intersection_modifier |> "Intersection modifier." |> ShortcutKeys::single(Key::Ctrl('i')),
+        select_entry |> "Select thread entry." |> ShortcutKeys::single(Key::Char('V')),
+        select_motion |> "Perform select motion with a movement." |> ShortcutKeys::single(Key::Char('v')),
+        increase_sidebar |> "Increase sidebar width." |> ShortcutKeys::single(Key::Ctrl('f')),
+        decrease_sidebar |> "Decrease sidebar width." |> ShortcutKeys::single(Key::Ctrl('d')),
+        next_entry |> "Focus on next entry." |> ShortcutKeys::single(Key::Ctrl('n')),
+        previous_entry |> "Focus on previous entry." |> ShortcutKeys::single(Key::Ctrl('p')),
+        toggle_menu_visibility |> "Toggle visibility of side menu in mail list." |> ShortcutKeys::single(Key::Char('`')),
+        focus_left |> "Switch focus on the left." |> ShortcutKeys::double(Key::Left, Key::Char('h')),
+        focus_right |> "Open selected sidebar entry and switch focus on the right." |> ShortcutKeys::double(Key::Right, Key::Char('l')),
+        exit_entry |> "Exit e-mail entry." |> ShortcutKeys::single(Key::Char('i')),
+        open_entry |> "Open e-mail entry." |> ShortcutKeys::single(Key::Char('\n'))
     }
 }
 
 shortcut_key_values! { "contact-list",
     /// Shortcut listing for the contact list view
     pub struct ContactListShortcuts {
-        scroll_up |> "Scroll up list." |> Key::Up,
-        scroll_down |> "Scroll down list." |> Key::Down,
-        create_contact |> "Create new contact." |> Key::Char('c'),
-        edit_contact |> "Edit contact under cursor." |> Key::Char('e'),
-        export_contact |> "Export contact under cursor to .vcf." |> Key::Char('E'),
-        delete_contact |> "Delete contact under cursor." |> Key::Char('d'),
-        mail_contact |> "Mail contact under cursor." |> Key::Char('m'),
-        next_account |> "Go to next account." |> Key::Char('H'),
-        prev_account |> "Go to previous account." |> Key::Char('L'),
-        toggle_menu_visibility |> "Toggle visibility of side menu in mail list." |> Key::Char('`')
+        scroll_up |> "Scroll up list." |> ShortcutKeys::double(Key::Up, Key::Char('k')),
+        scroll_down |> "Scroll down list." |> ShortcutKeys::double(Key::Down, Key::Char('j')),
+        create_contact |> "Create new contact." |> ShortcutKeys::single(Key::Char('c')),
+        edit_contact |> "Edit contact under cursor." |> ShortcutKeys::single(Key::Char('e')),
+        export_contact |> "Export contact under cursor to .vcf." |> ShortcutKeys::single(Key::Char('E')),
+        delete_contact |> "Delete contact under cursor." |> ShortcutKeys::single(Key::Char('d')),
+        mail_contact |> "Mail contact under cursor." |> ShortcutKeys::single(Key::Char('m')),
+        next_account |> "Go to next account." |> ShortcutKeys::single(Key::Char('H')),
+        prev_account |> "Go to previous account." |> ShortcutKeys::single(Key::Char('L')),
+        toggle_menu_visibility |> "Toggle visibility of side menu in mail list." |> ShortcutKeys::single(Key::Char('`'))
     }
 }
 
 shortcut_key_values! { "pager",
     /// Shortcut listing for the text pager
     pub struct PagerShortcuts {
-        page_down |> "Go to next pager page." |>  Key::PageDown,
-        page_up |> "Go to previous pager page." |>  Key::PageUp,
-        scroll_down |> "Scroll down pager." |> Key::Down,
-        scroll_up |> "Scroll up pager." |> Key::Up,
-        select_filter |> "Select content filter." |> Key::Char('f')
+        page_down |> "Go to next pager page." |>  ShortcutKeys::single(Key::PageDown),
+        page_up |> "Go to previous pager page." |>  ShortcutKeys::single(Key::PageUp),
+        scroll_down |> "Scroll down pager." |> ShortcutKeys::double(Key::Down, Key::Char('j')),
+        scroll_up |> "Scroll up pager." |> ShortcutKeys::double(Key::Up, Key::Char('k')),
+        select_filter |> "Select content filter." |> ShortcutKeys::single(Key::Char('f'))
     }
 }
 
 shortcut_key_values! { "general",
     pub struct GeneralShortcuts {
-        toggle_help |> "Toggle help and shortcuts view." |> Key::Char('?'),
-        enter_command_mode |> "Enter COMMAND mode." |> Key::Char(':'),
-        quit |> "Quit meli." |> Key::Char('q'),
-        go_to_tab |> "Go to the nth tab." |> Key::Alt('n'),
-        next_tab |> "Go to the next tab." |> Key::Char('T'),
-        scroll_right |> "Generic scroll right (catch-all setting)" |> Key::Char('l'),
-        scroll_left |> "Generic scroll left (catch-all setting)" |>Key::Char('h'),
-        scroll_up |> "Generic scroll up (catch-all setting)" |> Key::Up,
-        scroll_down |> "Generic scroll down (catch-all setting)" |> Key::Down,
-        next_page |> "Go to next page. (catch-all setting)" |> Key::PageDown,
-        prev_page |> "Go to previous page. (catch-all setting)" |> Key::PageUp,
-        home_page |> "Go to first page. (catch-all setting)" |> Key::Home,
-        end_page |> "Go to last page. (catch-all setting)" |> Key::End,
-        open_entry |> "Open list entry. (catch-all setting)" |> Key::Char('\n'),
-        info_message_next |> "Show next info message, if any." |> Key::Char('>'),
-        info_message_previous |> "Show previous info message, if any." |> Key::Char('<'),
-        focus_in_text_field |> "Focus on a text field." |> Key::Char('\n'),
-        next_search_result |> "Scroll to next search result." |> Key::Char('n'),
-        previous_search_result |> "Scroll to previous search result." |> Key::Char('N')
+        toggle_help |> "Toggle help and shortcuts view." |> ShortcutKeys::single(Key::Char('?')),
+        enter_command_mode |> "Enter COMMAND mode." |> ShortcutKeys::single(Key::Char(':')),
+        quit |> "Quit meli." |> ShortcutKeys::double(Key::Esc, Key::Char('q')),
+        go_to_tab |> "Go to the nth tab." |> ShortcutKeys::single(Key::Alt('n')),
+        next_tab |> "Go to the next tab." |> ShortcutKeys::single(Key::Char('T')),
+        scroll_right |> "Generic scroll right (catch-all setting)" |> ShortcutKeys::double(Key::Right, Key::Char('l')),
+        scroll_left |> "Generic scroll left (catch-all setting)" |> ShortcutKeys::double(Key::Left, Key::Char('h')),
+        scroll_up |> "Generic scroll up (catch-all setting)" |> ShortcutKeys::double(Key::Up, Key::Char('k')),
+        scroll_down |> "Generic scroll down (catch-all setting)" |> ShortcutKeys::double(Key::Down, Key::Char('j')),
+        next_page |> "Go to next page. (catch-all setting)" |> ShortcutKeys::single(Key::PageDown),
+        prev_page |> "Go to previous page. (catch-all setting)" |> ShortcutKeys::single(Key::PageUp),
+        home_page |> "Go to first page. (catch-all setting)" |> ShortcutKeys::single(Key::Home),
+        end_page |> "Go to last page. (catch-all setting)" |> ShortcutKeys::single(Key::End),
+        open_entry |> "Open list entry. (catch-all setting)" |> ShortcutKeys::single(Key::Char('\n')),
+        info_message_next |> "Show next info message, if any." |> ShortcutKeys::single(Key::Char('>')),
+        info_message_previous |> "Show previous info message, if any." |> ShortcutKeys::single(Key::Char('<')),
+        focus_in_text_field |> "Focus on a text field." |> ShortcutKeys::single(Key::Char('\n')),
+        next_search_result |> "Scroll to next search result." |> ShortcutKeys::single(Key::Char('n')),
+        previous_search_result |> "Scroll to previous search result." |> ShortcutKeys::single(Key::Char('N'))
     }
 }
 
 shortcut_key_values! { "composing",
     pub struct ComposingShortcuts {
-        edit |> "Edit." |> Key::Char('e'),
-        send_mail |> "Deliver draft to mailer." |> Key::Char('s'),
-        close |> "Close composer tab." |> Key::Esc,
-        scroll_up |> "Change field focus." |> Key::Up,
-        scroll_down |> "Change field focus." |> Key::Down,
-        reset_date |> "Reset date to current time." |> Key::F(1),
-        reset_body |> "Reset body to default template." |> Key::F(2),
+        edit |> "Edit." |> ShortcutKeys::single(Key::Char('e')),
+        send_mail |> "Deliver draft to mailer." |> ShortcutKeys::single(Key::Char('s')),
+        close |> "Close composer tab." |> ShortcutKeys::single(Key::Esc),
+        scroll_up |> "Change field focus." |> ShortcutKeys::double(Key::Up, Key::Char('k')),
+        scroll_down |> "Change field focus." |> ShortcutKeys::double(Key::Down, Key::Char('j')),
+        reset_date |> "Reset date to current time." |> ShortcutKeys::single(Key::F(1)),
+        reset_body |> "Reset body to default template." |> ShortcutKeys::single(Key::F(2)),
     }
 }
 
 shortcut_key_values! { "envelope-view",
     pub struct EnvelopeViewShortcuts {
-        add_addresses_to_contacts |> "Select addresses from envelope to add to contacts." |> Key::Char('c'),
-        edit |> "Open envelope in composer." |> Key::Char('e'),
-        go_to_url |> "Go to url of given index." |> Key::Char('g'),
-        open_attachment |> "Opens selected attachment with xdg-open." |> Key::Char('a'),
-        open_mailcap |> "Opens selected attachment according to its mailcap entry." |> Key::Char('m'),
-        open_html |> "Opens html attachment in the default browser." |> Key::Char('v'),
-        reply |> "Reply to envelope." |> Key::Char('R'),
-        reply_to_author |> "Reply to author." |> Key::Ctrl('r'),
-        reply_to_all |> "Reply to all/Reply to list/Follow up." |> Key::Ctrl('g'),
-        forward |> "Forward email." |> Key::Ctrl('f'),
-        return_to_normal_view |> "Return to envelope if viewing raw source or attachment." |> Key::Char('r'),
-        save_all_attachments |> "Save all attachments with the save-all-attachment command." |> Key::Ctrl('s'),
-        toggle_expand_headers |> "Expand extra headers (References and others)." |> Key::Char('h'),
-        toggle_url_mode |> "Toggles url open mode." |> Key::Char('u'),
-        view_raw_source |> "View envelope source in a pager. (toggles between raw and decoded source)" |> Key::Alt('r'),
-        change_charset |> "Force attachment charset for decoding." |> Key::Char('d')
+        add_addresses_to_contacts |> "Select addresses from envelope to add to contacts." |> ShortcutKeys::single(Key::Char('c')),
+        edit |> "Open envelope in composer." |> ShortcutKeys::single(Key::Char('e')),
+        go_to_url |> "Go to url of given index." |> ShortcutKeys::single(Key::Char('g')),
+        open_attachment |> "Opens selected attachment with xdg-open." |> ShortcutKeys::single(Key::Char('a')),
+        open_mailcap |> "Opens selected attachment according to its mailcap entry." |> ShortcutKeys::single(Key::Char('m')),
+        open_html |> "Opens html attachment in the default browser." |> ShortcutKeys::single(Key::Char('v')),
+        reply |> "Reply to envelope." |> ShortcutKeys::single(Key::Char('R')),
+        reply_to_author |> "Reply to author." |> ShortcutKeys::single(Key::Ctrl('r')),
+        reply_to_all |> "Reply to all/Reply to list/Follow up." |> ShortcutKeys::single(Key::Ctrl('g')),
+        forward |> "Forward email." |> ShortcutKeys::single(Key::Ctrl('f')),
+        return_to_normal_view |> "Return to envelope if viewing raw source or attachment." |> ShortcutKeys::single(Key::Char('r')),
+        save_all_attachments |> "Save all attachments with the save-all-attachment command." |> ShortcutKeys::single(Key::Ctrl('s')),
+        toggle_expand_headers |> "Expand extra headers (References and others)." |> ShortcutKeys::single(Key::Char('x')),
+        toggle_url_mode |> "Toggles url open mode." |> ShortcutKeys::single(Key::Char('u')),
+        view_raw_source |> "View envelope source in a pager. (toggles between raw and decoded source)" |> ShortcutKeys::single(Key::Alt('r')),
+        change_charset |> "Force attachment charset for decoding." |> ShortcutKeys::single(Key::Char('d'))
     }
 }
 
 shortcut_key_values! { "thread-view",
     pub struct ThreadViewShortcuts {
-        scroll_up |> "Scroll up list." |> Key::Up,
-        scroll_down |> "Scroll down list." |> Key::Down,
-        collapse_subtree |> "collapse thread branches." |> Key::Char('h'),
-        next_page |> "Go to next page." |> Key::PageDown,
-        prev_page |> "Go to previous page." |> Key::PageUp,
-        reverse_thread_order |> "reverse thread order." |> Key::Ctrl('r'),
-        toggle_mailview |> "toggle mail view visibility." |> Key::Char('p'),
-        toggle_threadview |> "toggle thread view visibility." |> Key::Char('t'),
-        toggle_layout |> "Toggle between horizontal and vertical layout." |> Key::Char(' '),
-        focus_left |> "Focus or enlarge the thread list pane." |> Key::Left,
-        focus_right |> "Focus or enlarge the mail view pane." |> Key::Right
+        scroll_up |> "Scroll up list." |> ShortcutKeys::double(Key::Up, Key::Char('k')),
+        scroll_down |> "Scroll down list." |> ShortcutKeys::double(Key::Down, Key::Char('j')),
+        collapse_subtree |> "collapse thread branches." |> ShortcutKeys::single(Key::Char('H')),
+        next_page |> "Go to next page." |> ShortcutKeys::single(Key::PageDown),
+        prev_page |> "Go to previous page." |> ShortcutKeys::single(Key::PageUp),
+        reverse_thread_order |> "reverse thread order." |> ShortcutKeys::single(Key::Ctrl('r')),
+        toggle_mailview |> "toggle mail view visibility." |> ShortcutKeys::single(Key::Char('p')),
+        toggle_threadview |> "toggle thread view visibility." |> ShortcutKeys::single(Key::Char('t')),
+        toggle_layout |> "Toggle between horizontal and vertical layout." |> ShortcutKeys::single(Key::Char(' ')),
+        focus_left |> "Focus or enlarge the thread list pane." |> ShortcutKeys::double(Key::Left, Key::Char('h')),
+        focus_right |> "Focus or enlarge the mail view pane." |> ShortcutKeys::double(Key::Right, Key::Char('l'))
     }
 }

@@ -553,6 +553,37 @@ pub fn blit_buffer_to_cellbuffer(src: &RatatuiBuffer, dst: &mut CellBuffer) {
     }
 }
 
+/// Copy a ratatui buffer into a meli [`CellBuffer`] anchored at `area`.
+///
+/// Unlike [`blit_buffer_to_cellbuffer`] (which targets the grid origin
+/// and suits full-screen copies only), this blits at `area`'s
+/// upper-left corner.
+///
+/// Per cell: the symbol's first char becomes the cell glyph, fg/bg
+/// colors and modifiers are copied. The intersection of `area` and the
+/// source buffer dimensions is copied; everything else is untouched.
+pub fn blit_buffer_to_cellbuffer_at(src: &RatatuiBuffer, dst: &mut CellBuffer, area: Area) {
+    debug_assert_eq!(dst.generation(), area.generation());
+    let (x0, y0) = area.upper_left();
+    let width = area.width().min(src.area().width as usize);
+    let height = area.height().min(src.area().height as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let (Some(s), Some(d)) = (src.cell((x as u16, y as u16)), dst.get_mut(x0 + x, y0 + y))
+            else {
+                continue;
+            };
+            d.overwrite(
+                s.symbol().chars().next().unwrap_or(' '),
+                s.fg.into(),
+                s.bg.into(),
+                s.modifier.into(),
+                false,
+            );
+        }
+    }
+}
+
 /// Border glyph set for pane chrome: the rounded set normally, or meli's
 /// `ascii_drawing` set (`-`/`|`/`+`) when the terminal must stay ASCII-only.
 ///

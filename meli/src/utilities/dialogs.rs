@@ -113,6 +113,13 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
         }
 
         let shortcuts = self.shortcuts(context);
+        // A dialog with no entries has nothing to select: keep the cursor off
+        // the entry list so the `Entry(c)` arms below cannot index it. An
+        // empty entry list (e.g. "select recipients" with no candidate
+        // addresses) used to panic on Enter.
+        if self.entries.is_empty() && matches!(self.cursor, SelectorCursor::Entry(_)) {
+            self.cursor = SelectorCursor::Ok;
+        }
         match (event, self.cursor) {
             (UIEvent::Input(Key::Char('\n')), _) if self.single_only => {
                 /* User can only select one entry, so Enter key finalises the selection */
@@ -126,7 +133,9 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
             (UIEvent::Input(Key::Char('\n')), SelectorCursor::Entry(c)) if !self.single_only => {
                 /* User can select multiple entries, so Enter key toggles the entry under the
                  * cursor */
-                self.entries[c].1 = !self.entries[c].1;
+                if let Some(e) = self.entries.get_mut(c) {
+                    e.1 = !e.1;
+                }
                 self.dirty = true;
                 self.initialized = false;
                 return true;
@@ -164,7 +173,8 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
                 return true;
             }
             (UIEvent::Input(ref key), SelectorCursor::Unfocused)
-                if shortcut!(key == shortcuts[Shortcuts::GENERAL]["scroll_down"]) =>
+                if !self.entries.is_empty()
+                    && shortcut!(key == shortcuts[Shortcuts::GENERAL]["scroll_down"]) =>
             {
                 if self.single_only {
                     self.entries[0].1 = true;
@@ -189,7 +199,8 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
             }
             (UIEvent::Input(ref key), SelectorCursor::Ok)
             | (UIEvent::Input(ref key), SelectorCursor::Cancel)
-                if shortcut!(key == shortcuts[Shortcuts::GENERAL]["scroll_up"]) =>
+                if !self.entries.is_empty()
+                    && shortcut!(key == shortcuts[Shortcuts::GENERAL]["scroll_up"]) =>
             {
                 let c = self.entries.len().saturating_sub(1);
                 self.cursor = SelectorCursor::Entry(c);
@@ -332,6 +343,13 @@ impl Component for UIConfirmationDialog {
         }
 
         let shortcuts = self.shortcuts(context);
+        // A dialog with no entries has nothing to select: keep the cursor off
+        // the entry list so the `Entry(c)` arms below cannot index it. An
+        // empty entry list (e.g. "select recipients" with no candidate
+        // addresses) used to panic on Enter.
+        if self.entries.is_empty() && matches!(self.cursor, SelectorCursor::Entry(_)) {
+            self.cursor = SelectorCursor::Ok;
+        }
         match (event, self.cursor) {
             (UIEvent::Input(Key::Char('\n')), _) if self.single_only => {
                 /* User can only select one entry, so Enter key finalises the selection */
@@ -347,7 +365,9 @@ impl Component for UIConfirmationDialog {
             (UIEvent::Input(Key::Char('\n')), SelectorCursor::Entry(c)) if !self.single_only => {
                 /* User can select multiple entries, so Enter key toggles the entry under the
                  * cursor */
-                self.entries[c].1 = !self.entries[c].1;
+                if let Some(e) = self.entries.get_mut(c) {
+                    e.1 = !e.1;
+                }
                 self.set_dirty(true);
                 self.initialized = false;
                 return true;
@@ -404,7 +424,8 @@ impl Component for UIConfirmationDialog {
             }
             (UIEvent::Input(ref key), SelectorCursor::Ok)
             | (UIEvent::Input(ref key), SelectorCursor::Cancel)
-                if shortcut!(key == shortcuts[Shortcuts::GENERAL]["scroll_up"]) =>
+                if !self.entries.is_empty()
+                    && shortcut!(key == shortcuts[Shortcuts::GENERAL]["scroll_up"]) =>
             {
                 let c = self.entries.len().saturating_sub(1);
                 self.cursor = SelectorCursor::Entry(c);
@@ -413,7 +434,8 @@ impl Component for UIConfirmationDialog {
                 return true;
             }
             (UIEvent::Input(ref key), SelectorCursor::Unfocused)
-                if shortcut!(key == shortcuts[Shortcuts::GENERAL]["scroll_down"]) =>
+                if !self.entries.is_empty()
+                    && shortcut!(key == shortcuts[Shortcuts::GENERAL]["scroll_down"]) =>
             {
                 if self.single_only {
                     self.entries[0].1 = true;
@@ -899,5 +921,44 @@ impl UIConfirmationDialog {
         context
             .replies
             .push_back(UIEvent::ComponentUnrealize(self.id()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A selector with no entries has nothing to select: movement keys and
+    /// Enter must not index the empty entry list (an empty "select
+    /// recipients"/tag list used to panic here).
+    #[test]
+    fn empty_selector_does_not_panic() {
+        let mut ctx = crate::golden::mock_context();
+        let mut dialog = UIConfirmationDialog::new("no choices", Vec::new(), false, None, &ctx);
+        for key in [
+            Key::Down,
+            Key::Up,
+            Key::PageDown,
+            Key::PageUp,
+            Key::Char('\n'),
+            Key::Char(' '),
+            Key::Esc,
+        ] {
+            let mut event = UIEvent::Input(key);
+            let _ = dialog.process_event(&mut event, &mut ctx);
+        }
+
+        // Same for the multi-choice `UIDialog`.
+        let mut dialog: UIDialog<char> = UIDialog::new(
+            "no choices",
+            Vec::<(char, String)>::new(),
+            false,
+            None,
+            &ctx,
+        );
+        for key in [Key::Down, Key::Up, Key::Char('\n'), Key::Esc] {
+            let mut event = UIEvent::Input(key);
+            let _ = dialog.process_event(&mut event, &mut ctx);
+        }
     }
 }

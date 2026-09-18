@@ -72,7 +72,7 @@ impl std::fmt::UpperHex for ComponentId {
     }
 }
 
-pub type ShortcutMap = IndexMap<&'static str, Key>;
+pub type ShortcutMap = IndexMap<&'static str, ShortcutKeys>;
 pub type ShortcutMaps = IndexMap<&'static str, ShortcutMap>;
 
 mod private {
@@ -162,6 +162,16 @@ pub trait Component: std::fmt::Display + std::fmt::Debug + Send + Sync {
         String::new()
     }
 
+    /// The mailbox the user is currently focused on, if any. The
+    /// [`StatusBar`](crate::utilities::StatusBar) uses this to scope
+    /// `LineGauge` rendering to the focused mailbox's `MailboxStatus`;
+    /// containers like [`Tabbed`](crate::utilities::Tabbed) forward
+    /// whatever the active child returns. Defaults to `None` for
+    /// components that have no mailbox concept.
+    fn status_watch(&self) -> Option<(AccountHash, MailboxHash)> {
+        None
+    }
+
     fn attributes(&self) -> &'static ComponentAttr {
         &ComponentAttr::DEFAULT
     }
@@ -227,6 +237,10 @@ impl Component for Box<dyn Component> {
 
     fn status(&self, context: &Context) -> String {
         (**self).status(context)
+    }
+
+    fn status_watch(&self) -> Option<(AccountHash, MailboxHash)> {
+        (**self).status_watch()
     }
 
     fn attributes(&self) -> &'static ComponentAttr {
@@ -336,6 +350,7 @@ pub mod prelude {
         jobs::{JobId, JobMetadata},
         melib::{text::TextProcessing, utils::datetime, SortOrder},
         shortcut, AccountHash, Action, Area, Attr, CellBuffer, Context, DataColumns, EnvelopeHash,
-        Key, MailboxHash, Shortcuts, StatusEvent, ThemeAttribute, UIDialog, UIEvent, UIMode,
+        Key, MailboxHash, ShortcutKeys, Shortcuts, StatusEvent, ThemeAttribute, UIDialog, UIEvent,
+        UIMode,
     };
 }

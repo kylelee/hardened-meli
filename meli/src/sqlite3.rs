@@ -193,16 +193,14 @@ impl AccountCache {
                 )));
             }
             let account_id: i32 = {
-                let mut stmt = tx
-                    .prepare("SELECT id FROM accounts WHERE name = ?")
-                    .unwrap();
-                let x = stmt
-                    .query_map(params![acc_name], |row| row.get(0))
-                    .unwrap()
-                    .next()
-                    .unwrap()
-                    .unwrap();
-                x
+                let mut stmt = tx.prepare("SELECT id FROM accounts WHERE name = ?")?;
+                let mut rows = stmt.query_map(params![acc_name], |row| row.get::<_, i32>(0))?;
+                rows.next().ok_or_else(|| {
+                    Error::new(format!(
+                        "Index database has no account row for `{acc_name}`; run `reindex` \
+                             to rebuild it."
+                    ))
+                })??
             };
             if let Err(err) = tx
                 .execute(
@@ -308,16 +306,15 @@ impl AccountCache {
                 )
                 .chain_err_summary(|| "Failed to update index:")?;
                 let account_id = {
-                    let mut stmt = tx
-                        .prepare("SELECT id FROM accounts WHERE name = ?")
-                        .unwrap();
-                    let x = stmt
-                        .query_map(params![acc_name.as_ref()], |row| row.get(0))
-                        .unwrap()
-                        .next()
-                        .unwrap()
-                        .unwrap();
-                    x
+                    let mut stmt = tx.prepare("SELECT id FROM accounts WHERE name = ?")?;
+                    let mut rows =
+                        stmt.query_map(params![acc_name.as_ref()], |row| row.get::<_, i32>(0))?;
+                    rows.next().ok_or_else(|| {
+                        Error::new(format!(
+                            "Index database has no account row for `{acc_name}`; run \
+                                 `reindex` to rebuild it."
+                        ))
+                    })??
                 };
                 tx.commit()?;
                 Ok::<i32, Error>(account_id)

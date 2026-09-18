@@ -51,9 +51,13 @@ use crate::{
     utils::{html_escape::HtmlEntity, percent_encoding::percent_decode},
 };
 
+// Only used for diagnostic formatting of parser inputs, which come straight
+// from untrusted mail. A lossy fallback is required here: the previous
+// `from_utf8_unchecked` was undefined behaviour for malformed (non-UTF-8)
+// header bytes.
 macro_rules! to_str {
     ($l:expr) => {{
-        unsafe { std::str::from_utf8_unchecked($l) }
+        std::str::from_utf8($l).unwrap_or("<invalid UTF-8>")
     }};
 }
 
@@ -392,12 +396,20 @@ impl BytesExt for [u8] {
 
     #[inline]
     fn replace(&self, from: &[u8], to: &[u8]) -> Vec<u8> {
-        let mut ret = self.to_vec();
-        let mut offset = 0;
-        while let Some(idx) = ret[offset..].find(from) {
-            offset += idx;
-            ret.splice(offset..(offset + from.len()), to.iter().cloned());
+        if from.is_empty() {
+            // Nothing to match: avoid an infinite loop below.
+            return self.to_vec();
         }
+        let mut ret = Vec::with_capacity(self.len());
+        let mut offset = 0;
+        while let Some(idx) = self[offset..].find(from) {
+            ret.extend_from_slice(&self[offset..offset + idx]);
+            ret.extend_from_slice(to);
+            // Always advance past the consumed `from`, even when `to` starts
+            // with `from`, so the loop always terminates.
+            offset += idx + from.len();
+        }
+        ret.extend_from_slice(&self[offset..]);
         ret
     }
 
@@ -1138,7 +1150,10 @@ pub mod generic {
                 ret
             } else if decoded.as_bytes()[i..].starts_with(b"body") {
                 let ret = &decoded.as_bytes()[i..][0.."body".len()];
-                i += "body".len() + 1;
+                // `body` must be followed by `=`, but a truncated URI such as
+                // `mailto:a@b?body` ends right here; clamp so the next
+                // `decoded[i..]` below stays in range instead of panicking.
+                i = (i + "body".len() + 1).min(decoded.len());
                 ret
             } else {
                 return Err(nom::Err::Error(
@@ -2478,7 +2493,14 @@ pub mod address {
             if at_flag && flag {
                 let (_, raw) =
                     super::encodings::phrase(&input[0..end + display_name.length + 3], false)?;
-                let display_name_end = raw.find(b"<").unwrap();
+                // `phrase()` decodes RFC2047 encoded words and may return a
+                // byte string whose offsets no longer line up with `input`; do
+                // not assume the literal `<` survived.
+                let Some(display_name_end) = raw.iter().position(|b| *b == b'<') else {
+                    return Err(nom::Err::Error(
+                        (input, "display_addr(): no '<' in decoded display name").into(),
+                    ));
+                };
                 display_name.length = raw[0..display_name_end].trim().len();
                 let address_spec = if display_name_end == 0 {
                     StrBuilder {
@@ -2494,7 +2516,7 @@ pub mod address {
 
                 if display_name.display(&raw).as_bytes().is_quoted() {
                     display_name.offset += 1;
-                    display_name.length -= 2;
+                    display_name.length = display_name.length.saturating_sub(2);
                 }
 
                 let rest_start = if input.len() > end + display_name.length + 2 {

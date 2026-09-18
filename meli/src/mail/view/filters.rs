@@ -881,7 +881,12 @@ impl ViewFilter {
     }
 
     fn html_process_event(self_: &mut Self, event: &mut UIEvent, context: &mut Context) -> bool {
-        if matches!(event, UIEvent::Input(key) if *key == context.settings.shortcuts.envelope_view.open_html)
+        if matches!(event, UIEvent::Input(key) if context
+            .settings
+            .shortcuts
+            .envelope_view
+            .open_html
+            .contains(key))
         {
             let command = context
                 .settings

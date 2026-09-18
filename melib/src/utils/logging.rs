@@ -254,13 +254,22 @@ impl Logger {
                 let log_file = open_log_file(&path)?;
                 Ok((path, log_file))
             }
-            let (path, log_file) =
-                __inline_err_wrap().expect("Could not create log file in XDG_DATA_DIR");
+            // The XDG data directory (or the log path) may be missing or
+            // unwritable at startup; fall back to stderr instead of aborting.
+            let (writer, path) = match __inline_err_wrap() {
+                Ok((path, log_file)) => (Writer::File(BufWriter::new(log_file)), path),
+                Err(err) => {
+                    eprintln!(
+                        "Could not create log file in XDG_DATA_DIR: {err}; logging to stderr."
+                    );
+                    (
+                        Writer::Stderr(BufWriter::new(std::io::stderr())),
+                        PathBuf::new(),
+                    )
+                }
+            };
             Self {
-                dest: Arc::new(Mutex::new(FileOutput {
-                    writer: Writer::File(BufWriter::new(log_file)),
-                    path,
-                })),
+                dest: Arc::new(Mutex::new(FileOutput { writer, path })),
                 level: Arc::new(AtomicU8::new(level as u8)),
                 print_level: true,
                 print_module_names: true,
@@ -300,16 +309,37 @@ impl Logger {
 
     /// Change log level.
     pub fn change_log_level(&self, new_level: LogLevel) {
-        self.level.store(new_level as u8, Ordering::SeqCst)
+        self.level.store(new_level as u8, Ordering::SeqCst);
+        // The `log` facade filters calls by its own static max level, which
+        // is only set from the level at `Logger` construction. Without
+        // re-syncing here, a later `change_log_level(DEBUG/TRACE)` (e.g. the
+        // debug-build default in meli's `Settings`) would never let
+        // `log::debug!`/`log::trace!` calls through — the file stays at the
+        // construction-time level and freeze reports lose their trail.
+        // Under `release_max_level_off` this call compiles to a no-op.
+        log::set_max_level(LevelFilter::from(new_level));
     }
 
     pub fn change_log_dest(&self, path: PathBuf) {
         use crate::utils::shellexpand::ShellExpandTrait;
 
         let path = path.expand(); // expand shell stuff
+                                  // The path comes from user/config input and may be unwritable (a
+                                  // directory, missing parent, EACCES). Do not panic: warn and keep the
+                                  // current destination.
+        let log_file = match open_log_file(&path) {
+            Ok(f) => f,
+            Err(err) => {
+                eprintln!(
+                    "Could not open log file `{}`: {err}; keeping previous log destination.",
+                    path.display()
+                );
+                return;
+            }
+        };
         let mut dest = self.dest.lock().unwrap();
         *dest = FileOutput {
-            writer: Writer::File(BufWriter::new(open_log_file(&path).unwrap())),
+            writer: Writer::File(BufWriter::new(log_file)),
             path,
         };
     }
@@ -465,5 +495,30 @@ mod tests {
         drop(open_log_file(&path).unwrap());
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "reopened log file mode was {mode:o}");
+    }
+
+    /// `change_log_dest` must not panic when the configured path is
+    /// unwritable (here: a directory).
+    #[test]
+    fn test_change_log_dest_unwritable_no_panic() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        // Build the logger directly: `Logger::default` would try to install
+        // the process-global logger, which other tests already did.
+        let logger = Logger {
+            dest: Arc::new(Mutex::new(FileOutput {
+                writer: Writer::Stderr(BufWriter::new(std::io::stderr())),
+                path: PathBuf::new(),
+            })),
+            level: Arc::new(AtomicU8::new(LogLevel::default() as u8)),
+            print_level: true,
+            print_module_names: true,
+            debug_dest: Destination::None,
+        };
+        let before = logger.log_dest();
+
+        logger.change_log_dest(temp_dir.path().to_path_buf());
+
+        // The previous destination is kept.
+        assert_eq!(logger.log_dest(), before);
     }
 }

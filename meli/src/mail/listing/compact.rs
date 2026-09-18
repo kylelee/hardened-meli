@@ -370,9 +370,13 @@ impl MailListingTrait for CompactListing {
 
                 continue;
             }
-            let root_envelope: EnvelopeRef = context.accounts[&self.cursor_pos.0]
+            let Some(root_envelope) = context.accounts[&self.cursor_pos.0]
                 .collection
-                .get_env(root_env_hash);
+                .get_env(root_env_hash)
+            else {
+                // Stale thread root: skip the row instead of drawing a bogus one.
+                continue 'items_for_loop;
+            };
             use melib::search::QueryTrait;
             if let Some(filter_query) = mailbox_settings!(
                 context[self.cursor_pos.0][&self.cursor_pos.1]
@@ -398,13 +402,13 @@ impl MailListingTrait for CompactListing {
                         threads.thread_nodes()[&h].show_subject(),
                     ))
                 })
-                .map(|(env_hash, show_subject)| {
-                    (
+                .filter_map(|(env_hash, show_subject)| {
+                    Some((
                         context.accounts[&self.cursor_pos.0]
                             .collection
-                            .get_env(env_hash),
+                            .get_env(env_hash)?,
                         show_subject,
-                    )
+                    ))
                 })
             {
                 if show_subject {
@@ -1041,7 +1045,15 @@ impl CompactListing {
             return;
         }
         let tags_lck = account.collection.tag_index.read().unwrap();
-        let envelope: EnvelopeRef = account.collection.get_env(env_hash);
+        let Some(envelope) = account.collection.get_env(env_hash) else {
+            /* The envelope has been renamed or removed, so wait for the appropriate
+             * event to arrive */
+            log::error!(
+                "Could not update compact listing row: envelope {env_hash} is no longer in the \
+                 mailbox"
+            );
+            return;
+        };
         let thread_hash = self.rows.env_to_thread[&env_hash];
         let threads = account.collection.get_threads(self.cursor_pos.1);
         let thread = threads.thread_ref(thread_hash);
@@ -1078,13 +1090,13 @@ impl CompactListing {
                     .message()
                     .map(|env_hash| (env_hash, threads.thread_nodes()[&h].show_subject()))
             })
-            .map(|(env_hash, show_subject)| {
-                (
+            .filter_map(|(env_hash, show_subject)| {
+                Some((
                     context.accounts[&self.cursor_pos.0]
                         .collection
-                        .get_env(env_hash),
+                        .get_env(env_hash)?,
                     show_subject,
-                )
+                ))
             })
         {
             if show_subject {
@@ -1166,6 +1178,12 @@ impl CompactListing {
 
         let columns = &mut self.data_columns.columns;
         let mut itoa_buffer = itoa::Buffer::new();
+        // Resolved once per draw: `text_format_regexps` returns the
+        // formatter list *by value* (an `IndexMap` lookup plus per-entry
+        // `ThemeValue` → `FormatTag` resolution, copying up to 64 inline
+        // entries), and it used to be re-resolved twice per visible row.
+        let from_formatters = crate::conf::text_format_regexps(context, "listing.from");
+        let subject_formatters = crate::conf::text_format_regexps(context, "listing.subject");
         for (idx, ((_thread_hash, root_env_hash), strings)) in self
             .rows
             .entries
@@ -1248,7 +1266,7 @@ impl CompactListing {
                     .set_ch(' ');
             }
             {
-                for text_formatter in crate::conf::text_format_regexps(context, "listing.from") {
+                for text_formatter in &from_formatters {
                     let t = columns[2].grid_mut().insert_tag(text_formatter.tag);
                     for (start, end) in text_formatter.regexp.find_iter(strings.from.as_str()) {
                         columns[2].grid_mut().set_tag(t, (start, idx), (end, idx));
@@ -1306,9 +1324,7 @@ impl CompactListing {
                     None,
                 ));
                 {
-                    for text_formatter in
-                        crate::conf::text_format_regexps(context, "listing.subject")
-                    {
+                    for text_formatter in &subject_formatters {
                         let t = columns[4].grid_mut().insert_tag(text_formatter.tag);
                         for (start, end) in
                             text_formatter.regexp.find_iter(strings.subject.as_str())
@@ -1420,6 +1436,9 @@ impl CompactListing {
         let area = area.take_cols(width);
         let account = &context.accounts[&self.cursor_pos.0];
         let threads = account.collection.get_threads(self.cursor_pos.1);
+        // Stack-formatted per row: `to_string()` allocated a `String` for
+        // every visible row on every draw.
+        let mut itoa_buffer = itoa::Buffer::new();
         for i in 0..area.height() {
             let idx = top_idx + i;
             if idx >= self.length {
@@ -1439,14 +1458,13 @@ impl CompactListing {
             };
 
             grid.clear_area(area.nth_row(i), row_attr);
+            let number: isize = if self.new_cursor_pos.2.saturating_sub(top_idx) == i {
+                self.new_cursor_pos.2 as isize
+            } else {
+                (i as isize - (self.new_cursor_pos.2 - top_idx) as isize).abs()
+            };
             grid.write_string(
-                &if self.new_cursor_pos.2.saturating_sub(top_idx) == i {
-                    self.new_cursor_pos.2.to_string()
-                } else {
-                    (i as isize - (self.new_cursor_pos.2 - top_idx) as isize)
-                        .abs()
-                        .to_string()
-                },
+                itoa_buffer.format(number),
                 row_attr.fg,
                 row_attr.bg,
                 row_attr.attrs,
@@ -1755,7 +1773,15 @@ impl Component for CompactListing {
     }
 
     fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
-        let shortcuts = self.shortcuts(context);
+        // Only the `UIEvent::Input` arms below resolve shortcut
+        // bindings, so skip rebuilding (and re-hashing) the shortcut
+        // maps for every other event: backend syncs can deliver
+        // hundreds of non-key events per second.
+        let shortcuts = if matches!(event, UIEvent::Input(_)) {
+            self.shortcuts(context)
+        } else {
+            ShortcutMaps::default()
+        };
 
         match (&event, self.focus) {
             (UIEvent::VisibilityChange(true), _) => {
@@ -1797,7 +1823,8 @@ impl Component for CompactListing {
                 }
                 UIEvent::Input(ref k)
                     if !matches!(self.focus, Focus::None)
-                        && shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"]) =>
+                        && (shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"])
+                            || context.settings.shortcuts.general.quit.contains(k)) =>
                 {
                     self.set_focus(Focus::None, context);
                     return true;
