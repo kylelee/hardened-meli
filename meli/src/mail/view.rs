@@ -215,6 +215,7 @@ impl MailView {
                 match account.envelope_bytes_by_hash(coordinates.2) {
                     Ok(fut) => {
                         log::debug!("init_futures: spawning fetch-envelope");
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
                         let mut handle = account.main_loop_handler.job_executor.spawn(
                             "fetch-envelope".into(),
                             fut,
@@ -230,10 +231,7 @@ impl MailView {
                         } else {
                             None
                         };
-                        #[cfg(debug_assertions)]
-                        let got_bytes = if let Ok(Some(bytes_result)) =
-                            try_recv_timeout!(&mut handle.chan)
-                        {
+                        if let Ok(Some(bytes_result)) = try_recv_timeout!(&mut handle.chan) {
                             log::debug!("init_futures: fetch-envelope completed synchronously");
                             match bytes_result {
                                 Ok(bytes) => {
@@ -249,7 +247,6 @@ impl MailView {
                                     self.state = MailViewState::Error { err };
                                 }
                             }
-                            true
                         } else {
                             log::debug!("init_futures: fetch-envelope still running; LoadingBody");
                             self.state = MailViewState::LoadingBody {
@@ -261,10 +258,7 @@ impl MailView {
                             context
                                 .replies
                                 .push_back(UIEvent::StatusEvent(StatusEvent::NewJob(job_id)));
-                            false
-                        };
-                        #[cfg(debug_assertions)]
-                        let _ = got_bytes;
+                        }
                     }
                     Err(err) => {
                         context.replies.push_back(UIEvent::Notification {
