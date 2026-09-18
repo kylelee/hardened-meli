@@ -263,6 +263,7 @@ impl MailView {
                                 .push_back(UIEvent::StatusEvent(StatusEvent::NewJob(job_id)));
                             false
                         };
+                        #[cfg(debug_assertions)]
                         let _ = got_bytes;
                     }
                     Err(err) => {

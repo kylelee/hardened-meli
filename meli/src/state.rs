@@ -735,6 +735,7 @@ impl State {
             return;
         }
         log::debug!("redraw: begin");
+        #[cfg(debug_assertions)]
         let __redraw_span = DrawSpan::enter("redraw total");
 
         for i in 0..self.components.len() {
@@ -883,9 +884,11 @@ impl State {
         let component = &mut self.components[idx];
 
         if component.is_dirty() {
+            #[cfg(debug_assertions)]
             let __span = DrawSpan::enter(&format!("component[{idx}] {}", component));
             let area = self.screen.area();
             component.draw(self.screen.grid_mut(), area, &mut self.context);
+            #[cfg(debug_assertions)]
             drop(__span);
         }
     }
