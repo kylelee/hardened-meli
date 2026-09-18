@@ -368,10 +368,18 @@ impl ImapCache for Sqlite3Cache {
         }
         // `msn` is stored 1-based; the returned vector is indexed 0-based,
         // with `None` for missing message sequence numbers.
+        //
+        // Bound on the dense index built here: `msn` is an `i32` read from a
+        // (possibly corrupted) local cache, so a single forged row with
+        // `msn = 2_000_000_000` would otherwise try to allocate ~32 GiB.
+        // Rows past the bound are ignored, which is a safe degradation on an
+        // already-corrupt cache.
+        const MAX_MSN_INDEX_LEN: usize = 5_000_000;
         let len = rows
             .last()
             .and_then(|&(msn, _, _)| usize::try_from(msn).ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(MAX_MSN_INDEX_LEN);
         let mut ret = vec![None; len];
         for &(msn, uid, _) in &rows {
             if let Some(slot) = msn
@@ -462,7 +470,14 @@ impl ImapCache for Sqlite3Cache {
                 .and_modify(|entry| *entry = uidvalidity)
                 .or_insert(uidvalidity);
             let mut tag_lck = self.uid_store.collection.tag_index.write().unwrap();
-            for f in to_str!(&flags).split('\0') {
+            // The flags blob comes from the local (possibly corrupted) cache.
+            // Validate it as UTF-8 instead of using `from_utf8_unchecked`,
+            // which would be UB on arbitrary bytes.
+            let flags_str = std::str::from_utf8(&flags).map_err(|_| {
+                Error::new("Cached mailbox flags are not valid UTF-8")
+                    .set_kind(ErrorKind::ProtocolError)
+            })?;
+            for f in flags_str.split('\0') {
                 let hash = TagHash::from_bytes(f.as_bytes());
                 tag_lck.entry(hash).or_insert_with(|| f.to_string());
             }
@@ -994,6 +1009,13 @@ impl ImapCache for Sqlite3Cache {
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let mut hash_index_lck = uid_store.hash_index.lock().unwrap();
+            // Hoist the statements out of the loop: preparing the same SQL for
+            // every flag-change event is wasteful.
+            let mut select_stmt =
+                tx.prepare("SELECT envelope FROM envelopes WHERE mailbox_hash = ?1 AND uid = ?2;")?;
+            let mut update_stmt = tx.prepare(
+                "UPDATE envelopes SET envelope = ?1 WHERE mailbox_hash = ?2 AND uid = ?3;",
+            )?;
             for (uid, event) in refresh_events {
                 match &event.kind {
                     RefreshEventKind::Remove(env_hash) => {
@@ -1023,11 +1045,7 @@ impl ImapCache for Sqlite3Cache {
                         })?;
                     }
                     RefreshEventKind::NewFlags(env_hash, (flags, tags)) => {
-                        let mut stmt = tx.prepare(
-                            "SELECT envelope FROM envelopes WHERE mailbox_hash = ?1 AND uid = ?2;",
-                        )?;
-
-                        let mut ret: Vec<Envelope> = stmt
+                        let mut ret: Vec<Envelope> = select_stmt
                             .query_map(sqlite3::params![mailbox_hash, *uid as Sqlite3UID], |row| {
                                 row.get(0)
                             })?
@@ -1037,18 +1055,15 @@ impl ImapCache for Sqlite3Cache {
                             env.tags_mut().clear();
                             env.tags_mut()
                                 .extend(tags.iter().map(|t| TagHash::from_bytes(t.as_bytes())));
-                            tx.execute(
-                                "UPDATE envelopes SET envelope = ?1 WHERE mailbox_hash = ?2 AND \
-                                 uid = ?3;",
-                                sqlite3::params![&env, mailbox_hash, *uid as Sqlite3UID],
-                            )
-                            .chain_err_summary(|| {
-                                format!(
-                                    "Could not update envelope {} uid {} from  mailbox {} account \
-                                     {}",
-                                    env_hash, *uid, mailbox_hash, uid_store.account_name
-                                )
-                            })?;
+                            update_stmt
+                                .execute(sqlite3::params![&env, mailbox_hash, *uid as Sqlite3UID])
+                                .chain_err_summary(|| {
+                                    format!(
+                                        "Could not update envelope {} uid {} from  mailbox {} \
+                                         account {}",
+                                        env_hash, *uid, mailbox_hash, uid_store.account_name
+                                    )
+                                })?;
                             uid_store
                                 .envelopes
                                 .lock()
@@ -1062,6 +1077,8 @@ impl ImapCache for Sqlite3Cache {
                     _ => {}
                 }
             }
+            drop(select_stmt);
+            drop(update_stmt);
             tx.commit()?;
         }
         if let Ok(Some(new_lastseenuid)) = self.lastseenuid(mailbox_hash) {

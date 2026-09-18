@@ -21,7 +21,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     convert::TryFrom,
     fs::File,
     future::Future,
@@ -50,7 +50,18 @@ use crate::{
 use ratatui::layout::{Constraint, Layout};
 
 pub const DEFAULT_ATTACHMENT_FLAG: &str = concat!("📎", emoji_text_presentation_selector!());
-pub const DEFAULT_SELECTED_FLAG: &str = concat!("☑️", emoji_text_presentation_selector!());
+
+/// The default `listing.selected_flag`.
+///
+/// The `☑️` literal already carries the emoji-presentation selector
+/// (`U+FE0F`) — which is also the documented default for
+/// `listing.selected_flag` — so appending the *text*-presentation
+/// selector as well produced a self-contradictory `☑ U+FE0F U+FE0E`
+/// sequence that terminals resolve differently (and the flush layer emits
+/// both, `FORCE_TEXT` before `FORCE_EMOJI`). Keep emoji presentation as
+/// the only selector: it matches the documented default, the two-column
+/// grid accounting of `grapheme_width`, and the golden corpus.
+pub const DEFAULT_SELECTED_FLAG: &str = "☑️";
 pub const DEFAULT_UNSEEN_FLAG: &str = concat!("●", emoji_text_presentation_selector!());
 pub const DEFAULT_SNOOZED_FLAG: &str = concat!("💤", emoji_text_presentation_selector!());
 pub const DEFAULT_HIGHLIGHT_SELF_FLAG: &str = concat!("✸", emoji_text_presentation_selector!());
@@ -943,11 +954,25 @@ pub trait MailListingTrait: ListingTrait {
                                 let bytes: Vec<Vec<u8>> = try_join_all(futures?).await?;
                                 let envs: Vec<_> = envs_to_set
                                     .iter()
-                                    .map(|&env_hash| collection.get_env(env_hash))
-                                    .collect();
+                                    .map(|&env_hash| {
+                                        collection.get_env(env_hash).ok_or_else(|| {
+                                            melib::Error::new(format!(
+                                                "Could not export mbox: envelope {env_hash} is no \
+                                                 longer in the mailbox"
+                                            ))
+                                            .set_kind(melib::error::ErrorKind::NotFound)
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>>>()?;
                                 if path.is_dir() {
+                                    let Some(first_env) = envs.first() else {
+                                        return Err(melib::Error::new(
+                                            "Could not export mbox: there is nothing to export",
+                                        )
+                                        .set_kind(melib::error::ErrorKind::NotFound));
+                                    };
                                     let mut filename = if envs.len() == 1 {
-                                        format!("{}.mbox", envs[0].message_id()).into()
+                                        format!("{}.mbox", first_env.message_id()).into()
                                     } else {
                                         let now = datetime::timestamp_to_string(
                                             datetime::now(),
@@ -957,7 +982,7 @@ pub trait MailListingTrait: ListingTrait {
                                         format!(
                                             "{}-{}-{}_envelopes.mbox",
                                             now,
-                                            envs[0].message_id(),
+                                            first_env.message_id(),
                                             envs.len(),
                                         )
                                         .into()
@@ -1293,6 +1318,8 @@ impl std::fmt::Display for Listing {
 
 impl Component for Listing {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        #[cfg(debug_assertions)]
+        let __draw_span = crate::state::DrawSpan::enter("Listing");
         if !self.is_dirty() {
             return;
         }
@@ -1383,7 +1410,7 @@ impl Component for Listing {
         };
         let view_drawn = self.status.is_none() && self.component.unfocused() && self.view.is_some();
         if right_component_width == total_cols {
-            if context.is_online(account_hash).is_err()
+            if Self::should_replace_with_offline(context, account_hash)
                 && !matches!(self.component, ListingComponent::Offline(_))
             {
                 self.component.unrealize(context);
@@ -1441,7 +1468,7 @@ impl Component for Listing {
                 context.dirty_areas.push_back(frame_area);
             }
             self.draw_menu(grid, menu_inner, context);
-            if context.is_online(account_hash).is_err()
+            if Self::should_replace_with_offline(context, account_hash)
                 && !matches!(self.component, ListingComponent::Offline(_))
             {
                 self.component.unrealize(context);
@@ -1582,10 +1609,16 @@ impl Component for Listing {
                             Some(msg) => format!("{} {}", self.status(context), msg),
                             None => self.status(context),
                         })));
+                    if let Some((acc_hash, mb_hash)) = self.status_watch() {
+                        context
+                            .replies
+                            .push_back(UIEvent::StatusEvent(StatusEvent::FocusMailbox(
+                                acc_hash, mb_hash,
+                            )));
+                    }
                 }
             }
-            UIEvent::MailboxDelete((account_hash, mailbox_hash))
-            | UIEvent::MailboxCreate((account_hash, mailbox_hash)) => {
+            UIEvent::MailboxCreate((account_hash, mailbox_hash)) => {
                 let account_index = context
                     .accounts
                     .get_index_of(account_hash)
@@ -1650,11 +1683,11 @@ impl Component for Listing {
                     self.component
                         .process_event(&mut UIEvent::VisibilityChange(true), context);
                 }
-                context
-                    .replies
-                    .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                        self.status(context),
-                    )));
+                self.push_status_watch(
+                    self.status(context),
+                    self.status_watch(),
+                    &mut context.replies,
+                );
                 self.set_dirty(true);
                 return true;
             }
@@ -1786,16 +1819,33 @@ impl Component for Listing {
             return true;
         }
 
-        let shortcuts = {
+        // Only the `UIEvent::Input` arms below resolve shortcut bindings,
+        // so skip rebuilding (and re-hashing) this map — which also clones
+        // the focused component's and the mail view's shortcut sections —
+        // for every other event: backend syncs can deliver hundreds of
+        // non-key events per second.
+        let shortcuts = if matches!(event, UIEvent::Input(_)) {
             let mut m = self.shortcuts(context);
             m.insert(
                 Shortcuts::GENERAL,
                 context.settings.shortcuts.general.key_values(),
             );
             m
+        } else {
+            ShortcutMaps::default()
         };
         if self.focus == ListingFocus::Mailbox {
             match *event {
+                UIEvent::Input(ref k)
+                    if self.status.is_some()
+                        && context.settings.shortcuts.general.quit.contains(k) =>
+                {
+                    // Layered quit: close the open `AccountStatus`
+                    // sub-view instead of exiting the application.
+                    self.status = None;
+                    self.set_dirty(true);
+                    return true;
+                }
                 UIEvent::Input(Key::Mouse(MouseEvent::Press(MouseButton::Left, x, _y)))
                     if self.is_menu_visible() =>
                 {
@@ -2249,7 +2299,10 @@ impl Component for Listing {
                         return true;
                     }
                     UIEvent::Input(Key::Esc) | UIEvent::Input(Key::Char('\x1b'))
-                        if !self.component.unfocused() =>
+                        if !self.component.unfocused()
+                            && (context.cmd_buf().is_some()
+                                || self.component.modifier_active()
+                                || !self.component.get_focused_items(context).is_empty()) =>
                     {
                         // Clear command buffer.
                         _ = context.cmd_buf_clear();
@@ -2292,11 +2345,11 @@ impl Component for Listing {
                         .push_back(UIEvent::StatusEvent(StatusEvent::ScrollUpdate(
                             ScrollUpdate::End(self.id),
                         )));
-                    context
-                        .replies
-                        .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                            self.status(context),
-                        )));
+                    self.push_status_watch(
+                        self.status(context),
+                        self.status_watch(),
+                        &mut context.replies,
+                    );
                     return true;
                 }
                 UIEvent::Input(ref k)
@@ -2354,11 +2407,11 @@ impl Component for Listing {
                         .push_back(UIEvent::StatusEvent(StatusEvent::ScrollUpdate(
                             ScrollUpdate::End(self.id),
                         )));
-                    context
-                        .replies
-                        .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                            self.status(context),
-                        )));
+                    self.push_status_watch(
+                        self.status(context),
+                        self.status_watch(),
+                        &mut context.replies,
+                    );
                     return true;
                 }
                 UIEvent::Input(ref k)
@@ -2726,11 +2779,11 @@ impl Component for Listing {
                 self.dirty = true;
                 // clear menu to force redraw
                 self.menu.grid_mut().empty();
-                context
-                    .replies
-                    .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                        self.status(context),
-                    )));
+                self.push_status_watch(
+                    self.status(context),
+                    self.status_watch(),
+                    &mut context.replies,
+                );
             }
             UIEvent::Input(Key::Backspace) if context.cmd_buf().is_some() => {
                 context.cmd_buf_pop(self.component.modifier_command());
@@ -2834,7 +2887,13 @@ impl Component for Listing {
                     .listing
                     .commands
             ) {
-                config_map.retain(|_, shortcut| shortcut != &command.shortcut);
+                // Shadow only the colliding key: a `ShortcutKeys` binding
+                // holds up to two keys (`"Down,j"`), and dropping the
+                // whole field would silently disable the sibling key too.
+                config_map.retain(|_, shortcut| {
+                    shortcut.0.retain(|k| k != &command.shortcut);
+                    !shortcut.0.is_empty()
+                });
             }
         }
         map.insert(Shortcuts::LISTING, config_map);
@@ -2846,44 +2905,17 @@ impl Component for Listing {
         self.id
     }
 
-    fn status(&self, context: &Context) -> String {
-        let mailbox_hash = match self.cursor_pos.menu {
-            MenuEntryCursor::Mailbox(idx) => {
-                if let Some(MailboxMenuEntry { mailbox_hash, .. }) =
-                    self.accounts[self.cursor_pos.account].entries.get(idx)
-                {
-                    *mailbox_hash
-                } else {
-                    return String::new();
-                }
-            }
-            MenuEntryCursor::Status => {
-                return format!("{} status", self.accounts[self.cursor_pos.account].name)
-            }
+    fn status_watch(&self) -> Option<(AccountHash, MailboxHash)> {
+        let CursorPos {
+            account,
+            menu: MenuEntryCursor::Mailbox(idx),
+        } = self.cursor_pos
+        else {
+            return None;
         };
-
-        let account = &context.accounts[self.cursor_pos.account];
-        match account[&mailbox_hash].status {
-            MailboxStatus::Available | MailboxStatus::Parsing(_, _) => {
-                let (unseen, total) = account[&mailbox_hash]
-                    .ref_mailbox
-                    .count()
-                    .ok()
-                    .unwrap_or((0, 0));
-                format!(
-                    "Mailbox: {}, Messages: {}, New: {}{}",
-                    account[&mailbox_hash].name(),
-                    total,
-                    unseen,
-                    if account[&mailbox_hash].status.is_parsing() {
-                        "(Loading...)"
-                    } else {
-                        ""
-                    }
-                )
-            }
-            MailboxStatus::Failed(_) | MailboxStatus::None => account[&mailbox_hash].status(),
-        }
+        let entry = self.accounts.get(account)?;
+        let mailbox = entry.entries.get(idx)?;
+        Some((entry.hash, mailbox.mailbox_hash))
     }
 
     fn children(&self) -> IndexMap<ComponentId, &dyn Component> {
@@ -2920,6 +2952,41 @@ impl Component for Listing {
 }
 
 impl Listing {
+    /// Whether the offline placeholder should replace the listing
+    /// component while drawing: only when the account is offline *and* has
+    /// no mailbox list to show. A cached mailbox list (loaded by the
+    /// cache-first `Mailboxes` job at cold start) means the listing can
+    /// already render offline content — the envelopes come from the sqlite3
+    /// offline cache — so replacing it with the placeholder would hide the
+    /// cached mail behind `offline: …` until the (possibly slow) connect
+    /// attempt succeeds.
+    fn should_replace_with_offline(context: &mut Context, account_hash: AccountHash) -> bool {
+        context.is_online(account_hash).is_err()
+            && context.accounts[&account_hash].list_mailboxes().is_empty()
+    }
+
+    /// Emit both the legacy `UpdateStatus` string and the structured
+    /// `FocusMailbox` event for the active cursor, so the status bar
+    /// stays in sync with the focused mailbox as the cursor moves inside
+    /// the listing. Centralised helper for the eight call sites that
+    /// updated the status string before this refactor. The status string
+    /// and the `(AccountHash, MailboxHash)` are passed in (rather than
+    /// read from `context`) so the caller can release the immutable
+    /// `&Context` borrow before mutably borrowing `context.replies`.
+    pub fn push_status_watch(
+        &self,
+        status: String,
+        status_watch: Option<(AccountHash, MailboxHash)>,
+        replies: &mut VecDeque<UIEvent>,
+    ) {
+        replies.push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(status)));
+        if let Some((acc_hash, mb_hash)) = status_watch {
+            replies.push_back(UIEvent::StatusEvent(StatusEvent::FocusMailbox(
+                acc_hash, mb_hash,
+            )));
+        }
+    }
+
     pub fn new(context: &mut Context) -> Self {
         let account_entries: Vec<AccountMenuEntry> = context
             .accounts
@@ -3591,11 +3658,11 @@ impl Listing {
                 self.component
                     .process_event(&mut UIEvent::VisibilityChange(true), context);
                 self.status = None;
-                context
-                    .replies
-                    .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                        self.status(context),
-                    )));
+                self.push_status_watch(
+                    self.status(context),
+                    self.status_watch(),
+                    &mut context.replies,
+                );
             }
             MenuEntryCursor::Status if context.is_online(account_hash).is_ok() => {
                 self.open_status(self.cursor_pos.account, context);
@@ -3609,11 +3676,11 @@ impl Listing {
                     .process_event(&mut UIEvent::VisibilityChange(true), context);
                 self.status = None;
                 self.cursor_pos.menu = MenuEntryCursor::Mailbox(0);
-                context
-                    .replies
-                    .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                        self.status(context),
-                    )));
+                self.push_status_watch(
+                    self.status(context),
+                    self.status_watch(),
+                    &mut context.replies,
+                );
             }
         }
         self.sidebar_divider = *account_settings!(context[account_hash].listing.sidebar_divider);
@@ -3632,11 +3699,11 @@ impl Listing {
     fn open_status(&mut self, account_idx: usize, context: &mut Context) {
         self.status = Some(AccountStatus::new(account_idx, self.theme_default));
         self.menu.grid_mut().empty();
-        context
-            .replies
-            .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                self.status(context),
-            )));
+        self.push_status_watch(
+            self.status(context),
+            self.status_watch(),
+            &mut context.replies,
+        );
     }
 
     fn is_menu_visible(&self) -> bool {
@@ -3953,10 +4020,10 @@ mod listing_menu_tests {
         let mut ctx = mock_context();
         // Pin the shortcuts this test drives so that a `MELI_CONFIG` template
         // drift cannot change what the keys mean.
-        ctx.settings.shortcuts.listing.focus_left = Key::Left;
-        ctx.settings.shortcuts.listing.focus_right = Key::Right;
-        ctx.settings.shortcuts.listing.scroll_up = Key::Up;
-        ctx.settings.shortcuts.listing.scroll_down = Key::Down;
+        ctx.settings.shortcuts.listing.focus_left = Key::Left.into();
+        ctx.settings.shortcuts.listing.focus_right = Key::Right.into();
+        ctx.settings.shortcuts.listing.scroll_up = Key::Up.into();
+        ctx.settings.shortcuts.listing.scroll_down = Key::Down.into();
         let (account_hash, _inbox_hash, archive_hash) = register_two_mailboxes(&mut ctx);
         let mut listing = Listing::new(&mut ctx);
         assert_eq!(
@@ -3993,10 +4060,10 @@ mod listing_menu_tests {
     #[test]
     fn listing_menu_focus_right_at_status_opens_status() {
         let mut ctx = mock_context();
-        ctx.settings.shortcuts.listing.focus_left = Key::Left;
-        ctx.settings.shortcuts.listing.focus_right = Key::Right;
-        ctx.settings.shortcuts.listing.scroll_up = Key::Up;
-        ctx.settings.shortcuts.listing.scroll_down = Key::Down;
+        ctx.settings.shortcuts.listing.focus_left = Key::Left.into();
+        ctx.settings.shortcuts.listing.focus_right = Key::Right.into();
+        ctx.settings.shortcuts.listing.scroll_up = Key::Up.into();
+        ctx.settings.shortcuts.listing.scroll_down = Key::Down.into();
         register_two_mailboxes(&mut ctx);
         let mut listing = Listing::new(&mut ctx);
 
@@ -4011,6 +4078,166 @@ mod listing_menu_tests {
             listing.status.is_some(),
             "focus_right at the Status entry must open the account status view"
         );
+    }
+
+    /// Navigation key group on the sidebar (mailbox list): with the
+    /// default bindings both the vim keys (`j`/`k`) and the arrow keys
+    /// drive the menu cursor through the same `listing.scroll_up` /
+    /// `scroll_down` arms.
+    #[test]
+    fn listing_menu_vim_and_arrow_keys_move_cursor() {
+        let mut ctx = mock_context();
+        ctx.settings.shortcuts.listing.focus_left = ShortcutKeys::double(Key::Left, Key::Char('h'));
+        register_two_mailboxes(&mut ctx);
+        let mut listing = Listing::new(&mut ctx);
+        listing.process_event(&mut UIEvent::Input(Key::Left), &mut ctx);
+        assert_eq!(listing.focus, ListingFocus::Menu);
+
+        let start = listing.menu_cursor_pos.menu;
+        // Vim down then back up.
+        assert!(
+            listing.process_event(&mut UIEvent::Input(Key::Char('j')), &mut ctx),
+            "'j' must be consumed at the sidebar"
+        );
+        assert_ne!(
+            listing.menu_cursor_pos.menu, start,
+            "'j' must move the menu cursor down"
+        );
+        assert!(
+            listing.process_event(&mut UIEvent::Input(Key::Char('k')), &mut ctx),
+            "'k' must be consumed at the sidebar"
+        );
+        assert_eq!(
+            listing.menu_cursor_pos.menu, start,
+            "'k' must move the menu cursor back up"
+        );
+        // Arrow keys drive the same arms.
+        assert!(
+            listing.process_event(&mut UIEvent::Input(Key::Down), &mut ctx),
+            "Down must be consumed at the sidebar"
+        );
+        assert_ne!(
+            listing.menu_cursor_pos.menu, start,
+            "Down must move the menu cursor down"
+        );
+        assert!(
+            listing.process_event(&mut UIEvent::Input(Key::Up), &mut ctx),
+            "Up must be consumed at the sidebar"
+        );
+        assert_eq!(
+            listing.menu_cursor_pos.menu, start,
+            "Up must move the menu cursor back up"
+        );
+    }
+
+    /// Navigation key group on the mail list: with the menu hidden (the
+    /// state in which the horizontal keys reach the scroll arms instead of
+    /// the sidebar `focus_left` branch), the default bindings — vim keys
+    /// and arrow keys alike — are consumed by the listing's scroll arms
+    /// (`listing.scroll_up`/`scroll_down` doubles, plus
+    /// `general.scroll_left`/`scroll_right` for the horizontal pair).
+    #[test]
+    fn listing_mail_list_navigation_keygroup_consumed() {
+        let mut ctx = mock_context();
+        register_two_mailboxes(&mut ctx);
+        let mut listing = Listing::new(&mut ctx);
+        // The sidebar's `focus_left` branch (menu visible) owns h/Left by
+        // design; hide the menu so the plain scroll arms are exercised.
+        listing.menu_visibility = false;
+        for key in [
+            Key::Char('j'),
+            Key::Down,
+            Key::Char('k'),
+            Key::Up,
+            Key::Char('l'),
+            Key::Right,
+            Key::Char('h'),
+            Key::Left,
+        ] {
+            assert!(
+                listing.process_event(&mut UIEvent::Input(key.clone()), &mut ctx),
+                "{key:?} must be consumed by the mail list scroll arms"
+            );
+        }
+    }
+
+    /// Layered quit: with the `AccountStatus` sub-view open, the quit
+    /// binding (`Esc`/`q` by default) must close the status view and be
+    /// consumed, instead of bubbling to the application-level exit path.
+    #[test]
+    fn quit_key_closes_account_status() {
+        for key in [Key::Esc, Key::Char('q')] {
+            let mut ctx = mock_context();
+            ctx.settings.shortcuts.listing.focus_left = Key::Left.into();
+            ctx.settings.shortcuts.listing.focus_right = Key::Right.into();
+            ctx.settings.shortcuts.listing.scroll_up = Key::Up.into();
+            register_two_mailboxes(&mut ctx);
+            let mut listing = Listing::new(&mut ctx);
+
+            listing.process_event(&mut UIEvent::Input(Key::Left), &mut ctx);
+            listing.menu_cursor_pos.menu = MenuEntryCursor::Status;
+            listing.process_event(&mut UIEvent::Input(Key::Right), &mut ctx);
+            assert!(listing.status.is_some(), "precondition: status view open");
+
+            let consumed = listing.process_event(&mut UIEvent::Input(key.clone()), &mut ctx);
+            assert!(consumed, "{key:?} must be consumed by the listing");
+            assert!(
+                listing.status.is_none(),
+                "{key:?} must close the account status view, not the application"
+            );
+        }
+    }
+
+    /// Layered quit: with a mail view open on the focused entry, the quit
+    /// binding must exit the view back to the list (the same
+    /// `exit_entry` path as `i`), not the application.
+    #[test]
+    fn quit_key_exits_open_mail_view() {
+        for key in [Key::Esc, Key::Char('q')] {
+            let mut ctx = mock_context();
+            let (_a, inbox_hash, _arch) = register_two_mailboxes(&mut ctx);
+            let bytes = b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: quit-exit mail\r\nMessage-ID: <quit-exit@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\nquit exit body\r\n";
+            let mut env = Envelope::from_bytes(bytes, None).unwrap();
+            env.set_flags(melib::Flag::SEEN);
+            let account_hash = *ctx.accounts.iter().next().unwrap().0;
+            ctx.accounts[&account_hash]
+                .collection
+                .insert(env, inbox_hash);
+
+            ctx.settings.shortcuts.listing.open_entry = Key::Char('\n').into();
+            let mut listing = Listing::new(&mut ctx);
+            let theme_default = crate::conf::value(&ctx, "theme_default");
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            assert!(screen.resize(80, 24));
+            let area = screen.area();
+            listing.draw(screen.grid_mut(), area, &mut ctx);
+            let mut event = UIEvent::Input(Key::Char('\n'));
+            assert!(listing.process_event(&mut event, &mut ctx));
+            for _ in 0..8 {
+                let replies = ctx.replies();
+                if replies.is_empty() {
+                    break;
+                }
+                for mut ev in replies {
+                    let _ = listing.process_event(&mut ev, &mut ctx);
+                }
+            }
+            assert!(
+                listing.view.is_some(),
+                "precondition: open_entry must create the view"
+            );
+            assert!(
+                listing.component.unfocused(),
+                "precondition: entry focus while the view is open"
+            );
+
+            let consumed = listing.process_event(&mut UIEvent::Input(key.clone()), &mut ctx);
+            assert!(consumed, "{key:?} must be consumed by the listing");
+            assert!(
+                !listing.component.unfocused(),
+                "{key:?} must exit the open mail view back to the list"
+            );
+        }
     }
 
     /// A standalone (single-mail thread) mail opened and the component put
@@ -4033,7 +4260,7 @@ mod listing_menu_tests {
             .collection
             .insert(env, inbox_hash);
 
-        ctx.settings.shortcuts.listing.open_entry = Key::Char('\n');
+        ctx.settings.shortcuts.listing.open_entry = Key::Char('\n').into();
         let mut listing = Listing::new(&mut ctx);
         let theme_default = crate::conf::value(&ctx, "theme_default");
         let mut screen = Screen::<Virtual>::new(theme_default);
@@ -4098,7 +4325,7 @@ mod listing_menu_tests {
             .collection
             .insert(env, inbox_hash);
 
-        ctx.settings.shortcuts.listing.open_entry = Key::Char('\n');
+        ctx.settings.shortcuts.listing.open_entry = Key::Char('\n').into();
         let mut listing = Listing::new(&mut ctx);
         let theme_default = crate::conf::value(&ctx, "theme_default");
         let mut screen = Screen::<Virtual>::new(theme_default);

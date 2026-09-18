@@ -461,6 +461,13 @@ impl std::fmt::Display for DisplayMessageBox {
 
 impl Component for DisplayMessageBox {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        // Keep the cached area's generation in sync from the start: the
+        // early-return paths below leave it untouched, and a stale area
+        // (from before a resize) would trip the `bounds_iter` generation
+        // assert when the caller redraws the overlay from `cached_area()`.
+        // An empty area iterates zero rows, which is exactly right for the
+        // "nothing drawn this frame" paths.
+        self.cached_area = area.into_empty();
         if let Some(DisplayMessage {
             ref timestamp,
             ref msg,
@@ -581,5 +588,61 @@ impl Component for DisplayMessageBox {
 
     fn id(&self) -> ComponentId {
         self.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The early-return paths of `DisplayMessageBox::draw` (narrow screen,
+    /// empty message) must still keep `cached_area` in the *current* frame's
+    /// generation: `State::redraw` iterates the overlay from `cached_area()`,
+    /// and an area from before a resize trips the `bounds_iter` generation
+    /// assert (observed as a freeze: the main thread panicked on the first
+    /// notification after a resize).
+    #[test]
+    fn display_message_box_cached_area_keeps_generation_on_early_return() {
+        let mut ctx = crate::golden::mock_context();
+        // Screen A: the generation the box is constructed with.
+        let screen_a = crate::golden::golden_screen(&ctx, 80, 24);
+        let mut this = DisplayMessageBox {
+            messages: vec![DisplayMessage {
+                timestamp: 0,
+                msg: "hello".to_string(),
+                repeats: 1,
+            }],
+            expiration_start: None,
+            pos: 0,
+            active: true,
+            dirty: true,
+            initialised: true,
+            cached_area: screen_a.area().into_empty(),
+            id: ComponentId::default(),
+        };
+        // Screen B after a resize: a different generation, and narrow
+        // enough (width < 30) that draw takes the `box_width < 10`
+        // early return without touching cached_area otherwise.
+        let mut screen_b = crate::golden::golden_screen(&ctx, 20, 10);
+        let area_b = screen_b.area();
+        assert_ne!(
+            area_b.generation(),
+            screen_a.area().generation(),
+            "the two screens must have different generations"
+        );
+        this.draw(screen_b.grid_mut(), area_b, &mut ctx);
+        assert_eq!(
+            this.cached_area.generation(),
+            area_b.generation(),
+            "early-return draw must sync the cached area generation to the \
+             drawn frame"
+        );
+        // An empty-area iteration is safe (zero rows), which is what the
+        // caller will do with the synced cached area.
+        let mut n = 0;
+        for _ in screen_b.grid().bounds_iter(this.cached_area) {
+            n += 1;
+        }
+        assert_eq!(n, 0);
     }
 }

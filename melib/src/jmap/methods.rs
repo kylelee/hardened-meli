@@ -232,6 +232,43 @@ pub struct MethodResponse<'a> {
     pub session_state: State<Session>,
 }
 
+impl MethodResponse<'_> {
+    /// Remove and return the first entry of `methodResponses`.
+    ///
+    /// Returns a `ProtocolError` when the server sent an empty array, so a
+    /// malformed reply cannot turn into an out-of-bounds `remove(0)` panic.
+    pub fn take_first(&mut self) -> Result<&RawValue> {
+        if self.method_responses.is_empty() {
+            return Err(
+                Error::new("JMAP server returned an empty `methodResponses` array")
+                    .set_kind(ErrorKind::ProtocolError),
+            );
+        }
+        Ok(self.method_responses.remove(0))
+    }
+
+    /// Remove and return the last entry of `methodResponses`.
+    ///
+    /// Returns a `ProtocolError` when the server sent an empty array, so a
+    /// malformed reply cannot turn into a `pop().unwrap()` panic.
+    pub fn take_last(&mut self) -> Result<&RawValue> {
+        self.method_responses.pop().ok_or_else(|| {
+            Error::new("JMAP server returned an empty `methodResponses` array")
+                .set_kind(ErrorKind::ProtocolError)
+        })
+    }
+
+    /// Borrow the last entry of `methodResponses` without removing it.
+    ///
+    /// Returns a `ProtocolError` when the server sent an empty array.
+    pub fn last(&self) -> Result<&RawValue> {
+        self.method_responses.last().copied().ok_or_else(|| {
+            Error::new("JMAP server returned an empty `methodResponses` array")
+                .set_kind(ErrorKind::ProtocolError)
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetResponse<OBJ: Object> {
@@ -247,7 +284,14 @@ impl<OBJ: Object + DeserializeOwned> std::convert::TryFrom<&RawValue> for GetRes
 
     fn try_from(t: &RawValue) -> Result<Self> {
         let res: (String, Self, String) = deserialize_from_str(t.get())?;
-        assert_eq!(&res.0, &format!("{}/get", OBJ::NAME));
+        let expected = format!("{}/get", OBJ::NAME);
+        if res.0 != expected {
+            return Err(Error::new(format!(
+                "Expected a `{expected}` method response, but the server sent `{}`",
+                res.0
+            ))
+            .set_kind(ErrorKind::ProtocolError));
+        }
         Ok(res.1)
     }
 }
@@ -353,7 +397,14 @@ impl<OBJ: Object + DeserializeOwned> std::convert::TryFrom<&RawValue> for QueryR
 
     fn try_from(t: &RawValue) -> Result<Self> {
         let res: (String, Self, String) = deserialize_from_str(t.get())?;
-        assert_eq!(&res.0, &format!("{}/query", OBJ::NAME));
+        let expected = format!("{}/query", OBJ::NAME);
+        if res.0 != expected {
+            return Err(Error::new(format!(
+                "Expected a `{expected}` method response, but the server sent `{}`",
+                res.0
+            ))
+            .set_kind(ErrorKind::ProtocolError));
+        }
         Ok(res.1)
     }
 }
@@ -484,7 +535,14 @@ impl<OBJ: Object + DeserializeOwned> std::convert::TryFrom<&RawValue> for Change
 
     fn try_from(t: &RawValue) -> Result<Self> {
         let res: (String, Self, String) = deserialize_from_str(t.get())?;
-        assert_eq!(&res.0, &format!("{}/changes", OBJ::NAME));
+        let expected = format!("{}/changes", OBJ::NAME);
+        if res.0 != expected {
+            return Err(Error::new(format!(
+                "Expected a `{expected}` method response, but the server sent `{}`",
+                res.0
+            ))
+            .set_kind(ErrorKind::ProtocolError));
+        }
         Ok(res.1)
     }
 }
@@ -727,7 +785,14 @@ impl<OBJ: Object + DeserializeOwned> std::convert::TryFrom<&RawValue> for SetRes
 
     fn try_from(t: &RawValue) -> Result<Self> {
         let res: (String, Self, String) = deserialize_from_str(t.get())?;
-        assert_eq!(&res.0, &format!("{}/set", OBJ::NAME));
+        let expected = format!("{}/set", OBJ::NAME);
+        if res.0 != expected {
+            return Err(Error::new(format!(
+                "Expected a `{expected}` method response, but the server sent `{}`",
+                res.0
+            ))
+            .set_kind(ErrorKind::ProtocolError));
+        }
         Ok(res.1)
     }
 }

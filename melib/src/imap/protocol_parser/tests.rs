@@ -537,6 +537,71 @@ fn test_imap_select_response() {
 }
 
 #[test]
+fn test_imap_select_response_malformed_terminators() {
+    // A server-supplied select response line missing its terminator must yield
+    // a parse error instead of panicking on an unwrapped `find()`.
+    assert_eq!(
+        select_response(b"* OK [UNSEEN ").unwrap_err().kind,
+        ErrorKind::ProtocolError
+    );
+    assert_eq!(
+        select_response(b"* OK [UNSEEN \r\n").unwrap_err().kind,
+        ErrorKind::ProtocolError
+    );
+    assert_eq!(
+        select_response(b"* OK [UIDVALIDITY ").unwrap_err().kind,
+        ErrorKind::ProtocolError
+    );
+    assert_eq!(
+        select_response(b"* OK [UIDVALIDITY \r\n").unwrap_err().kind,
+        ErrorKind::ProtocolError
+    );
+    assert_eq!(
+        select_response(b"* OK [UIDNEXT ").unwrap_err().kind,
+        ErrorKind::ProtocolError
+    );
+    assert_eq!(
+        select_response(b"* OK [UIDNEXT \r\n").unwrap_err().kind,
+        ErrorKind::ProtocolError
+    );
+    assert_eq!(
+        select_response(b"* OK [PERMANENTFLAGS (").unwrap_err().kind,
+        ErrorKind::ProtocolError
+    );
+    assert_eq!(
+        select_response(b"* OK [PERMANENTFLAGS (\r\n")
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProtocolError
+    );
+    // Positive cases: the terminators are present.
+    assert_eq!(
+        select_response(b"* OK [UNSEEN 16] First unseen.\r\n")
+            .expect("Could not parse IMAP select response")
+            .first_unseen,
+        16
+    );
+    assert_eq!(
+        select_response(b"* OK [UIDVALIDITY 1554422056] UIDs valid\r\n")
+            .expect("Could not parse IMAP select response")
+            .uidvalidity,
+        1554422056
+    );
+    assert_eq!(
+        select_response(b"* OK [UIDNEXT 50] Predicted next UID\r\n")
+            .expect("Could not parse IMAP select response")
+            .uidnext,
+        50
+    );
+    assert_eq!(
+        select_response(b"* OK [PERMANENTFLAGS (\\Deleted \\Seen \\*)] Limited\r\n")
+            .expect("Could not parse IMAP select response")
+            .permanentflags,
+        (Flag::SEEN | Flag::TRASHED, vec!["*".into()])
+    );
+}
+
+#[test]
 fn test_imap_envelope() {
     let input: &[u8] = b"(\"Fri, 24 Jun 2011 10:09:10 +0000\" \"xxxx/xxxx\" ((\"xx@xx.com\" NIL \"xx\" \"xx.com\")) NIL NIL ((\"xx@xx\" NIL \"xx\" \"xx.com\")) ((\"'xx, xx'\" NIL \"xx.xx\" \"xx.com\") (\"xx.xx@xx.com\" NIL \"xx.xx\" \"xx.com\") (\"'xx'\" NIL \"xx.xx\" \"xx.com\") (\"'xx xx'\" NIL \"xx.xx\" \"xx.com\") (\"xx.xx@xx.com\" NIL \"xx.xx\" \"xx.com\")) NIL NIL \"<xx@xx.com>\")";
     _ = envelope(input).unwrap();
@@ -958,4 +1023,102 @@ fn test_imap_envelope_fallback_does_not_conflate_adjacent_fields() {
     assert!(rest.is_empty());
     assert_eq!(&env.other_headers()[HeaderName::IN_REPLY_TO], "\"<abc");
     assert_eq!(env.message_id().to_string(), "m@example.com");
+}
+
+#[test]
+fn test_imap_response_code_missing_value_does_not_panic() {
+    // A malformed status response whose `]` appears before the end of the
+    // keyword used to build a reversed slice range (`&val[10..7]`) and
+    // panic. It must degrade to the documented `0` fallback instead.
+    assert_eq!(
+        ImapResponse::try_from(&b"M1 OK [UIDNEXT]\r\n"[..]).unwrap(),
+        ImapResponse::Ok(ResponseCode::Uidnext(0))
+    );
+    assert_eq!(
+        ImapResponse::try_from(&b"M1 OK [UIDVALIDITY]\r\n"[..]).unwrap(),
+        ImapResponse::Ok(ResponseCode::Uidvalidity(0))
+    );
+    assert_eq!(
+        ImapResponse::try_from(&b"M1 OK [UNSEEN]\r\n"[..]).unwrap(),
+        ImapResponse::Ok(ResponseCode::Unseen(0))
+    );
+}
+
+#[test]
+fn test_imap_response_bare_status_word_does_not_panic() {
+    // `OK`/`NO`/`BAD`/`PREAUTH`/`BYE` without the trailing space used to
+    // index past the end of the value (`&val[b"OK ".len()..]`).
+    for line in [
+        &b"M1 OK\r\n"[..],
+        &b"M1 NO\r\n"[..],
+        &b"M1 BAD\r\n"[..],
+        &b"M1 PREAUTH\r\n"[..],
+        &b"M1 BYE\r\n"[..],
+    ] {
+        ImapResponse::try_from(line).unwrap();
+    }
+}
+
+#[test]
+fn test_imap_fetch_response_oversized_uid_is_error() {
+    // A UID that does not fit the `usize` type used to hit `.unwrap()` on
+    // the parse result and panic. It must be a typed protocol error.
+    let input = &b"* 1 FETCH (UID 99999999999999999999999999999999 FLAGS ())\r\n"[..];
+    let err = fetch_response(input).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::ProtocolError);
+}
+
+#[test]
+fn test_imap_fetch_response_bare_untagged_prefix_is_error() {
+    // `fetch_response` starts indexing right after `* `; an input that is
+    // exactly the prefix used to panic with an out-of-bounds index.
+    fetch_response(b"* ").unwrap_err();
+}
+
+#[test]
+fn test_imap_select_response_missing_counts_does_not_panic() {
+    // `* EXISTS` / `* RECENT` without a count used to build a reversed
+    // slice range and panic. The line must be skipped gracefully.
+    let input = &b"* OK [UIDNEXT 1] Predicted next UID\r\n* EXISTS\r\n* RECENT\r\n"[..];
+    let ret = select_response(input).unwrap();
+    assert_eq!(ret.exists, 0);
+    assert_eq!(ret.recent, 0);
+}
+
+#[test]
+fn test_imap_select_response_missing_code_value_is_error() {
+    // A select response code whose `]` precedes its value must be a typed
+    // protocol error, not a reversed-slice panic.
+    for input in [
+        &b"* OK [UIDNEXT ] Predicted next UID\r\n"[..],
+        &b"* OK [UIDVALIDITY ] UIDs valid\r\n"[..],
+        &b"* OK [UNSEEN ] First unseen\r\n"[..],
+        &b"* OK [UIDNEXT 1]\r\n* FLAGS ("[..],
+    ] {
+        let err = select_response(input).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ProtocolError);
+    }
+}
+
+#[test]
+fn test_imap_bodystructure_depth_limit() {
+    // Unbounded recursion on a run of `(` used to overflow the stack; the
+    // parser must instead stop with an error past the named depth bound,
+    // while a normal nested part list still parses.
+    let deep = "(".repeat(500).into_bytes();
+    bodystructure_has_attachments(&deep).unwrap_err();
+
+    let valid = &b"((\"text\" \"plain\"))"[..];
+    bodystructure_has_attachments(valid).unwrap();
+}
+
+#[test]
+fn test_imap_search_results_non_utf8_is_error() {
+    // `is_not` accepts arbitrary bytes; a non-UTF-8 search result used to go
+    // through `from_utf8_unchecked` (undefined behaviour) and must now be a
+    // parse error, while valid results keep parsing.
+    search_results(b"* SEARCH \xff\xfe\r\n").unwrap_err();
+    let (rest, v) = search_results(b"* SEARCH 1 2 3\r\n").unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(v, vec![1, 2, 3]);
 }

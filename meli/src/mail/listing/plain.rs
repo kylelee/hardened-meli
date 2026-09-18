@@ -270,13 +270,18 @@ impl MailListingTrait for PlainListing {
                 mb.subject().cmp(&ma.subject())
             }
         });
+        // Release the read guard before `redraw_list` runs: it resolves
+        // each row through `Collection::get_env`, which takes the *same*
+        // `envelopes` lock again. A recursive read on a write-preferring
+        // `RwLock` can deadlock (and is documented as possibly panicking)
+        // if a backend thread queued for `envelopes.write()` in between.
+        drop(env_lck);
         let items = Box::new(self.local_collection.clone().into_iter())
             as Box<dyn Iterator<Item = EnvelopeHash>>;
 
         let previous_selection = self.rows.clear(same_mailbox);
         self.redraw_list(context, items);
         self.rows.restore_selection(previous_selection);
-        drop(env_lck);
 
         if self.get_env_under_cursor(self.new_cursor_pos.2).is_some() {
             if !force && old_cursor_pos == self.new_cursor_pos {
@@ -366,7 +371,10 @@ impl ListingTrait for PlainListing {
         };
 
         let account = &context.accounts[&self.cursor_pos.0];
-        let envelope: EnvelopeRef = account.collection.get_env(i);
+        let Some(envelope) = account.collection.get_env(i) else {
+            // Stale row (the envelope was removed by a refresh): skip it.
+            return;
+        };
 
         let row_attr = row_attr!(
             self.color_cache,
@@ -772,7 +780,12 @@ impl PlainListing {
 
                 continue;
             }
-            let envelope: EnvelopeRef = context.accounts[&self.cursor_pos.0].collection.get_env(i);
+            let Some(envelope) = context.accounts[&self.cursor_pos.0].collection.get_env(i) else {
+                // Stale entry: the envelope was removed after the `contains_key`
+                // check above (or `i` is not in the collection at all). Skip the
+                // row instead of drawing a bogus one.
+                continue;
+            };
             use melib::search::QueryTrait;
             if let Some(filter_query) = mailbox_settings!(
                 context[self.cursor_pos.0][&self.cursor_pos.1]
@@ -1101,7 +1114,14 @@ impl PlainListing {
              * event to arrive */
             return;
         }
-        let envelope: EnvelopeRef = account.collection.get_env(env_hash);
+        let Some(envelope) = account.collection.get_env(env_hash) else {
+            /* The envelope has been renamed or removed, so wait for the appropriate
+             * event to arrive */
+            log::error!(
+                "Could not update listing row: envelope {env_hash} is no longer in the mailbox"
+            );
+            return;
+        };
         let thread_hash = self.rows.env_to_thread[&env_hash];
         let idx = self.rows.env_order[&env_hash];
         let row_attr = row_attr!(
@@ -1326,6 +1346,9 @@ impl PlainListing {
     fn draw_relative_numbers(&self, grid: &mut CellBuffer, area: Area, top_idx: usize) {
         let width = self.data_columns.widths[0];
         let area = area.take_cols(width);
+        // Stack-formatted per row: `to_string()` allocated a `String` for
+        // every visible row on every draw.
+        let mut itoa_buffer = itoa::Buffer::new();
         for i in 0..area.height() {
             if top_idx + i >= self.length {
                 break;
@@ -1349,14 +1372,13 @@ impl PlainListing {
             };
 
             grid.clear_area(area.nth_row(i), row_attr);
+            let number: isize = if self.new_cursor_pos.2.saturating_sub(top_idx) == i {
+                self.new_cursor_pos.2 as isize
+            } else {
+                (i as isize - (self.new_cursor_pos.2 - top_idx) as isize).abs()
+            };
             grid.write_string(
-                &if self.new_cursor_pos.2.saturating_sub(top_idx) == i {
-                    self.new_cursor_pos.2.to_string()
-                } else {
-                    (i as isize - (self.new_cursor_pos.2 - top_idx) as isize)
-                        .abs()
-                        .to_string()
-                },
+                itoa_buffer.format(number),
                 row_attr.fg,
                 row_attr.bg,
                 row_attr.attrs,
@@ -1638,9 +1660,16 @@ impl Component for PlainListing {
                     }
                     self.update_line(context, env_hash);
                     let row: usize = self.rows.env_order[&env_hash];
-                    let envelope: EnvelopeRef = context.accounts[&self.cursor_pos.0]
+                    let Some(envelope) = context.accounts[&self.cursor_pos.0]
                         .collection
-                        .get_env(env_hash);
+                        .get_env(env_hash)
+                    else {
+                        // Removed between the `env_to_thread` check and here:
+                        // rebuild the listing instead of drawing a stale row.
+                        self.refresh_mailbox(context, true);
+                        self.set_dirty(true);
+                        break;
+                    };
                     let row_attr = row_attr!(
                         self.color_cache,
                         even: row.is_multiple_of(2),
@@ -1674,7 +1703,15 @@ impl Component for PlainListing {
     }
 
     fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
-        let shortcuts = self.shortcuts(context);
+        // Only the `UIEvent::Input` arms below resolve shortcut
+        // bindings, so skip rebuilding (and re-hashing) the shortcut
+        // maps for every other event: backend syncs can deliver
+        // hundreds of non-key events per second.
+        let shortcuts = if matches!(event, UIEvent::Input(_)) {
+            self.shortcuts(context)
+        } else {
+            ShortcutMaps::default()
+        };
 
         match (&event, self.focus) {
             (UIEvent::VisibilityChange(true), _) => {
@@ -1715,7 +1752,8 @@ impl Component for PlainListing {
                 }
                 UIEvent::Input(ref k)
                     if !matches!(self.focus, Focus::None)
-                        && shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"]) =>
+                        && (shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"])
+                            || context.settings.shortcuts.general.quit.contains(k)) =>
                 {
                     self.set_focus(Focus::None, context);
                     return true;

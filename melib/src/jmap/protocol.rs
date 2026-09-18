@@ -32,7 +32,7 @@ use smallvec::SmallVec;
 
 use crate::{
     email::Envelope,
-    error::Result,
+    error::{Error, ErrorKind, Result},
     jmap::{
         argument::Argument,
         backend_mailbox::JmapMailbox,
@@ -122,7 +122,7 @@ pub async fn get_mailboxes(
     request: Option<Request>,
 ) -> Result<HashMap<MailboxHash, JmapMailbox>> {
     let mut req = request.unwrap_or_else(|| Request::new(conn.request_no.clone()));
-    let mail_account_id = conn.session_guard().await?.mail_account_id();
+    let mail_account_id = conn.session_guard().await?.mail_account_id()?;
     let mailbox_get: MailboxGet =
         MailboxGet::new(Get::<MailboxObject>::new().account_id(mail_account_id));
     req.add_call(&mailbox_get).await;
@@ -130,7 +130,7 @@ pub async fn get_mailboxes(
 
     let v: MethodResponse = deserialize_from_str(&res_text)?;
     conn.store.online_status.update_timestamp(None).await;
-    let m = GetResponse::<MailboxObject>::try_from(*v.method_responses.last().unwrap())?;
+    let m = GetResponse::<MailboxObject>::try_from(v.last()?)?;
     let GetResponse::<MailboxObject> {
         list,
         account_id,
@@ -246,6 +246,12 @@ impl EmailFetcher {
     }
 
     pub async fn fetch(&mut self, mailbox_hash: MailboxHash) -> Result<Vec<Envelope>> {
+        // Bound on how many times one fetch may restart from position 0
+        // because the server reported a new Email state. A server that
+        // returns a fresh `state` on every Email/get would otherwise make
+        // this loop re-query forever, one round trip per iteration.
+        const MAX_STATE_UPDATES: usize = 10;
+        let mut state_updates = 0;
         loop {
             match self.state {
                 EmailFetchState::Start => {
@@ -255,8 +261,20 @@ impl EmailFetcher {
                 EmailFetchState::Ongoing { mut position } => {
                     let mut conn = self.connection.lock().await;
                     conn.connect().await?;
-                    let mail_account_id = conn.session_guard().await?.mail_account_id();
-                    let mailbox_id = self.store.mailboxes.read().unwrap()[&mailbox_hash]
+                    let mail_account_id = conn.session_guard().await?.mail_account_id()?;
+                    let mailbox_id = self
+                        .store
+                        .mailboxes
+                        .read()
+                        .unwrap()
+                        .get(&mailbox_hash)
+                        .ok_or_else(|| {
+                            Error::new(format!(
+                                "Mailbox with hash {mailbox_hash} not found in JMAP store; it may \
+                                 have been deleted by the server."
+                            ))
+                            .set_kind(ErrorKind::ProtocolError)
+                        })?
                         .id
                         .clone();
                     let email_query_call: EmailQuery = EmailQuery::new(
@@ -295,12 +313,19 @@ impl EmailFetcher {
                         Ok(v) => v,
                     };
 
-                    let e =
-                        GetResponse::<EmailObject>::try_from(v.method_responses.pop().unwrap())?;
+                    let e = GetResponse::<EmailObject>::try_from(v.take_last()?)?;
                     let GetResponse::<EmailObject> { list, state, .. } = e;
                     conn.last_method_response = Some(res_text);
 
                     if Self::must_update_state(&conn, mailbox_hash, state).await? {
+                        state_updates += 1;
+                        if state_updates > MAX_STATE_UPDATES {
+                            return Err(Error::new(
+                                "JMAP server keeps changing the Email state while fetching; \
+                                 aborting to avoid an endless re-query loop.",
+                            )
+                            .set_kind(ErrorKind::ProtocolError));
+                        }
                         self.state = EmailFetchState::Start;
                         continue;
                     }

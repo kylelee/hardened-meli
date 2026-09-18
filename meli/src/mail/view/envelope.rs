@@ -99,6 +99,15 @@ pub struct EnvelopeView {
     pub attachment_paths: Vec<Vec<usize>>,
     pub headers_no: usize,
     pub headers_cursor: usize,
+    /// Height in rows of the *whole* header block (every header plus the
+    /// `List-Actions` rows), measured on a frame that draws all of it (i.e.
+    /// with `headers_cursor == 0`).
+    ///
+    /// The scrollbar needs rows: `headers_no` counts header *fields* and a
+    /// field can wrap onto several rows.
+    headers_full_height: Option<usize>,
+    /// Width `headers_full_height` was measured at (wrapping depends on it).
+    headers_measured_width: usize,
     pub force_charset: Option<Box<UIDialog<Option<Charset>>>>,
     pub launch_url_dialog: Option<Box<UIConfirmationDialog>>,
     pub pending_launch_url: Option<String>,
@@ -108,47 +117,16 @@ pub struct EnvelopeView {
     pub id: ComponentId,
 }
 
-impl Clone for EnvelopeView {
-    fn clone(&self) -> Self {
-        Self::new(
-            self.mail.clone(),
-            Some(self.pager.clone()),
-            None,
-            Some(self.view_settings.clone()),
-            self.main_loop_handler.clone(),
-        )
-    }
-}
+// NOTE: `EnvelopeView` deliberately does **not** implement `Clone`.
+// `Self::new` runs `AttachmentBuilder` (a full MIME parse and attachment
+// tree build) plus a deep `Mail` clone, so a `Clone` impl would look cheap
+// at the call site while re-parsing the whole message and copying its raw
+// bytes. Nothing needs it today; if a cheap copy is ever required, share
+// the parsed data (`Arc`) rather than re-parse.
 
 impl std::fmt::Display for EnvelopeView {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "view mail")
-    }
-}
-
-/// How to convert `text/html` attachment bytes to displayable text in the
-/// envelope view.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum HtmlDisplayFilter {
-    /// Pipe bytes through an external command (`sh -c <invocation>`).
-    External { invocation: String },
-    /// Sanitize and render in-process with the built-in renderer.
-    Builtin { width: usize },
-}
-
-impl HtmlDisplayFilter {
-    /// Select the display filter from the `html_filter` setting: `None` or an
-    /// empty/whitespace-only command means the built-in renderer; any other
-    /// value is run verbatim through `sh -c`.
-    fn resolve(html_filter: Option<&str>, render_width: usize) -> Self {
-        match html_filter.filter(|f| !f.trim().is_empty()) {
-            Some(invocation) => Self::External {
-                invocation: invocation.to_string(),
-            },
-            None => Self::Builtin {
-                width: render_width,
-            },
-        }
     }
 }
 
@@ -182,6 +160,8 @@ impl EnvelopeView {
             view_settings,
             headers_no: 5,
             headers_cursor: 0,
+            headers_full_height: None,
+            headers_measured_width: 0,
             mail,
             main_loop_handler,
             active_jobs: HashSet::default(),
@@ -293,107 +273,23 @@ impl EnvelopeView {
                 inner: Box::new(a.clone()),
             });
         } else if a.content_type().is_text_html() {
-            let bytes = a.decode(view_settings.charset.into());
-            // Same formula as the primary html path in `filters.rs`, minus the
-            // `pager.minimum_width` clamp: `ViewSettings` does not carry it.
-            let render_width = crossterm::terminal::size()
-                .map(|(cols, _)| cols as usize)
-                .unwrap_or(120)
-                .saturating_sub(4);
-            match HtmlDisplayFilter::resolve(view_settings.html_filter.as_deref(), render_width) {
-                HtmlDisplayFilter::External {
-                    invocation: filter_invocation,
-                } => {
-                    let command_obj =
-                        Command::new("sh")
-                            .args(["-c", filter_invocation.as_str()])
-                            .stdin(Stdio::piped())
-                            .stdout(Stdio::piped())
-                            .spawn()
-                            .and_then(|mut cmd| {
-                                cmd.stdin.as_mut().unwrap().write_all(&bytes)?;
-                                Ok(String::from_utf8_lossy(&cmd.wait_with_output()?.stdout)
-                                    .to_string())
-                            });
-                    match command_obj {
-                        Err(err) => {
-                            main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::Notification {
-                                title: Some(
-                                    format!(
-                                        "Failed to start html filter process: {filter_invocation}"
-                                    )
-                                    .into(),
-                                ),
-                                body: err.to_string().into(),
-                                source: Some(err.into()),
-                                kind: Some(NotificationType::Error(melib::ErrorKind::External)),
-                            }));
-                            // [ref:FIXME]: add `v` configurable shortcut
-                            let comment = Some(format!(
-                                "Failed to start html filter process: `{filter_invocation}`. Press \
-                                 `v` to open in web browser. \n\n"
-                            ));
-                            let text = String::from_utf8_lossy(&bytes).to_string();
-                            acc.push(AttachmentDisplay::InlineText {
-                                inner: Box::new(a.clone()),
-                                comment,
-                                text,
-                            });
-                        }
-                        Ok(text) => {
-                            // [ref:FIXME]: add `v` configurable shortcut
-                            let comment = Some(format!(
-                                "Text piped through `{filter_invocation}`. Press `v` to open in \
-                                 web browser. \n\n"
-                            ));
-                            acc.push(AttachmentDisplay::InlineText {
-                                inner: Box::new(a.clone()),
-                                comment,
-                                text,
-                            });
-                        }
-                    }
-                }
-                HtmlDisplayFilter::Builtin { width } => match html_render::render(&bytes, width) {
-                    Err(err) => {
-                        main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::Notification {
-                            title: Some(
-                                "Failed to render html with the built-in html renderer"
-                                    .to_string()
-                                    .into(),
-                            ),
-                            body: err.to_string().into(),
-                            source: Some(err),
-                            kind: Some(NotificationType::Error(melib::ErrorKind::External)),
-                        }));
-                        // [ref:FIXME]: add `v` configurable shortcut
-                        let comment = Some(
-                            "Failed to render html with the built-in html renderer. Press `v` to \
-                             open in web browser. \n\n"
-                                .to_string(),
-                        );
-                        let text = String::from_utf8_lossy(&bytes).to_string();
-                        acc.push(AttachmentDisplay::InlineText {
-                            inner: Box::new(a.clone()),
-                            comment,
-                            text,
-                        });
-                    }
-                    Ok(text) => {
-                        // [ref:FIXME]: add `v` configurable shortcut
-                        let comment = Some(
-                            "Text rendered with the built-in html renderer. Press `v` to open in \
-                             web browser. \n\n"
-                                .to_string(),
-                        );
-                        acc.push(AttachmentDisplay::InlineText {
-                            inner: Box::new(a.clone()),
-                            comment,
-                            text,
-                        });
-                    }
-                },
-            }
+            // The rendered text of an inline HTML part has no consumer on
+            // this path: the reading surface is the job-driven
+            // `ViewFilter::new_html` pipeline (see `filters.rs`), and the
+            // attachment tree / `lookup_attachment` only use
+            // `attachment()`. Rendering here — synchronously, on the main
+            // thread — froze the whole UI on large or pathological HTML
+            // (an unclosed-tag flood or deeply nested tables cost tens of
+            // seconds across ammonia sanitize + html2text), exactly when
+            // the user opened a mail, so this records a placeholder
+            // instead.
+            acc.push(AttachmentDisplay::InlineText {
+                inner: Box::new(a.clone()),
+                comment: Some(
+                    "HTML content; rendered by the mail view in the background.\n\n".into(),
+                ),
+                text: String::new(),
+            });
         } else if a.is_text() {
             let bytes = a.decode(view_settings.charset.into());
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -1008,6 +904,8 @@ impl EnvelopeView {
 
 impl Component for EnvelopeView {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        #[cfg(debug_assertions)]
+        let __draw_span = crate::state::DrawSpan::enter("EnvelopeView");
         self.view_settings.theme_default = crate::conf::value(context, "theme_default");
 
         let hdr_theme = crate::conf::value(context, "mail.view.headers");
@@ -1018,6 +916,7 @@ impl Component for EnvelopeView {
             if self.options.contains(ViewOptions::SOURCE) {
                 grid.clear_area(area, self.view_settings.theme_default);
                 context.dirty_areas.push_back(area);
+                self.headers_full_height = Some(0);
                 0
             } else {
                 let envelope = &self.mail;
@@ -1032,6 +931,18 @@ impl Component for EnvelopeView {
                 self.headers_no = 0;
                 let mut skip_header_ctr = self.headers_cursor;
                 let sticky = self.view_settings.sticky_headers || height_p < height;
+                // A width change re-wraps every header value, so a cached full
+                // height and the walk offset no longer describe this layout.
+                // Restart the walk so the next frame measures the whole block
+                // again (recording a partially walked block as "full" would
+                // make the scrollbar's denominator too small).
+                if self.headers_measured_width != area.width() {
+                    self.headers_full_height = None;
+                    if !sticky {
+                        self.headers_cursor = 0;
+                        skip_header_ctr = 0;
+                    }
+                }
                 let mut y = 0;
                 macro_rules! print_header {
                     ($(($header:path, $string:expr)),*$(,)?) => {
@@ -1258,6 +1169,10 @@ impl Component for EnvelopeView {
                 }
 
                 self.force_draw_headers = false;
+                if self.headers_cursor == 0 || sticky {
+                    self.headers_full_height = Some(y);
+                    self.headers_measured_width = area.width();
+                }
                 grid.clear_area(area.skip_rows(y), self.view_settings.theme_default);
                 context.dirty_areas.push_back(area.take_rows(y + 3));
                 if !self.view_settings.sticky_headers {
@@ -1440,6 +1355,10 @@ impl Component for EnvelopeView {
                 None,
                 self.view_settings.body_theme,
             );
+            // The mail view draws one scrollbar itself (see below) that
+            // spans the whole view and encodes the combined reading
+            // position; the pager's own bar only tracks the body and
+            // would never move during the headers-walk phase.
             if let Some(ref filter) = self.view_settings.pager_filter {
                 self.pager.filter(filter, context);
             }
@@ -1452,6 +1371,52 @@ impl Component for EnvelopeView {
             s.draw(grid, area.skip_rows(y), context);
         } else {
             self.pager.draw(grid, area.skip_rows(y), context);
+            // One scrollbar over the whole view, encoding the combined
+            // reading position in *rows* over the whole document:
+            //
+            //   position   = prefix scrolled off + pager body offset
+            //   content    = all header rows + separator + all body lines
+            //   viewport   = the view's height
+            //
+            // The document is `[header block][separator row][body]` and the
+            // pager starts at screen row `y` (either below the header block
+            // or at 0 once the body has scrolled past it — the pager then
+            // covers the header block entirely). The prefix scrolled off
+            // the top is therefore `(header_rows + 1) - y`, which counts the
+            // whole header block *plus* the separator once `y == 0`.
+            // Accounting that instead compared `full - visible` missed
+            // exactly those rows while the body covered the headers: the
+            // thumb lagged behind the reading position and stopped short of
+            // the track bottom at the end.
+            //
+            // `headers_full_height` is the whole header block measured on a
+            // frame that drew all of it, so during the headers-walk (cursor
+            // still 0) the prefix formula reduces to `full - visible`: the
+            // thumb moves from the very first walk step. `Pager::total_height`
+            // counts every wrapped body line rather than the lazily
+            // materialized prefix, so the thumb keeps a stable length and
+            // reaches the track bottom exactly when the last body line does.
+            // SOURCE mode has no header block and no separator: the prefix
+            // is empty and only the pager offset counts.
+            let header_rows = self.headers_full_height.unwrap_or(0);
+            let separator_row = usize::from(!self.options.contains(ViewOptions::SOURCE));
+            let prefix_len = header_rows + separator_row;
+            let prefix_scrolled = prefix_len.saturating_sub(y);
+            let body_height = self.pager.total_height();
+            let viewport = area.height();
+            let content_len = prefix_len.saturating_add(body_height);
+            if content_len > viewport {
+                let position = self.pager.cursor_pos().saturating_add(prefix_scrolled);
+                crate::utilities::draw_scrollbar(
+                    grid,
+                    area.nth_col(area.width().saturating_sub(1)),
+                    context,
+                    /* horizontal */ false,
+                    position.min(content_len - viewport),
+                    viewport,
+                    content_len,
+                );
+            }
         }
         if let Some(ref mut s) = self.force_charset {
             s.draw(grid, area, context);
@@ -2365,24 +2330,247 @@ mod tests {
     use super::*;
 
     #[test]
-    fn html_display_filter_unconfigured_is_builtin_not_w3m() {
-        // Unconfigured (`None`) must select the built-in renderer; it must
-        // never produce an external command string.
-        assert_eq!(
-            HtmlDisplayFilter::resolve(None, 116),
-            HtmlDisplayFilter::Builtin { width: 116 }
+    fn mail_view_scrollbar_tracks_wrapping_headers_over_a_long_body() {
+        use crate::{components::Component, terminal::Key, types::UIEvent};
+
+        fn thumb_rows(view_grid: &crate::terminal::CellBuffer, area: Area) -> Vec<usize> {
+            let gutter = area.nth_col(area.width() - 1);
+            view_grid
+                .bounds_iter(gutter)
+                .flatten()
+                .enumerate()
+                .filter(|(_, (x, y))| view_grid[(*x, *y)].ch() == '\u{2588}')
+                .map(|(i, _)| i)
+                .collect()
+        }
+
+        // Headers that wrap onto several rows, plus a body far longer than the
+        // pager's look-ahead window (16 screens).
+        let long_to = (0..8)
+            .map(|i| format!("recipient-{i:02}-with-a-long-name@example.org"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let body = (0..400)
+            .map(|i| format!("body line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let bytes = format!(
+            "From: a@b.example\r\nTo: {long_to}\r\nCc: {long_to}\r\n\
+             Subject: a deliberately long subject line that wraps across several rows\r\n\
+             Message-ID: <sb-wrap@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+             \r\n{body}\r\n"
         );
-        // An empty command counts as unconfigured.
-        assert_eq!(
-            HtmlDisplayFilter::resolve(Some(""), 116),
-            HtmlDisplayFilter::Builtin { width: 116 }
+        let mail = melib::Mail::new(bytes.into_bytes(), None).expect("could not parse test mail");
+        let mut ctx = crate::golden::mock_context();
+        let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+        view.process_event(&mut UIEvent::Resize, &mut ctx);
+        assert!(screen.resize(40, 20));
+        let area = screen.area();
+
+        view.draw(screen.grid_mut(), area, &mut ctx);
+        let at_top = thumb_rows(screen.grid(), area);
+        assert!(
+            !at_top.is_empty() && at_top[0] <= 1,
+            "thumb must start at the track top, got {at_top:?}"
         );
-        // An explicitly configured command is kept verbatim.
+
+        // The header walk must move the thumb, and the thumb must keep its
+        // length (the total document height is now fixed).
+        let mut advanced = false;
+        for _ in 0..view.headers_no {
+            view.process_event(&mut UIEvent::Input(Key::Down), &mut ctx);
+            view.set_dirty(true);
+            view.draw(screen.grid_mut(), area, &mut ctx);
+            let now = thumb_rows(screen.grid(), area);
+            assert_eq!(
+                now.len(),
+                at_top.len(),
+                "thumb length must stay stable while the header walk scrolls"
+            );
+            advanced |= now.first().zip(at_top.first()).is_some_and(|(n, t)| n > t);
+        }
+        assert!(
+            advanced,
+            "the thumb must advance while wrapping headers are walked off"
+        );
+
+        // Reading to the end must land the thumb at the track bottom.
+        for _ in 0..600 {
+            view.process_event(&mut UIEvent::Input(Key::Down), &mut ctx);
+            view.set_dirty(true);
+            view.draw(screen.grid_mut(), area, &mut ctx);
+        }
+        let at_end = thumb_rows(screen.grid(), area);
+        assert!(
+            !at_end.is_empty() && at_end[at_end.len() - 1] >= area.height() - 2,
+            "thumb must sit at the track bottom at the end, got {at_end:?}"
+        );
+    }
+
+    /// The mail view scrollbar must track the combined reading position:
+    /// the thumb moves on the very first scroll step (the headers walk —
+    /// the header block scrolls even though the pager cursor is still 0)
+    /// and sits exactly at the track bottom once the last body line is
+    /// reached.
+    #[test]
+    fn mail_view_scrollbar_tracks_headers_walk_and_bottom() {
+        use crate::{components::Component, terminal::Key, types::UIEvent};
+
+        let body = (0..40)
+            .map(|i| format!("body line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let bytes = format!(
+            "From: a@b.example\r\nTo: c@d.example\r\nCc: e@f.example\r\nSubject: scrollbar\r\n\
+             Message-ID: <sb@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+             \r\n{body}\r\n"
+        );
+        let mail = melib::Mail::new(bytes.into_bytes(), None).expect("could not parse test mail");
+        let mut ctx = crate::golden::mock_context();
+        let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+        view.process_event(&mut UIEvent::Resize, &mut ctx);
+        assert!(screen.resize(40, 20));
+        let area = screen.area();
+
+        fn thumb_rows(view_grid: &crate::terminal::CellBuffer, area: Area) -> Vec<usize> {
+            let gutter = area.nth_col(area.width() - 1);
+            view_grid
+                .bounds_iter(gutter)
+                .flatten()
+                .enumerate()
+                .filter(|(_, (x, y))| view_grid[(*x, *y)].ch() == '█')
+                .map(|(i, _)| i)
+                .collect()
+        }
+
+        view.draw(screen.grid_mut(), area, &mut ctx);
+        let at_top = thumb_rows(screen.grid(), area);
+        assert!(
+            !at_top.is_empty() && at_top[0] <= 1,
+            "thumb must start at the track top, got {at_top:?}"
+        );
+
+        // Walk the whole header block (headers still on top, pager cursor
+        // still 0): the thumb must advance measurably — the combined
+        // position counts every walked header line.
+        for _ in 0..view.headers_no {
+            view.process_event(&mut UIEvent::Input(Key::Down), &mut ctx);
+        }
+        view.set_dirty(true);
+        view.draw(screen.grid_mut(), area, &mut ctx);
+        let after_walk = thumb_rows(screen.grid(), area);
+        assert!(
+            !after_walk.is_empty() && after_walk[0] > at_top[0],
+            "thumb must advance during the headers walk, got {after_walk:?} (was {at_top:?})"
+        );
+
+        // Scroll to the very end: the thumb must sit at the track bottom.
+        // (Draw after every key like the main loop does — the pager's
+        // scroll movement is applied at draw time.)
+        for _ in 0..100 {
+            view.process_event(&mut UIEvent::Input(Key::Down), &mut ctx);
+            view.set_dirty(true);
+            view.draw(screen.grid_mut(), area, &mut ctx);
+        }
+        let at_end = thumb_rows(screen.grid(), area);
+        let track_len = area.height();
+        assert!(
+            !at_end.is_empty() && at_end[at_end.len() - 1] >= track_len - 2,
+            "thumb must sit at the track bottom at the end, got {at_end:?} of {track_len} rows"
+        );
+    }
+
+    /// Paging straight through a long mail (`PageDown`, which never walks
+    /// the headers — the body scrolls under them and then covers them):
+    /// the thumb must start at the top, move on the first page, and sit
+    /// flush at the track bottom once the last body line is on screen.
+    ///
+    /// Regression: the position used to be `pager cursor + (header rows
+    /// full - visible)`; while the body covered the header block `visible`
+    /// stayed at full height, so the scrolled-off header rows (and the
+    /// separator) were never counted and the thumb stopped short of the
+    /// track bottom at the end.
+    #[test]
+    fn mail_view_scrollbar_tracks_paging_over_the_headers() {
+        use crate::{components::Component, terminal::Key, types::UIEvent};
+
+        fn thumb_rows(view_grid: &crate::terminal::CellBuffer, area: Area) -> Vec<usize> {
+            let gutter = area.nth_col(area.width() - 1);
+            view_grid
+                .bounds_iter(gutter)
+                .flatten()
+                .enumerate()
+                .filter(|(_, (x, y))| view_grid[(*x, *y)].ch() == '█')
+                .map(|(i, _)| i)
+                .collect()
+        }
+
+        // Small screen and a short body, so the header block is a large
+        // fraction of the document: an uncounted header walk is more than
+        // one track cell here (the rounding cannot hide it).
+        let body = (0..120)
+            .map(|i| format!("body line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let bytes = format!(
+            "From: a@b.example\r\nTo: c@d.example\r\nCc: e@f.example\r\nSubject: scrollbar\r\n\
+             Message-ID: <sb-pg@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+             \r\n{body}\r\n"
+        );
+        let mail = melib::Mail::new(bytes.into_bytes(), None).expect("could not parse test mail");
+        let mut ctx = crate::golden::mock_context();
+        let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+        view.process_event(&mut UIEvent::Resize, &mut ctx);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+
+        view.draw(screen.grid_mut(), area, &mut ctx);
+        let at_top = thumb_rows(screen.grid(), area);
+        assert!(
+            !at_top.is_empty() && at_top[0] <= 1,
+            "thumb must start at the track top, got {at_top:?}"
+        );
+
+        // First page: the reading position must advance measurably.
+        view.process_event(&mut UIEvent::Input(Key::PageDown), &mut ctx);
+        view.set_dirty(true);
+        view.draw(screen.grid_mut(), area, &mut ctx);
+        let after_first_page = thumb_rows(screen.grid(), area);
+        assert!(
+            !after_first_page.is_empty() && after_first_page[0] > at_top[0],
+            "thumb must advance after the first page, got {after_first_page:?} (was {at_top:?})"
+        );
+
+        // Page to the very end. The pager stops with the last body line at
+        // the bottom of the viewport (no overshoot), without ever walking
+        // the headers — the thumb must still sit at the track bottom.
+        let mut last = after_first_page;
+        for _ in 0..10 {
+            view.process_event(&mut UIEvent::Input(Key::PageDown), &mut ctx);
+            view.set_dirty(true);
+            view.draw(screen.grid_mut(), area, &mut ctx);
+            last = thumb_rows(screen.grid(), area);
+        }
+        let cursor_before = view.pager.cursor_pos();
+        view.process_event(&mut UIEvent::Input(Key::PageDown), &mut ctx);
+        view.set_dirty(true);
+        view.draw(screen.grid_mut(), area, &mut ctx);
         assert_eq!(
-            HtmlDisplayFilter::resolve(Some("w3m -I utf-8 -T text/html"), 116),
-            HtmlDisplayFilter::External {
-                invocation: "w3m -I utf-8 -T text/html".to_string()
-            }
+            view.pager.cursor_pos(),
+            cursor_before,
+            "the pager must be clamped at the bottom before checking the thumb"
+        );
+        let track_len = area.height();
+        assert!(
+            !last.is_empty() && last[last.len() - 1] >= track_len - 2,
+            "thumb must sit at the track bottom after paging to the end, got {last:?} of \
+             {track_len} rows"
         );
     }
 

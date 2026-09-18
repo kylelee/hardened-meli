@@ -244,7 +244,10 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
             let (file_account_conf, _) = get_account(path, account)?;
             let send_mail = file_account_conf.send_mail;
             let SendMail::Smtp(smtp_conf) = send_mail else {
-                panic!("smtp shell requires an smtp configuration for account {account}");
+                return Err(Error::new(format!(
+                    "The `smtp-shell` tool requires an SMTP configuration for account `{account}`."
+                ))
+                .set_kind(ErrorKind::Configuration));
             };
             std::thread::spawn(move || {
                 let ex = melib::smol::Executor::new();
@@ -270,12 +273,11 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
                         futures::executor::block_on(timeout(
                             None,
                             conn.send_command(&[input.trim().as_bytes()]),
-                        ))
-                        .unwrap()
-                        .unwrap();
-                        futures::executor::block_on(timeout(None, conn.read_lines(&mut res, None)))
-                            .unwrap()
-                            .unwrap();
+                        ))??;
+                        futures::executor::block_on(timeout(
+                            None,
+                            conn.read_lines(&mut res, None),
+                        ))??;
                         println!("\rC: {}", input.trim());
                         print!("S: {res}");
                         if input.trim().eq_ignore_ascii_case("quit") {
@@ -308,22 +310,16 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
                 true,
             );
 
-            futures::executor::block_on(timeout(imap.server_conf.timeout, conn.connect()))
-                .unwrap()
-                .unwrap();
+            futures::executor::block_on(timeout(imap.server_conf.timeout, conn.connect()))??;
             let mut res = Vec::with_capacity(8 * 1024);
             futures::executor::block_on(timeout(
                 imap.server_conf.timeout,
                 conn.send_command(CommandBody::Noop),
-            ))
-            .unwrap()
-            .unwrap();
+            ))??;
             futures::executor::block_on(timeout(
                 imap.server_conf.timeout,
                 conn.read_response(&mut res, RequiredResponses::empty()),
-            ))
-            .unwrap()
-            .unwrap();
+            ))??;
 
             let mut input = String::new();
             println!(
@@ -340,15 +336,11 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
                         futures::executor::block_on(timeout(
                             imap.server_conf.timeout,
                             conn.send_command_raw(input.as_bytes()),
-                        ))
-                        .unwrap()
-                        .unwrap();
+                        ))??;
                         futures::executor::block_on(timeout(
                             imap.server_conf.timeout,
                             conn.read_lines(&mut res, None),
-                        ))
-                        .unwrap()
-                        .unwrap();
+                        ))??;
                         if input.trim().eq_ignore_ascii_case("logout") {
                             break;
                         }
@@ -383,7 +375,7 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
                     output,
                     message_id,
                 } => {
-                    let lore = PublicInboxHTTP::new(url.as_str()).unwrap();
+                    let lore = PublicInboxHTTP::new(url.as_str())?;
                     let msg_id = MessageID::new(message_id);
                     std::thread::spawn(move || {
                         let ex = melib::smol::Executor::new();

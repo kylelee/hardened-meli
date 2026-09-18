@@ -84,11 +84,17 @@ impl Cache {
         let Some(mailbox_hash): Option<MailboxHash> = path.to_mailbox_hash() else {
             return Err(Error::new("Invalid mailbox path").set_kind(ErrorKind::ValueError));
         };
-        let mut hi_lck = self.hash_indexes.lock().unwrap();
-        let mut mi = self.mailbox_index.lock().unwrap();
-        let mailboxes_lck = self.mailboxes.lock().unwrap();
-        let Some(mailbox) = mailboxes_lck.get(&mailbox_hash) else {
-            return Err(Error::new("Mailbox does not exist in cache").set_kind(ErrorKind::NotFound));
+        // Take the `mailboxes` lock only long enough to clone the shared
+        // counters, so that the potentially slow file I/O and parsing below
+        // happen without holding any cache lock.
+        let (total, unseen) = {
+            let mailboxes_lck = self.mailboxes.lock().unwrap();
+            let Some(mailbox) = mailboxes_lck.get(&mailbox_hash) else {
+                return Err(
+                    Error::new("Mailbox does not exist in cache").set_kind(ErrorKind::NotFound)
+                );
+            };
+            (mailbox.total.clone(), mailbox.unseen.clone())
         };
 
         let env_hash = path.to_envelope_hash();
@@ -99,13 +105,15 @@ impl Cache {
         let mut env = Envelope::from_bytes(self.buffer.as_slice(), Some(path.flags()))?;
         env.set_hash(env_hash);
 
+        let mut hi_lck = self.hash_indexes.lock().unwrap();
+        let mut mi = self.mailbox_index.lock().unwrap();
         let hi = hi_lck.entry(mailbox_hash).or_default();
         hi.index.insert(env_hash, path.to_path_buf().into());
         hi.reverse_index.insert(path.to_path_buf(), env_hash);
         mi.insert(env.hash(), mailbox_hash);
-        *mailbox.total.lock().unwrap() += 1;
+        *total.lock().unwrap() += 1;
         if !env.is_seen() {
-            *mailbox.unseen.lock().unwrap() += 1;
+            *unseen.lock().unwrap() += 1;
         }
         Ok((mailbox_hash, env))
     }
@@ -122,11 +130,19 @@ impl Cache {
         hi.entry(mailbox_hash)
             .or_default()
             .remove_env_hash(&env_hash);
-        *mailbox.total.lock().unwrap() -= 1;
+        // Saturating: a duplicate removal must not underflow (panic in
+        // debug, wrap to `usize::MAX` in release).
+        {
+            let mut total_lck = mailbox.total.lock().unwrap();
+            *total_lck = total_lck.saturating_sub(1);
+        }
         let flags = path.flags();
         let was_unseen: bool = !flags.contains(Flag::SEEN);
         if was_unseen {
-            *mailbox.unseen.lock().unwrap() -= 1;
+            {
+                let mut unseen_lck = mailbox.unseen.lock().unwrap();
+                *unseen_lck = unseen_lck.saturating_sub(1);
+            }
         }
         Some((mailbox_hash, env_hash))
     }
@@ -148,11 +164,19 @@ impl Cache {
         else {
             return false;
         };
-        *mailbox.total.lock().unwrap() -= 1;
+        // Saturating: a duplicate removal must not underflow (panic in
+        // debug, wrap to `usize::MAX` in release).
+        {
+            let mut total_lck = mailbox.total.lock().unwrap();
+            *total_lck = total_lck.saturating_sub(1);
+        }
         let flags = path.flags();
         let was_unseen: bool = !flags.contains(Flag::SEEN);
         if was_unseen {
-            *mailbox.unseen.lock().unwrap() -= 1;
+            {
+                let mut unseen_lck = mailbox.unseen.lock().unwrap();
+                *unseen_lck = unseen_lck.saturating_sub(1);
+            }
         }
         true
     }

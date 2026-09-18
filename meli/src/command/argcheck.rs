@@ -120,10 +120,12 @@ impl<const MIN: u8, const MAX: u8> ArgCheck<MIN, MAX> {
         };
         let is_empty = input.trim().is_empty();
         if !is_empty {
-            assert!(so_far <= MAX);
-            assert!(so_far >= MIN);
+            // Do not `assert!` the declared bounds here: a parser whose
+            // `arg_init!` counts and actual `inc` calls disagree would abort
+            // the process on user input (e.g. `:flag set foo bar`). Report the
+            // mismatch as a normal argument-count error instead.
             return Err(CommandError::WrongNumberOfArguments {
-                too_many: true,
+                too_many: so_far >= MAX,
                 takes: (MIN, MAX.into()),
                 given: so_far + 1,
                 __func__,

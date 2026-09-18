@@ -25,7 +25,7 @@ use futures::lock::Mutex as FutureMutex;
 use isahc::AsyncReadResponseExt;
 
 use crate::{
-    error::Result,
+    error::{Error, ErrorKind, Result},
     jmap::{connection::JmapConnection, methods::download_request_format, Store},
     EnvelopeHash,
 };
@@ -58,12 +58,25 @@ impl JmapOp {
                 return Ok(ret.into_bytes());
             }
         }
-        let blob_id = self.store.blob_id_store.lock().await[&self.hash].clone();
+        let blob_id = self
+            .store
+            .blob_id_store
+            .lock()
+            .await
+            .get(&self.hash)
+            .cloned()
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "No JMAP blob id is known for envelope {:?}; the local cache may be stale.",
+                    self.hash
+                ))
+                .set_kind(ErrorKind::NotFound)
+            })?;
         let mut conn = self.connection.lock().await;
         conn.connect().await?;
         let (download_url, mail_account_id) = {
             let g = self.store.online_status.session_guard().await?;
-            (g.download_url.clone(), g.mail_account_id())
+            (g.download_url.clone(), g.mail_account_id()?)
         };
         let res_text = conn
             .get_async(&download_request_format(

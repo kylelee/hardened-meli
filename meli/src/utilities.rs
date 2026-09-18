@@ -21,14 +21,17 @@
 
 //! Various useful utilities.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use indexmap::IndexMap;
 use melib::{text::Reflow, ShellExpandTrait};
 use ratatui::layout::{Constraint, Layout};
 
 use super::*;
-use crate::{components::ExtendShortcutsMaps, jobs::JobId, melib::text::TextProcessing};
+use crate::{
+    accounts::MailboxStatus, components::ExtendShortcutsMaps, jobs::JobId,
+    melib::text::TextProcessing,
+};
 
 mod pager;
 pub use self::pager::*;
@@ -71,7 +74,6 @@ pub struct SearchPattern {
 #[derive(Debug)]
 pub struct StatusBar {
     container: Box<dyn Component>,
-    status: String,
     status_message: String,
     substatus_message: String,
     ex_buffer: TextField,
@@ -85,8 +87,30 @@ pub struct StatusBar {
     progress_spinner: ProgressSpinner,
     in_progress_jobs: HashSet<JobId>,
     done_jobs: HashSet<JobId>,
-    scroll_contexts: IndexMap<ComponentId, ScrollContext>,
+    /// Mailbox the active listing child has focused on, if any. Drives the
+    /// central `LineGauge` (whose ratio is the mailbox's
+    /// `MailboxStatus::Parsing(done, total)`) and narrows
+    /// `AccountStatusChange`/`MailboxUpdate` redraw arms to that exact
+    /// mailbox. `None` whenever no listing owns the focus.
+    focus: Option<(AccountHash, MailboxHash)>,
 
+    /// Unseen-count floor for the focused mailbox: tracks how far the
+    /// user has read mail down since the mailbox was focused, so the
+    /// `📨 new` count in the status bar only surfaces mail that arrived
+    /// after focusing (and not unseen mail that existed before).
+    unseen_floor: usize,
+    /// Mailbox total seen at the last settled (non-parsing) observation
+    /// of the focused mailbox; `None` when the mailbox has not been
+    /// observed settled, or the focus changed. Classifies an incoming
+    /// parse session as the initial fetch (settled total was 0) versus
+    /// an incremental sync (settled total was > 0).
+    settled_total: Option<usize>,
+    /// Classification of the focused mailbox's current parse session:
+    /// `Some(true)` = initial fetch — arrivals are absorbed into the
+    /// floor and never surface as `📨 new`; `Some(false)` = incremental
+    /// sync — arrivals surface immediately. `None` while no parse
+    /// session is active.
+    parse_first_fetch: Option<bool>,
     auto_complete: Box<AutoComplete>,
     cmd_history: Vec<String>,
 }
@@ -102,23 +126,10 @@ impl StatusBar {
     const MOUSE_MODE_ASCII: &str = "(mouse)";
 
     pub fn new(context: &Context, container: Box<dyn Component>) -> Self {
-        let mut progress_spinner = ProgressSpinner::new(20, context);
-        match context.settings.terminal.progress_spinner_sequence.as_ref() {
-            Some(conf::terminal::ProgressSpinnerSequence::Integer(k)) => {
-                progress_spinner.set_kind(*k);
-            }
-            Some(conf::terminal::ProgressSpinnerSequence::Custom {
-                ref frames,
-                ref interval_ms,
-            }) => {
-                progress_spinner.set_custom_kind(frames.clone(), *interval_ms);
-            }
-            None => {}
-        }
+        let progress_spinner = Self::make_progress_spinner(context);
 
         Self {
             container,
-            status: String::with_capacity(256),
             status_message: String::with_capacity(256),
             substatus_message: String::with_capacity(256),
             ex_buffer: TextField::new(UText::new(String::with_capacity(256)), None),
@@ -133,9 +144,58 @@ impl StatusBar {
             progress_spinner,
             in_progress_jobs: HashSet::default(),
             done_jobs: HashSet::default(),
-            scroll_contexts: IndexMap::default(),
+            focus: None,
+            unseen_floor: 0,
+            settled_total: None,
+            parse_first_fetch: None,
             cmd_history: crate::command::history::old_cmd_history(),
         }
+    }
+
+    /// Build the mailbox-status carousel: the `ProgressSpinner` engine
+    /// cycling through envelope glyphs while network refresh work is in
+    /// flight. Defaults to the six-glyph mailbox carousel (the classic
+    /// `|/-\` on ASCII terminals); `progress_spinner_sequence` overrides
+    /// the frames as before.
+    fn make_progress_spinner(context: &Context) -> ProgressSpinner {
+        let mut progress_spinner = ProgressSpinner::new(20, context);
+        match context.settings.terminal.progress_spinner_sequence.as_ref() {
+            Some(conf::terminal::ProgressSpinnerSequence::Integer(k)) => {
+                progress_spinner.set_kind(*k);
+            }
+            Some(conf::terminal::ProgressSpinnerSequence::Custom {
+                ref frames,
+                ref interval_ms,
+            }) => {
+                progress_spinner.set_custom_kind(frames.clone(), *interval_ms);
+            }
+            None => {
+                let frames: Vec<String> = if context.settings.terminal.emoji_capable() {
+                    // Six mailbox glyphs: one frame per 120 ms tick.
+                    ["📨", "📬", "📪", "📭", "📩", "📫"]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                } else if context.settings.terminal.ascii_drawing {
+                    // Plain-ASCII fallback for terminals without unicode
+                    // braille or emoji support.
+                    ["|", "/", "-", "\\", "|", "/"]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                } else {
+                    // Braille-pattern carousel — the user's preferred
+                    // unicode-but-not-emoji analogue. 10 frames at
+                    // 120 ms ≈ 1.2 s per rotation.
+                    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                };
+                progress_spinner.set_custom_kind(frames, 120);
+            }
+        }
+        progress_spinner
     }
 
     fn draw_status_bar(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
@@ -144,81 +204,269 @@ impl StatusBar {
             attribute.attrs |= Attr::REVERSE;
         }
         grid.clear_area(area, attribute);
-        /* UIMode indicator chip: the leading mode word is styled per mode
-         * from the existing status vocabulary (no new theme keys); the
-         * remainder of the line keeps the plain "status.bar" values. */
-        let mode_str = self.mode.to_string();
-        let mode_attribute = Self::mode_indicator_attrs(self.mode, context);
-        let (x, _) = grid.write_string(
-            &mode_str,
-            mode_attribute.fg,
-            mode_attribute.bg,
-            mode_attribute.attrs,
-            area,
-            None,
-            None,
-        );
-        let rest = self
-            .status
-            .strip_prefix(mode_str.as_str())
-            .unwrap_or(&self.status);
-        let (x, _) = grid.write_string(
-            rest,
-            attribute.fg,
-            attribute.bg,
-            attribute.attrs,
-            area.skip_cols(x),
-            None,
-            None,
-        );
-        let offset = self.status.find('|').unwrap_or(self.status.len());
-        for c in grid.row_iter(area, offset..(area.width()), 0) {
-            grid[c].set_attrs(attribute.attrs | Attr::BOLD);
-        }
-        if let Some((
-            _,
-            ScrollContext {
-                shown_lines,
-                total_lines,
-                has_more_lines,
-            },
-        )) = self.scroll_contexts.last()
-        {
-            let s = format!(
-                "| {shown_percentage}% {line_desc}{shown_lines}/{total_lines}{has_more_lines}",
-                line_desc = if grid.ascii_drawing { "lines:" } else { "☰ " },
-                shown_percentage = (*shown_lines as f32 / (*total_lines as f32) * 100.0) as usize,
-                shown_lines = *shown_lines,
-                total_lines = *total_lines,
-                has_more_lines = if *has_more_lines { "(+)" } else { "" }
+        /* The row is one flowing line from column 0:
+         * [mailbox-status icon] | [mail counts] [transient message]
+         * [scroll %] | [gauge while fetching] | [keyboard hints], with
+         * the remaining columns left blank — the hints follow the
+         * counts left-aligned instead of hugging the right edge. The
+         * gauge width comes from the focused mailbox's
+         * `MailboxStatus::Parsing(done, total)`; `write_string` returns
+         * the x relative to the area it was passed, so each chained
+         * write accumulates into `x`. */
+        let (gauge_label, gauge_w) = self.gauge_metrics(context);
+        let (hints_spans, hints_w) = self.hints_metrics(context);
+        let left_area = area;
+        /* Left segment, laid out from column 0: mode chip (only outside
+         * Normal mode, where the mode carries information — Insert
+         * editing, Command line, Embedded terminal, Fork), mouse flag,
+         * backend chip, mailbox label, transient status/substatus
+         * message and the scroll percentage. The legacy
+         * `NORMAL | Mailbox: …` line is gone: `Listing` no longer
+         * reports a redundant status string (its `Component::status`
+         * override was removed), so the focus chips own the left edge.
+         * `write_string` returns the x relative to the area it was
+         * passed, so each chained write accumulates into `x`. */
+        let mut x = if self.mode != UIMode::Normal {
+            let mode_str = self.mode.to_string();
+            let mode_attribute = Self::mode_indicator_attrs(self.mode, context);
+            let (x_rel, _) = grid.write_string(
+                &mode_str,
+                mode_attribute.fg,
+                mode_attribute.bg,
+                mode_attribute.attrs,
+                left_area,
+                None,
+                None,
             );
-            grid.write_string(
-                &s,
+            x_rel
+        } else {
+            0
+        };
+        if self.mouse {
+            let alt = if context.settings.terminal.ascii_drawing {
+                Self::MOUSE_MODE_ASCII
+            } else {
+                Self::MOUSE_MODE
+            };
+            let flag = context
+                .settings
+                .terminal
+                .mouse_flag
+                .as_deref()
+                .unwrap_or(alt);
+            // Two writes instead of `format!(" {flag}")`: the status bar is
+            // redrawn on every keystroke and every spinner tick.
+            let (x_rel, _) = grid.write_string(
+                " ",
                 attribute.fg,
                 attribute.bg,
                 attribute.attrs,
-                area.skip_cols(x + 1),
+                left_area.skip_cols(x),
                 None,
                 None,
             );
+            x += x_rel;
+            let (x_rel, _) = grid.write_string(
+                flag,
+                attribute.fg,
+                attribute.bg,
+                attribute.attrs,
+                left_area.skip_cols(x),
+                None,
+                None,
+            );
+            x += x_rel;
+        }
+        // Mailbox status icon: ✘ when the focused account is offline,
+        // the carousel (the spinner engine, mailbox envelope glyphs)
+        // while network refresh work is in flight, and a fixed 📫 when
+        // idle. Without emoji, the fallback is `#`; plain ASCII keeps
+        // `*` (matches the legacy spinner-fallback glyph).
+        if self.focus_offline(context) {
+            let glyph = if context.settings.terminal.emoji_capable() {
+                "✘"
+            } else {
+                "!"
+            };
+            let (x_rel, _) = grid.write_string(
+                glyph,
+                attribute.fg,
+                attribute.bg,
+                attribute.attrs | Attr::BOLD,
+                left_area.skip_cols(x),
+                None,
+                None,
+            );
+            x += x_rel;
+        } else if self.progress_spinner.is_active() {
+            self.progress_spinner.set_dirty(true);
+            self.progress_spinner
+                .draw(grid, left_area.skip_cols(x), context);
+            x += self.progress_spinner.width;
+        } else if self.focus.is_some() {
+            let glyph = if context.settings.terminal.emoji_capable() {
+                "📫"
+            } else {
+                "#"
+            };
+            let (x_rel, _) = grid.write_string(
+                glyph,
+                attribute.fg,
+                attribute.bg,
+                attribute.attrs,
+                left_area.skip_cols(x),
+                None,
+                None,
+            );
+            x += x_rel;
+        }
+        // Mail counts for the focused mailbox: `📨new 📩unread 📧total`
+        // (`📧` instead of `✉️`: the dingbat needs an emoji-presentation
+        // variation selector that the cell-based grid cannot carry, so
+        // it rendered text-style). `new` counts unseen mail that arrived
+        // since the mailbox was focused; the floor follows the user
+        // reading mail down, so only genuinely new arrivals surface.
+        if let Some((new, unseen, total)) = self.focus_counts(context) {
+            let counts = if context.settings.terminal.emoji_capable() {
+                format!("📨{new} 📩{unseen} 📧{total}")
+            } else if context.settings.terminal.ascii_drawing {
+                format!("new:{new} unread:{unseen} total:{total}")
+            } else {
+                // Braille analogue: 📨 → `+`, 📩 → `~`, 📧 → `=`.
+                format!("+{new} ~{unseen} ={total}")
+            };
+            let (x_rel, _) = grid.write_string(
+                " | ",
+                attribute.fg,
+                attribute.bg,
+                attribute.attrs,
+                left_area.skip_cols(x),
+                None,
+                None,
+            );
+            x += x_rel;
+            let (x_rel, _) = grid.write_string(
+                &counts,
+                attribute.fg,
+                attribute.bg,
+                attribute.attrs,
+                left_area.skip_cols(x),
+                None,
+                None,
+            );
+            x += x_rel;
+        }
+        if !self.status_message.is_empty() || !self.substatus_message.is_empty() {
+            // Written piecewise (leading space, first part, optional
+            // separator + second part) instead of building a `String` and
+            // `format!(" {message}")` on every redraw.
+            let (x_rel, _) = grid.write_string(
+                " ",
+                attribute.fg,
+                attribute.bg,
+                attribute.attrs,
+                left_area.skip_cols(x),
+                None,
+                None,
+            );
+            x += x_rel;
+            if !self.status_message.is_empty() {
+                let (x_rel, _) = grid.write_string(
+                    &self.status_message,
+                    attribute.fg,
+                    attribute.bg,
+                    attribute.attrs,
+                    left_area.skip_cols(x),
+                    None,
+                    None,
+                );
+                x += x_rel;
+            }
+            if !self.substatus_message.is_empty() {
+                if !self.status_message.is_empty() {
+                    let (x_rel, _) = grid.write_string(
+                        " | ",
+                        attribute.fg,
+                        attribute.bg,
+                        attribute.attrs,
+                        left_area.skip_cols(x),
+                        None,
+                        None,
+                    );
+                    x += x_rel;
+                }
+                let (x_rel, _) = grid.write_string(
+                    &self.substatus_message,
+                    attribute.fg,
+                    attribute.bg,
+                    attribute.attrs,
+                    left_area.skip_cols(x),
+                    None,
+                    None,
+                );
+                x += x_rel;
+            }
         }
 
-        if self.progress_spinner.is_dirty() {
-            self.progress_spinner.draw(
-                grid,
-                area.skip_cols(area.width().saturating_sub(self.progress_spinner.width)),
-                context,
+        if gauge_w > 0 {
+            let (x_rel, _) = grid.write_string(
+                " |",
+                attribute.fg,
+                attribute.bg,
+                attribute.attrs | Attr::BOLD,
+                left_area.skip_cols(x),
+                None,
+                None,
             );
+            x += x_rel;
+            let gauge_area = left_area.skip_cols(x).take_cols(gauge_w);
+            self.render_line_gauge(grid, gauge_area, context, &gauge_label);
+            x += gauge_w;
         }
-        let skip = area
+
+        if hints_w > 0 {
+            let (x_rel, _) = grid.write_string(
+                " |",
+                attribute.fg,
+                attribute.bg,
+                attribute.attrs | Attr::BOLD,
+                left_area.skip_cols(x),
+                None,
+                None,
+            );
+            x += x_rel;
+            // Key glyphs render green+bold inside the hints run so the
+            // binding pops out of the descriptive label text.
+            for span in &hints_spans {
+                let (fg, attrs) = if span.key {
+                    (Color::Green, attribute.attrs | Attr::BOLD)
+                } else {
+                    (attribute.fg, attribute.attrs)
+                };
+                let (dx, _) = grid.write_string(
+                    &span.text,
+                    fg,
+                    attribute.bg,
+                    attrs,
+                    left_area.skip_cols(x),
+                    None,
+                    None,
+                );
+                if dx == 0 {
+                    break; // row exhausted; remaining spans are clipped
+                }
+                x += dx;
+            }
+        }
+        let skip = left_area
             .width()
-            .saturating_sub(self.progress_spinner.width + self.display_buffer.len() + 1);
+            .saturating_sub(self.display_buffer.len() + 1);
         grid.write_string(
             &self.display_buffer,
             attribute.fg,
             attribute.bg,
             attribute.attrs,
-            area.skip_cols(skip),
+            left_area.skip_cols(skip),
             None,
             None,
         );
@@ -226,33 +474,305 @@ impl StatusBar {
         context.dirty_areas.push_back(area);
     }
 
-    fn update_status(&mut self, context: &Context) {
-        self.status = format!(
-            "{} {}| {}{}{}",
-            self.mode,
-            if self.mouse {
-                let alt = if context.settings.terminal.ascii_drawing {
-                    Self::MOUSE_MODE_ASCII
-                } else {
-                    Self::MOUSE_MODE
-                };
-                context
-                    .settings
-                    .terminal
-                    .mouse_flag
-                    .as_deref()
-                    .unwrap_or(alt)
-            } else {
-                ""
-            },
-            self.status_message,
-            if !self.substatus_message.is_empty() {
-                " | "
-            } else {
-                ""
-            },
-            self.substatus_message,
+    /// Whether the focused account's connection is in an error state
+    /// (drives the `✘` status icon).
+    fn focus_offline(&self, context: &Context) -> bool {
+        let Some((acc_hash, _)) = self.focus else {
+            return false;
+        };
+        context
+            .accounts
+            .get_index_of(&acc_hash)
+            .is_some_and(|i| context.accounts[i].is_online.is_err())
+    }
+
+    /// `(unseen, total)` for `mb_hash` from the account's collection of
+    /// loaded envelopes — the same envelopes the listing renders. The
+    /// backend's mailbox metadata (`ref_mailbox.count()`) can drift from
+    /// what the user sees: IMAP only populates its unseen set when the
+    /// server reports it, so the collection is the source of truth.
+    /// Missing mailbox → `None`.
+    fn collection_unseen_total(
+        collection: &melib::Collection,
+        mb_hash: MailboxHash,
+    ) -> Option<(usize, usize)> {
+        let mailboxes = collection.mailboxes.read().ok()?;
+        // A mailbox not (yet) in the collection simply has no loaded
+        // envelopes — that is (0, 0), not "no data".
+        let Some(envs) = mailboxes.get(&mb_hash) else {
+            return Some((0, 0));
+        };
+        let total = envs.len();
+        // Count inside a single `envelopes` read guard. Calling
+        // `Collection::get_env` per envelope took the same read lock once
+        // per envelope, so every status-bar redraw (one per keystroke, and
+        // once per spinner tick while a fetch runs) cost `len` lock round
+        // trips on the UI thread. The lock order `mailboxes` → `envelopes`
+        // matches `Collection`'s own (`threads` → `mailboxes` →
+        // `envelopes`).
+        let envelopes = collection.envelopes.read().ok()?;
+        let unseen = envs
+            .iter()
+            .filter(|env_hash| envelopes.get(*env_hash).is_some_and(|env| !env.is_seen()))
+            .count();
+        Some((unseen, total))
+    }
+
+    /// Mail counts for the focused mailbox: `(new, unseen, total)`.
+    /// `new` counts unseen mail that arrived since the mailbox was
+    /// focused, EXCEPT arrivals during the mailbox's *initial* fetch:
+    /// while a first-fetch `Parsing` session is active, unseen mail
+    /// trickling in belongs to the initial sync, so the floor rises with
+    /// it and `new` stays 0. An *incremental* sync (the mailbox was
+    /// already populated when the parse session started) instead keeps
+    /// the floor, so genuinely new arrivals surface immediately. Once the
+    /// mailbox is settled, the floor only follows the user reading mail
+    /// down. Returns `None` when no listing has reported a focus yet.
+    fn focus_counts(&mut self, context: &Context) -> Option<(usize, usize, usize)> {
+        let (acc_hash, mb_hash) = self.focus?;
+        let account = &context.accounts[context.accounts.get_index_of(&acc_hash)?];
+        let (unseen, total) = Self::collection_unseen_total(&account.collection, mb_hash)?;
+        let parsing = account
+            .mailbox_entries
+            .get(&mb_hash)
+            .is_some_and(|entry| entry.status.is_parsing());
+        if parsing {
+            let settled_total = self.settled_total;
+            let first_fetch = *self
+                .parse_first_fetch
+                .get_or_insert_with(|| settled_total.unwrap_or(0) == 0);
+            if first_fetch {
+                // Initial fetch: absorb the arrivals.
+                self.unseen_floor = self.unseen_floor.max(unseen);
+            } else if unseen < self.unseen_floor {
+                // Incremental sync: new arrivals surface, while the user
+                // reading mail down still lowers the floor.
+                self.unseen_floor = unseen;
+            }
+        } else {
+            self.parse_first_fetch = None;
+            self.settled_total = Some(total);
+            if unseen < self.unseen_floor {
+                self.unseen_floor = unseen;
+            }
+        }
+        let new = unseen.saturating_sub(self.unseen_floor);
+        Some((new, unseen, total))
+    }
+
+    /// Decide whether the centre `LineGauge` segment should be drawn and
+    /// how wide it should be. Returns `(label, width)` where an empty
+    /// label means "no gauge, width 0". The label carries the literal
+    /// `Fetch {done}/{total}` text that the gauge renders to its left;
+    /// `render_line_gauge` decides the bar fill from `MailboxStatus`.
+    fn gauge_metrics(&self, context: &Context) -> (String, usize) {
+        let Some((acc_hash, mb_hash)) = self.focus else {
+            return (String::new(), 0);
+        };
+        let Some(account_index) = context.accounts.get_index_of(&acc_hash) else {
+            return (String::new(), 0);
+        };
+        let account = &context.accounts[account_index];
+        let entry = match account.mailbox_entries.get(&mb_hash) {
+            Some(e) => e,
+            None => return (String::new(), 0),
+        };
+        let (done, total) = match entry.status {
+            MailboxStatus::Parsing(done, total) if total > 0 => (done, total),
+            _ => return (String::new(), 0),
+        };
+        let label = format!("Fetch {done}/{total}");
+        // Total width: 1-cell gutter + label + 1-cell spacer + at least
+        // one bar cell + 1-cell gutter. Reserve `min(label+8, 30)` so
+        // short bars don't waste a wide centre strip on tiny terminals.
+        let width = label.grapheme_width() + 8;
+        (label, width.min(30))
+    }
+
+    /// Render a `ratatui::widgets::LineGauge` for the focused mailbox's
+    /// `Parsing(done, total)` ratio. The gauge runs in a temporary
+    /// `RatatuiBuffer` and is then blitted back over `gauge_area` in the
+    /// status bar grid. This mirrors the `draw_rounded_frame` helper
+    /// pattern so the gauge is rendered through ratatui without leaking
+    /// ratatui types into the rest of `StatusBar`.
+    fn render_line_gauge(
+        &self,
+        grid: &mut CellBuffer,
+        gauge_area: Area,
+        context: &Context,
+        label: &str,
+    ) {
+        if gauge_area.is_empty() {
+            return;
+        }
+        let Some((acc_hash, mb_hash)) = self.focus else {
+            return;
+        };
+        let Some(account_index) = context.accounts.get_index_of(&acc_hash) else {
+            return;
+        };
+        let account = &context.accounts[account_index];
+        let entry = match account.mailbox_entries.get(&mb_hash) {
+            Some(e) => e,
+            None => return,
+        };
+        let (done, total) = match entry.status {
+            MailboxStatus::Parsing(done, total) if total > 0 => (done, total),
+            _ => return,
+        };
+        let ratio = (done.min(total)) as f64 / total as f64;
+        // Theme inversion for the filled portion: status.bar bg becomes
+        // the gauge fg and vice versa, the same palette fork the Insert
+        // mode indicator and the focus chip use.
+        let mut base = crate::conf::value(context, "status.bar");
+        if !context.settings.terminal.use_color() {
+            base.attrs |= Attr::REVERSE;
+        }
+        let filled_symbol = if context.settings.terminal.ascii_drawing {
+            "#"
+        } else {
+            "▰"
+        };
+        let unfilled_symbol = if context.settings.terminal.ascii_drawing {
+            "."
+        } else {
+            "▱"
+        };
+        let buf_width = gauge_area.width() as u16;
+        let buf_height = gauge_area.height() as u16;
+        let mut buf =
+            ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, buf_width, buf_height));
+        let mut gauge = ratatui::widgets::LineGauge::default()
+            .ratio(ratio)
+            .label(ratatui::text::Line::from(label))
+            .filled_symbol(filled_symbol)
+            .unfilled_symbol(unfilled_symbol);
+        gauge = gauge.filled_style(
+            ratatui::style::Style::default()
+                .fg(base.bg.into())
+                .bg(base.fg.into())
+                .add_modifier(ratatui::style::Modifier::BOLD),
         );
+        ratatui::widgets::Widget::render(gauge, buf.area, &mut buf);
+        crate::terminal::ratatui_bridge::blit_buffer_to_cellbuffer_at(&buf, grid, gauge_area);
+    }
+
+    /// Compute the right-edge hints text from `self.container.shortcuts()`.
+    /// Priority list (in display order):
+    ///
+    /// 1. `general.toggle_help`         — label `Help`
+    /// 2. `scroll_up`                   — label `Scroll Up`
+    /// 3. `scroll_down`                 — label `Scroll Down`
+    /// 4. `focus_left`                  — label `Switch Left View`
+    /// 5. `focus_right`                 — label `Switch Right View`
+    /// 6. `close`                       — label `Close View` (only on
+    ///    sub-views that expose a close binding, e.g. composing)
+    /// 7. `general.quit`                — label `Exit`
+    ///
+    /// Bindings missing from the active view are skipped silently. Format:
+    /// `⌨️ (?:Help)(Up:Scroll Up)(Down:Scroll Down)...(q:Exit)` — every
+    /// hint is rendered as `(key:label)` with no separator between them,
+    /// and the key glyph of each hint renders green+bold (see
+    /// [`HintSpan`]) so the actionable binding stands out from the
+    /// descriptive label. Truncates with `…` (or `...` in ASCII
+    /// terminals) when the joined text would overflow the configured
+    /// max width.
+    #[allow(clippy::type_complexity)]
+    fn hints_metrics(&self, context: &Context) -> (Vec<HintSpan>, usize) {
+        let maps = self.container.shortcuts(context);
+        let general = maps.get(crate::conf::Shortcuts::GENERAL);
+        // Walk every non-general section first, then fall back to
+        // general. This mirrors how `process_event` resolves bindings
+        // across the codebase: each view checks its own section
+        // (`listing`, `pager`, `composing`, ...) before reaching for
+        // the catch-all fields defined in `GeneralShortcuts`. Picking
+        // the deepest focused sub-view's binding first is what the
+        // user sees in practice when they rebind e.g.
+        // `shortcuts.listing.scroll_up`; the general `scroll_up`
+        // catch-all only fills in when the focused view doesn't
+        // expose the field at all.
+        let pick_key = |name: &str| -> Option<&crate::terminal::ShortcutKeys> {
+            for (section, map) in maps.iter() {
+                if *section == crate::conf::Shortcuts::GENERAL {
+                    continue;
+                }
+                if let Some(k) = map.get(name) {
+                    return Some(k);
+                }
+            }
+            if let Some(map) = general {
+                if let Some(k) = map.get(name) {
+                    return Some(k);
+                }
+            }
+            None
+        };
+        // Seven entries in fixed display order: help first (so it
+        // survives narrow ellipsis), then scroll, then focus switches,
+        // then view close, then exit pinned last so it is the final
+        // actionable hint.
+        let pickers: [(
+            &'static str,
+            Option<&crate::terminal::ShortcutKeys>,
+            &'static str,
+        ); 7] = [
+            ("help", general.and_then(|m| m.get("toggle_help")), "Help"),
+            ("scroll_up", pick_key("scroll_up"), "Scroll Up"),
+            ("scroll_down", pick_key("scroll_down"), "Scroll Down"),
+            ("focus_left", pick_key("focus_left"), "Switch Left View"),
+            ("focus_right", pick_key("focus_right"), "Switch Right View"),
+            ("close", pick_key("close"), "Close View"),
+            ("quit", general.and_then(|m| m.get("quit")), "Exit"),
+        ];
+        let entries: Vec<(&crate::terminal::ShortcutKeys, &'static str)> = pickers
+            .iter()
+            .filter_map(|(_, key, label)| key.as_ref().copied().map(|k| (k, *label)))
+            .collect();
+        if entries.is_empty() {
+            return (Vec::new(), 0);
+        }
+        let ellipsis = if context.settings.terminal.ascii_drawing {
+            "..."
+        } else {
+            "…"
+        };
+        // Build one colored run per hint: `(` plain, key glyph
+        // green+bold, `:label)` plain. The hint form renders placeholder
+        // keys in angle brackets (`<Up>/k`, `<Esc>/q`) so they read as
+        // key descriptions rather than literal text (see
+        // [`crate::terminal::ShortcutKeys::hint_display`]).
+        let mut spans: Vec<HintSpan> = Vec::with_capacity(entries.len() * 3);
+        for (key, label) in &entries {
+            spans.push(HintSpan::plain("("));
+            spans.push(HintSpan::key(key.hint_display()));
+            spans.push(HintSpan::plain(format!(":{label})")));
+        }
+        // Use a generous maximum: the status bar clips the segment at
+        // the row's remaining width anyway; this only governs the
+        // ellipsis cutoff. Seven labelled hints run ~100–110 cells, so
+        // the previous 80-column budget truncated too aggressively.
+        let mut spans = truncate_spans_with_ellipsis(spans, 200, ellipsis);
+        if spans.is_empty() {
+            return (Vec::new(), 0);
+        }
+        // Segment head: keyboard glyph with breathing room after the `|`
+        // separator; the emoji-presentation selector is carried to the
+        // terminal by the `FORCE_EMOJI` cell attribute (see cells.rs).
+        // On ASCII terminals only the space remains.
+        let icon = if context.settings.terminal.emoji_capable() {
+            // FORCE_EMOJI carries the FE0F selector to the terminal.
+            " ⌨️ "
+        } else if context.settings.terminal.ascii_drawing {
+            // Plain-ASCII mode: leading space only.
+            " "
+        } else {
+            // Unicode-but-not-emoji analogue. Literal word so it cannot
+            // be mistaken for a Ctrl-binding.
+            " Shortcut "
+        };
+        spans.insert(0, HintSpan::plain(icon));
+        let width = spans.iter().map(|span| span.text.grapheme_width()).sum();
+        (spans, width)
     }
 
     fn draw_command_bar(&self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
@@ -316,24 +836,46 @@ impl StatusBar {
 
 impl Component for StatusBar {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        #[cfg(debug_assertions)]
+        let __draw_span = crate::state::DrawSpan::enter("StatusBar");
+        // The bottom strip is wrapped in a rounded frame (one ring of
+        // border cells around the strip), so it occupies `self.height`
+        // content rows plus one border row above and below — mirroring the
+        // pane rings the container views draw (`draw_rounded_frame`).
+        const FRAME_ROWS: usize = 2;
         let total_rows = area.height();
-        if total_rows <= self.height {
+        if total_rows <= self.height + FRAME_ROWS {
             return;
         }
 
         /* Top-level vertical split via ratatui Layout: the container takes
-         * every row but the bottom strip, which the status bar and (in
-         * Command mode, where the strip is two rows) the command line share.
-         * Identical to the previous take_rows/skip_rows/nth_row math for
-         * every size. */
-        let [body, bar] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(self.height as u16)])
-                .areas(crate::terminal::ratatui_bridge::area_to_rect(area));
+         * every row but the framed bottom strip, which the status bar and
+         * (in Command mode, where the strip is two rows) the command line
+         * share. */
+        let [body, bar] = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length((self.height + FRAME_ROWS) as u16),
+        ])
+        .areas(crate::terminal::ratatui_bridge::area_to_rect(area));
+        let bar_area = crate::terminal::ratatui_bridge::rect_to_area(bar, area);
+        let bar_inner = crate::terminal::ratatui_bridge::draw_rounded_frame(grid, bar_area, {
+            let mut attr = crate::conf::value(context, "status.bar");
+            if !context.settings.terminal.use_color() {
+                attr.attrs |= Attr::REVERSE;
+            }
+            attr
+        });
+        // The frame ring writes cells directly (blit), so push its strips
+        // for the incremental flush — without this the ring only appears
+        // on full repaints (mirrors Tabbed's own frame push).
+        for frame_area in crate::terminal::ratatui_bridge::frame_ring_areas(bar_area) {
+            context.dirty_areas.push_back(frame_area);
+        }
         let [command_line, status_row] = Layout::vertical([
             Constraint::Length(self.height.saturating_sub(1) as u16),
             Constraint::Length(1),
         ])
-        .areas(bar);
+        .areas(crate::terminal::ratatui_bridge::area_to_rect(bar_inner));
 
         self.container.draw(
             grid,
@@ -428,8 +970,11 @@ impl Component for StatusBar {
                  * above the status strip (the widget styles itself with the
                  * dialog vocabulary in `AutoComplete::draw`). */
                 if !self.auto_complete.suggestions().is_empty() {
-                    self.auto_complete
-                        .draw(grid, area.skip_rows_from_end(self.height), context);
+                    self.auto_complete.draw(
+                        grid,
+                        area.skip_rows_from_end(self.height + 2),
+                        context,
+                    );
                 }
                 /*
                 let hist_height = std::cmp::min(15, self.auto_complete.suggestions().len());
@@ -608,25 +1153,29 @@ impl Component for StatusBar {
     }
 
     fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
+        // In Normal mode the quit binding doubles as the top-level
+        // "exit application" request, but only when no focused
+        // component consumed it (layered quit: sub-views close first).
+        // Snapshot the check before forwarding: the container may
+        // mutate the event while processing it.
+        let is_quit_request = self.mode == UIMode::Normal
+            && matches!(event, UIEvent::Input(ref k) if context
+                .settings
+                .shortcuts
+                .general
+                .quit
+                .contains(k));
         if self.container.process_event(event, context) {
+            return true;
+        }
+        if is_quit_request {
+            context.replies.push_back(UIEvent::Exit);
             return true;
         }
 
         match event {
             UIEvent::ConfigReload { old_settings: _ } => {
-                let mut progress_spinner = ProgressSpinner::new(20, context);
-                match context.settings.terminal.progress_spinner_sequence.as_ref() {
-                    Some(conf::terminal::ProgressSpinnerSequence::Integer(k)) => {
-                        progress_spinner.set_kind(*k);
-                    }
-                    Some(conf::terminal::ProgressSpinnerSequence::Custom {
-                        ref frames,
-                        ref interval_ms,
-                    }) => {
-                        progress_spinner.set_custom_kind(frames.clone(), *interval_ms);
-                    }
-                    None => {}
-                }
+                let mut progress_spinner = Self::make_progress_spinner(context);
                 if self.progress_spinner.is_active() {
                     progress_spinner.start();
                 }
@@ -636,29 +1185,6 @@ impl Component for StatusBar {
                 self.container.set_dirty(true);
             }
             UIEvent::ChangeMode(m) => {
-                let offset = self.status.find('|').unwrap_or(self.status.len());
-                self.status.replace_range(
-                    ..offset,
-                    &format!(
-                        "{} {}",
-                        m,
-                        if self.mouse {
-                            let alt = if context.settings.terminal.ascii_drawing {
-                                Self::MOUSE_MODE_ASCII
-                            } else {
-                                Self::MOUSE_MODE
-                            };
-                            context
-                                .settings
-                                .terminal
-                                .mouse_flag
-                                .as_deref()
-                                .unwrap_or(alt)
-                        } else {
-                            ""
-                        },
-                    ),
-                );
                 self.set_dirty(true);
                 self.container.set_dirty(true);
                 self.mode = *m;
@@ -814,18 +1340,15 @@ impl Component for StatusBar {
                 self.status_message.clear();
                 self.status_message.push_str(s.as_str());
                 self.substatus_message.clear();
-                self.update_status(context);
                 self.dirty = true;
             }
             UIEvent::StatusEvent(StatusEvent::UpdateSubStatus(ref mut s)) => {
                 self.substatus_message.clear();
                 self.substatus_message.push_str(s.as_str());
-                self.update_status(context);
                 self.dirty = true;
             }
             UIEvent::StatusEvent(StatusEvent::SetMouse(val)) => {
                 self.mouse = *val;
-                self.update_status(context);
                 self.dirty = true;
             }
             UIEvent::StatusEvent(StatusEvent::JobCanceled(ref job_id))
@@ -846,24 +1369,43 @@ impl Component for StatusBar {
                 self.progress_spinner.set_dirty(true);
                 self.in_progress_jobs.insert(*job_id);
             }
-            UIEvent::StatusEvent(StatusEvent::ScrollUpdate(ScrollUpdate::End(component_id))) => {
-                if self.scroll_contexts.shift_remove(component_id).is_some() {
-                    self.dirty = true;
-                }
-                return true;
-            }
-            UIEvent::StatusEvent(StatusEvent::ScrollUpdate(ScrollUpdate::Update {
-                id,
-                context,
-            })) => {
-                if self.scroll_contexts.insert(*id, *context) != Some(*context) {
-                    self.dirty = true;
-                }
-                return true;
-            }
             UIEvent::Timer(_) => {
                 if self.progress_spinner.process_event(event, context) {
                     return true;
+                }
+            }
+            UIEvent::StatusEvent(StatusEvent::FocusMailbox(acc_hash, mb_hash)) => {
+                // Idempotent: the listing co-emits this event on every
+                // status refresh (not only cursor moves), so the floor
+                // re-baselines only when the focus actually changes —
+                // otherwise every mail arrival would reset the `📨 new`
+                // counter to zero.
+                if self.focus != Some((*acc_hash, *mb_hash)) {
+                    self.focus = Some((*acc_hash, *mb_hash));
+                    self.settled_total = None;
+                    self.parse_first_fetch = None;
+                    self.unseen_floor = context
+                        .accounts
+                        .get_index_of(acc_hash)
+                        .and_then(|i| {
+                            Self::collection_unseen_total(&context.accounts[i].collection, *mb_hash)
+                        })
+                        .map_or(0, |(unseen, _)| unseen);
+                    self.dirty = true;
+                }
+            }
+            UIEvent::MailboxUpdate((acc_hash, mb_hash)) => {
+                if self.focus == Some((*acc_hash, *mb_hash)) {
+                    self.set_dirty(true);
+                }
+            }
+            UIEvent::AccountStatusChange(acc_hash, _msg) => {
+                // `AccountStatusChange` payloads are an optional descriptive
+                // string, not a `MailboxHash`: only the first element
+                // `AccountHash` is matched. The whole status bar repaints
+                // when the focused account's connection state flips.
+                if self.focus.is_some_and(|(acc, _)| acc == *acc_hash) {
+                    self.set_dirty(true);
                 }
             }
             _ => {}
@@ -1046,6 +1588,23 @@ impl Tabbed {
         }
         self.help_view.curr_views = children_maps;
     }
+
+    /// Emit both the legacy `UpdateStatus` string and the structured
+    /// `FocusMailbox` event for the active child, so the status bar stays
+    /// in sync with the focused mailbox as the cursor moves between tabs.
+    fn push_focus_updates(
+        &self,
+        status: String,
+        status_watch: Option<(AccountHash, MailboxHash)>,
+        replies: &mut VecDeque<UIEvent>,
+    ) {
+        replies.push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(status)));
+        if let Some((acc_hash, mb_hash)) = status_watch {
+            replies.push_back(UIEvent::StatusEvent(StatusEvent::FocusMailbox(
+                acc_hash, mb_hash,
+            )));
+        }
+    }
 }
 
 impl std::fmt::Display for Tabbed {
@@ -1056,6 +1615,8 @@ impl std::fmt::Display for Tabbed {
 
 impl Component for Tabbed {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        #[cfg(debug_assertions)]
+        let __draw_span = crate::state::DrawSpan::enter("Tabbed");
         /* Top-level vertical split via ratatui Layout: one tab row, the rest
          * is the tab body. Identical to the previous nth_row/skip_rows math
          * for every size (including empty areas). */
@@ -1240,25 +1801,16 @@ impl Component for Tabbed {
 
             for (desc, shortcuts) in children_maps.iter() {
                 max_length += shortcuts.len() + 3;
-                max_width = std::cmp::max(
-                    max_width,
-                    std::cmp::max(
-                        desc.len(),
-                        shortcuts
-                            .values()
-                            .map(|v| v.to_string().len() + 5)
-                            .max()
-                            .unwrap_or(0),
-                    ),
-                );
-                max_first_column_width = std::cmp::max(
-                    max_first_column_width,
-                    shortcuts
-                        .values()
-                        .map(|v| v.to_string().len() + 5)
-                        .max()
-                        .unwrap_or(0),
-                );
+                // `Display for ShortcutKeys` renders the `/`-joined
+                // bindings; format each entry once here instead of twice
+                // per entry (the two `max` computations used to re-run it).
+                let column_width = shortcuts
+                    .values()
+                    .map(|v| v.to_string().len() + 5)
+                    .max()
+                    .unwrap_or(0);
+                max_width = std::cmp::max(max_width, std::cmp::max(desc.len(), column_width));
+                max_first_column_width = std::cmp::max(max_first_column_width, column_width);
             }
             if !self
                 .help_view
@@ -1295,11 +1847,7 @@ impl Component for Tabbed {
                 for (k, v) in shortcuts {
                     let help_area = self.help_view.content.area();
                     let (x, _) = self.help_view.content.grid_mut().write_string(
-                        &format!(
-                            "{: >width$}",
-                            format!("{}", v),
-                            width = max_first_column_width
-                        ),
+                        &format!("{v: >max_first_column_width$}"),
                         self.theme_default.fg,
                         self.theme_default.bg,
                         self.theme_default.attrs | Attr::BOLD,
@@ -1518,11 +2066,10 @@ impl Component for Tabbed {
                         .process_event(&mut UIEvent::VisibilityChange(false), context);
                     self.cursor_pos = no % self.children.len();
                     self.update_help_curr_views(context);
-                    context
-                        .replies
-                        .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                            self.children[self.cursor_pos].status(context),
-                        )));
+                    let status = self.children[self.cursor_pos].status(context);
+                    let status_watch = self.children[self.cursor_pos].status_watch();
+                    let replies = &mut context.replies;
+                    self.push_focus_updates(status, status_watch, replies);
                     self.set_dirty(true);
                 }
                 return true;
@@ -1534,17 +2081,19 @@ impl Component for Tabbed {
                     .process_event(&mut UIEvent::VisibilityChange(false), context);
                 self.cursor_pos = (self.cursor_pos + 1) % self.children.len();
                 self.update_help_curr_views(context);
-                context
-                    .replies
-                    .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(
-                        self.children[self.cursor_pos].status(context),
-                    )));
+                self.push_focus_updates(
+                    self.children[self.cursor_pos].status(context),
+                    self.children[self.cursor_pos].status_watch(),
+                    &mut context.replies,
+                );
                 self.set_dirty(true);
                 return true;
             }
             UIEvent::Input(ref key)
                 if shortcut!(key == shortcuts[Shortcuts::GENERAL]["toggle_help"])
-                    || (self.show_shortcuts && key == Key::Esc) =>
+                    || (self.show_shortcuts
+                        && (key == Key::Esc
+                            || shortcut!(key == shortcuts[Shortcuts::GENERAL]["quit"]))) =>
             {
                 if self.show_shortcuts {
                     // Children below the shortcut overlay must be redrawn.
@@ -1566,6 +2115,34 @@ impl Component for Tabbed {
                 self.cursor_pos = self.children.len() - 1;
                 self.children[self.cursor_pos].set_dirty(true);
                 self.update_help_curr_views(context);
+                return true;
+            }
+            UIEvent::Input(ref key)
+                if !self.show_shortcuts
+                    && self.cursor_pos >= self.pinned
+                    && shortcut!(key == shortcuts[Shortcuts::GENERAL]["quit"]) =>
+            {
+                // Layered quit: let the focused non-pinned child interpret
+                // the quit binding first (a dirty composer turns it into
+                // its unsaved-changes dialog); only an unconsumed quit
+                // closes the tab. Pinned tabs do not consume it, letting
+                // it bubble up to the application-level exit path in
+                // `StatusBar`.
+                if self.children[self.cursor_pos].process_event(event, context) {
+                    return true;
+                }
+                // A child that cannot quit cleanly *vetoes* the kill: with
+                // its unsaved-changes dialog already open the child does
+                // not consume a second quit key, and killing the tab here
+                // would silently discard the work the dialog was asking
+                // about. The dialog owns the decision (its own `x`/`y`
+                // choices kill the tab); the quit binding must not make it
+                // for the user.
+                if !self.children[self.cursor_pos].can_quit_cleanly(context) {
+                    return true;
+                }
+                let id = self.children[self.cursor_pos].id();
+                context.replies.push_back(UIEvent::Action(Tab(Kill(id))));
                 return true;
             }
             UIEvent::Action(Tab(Close)) => {
@@ -1621,9 +2198,11 @@ impl Component for Tabbed {
                     search.movement = Some(SearchMovement::Next);
                     search.cursor += 1;
                 } else {
-                    unsafe {
-                        std::hint::unreachable_unchecked();
-                    }
+                    // The match guard above proved `search` is `Some`, so
+                    // this is unreachable; `unreachable!()` documents that
+                    // and panics instead of invoking UB if the invariant
+                    // is ever broken.
+                    unreachable!("help-view search guard verified `search` is Some");
                 }
                 self.dirty = true;
                 return true;
@@ -1637,9 +2216,11 @@ impl Component for Tabbed {
                     search.movement = Some(SearchMovement::Previous);
                     search.cursor = search.cursor.saturating_sub(1);
                 } else {
-                    unsafe {
-                        std::hint::unreachable_unchecked();
-                    }
+                    // The match guard above proved `search` is `Some`, so
+                    // this is unreachable; `unreachable!()` documents that
+                    // and panics instead of invoking UB if the invariant
+                    // is ever broken.
+                    unreachable!("help-view search guard verified `search` is Some");
                 }
                 self.dirty = true;
                 return true;
@@ -1716,11 +2297,18 @@ impl Component for Tabbed {
     }
 
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
+        // Aggregate the focused child's shortcuts under the active
+        // section name (e.g. "listing", "pager", "contact_list") plus
+        // the general section. The StatusBar reads this map for its
+        // hints segment and needs both layers.
         let mut map = ShortcutMaps::default();
         map.insert(
             Shortcuts::GENERAL,
             context.settings.shortcuts.general.key_values(),
         );
+        if let Some(child) = self.children.get(self.cursor_pos) {
+            map.extend(child.shortcuts(context));
+        }
         map
     }
 
@@ -1733,6 +2321,12 @@ impl Component for Tabbed {
             }
         }
         true
+    }
+
+    fn status_watch(&self) -> Option<(AccountHash, MailboxHash)> {
+        self.children
+            .get(self.cursor_pos)
+            .and_then(|c| c.status_watch())
     }
 
     fn attributes(&self) -> &'static ComponentAttr {
@@ -1757,15 +2351,92 @@ impl Component for Tabbed {
             c.realize(self.id().into(), context);
         }
     }
+}
 
-    fn unrealize(&self, context: &mut Context) {
-        context
-            .replies
-            .push_back(UIEvent::ComponentUnrealize(self.id()));
-        for c in &self.children {
-            c.unrealize(context);
+/// One colored run of the status-bar hints segment. The key glyph of a
+/// `(key:label)` hint renders green+bold so the actionable binding
+/// stands out from the descriptive label text.
+#[derive(Debug)]
+struct HintSpan {
+    text: String,
+    /// Render with `Color::Green` and bold (the key glyph of a hint).
+    key: bool,
+}
+
+impl HintSpan {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            key: false,
         }
     }
+
+    fn key(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            key: true,
+        }
+    }
+}
+
+/// Truncate `spans` from the tail until their joined width fits in
+/// `max_width` cells. When at least one grapheme was dropped, the
+/// result is terminated with `ellipsis` (which itself counts toward
+/// the width budget). Returns the spans unchanged if they already
+/// fit. Span-aware sibling of the former string-only truncation: the
+/// cut can land mid-span, in which case the trimmed span keeps its
+/// own coloring and the ellipsis is appended as a plain run.
+fn truncate_spans_with_ellipsis(
+    spans: Vec<HintSpan>,
+    max_width: usize,
+    ellipsis: &str,
+) -> Vec<HintSpan> {
+    let total: usize = spans.iter().map(|span| span.text.grapheme_width()).sum();
+    if total <= max_width {
+        return spans;
+    }
+    let ellipsis_w = ellipsis.grapheme_width();
+    if max_width <= ellipsis_w {
+        // Not enough room for any content + ellipsis; clip ellipsis.
+        return vec![HintSpan::plain(
+            ellipsis
+                .split_graphemes()
+                .into_iter()
+                .take(max_width)
+                .collect::<String>(),
+        )];
+    }
+    let budget = max_width - ellipsis_w;
+    let mut out = Vec::with_capacity(spans.len());
+    let mut used = 0;
+    for span in spans {
+        let width = span.text.grapheme_width();
+        if used + width <= budget {
+            out.push(span);
+            used += width;
+            continue;
+        }
+        // Boundary span: trim it grapheme by grapheme, then stop —
+        // everything after it is dropped.
+        let mut text = String::new();
+        for g in span.text.split_graphemes() {
+            let gw = g.grapheme_width();
+            if used + gw > budget {
+                break;
+            }
+            text.push_str(g);
+            used += gw;
+        }
+        if !text.is_empty() {
+            out.push(HintSpan {
+                text,
+                key: span.key,
+            });
+        }
+        out.push(HintSpan::plain(ellipsis));
+        return out;
+    }
+    out
 }
 
 /*

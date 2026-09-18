@@ -165,9 +165,18 @@ impl HappyEyeballs {
         self.poller.wait(&mut events, timeout)?;
         for evt in events.iter() {
             assert!(evt.writable);
-            let (sock_addr, sock) = self.attempts[evt.key].take().expect("attempt exists");
-            self.attempts_in_progress -= 1;
-            self.poller.delete(&sock).expect("socket is in poll set");
+            // The key/socket are internal poller invariants, but a stale or
+            // duplicate event must not panic the process.
+            let Some(slot) = self.attempts.get_mut(evt.key) else {
+                continue;
+            };
+            let Some((sock_addr, sock)) = slot.take() else {
+                continue;
+            };
+            self.attempts_in_progress = self.attempts_in_progress.saturating_sub(1);
+            if let Err(err) = self.poller.delete(&sock) {
+                log::warn!("poll_once(): could not delete socket from poller: {err}");
+            }
             match nix::sys::socket::getsockopt(&sock, nix::sys::socket::sockopt::SocketError) {
                 Err(err) => self.set_error(err.into()),
                 Ok(0) => {

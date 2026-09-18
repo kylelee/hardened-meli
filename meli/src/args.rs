@@ -273,12 +273,8 @@ impl Opt {
                 Ok(())
             }
             SubCommand::PrintAppDirectories => {
-                print_path(&xdg::BaseDirectories::with_prefix("meli")
-                        .expect(
-                            "Could not find your XDG directories. If this is unexpected, please \
-                         report it as a bug."
-                        )
-                        .get_data_file(""));
+                let data_dir = ret_err!(xdg::BaseDirectories::with_prefix("meli"));
+                print_path(&data_dir.get_data_file(""));
                 let mut temp_dir = std::env::temp_dir();
                 temp_dir.push("meli");
                 print_path(&temp_dir);

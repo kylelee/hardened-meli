@@ -494,7 +494,10 @@ impl ImapStream {
                 let now = Instant::now();
 
                 while now.elapsed().as_secs() < 3 {
-                    let len = socket.read(&mut buf).await.chain_err_summary(err_fn)?;
+                    let len = timeout(server_conf.timeout, socket.read(&mut buf))
+                        .await
+                        .chain_err_summary(err_fn)?
+                        .chain_err_summary(err_fn)?;
                     log::trace!(
                         "{} read {} bytes during STARTTLS negotiation: {:?}",
                         id,
@@ -502,6 +505,10 @@ impl ImapStream {
                         String::from_utf8_lossy(&buf[0..len.min(300)])
                     );
                     response.extend_from_slice(&buf[0..len]);
+                    // Cap the pre-negotiation buffer too: the 3-second wall
+                    // clock bound alone still allows buffering hundreds of
+                    // megabytes on a fast link.
+                    enforce_response_size_limit(response.len())?;
                     match server_conf.protocol {
                         ImapProtocol::IMAP { .. } => {
                             if response.starts_with(b"* OK ") && response.find(b"\r\n").is_some() {
@@ -810,6 +817,13 @@ impl ImapStream {
         }
         let tag_start = format!("M{} ", (ret.cmd_id - 1));
         let mut got_new_capabilities = false;
+        // Bound on `* CAPABILITY` lines accepted before the tagged
+        // completion. `res` itself is size-capped per read, but the
+        // accumulated `capabilities` set is not, so a server that never
+        // completes the command and keeps emitting distinct tokens could
+        // grow memory without limit.
+        const MAX_CAPABILITY_LINES: usize = 1024;
+        let mut capability_lines: usize = 0;
 
         loop {
             ret.read_lines(&mut res, None, false).await?;
@@ -817,6 +831,14 @@ impl ImapStream {
             for l in res.split_rn() {
                 if l.starts_with(b"* CAPABILITY") {
                     got_new_capabilities = true;
+                    capability_lines += 1;
+                    if capability_lines > MAX_CAPABILITY_LINES {
+                        return Err(Error::new(format!(
+                            "Server sent more than {MAX_CAPABILITY_LINES} capability lines \
+                             without completing the command"
+                        ))
+                        .set_kind(ErrorKind::ProtocolError));
+                    }
                     imap_log!(
                         trace,
                         ret,
@@ -1128,156 +1150,176 @@ impl ImapConnection {
 
     pub fn connect<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            if let (time, ref mut status @ Ok(())) = *self.uid_store.is_online.lock().unwrap() {
-                if SystemTime::now().duration_since(time).unwrap_or_default()
-                    >= IMAP_PROTOCOL_TIMEOUT
-                {
-                    let err = Error::new(format!(
-                        "Connection timed out after {} seconds",
-                        IMAP_PROTOCOL_TIMEOUT.as_secs()
-                    ))
-                    .set_kind(ErrorKind::TimedOut);
-                    *status = Err(err.clone());
-                    self.stream = Err(err);
-                }
-            }
-            if self.stream.is_ok() {
-                let mut ret = Vec::new();
-                if let Err(_err) = try_await(async {
-                    self.send_command(CommandBody::Noop).await?;
-                    self.read_response(&mut ret, RequiredResponses::empty())
-                        .await
-                })
-                .await
-                {
-                    imap_log!(
-                        trace,
-                        self,
-                        "connect(): connection is probably dead: {:?}",
-                        &_err
-                    );
-                } else {
-                    imap_log!(
-                        trace,
-                        self,
-                        "connect(): connection is probably alive, NOOP returned {:?}",
-                        &String::from_utf8_lossy(&ret)
-                    );
-                    return Ok(());
-                }
-            }
-            let new_stream = ImapStream::new_connection(
-                &self.server_conf,
-                self.id.clone(),
-                &self.uid_store,
-                self.send_state_changes,
-            )
-            .await;
-            if let Err(err) = new_stream.as_ref() {
-                self.uid_store.is_online.lock().unwrap().1 = Err(err.clone());
-            } else {
-                *self.uid_store.is_online.lock().unwrap() = (SystemTime::now(), Ok(()));
-            }
-            let (capabilities, stream) = new_stream?;
-            self.stream = Ok(stream);
-            match self.stream.as_ref()?.protocol {
-                ImapProtocol::IMAP {
-                    extension_use:
-                        ImapExtensionUse {
-                            condstore,
-                            deflate,
-                            idle: _,
-                            oauth2: _,
-                            auth_anonymous: _,
-                            id: _,
-                        },
-                } => {
-                    if capabilities.contains(&b"CONDSTORE"[..]) && condstore {
-                        match self.sync_policy {
-                            SyncPolicy::None => { /* do nothing, sync is disabled */ }
-                            _ => {
-                                /* Upgrade to Condstore */
-                                let mut ret = Vec::new();
-                                if capabilities.contains(&b"ENABLE"[..]) {
-                                    self.send_command(CommandBody::Enable {
-                                        capabilities: Vec1::from(CapabilityEnable::CondStore),
-                                    })
-                                    .await?;
-                                } else {
-                                    self.send_command(CommandBody::Status {
-                                        mailbox: Mailbox::Inbox,
-                                        item_names: vec![
-                                            StatusDataItemName::UidNext,
-                                            StatusDataItemName::UidValidity,
-                                            StatusDataItemName::Unseen,
-                                            StatusDataItemName::Messages,
-                                            StatusDataItemName::HighestModSeq,
-                                        ]
-                                        .into(),
-                                    })
-                                    .await?;
-                                }
-                                self.read_response(&mut ret, RequiredResponses::empty())
-                                    .await?;
-                                self.sync_policy = SyncPolicy::Condstore;
-                            }
-                        }
+            // Bound the COMPRESS=DEFLATE fallback. Answering BYE to COMPRESS
+            // and then closing the TCP connection used to make the recursive
+            // `connect()` below reconnect and recurse once per level until
+            // stack/heap exhaustion; retry at most once instead.
+            const MAX_DEFLATE_RETRIES: usize = 1;
+            let mut deflate_retries: usize = 0;
+            loop {
+                if let (time, ref mut status @ Ok(())) = *self.uid_store.is_online.lock().unwrap() {
+                    if SystemTime::now().duration_since(time).unwrap_or_default()
+                        >= IMAP_PROTOCOL_TIMEOUT
+                    {
+                        let err = Error::new(format!(
+                            "Connection timed out after {} seconds",
+                            IMAP_PROTOCOL_TIMEOUT.as_secs()
+                        ))
+                        .set_kind(ErrorKind::TimedOut);
+                        *status = Err(err.clone());
+                        self.stream = Err(err);
                     }
-                    if capabilities.contains(&b"COMPRESS=DEFLATE"[..]) && deflate {
-                        let mut ret = Vec::new();
-                        self.send_command(CommandBody::compress(CompressionAlgorithm::Deflate))
-                            .await?;
+                }
+                if self.stream.is_ok() {
+                    let mut ret = Vec::new();
+                    if let Err(_err) = try_await(async {
+                        self.send_command(CommandBody::Noop).await?;
                         self.read_response(&mut ret, RequiredResponses::empty())
-                            .await?;
-                        match ImapResponse::try_from(ret.as_slice())? {
-                            ImapResponse::Bye(code) => {
-                                log::warn!(
-                                    "Could not use COMPRESS=DEFLATE in account `{}`: server \
+                            .await
+                    })
+                    .await
+                    {
+                        imap_log!(
+                            trace,
+                            self,
+                            "connect(): connection is probably dead: {:?}",
+                            &_err
+                        );
+                    } else {
+                        imap_log!(
+                            trace,
+                            self,
+                            "connect(): connection is probably alive, NOOP returned {:?}",
+                            &String::from_utf8_lossy(&ret)
+                        );
+                        return Ok(());
+                    }
+                }
+                let new_stream = ImapStream::new_connection(
+                    &self.server_conf,
+                    self.id.clone(),
+                    &self.uid_store,
+                    self.send_state_changes,
+                )
+                .await;
+                if let Err(err) = new_stream.as_ref() {
+                    self.uid_store.is_online.lock().unwrap().1 = Err(err.clone());
+                } else {
+                    *self.uid_store.is_online.lock().unwrap() = (SystemTime::now(), Ok(()));
+                }
+                let (capabilities, stream) = new_stream?;
+                self.stream = Ok(stream);
+                match self.stream.as_ref()?.protocol {
+                    ImapProtocol::IMAP {
+                        extension_use:
+                            ImapExtensionUse {
+                                condstore,
+                                deflate,
+                                idle: _,
+                                oauth2: _,
+                                auth_anonymous: _,
+                                id: _,
+                            },
+                    } => {
+                        if capabilities.contains(&b"CONDSTORE"[..]) && condstore {
+                            match self.sync_policy {
+                                SyncPolicy::None => { /* do nothing, sync is disabled */ }
+                                _ => {
+                                    /* Upgrade to Condstore */
+                                    let mut ret = Vec::new();
+                                    if capabilities.contains(&b"ENABLE"[..]) {
+                                        self.send_command(CommandBody::Enable {
+                                            capabilities: Vec1::from(CapabilityEnable::CondStore),
+                                        })
+                                        .await?;
+                                    } else {
+                                        self.send_command(CommandBody::Status {
+                                            mailbox: Mailbox::Inbox,
+                                            item_names: vec![
+                                                StatusDataItemName::UidNext,
+                                                StatusDataItemName::UidValidity,
+                                                StatusDataItemName::Unseen,
+                                                StatusDataItemName::Messages,
+                                                StatusDataItemName::HighestModSeq,
+                                            ]
+                                            .into(),
+                                        })
+                                        .await?;
+                                    }
+                                    self.read_response(&mut ret, RequiredResponses::empty())
+                                        .await?;
+                                    self.sync_policy = SyncPolicy::Condstore;
+                                }
+                            }
+                        }
+                        if capabilities.contains(&b"COMPRESS=DEFLATE"[..]) && deflate {
+                            let mut ret = Vec::new();
+                            self.send_command(CommandBody::compress(CompressionAlgorithm::Deflate))
+                                .await?;
+                            self.read_response(&mut ret, RequiredResponses::empty())
+                                .await?;
+                            match ImapResponse::try_from(ret.as_slice())? {
+                                ImapResponse::Bye(code) => {
+                                    if deflate_retries >= MAX_DEFLATE_RETRIES {
+                                        return Err(Error::new(format!(
+                                        "Server kept replying BYE to COMPRESS=DEFLATE; giving up \
+                                         to avoid an endless reconnect loop (last code: {code})"
+                                    ))
+                                        .set_kind(ErrorKind::ProtocolError));
+                                    }
+                                    deflate_retries += 1;
+                                    log::warn!(
+                                        "Could not use COMPRESS=DEFLATE in account `{}`: server \
                                      replied with BYE `{}`. Retrying without deflate compression.",
-                                    self.uid_store.account_name,
-                                    code
-                                );
-                                self.stream.as_mut()?.protocol.set_deflate(false);
-                                return self.connect().await;
-                            }
-                            ImapResponse::Ok(_) => {
-                                let ImapStream {
-                                    cmd_id,
-                                    last_cmd,
-                                    id,
-                                    stream,
-                                    protocol,
-                                    current_mailbox,
-                                    timeout,
-                                } = std::mem::replace(&mut self.stream, Err(Error::new("")))?;
-                                let stream = stream.into_inner()?;
-                                self.stream = Ok(ImapStream {
-                                    cmd_id,
-                                    last_cmd,
-                                    id,
-                                    stream: AsyncWrapper::new(stream.deflate())?,
-                                    protocol,
-                                    current_mailbox,
-                                    timeout,
-                                });
-                            }
-                            ImapResponse::No(code)
-                            | ImapResponse::Bad(code)
-                            | ImapResponse::Preauth(code) => {
-                                log::warn!(
-                                    "Could not use COMPRESS=DEFLATE in account `{}`: server \
+                                        self.uid_store.account_name,
+                                        code
+                                    );
+                                    self.stream.as_mut()?.protocol.set_deflate(false);
+                                    // Retry through the outer loop: if the
+                                    // connection is still alive the NOOP probe
+                                    // returns `Ok(())` (with deflate now off),
+                                    // otherwise one bounded reconnect happens.
+                                    continue;
+                                }
+                                ImapResponse::Ok(_) => {
+                                    let ImapStream {
+                                        cmd_id,
+                                        last_cmd,
+                                        id,
+                                        stream,
+                                        protocol,
+                                        current_mailbox,
+                                        timeout,
+                                    } = std::mem::replace(&mut self.stream, Err(Error::new("")))?;
+                                    let stream = stream.into_inner()?;
+                                    self.stream = Ok(ImapStream {
+                                        cmd_id,
+                                        last_cmd,
+                                        id,
+                                        stream: AsyncWrapper::new(stream.deflate())?,
+                                        protocol,
+                                        current_mailbox,
+                                        timeout,
+                                    });
+                                }
+                                ImapResponse::No(code)
+                                | ImapResponse::Bad(code)
+                                | ImapResponse::Preauth(code) => {
+                                    log::warn!(
+                                        "Could not use COMPRESS=DEFLATE in account `{}`: server \
                                      replied with {}",
-                                    self.uid_store.account_name,
-                                    code,
-                                );
+                                        self.uid_store.account_name,
+                                        code,
+                                    );
+                                }
                             }
                         }
                     }
+                    ImapProtocol::ManageSieve => {}
                 }
-                ImapProtocol::ManageSieve => {}
+                *self.uid_store.capabilities.lock().unwrap() = capabilities;
+                return Ok(());
             }
-            *self.uid_store.capabilities.lock().unwrap() = capabilities;
-            Ok(())
         })
     }
 

@@ -20,6 +20,7 @@
  */
 
 use serde::{de, de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
+use smallvec::SmallVec;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Key {
@@ -133,6 +134,23 @@ impl std::fmt::Display for Key {
     }
 }
 
+impl Key {
+    /// Status-bar hint form: placeholder keys — arrows, `Esc`, `F`-keys,
+    /// modifier combinations, `Enter`/`Tab`/`Space` — render inside angle
+    /// brackets (`<Up>`, `<Esc>`, `<C-c>`) so they read as key *descriptions*
+    /// rather than literal text, while plain character keys (`j`, `k`, `q`,
+    /// …) stay bare exactly as they are typed.
+    pub fn hint_display(&self) -> String {
+        match self {
+            Self::Char(' ') => "<Space>".to_string(),
+            Self::Char('\t') => "<Tab>".to_string(),
+            Self::Char('\n') => "<Enter>".to_string(),
+            Self::Char(c) => c.to_string(),
+            _ => format!("<{self}>"),
+        }
+    }
+}
+
 impl<'a> From<&'a String> for Key {
     fn from(v: &'a String) -> Self {
         Self::Paste(v.to_string())
@@ -142,6 +160,72 @@ impl<'a> From<&'a String> for Key {
 impl PartialEq<Key> for &Key {
     fn eq(&self, other: &Key) -> bool {
         **self == *other
+    }
+}
+
+/// Parse a single key token from its configuration string form, e.g.
+/// `"Up"`, `"F5"`, `"C-c"`, `"M-x"`, `"Esc"`, `"Enter"` or a single
+/// character.
+///
+/// This is the parsing backend shared by [`Key`]'s and
+/// [`ShortcutKeys`]'s `Deserialize` implementations.
+pub fn parse_key(s: &str) -> Result<Key, String> {
+    match s {
+        "Backspace" | "backspace" => Ok(Key::Backspace),
+        "Left" | "left" => Ok(Key::Left),
+        "Right" | "right" => Ok(Key::Right),
+        "Up" | "up" => Ok(Key::Up),
+        "Down" | "down" => Ok(Key::Down),
+        "Home" | "home" => Ok(Key::Home),
+        "End" | "end" => Ok(Key::End),
+        "PageUp" | "pageup" => Ok(Key::PageUp),
+        "PageDown" | "pagedown" => Ok(Key::PageDown),
+        "Delete" | "delete" => Ok(Key::Delete),
+        "Insert" | "insert" => Ok(Key::Insert),
+        "Enter" | "enter" => Ok(Key::Char('\n')),
+        "Tab" | "tab" => Ok(Key::Char('\t')),
+        "Esc" | "esc" => Ok(Key::Esc),
+        s if s.len() == 1 => Ok(Key::Char(s.chars().next().unwrap())),
+        s if s.starts_with('F') && (s.len() == 2 || s.len() == 3) => {
+            use std::str::FromStr;
+
+            if let Ok(n) = u8::from_str(&s[1..]) {
+                if (1..=12).contains(&n) {
+                    return Ok(Key::F(n));
+                }
+            }
+            Err(format!(
+                "`{}` should be a number 1 <= n <= 12 instead.",
+                &s[1..]
+            ))
+        }
+        s if s.starts_with("M-") && s.len() == 3 => {
+            let c = s.as_bytes()[2] as char;
+
+            if c.is_lowercase() || c.is_numeric() {
+                return Ok(Key::Alt(c));
+            }
+
+            Err(format!(
+                "`{}` should be a lowercase and alphanumeric character instead.",
+                &s[2..]
+            ))
+        }
+        s if s.starts_with("C-") && s.len() == 3 => {
+            let c = s.as_bytes()[2] as char;
+
+            if c.is_lowercase() || c.is_numeric() {
+                return Ok(Key::Ctrl(c));
+            }
+
+            Err(format!(
+                "`{}` should be a lowercase and alphanumeric character instead.",
+                &s[2..]
+            ))
+        }
+        _ => Err(format!(
+            "Cannot derive shortcut from `{s}`. Please consult the manual for valid key inputs."
+        )),
     }
 }
 
@@ -171,63 +255,7 @@ impl<'de> Deserialize<'de> for Key {
             where
                 E: de::Error,
             {
-                match value {
-                    "Backspace" | "backspace" => Ok(Key::Backspace),
-                    "Left" | "left" => Ok(Key::Left),
-                    "Right" | "right" => Ok(Key::Right),
-                    "Up" | "up" => Ok(Key::Up),
-                    "Down" | "down" => Ok(Key::Down),
-                    "Home" | "home" => Ok(Key::Home),
-                    "End" | "end" => Ok(Key::End),
-                    "PageUp" | "pageup" => Ok(Key::PageUp),
-                    "PageDown" | "pagedown" => Ok(Key::PageDown),
-                    "Delete" | "delete" => Ok(Key::Delete),
-                    "Insert" | "insert" => Ok(Key::Insert),
-                    "Enter" | "enter" => Ok(Key::Char('\n')),
-                    "Tab" | "tab" => Ok(Key::Char('\t')),
-                    "Esc" | "esc" => Ok(Key::Esc),
-                    s if s.len() == 1 => Ok(Key::Char(s.chars().next().unwrap())),
-                    s if s.starts_with('F') && (s.len() == 2 || s.len() == 3) => {
-                        use std::str::FromStr;
-
-                        if let Ok(n) = u8::from_str(&s[1..]) {
-                            if (1..=12).contains(&n) {
-                                return Ok(Key::F(n));
-                            }
-                        }
-                        Err(de::Error::custom(format!(
-                            "`{}` should be a number 1 <= n <= 12 instead.",
-                            &s[1..]
-                        )))
-                    }
-                    s if s.starts_with("M-") && s.len() == 3 => {
-                        let c = s.as_bytes()[2] as char;
-
-                        if c.is_lowercase() || c.is_numeric() {
-                            return Ok(Key::Alt(c));
-                        }
-
-                        Err(de::Error::custom(format!(
-                            "`{}` should be a lowercase and alphanumeric character instead.",
-                            &s[2..]
-                        )))
-                    }
-                    s if s.starts_with("C-") && s.len() == 3 => {
-                        let c = s.as_bytes()[2] as char;
-
-                        if c.is_lowercase() || c.is_numeric() {
-                            return Ok(Key::Ctrl(c));
-                        }
-                        Err(de::Error::custom(format!(
-                            "`{}` should be a lowercase and alphanumeric character instead.",
-                            &s[2..]
-                        )))
-                    }
-                    _ => Err(de::Error::custom(format!(
-                        "Cannot derive shortcut from `{value}`. Please consult the manual for \
-                         valid key inputs."
-                    ))),
-                }
+                parse_key(value).map_err(de::Error::custom)
             }
         }
 
@@ -263,6 +291,162 @@ impl Serialize for Key {
             Self::Mouse(mev) => mev.serialize(serializer),
             Self::Paste(s) => serializer.serialize_str(s),
         }
+    }
+}
+
+/// Up to two key bindings for one shortcut, comma-separated in
+/// configuration (`"Up,k"`); a bare single key (`"Up"` or a single
+/// character) stays accepted and is equivalent to a one-element
+/// binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShortcutKeys(pub SmallVec<[Key; 2]>);
+
+impl ShortcutKeys {
+    /// A single-key binding.
+    pub fn single(k: Key) -> Self {
+        Self(smallvec::smallvec![k])
+    }
+
+    /// A two-key binding; either key triggers the shortcut.
+    pub fn double(a: Key, b: Key) -> Self {
+        Self(smallvec::smallvec![a, b])
+    }
+
+    /// Returns `true` if `k` is one of the bound keys.
+    pub fn contains(&self, k: &Key) -> bool {
+        self.0.iter().any(|bound| bound == k)
+    }
+
+    /// The configuration string form of a single key (the inverse of
+    /// [`parse_key`]).
+    fn key_to_config_string(k: &Key) -> String {
+        match k {
+            // `Key`'s `Display` renders this as `Space`, which does not
+            // parse back; the literal character does.
+            Key::Char(' ') => " ".to_string(),
+            k => k.to_string(),
+        }
+    }
+}
+
+impl From<Key> for ShortcutKeys {
+    fn from(k: Key) -> Self {
+        Self::single(k)
+    }
+}
+
+impl std::fmt::Display for ShortcutKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // The joined text has to go through `Formatter::pad`: width and
+        // alignment specs (e.g. the help overlay's right-aligned binding
+        // column) only apply if the `Display` impl calls `pad`, while
+        // `write_str` writes verbatim. Building one `String` and padding it
+        // replaces the previous `collect::<Vec<String>>().join("/")`, which
+        // allocated a `String` per key plus the vector plus the result on
+        // every call (the status-bar hints render one `Display` per hint per
+        // frame).
+        let mut joined = String::with_capacity(self.0.len() * 4);
+        for (i, k) in self.0.iter().enumerate() {
+            if i > 0 {
+                joined.push('/');
+            }
+            std::fmt::Write::write_fmt(&mut joined, format_args!("{k}"))?;
+        }
+        f.pad(&joined)
+    }
+}
+
+impl ShortcutKeys {
+    /// [`Self`] in status-bar hint form: each key via [`Key::hint_display`]
+    /// (placeholder keys in angle brackets, plain characters bare), joined
+    /// with `/` — e.g. `<Up>/k`, `<Esc>/q`.
+    pub fn hint_display(&self) -> String {
+        let mut joined = String::with_capacity(self.0.len() * 4);
+        for (i, k) in self.0.iter().enumerate() {
+            if i > 0 {
+                joined.push('/');
+            }
+            joined.push_str(&k.hint_display());
+        }
+        joined
+    }
+}
+
+impl<'de> Deserialize<'de> for ShortcutKeys {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ShortcutKeysVisitor;
+
+        impl Visitor<'_> for ShortcutKeysVisitor {
+            type Value = ShortcutKeys;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter
+                    .write_str("a key or at most two comma-separated keys, e.g. \"Up\" or \"Up,k\"")
+            }
+
+            fn visit_char<E>(self, value: char) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ShortcutKeys::single(Key::Char(value)))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                // A lone comma (or any value that is itself a valid single
+                // key) is one binding, not a separator: try the whole value
+                // first so `Key::Char(',')` round-trips through `Serialize`
+                // instead of splitting into two empty segments.
+                if let Ok(k) = parse_key(value) {
+                    return Ok(ShortcutKeys::single(k));
+                }
+                // Segments are deliberately NOT trimmed: trimming would
+                // break bindings whose key is the space character,
+                // which is a valid (and default) binding for e.g.
+                // `listing.toggle_mailbox_collapse`.
+                let keys = value
+                    .split(',')
+                    .map(parse_key)
+                    .collect::<Result<SmallVec<[Key; 2]>, String>>()
+                    .map_err(de::Error::custom)?;
+                if keys.len() > 2 {
+                    return Err(de::Error::custom(
+                        "at most two comma-separated keys are allowed",
+                    ));
+                }
+                Ok(ShortcutKeys(keys))
+            }
+        }
+
+        deserializer.deserialize_any(ShortcutKeysVisitor)
+    }
+}
+
+impl Serialize for ShortcutKeys {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let parts = self
+            .0
+            .iter()
+            .map(Self::key_to_config_string)
+            .collect::<Vec<_>>();
+        // The wire form is comma-separated, so a comma key is only
+        // representable on its own. A pair containing one would serialize
+        // to a string this deserializer cannot parse back (silent config
+        // corruption); reject it instead of emitting it.
+        if parts.len() > 1 && parts.iter().any(|p| p.contains(',')) {
+            return Err(serde::ser::Error::custom(
+                "a comma key cannot be serialized together with a second binding key",
+            ));
+        }
+        serializer.serialize_str(&parts.join(","))
     }
 }
 
@@ -322,4 +506,95 @@ fn test_key_serde() {
         &[Token::Str("adsfsf")],
         "Cannot derive shortcut from `adsfsf`. Please consult the manual for valid key inputs.",
     );
+}
+
+#[test]
+fn test_shortcut_keys_serde() {
+    use serde_test2::{
+        assert_de_tokens, assert_de_tokens_error, assert_ser_tokens_error, assert_tokens, Token,
+    };
+
+    // Round-trip: a comma-separated pair parses to a double binding and
+    // serializes back to the same comma-separated form.
+    assert_tokens(
+        &ShortcutKeys::double(Key::Up, Key::Char('k')),
+        &[Token::Str("Up,k")],
+    );
+    assert_tokens(
+        &ShortcutKeys::double(Key::Esc, Key::Char('q')),
+        &[Token::Str("Esc,q")],
+    );
+    // A bare single key value stays a single binding.
+    assert_tokens(&ShortcutKeys::single(Key::Up), &[Token::Str("Up")]);
+    // A bare char token (e.g. TOML `quit = 'q'`) is a single binding.
+    assert_de_tokens(&ShortcutKeys::single(Key::Char('k')), &[Token::Char('k')]);
+    // The space key must round-trip through its literal character.
+    assert_tokens(&ShortcutKeys::single(Key::Char(' ')), &[Token::Str(" ")]);
+    assert_tokens(
+        &ShortcutKeys::double(Key::Up, Key::Char(' ')),
+        &[Token::Str("Up, ")],
+    );
+    // A comma *is* a valid key and serializes to ","; parsing must treat the
+    // whole value as one binding first, or the round trip splits it into two
+    // empty segments.
+    assert_tokens(&ShortcutKeys::single(Key::Char(',')), &[Token::Str(",")]);
+    // A pair containing a comma key is not representable in the
+    // comma-separated wire form: serializing it is an error rather than a
+    // string this deserializer would reject.
+    assert_ser_tokens_error(
+        &ShortcutKeys::double(Key::Up, Key::Char(',')),
+        &[],
+        "a comma key cannot be serialized together with a second binding key",
+    );
+    // More than two keys are rejected instead of truncated.
+    assert_de_tokens_error::<ShortcutKeys>(
+        &[Token::Str("Up,k,j")],
+        "at most two comma-separated keys are allowed",
+    );
+    // An invalid segment reports the segment verbatim.
+    assert_de_tokens_error::<ShortcutKeys>(
+        &[Token::Str("Up,F13")],
+        "`13` should be a number 1 <= n <= 12 instead.",
+    );
+}
+
+/// `Key::hint_display` / `ShortcutKeys::hint_display`: the status-bar hint
+/// form wraps placeholder keys in angle brackets so they read as key
+/// descriptions (`<Up>`, `<Esc>`, `<C-c>`), while plain character keys stay
+/// bare exactly as they are typed (`j`, `k`, `q`, `?`).
+#[test]
+fn test_hint_display() {
+    assert_eq!(Key::Up.hint_display(), "<Up>");
+    assert_eq!(Key::Down.hint_display(), "<Down>");
+    assert_eq!(Key::Left.hint_display(), "<Left>");
+    assert_eq!(Key::Right.hint_display(), "<Right>");
+    assert_eq!(Key::Esc.hint_display(), "<Esc>");
+    assert_eq!(Key::Home.hint_display(), "<Home>");
+    assert_eq!(Key::End.hint_display(), "<End>");
+    assert_eq!(Key::PageUp.hint_display(), "<PageUp>");
+    assert_eq!(Key::PageDown.hint_display(), "<PageDown>");
+    assert_eq!(Key::Backspace.hint_display(), "<Backspace>");
+    assert_eq!(Key::Delete.hint_display(), "<Delete>");
+    assert_eq!(Key::Insert.hint_display(), "<Insert>");
+    assert_eq!(Key::F(5).hint_display(), "<F5>");
+    assert_eq!(Key::Ctrl('c').hint_display(), "<C-c>");
+    assert_eq!(Key::Alt('x').hint_display(), "<M-x>");
+    // Whitespace control keys have word forms and count as placeholders.
+    assert_eq!(Key::Char(' ').hint_display(), "<Space>");
+    assert_eq!(Key::Char('\t').hint_display(), "<Tab>");
+    assert_eq!(Key::Char('\n').hint_display(), "<Enter>");
+    // Plain character keys stay bare.
+    for c in ['j', 'k', 'h', 'l', 'q', '?', 'g'] {
+        assert_eq!(Key::Char(c).hint_display(), c.to_string());
+    }
+    // Joined bindings keep the `/` separator.
+    assert_eq!(
+        ShortcutKeys::double(Key::Up, Key::Char('k')).hint_display(),
+        "<Up>/k"
+    );
+    assert_eq!(
+        ShortcutKeys::double(Key::Esc, Key::Char('q')).hint_display(),
+        "<Esc>/q"
+    );
+    assert_eq!(ShortcutKeys::single(Key::Char('j')).hint_display(), "j");
 }

@@ -1186,8 +1186,8 @@ impl Attachment {
             },
             ContentTransferEncoding::QuotedPrintable => {
                 parser::encodings::quoted_printable_bytes(self.body())
-                    .unwrap()
-                    .1
+                    .map(|(_, v)| v)
+                    .unwrap_or_else(|_| self.body().to_vec())
             }
             ContentTransferEncoding::_7Bit
             | ContentTransferEncoding::_8Bit
@@ -1240,13 +1240,19 @@ pub trait StrBuild {
 
 impl StrBuilder {
     pub fn display(&self, s: &[u8]) -> String {
-        let offset = self.offset;
-        let length = self.length;
-        String::from_utf8_lossy(&s[offset..offset + length]).to_string()
+        String::from_utf8_lossy(self.display_bytes(s)).to_string()
     }
 
+    /// Slices `b` by this builder's `offset`/`length`.
+    ///
+    /// The offsets ultimately come from parsing untrusted mail, so an
+    /// out-of-range or overflowing range yields an empty slice instead of
+    /// panicking.
     pub fn display_bytes<'a>(&self, b: &'a [u8]) -> &'a [u8] {
-        &b[self.offset..(self.offset + self.length)]
+        let Some(end) = self.offset.checked_add(self.length) else {
+            return &[];
+        };
+        b.get(self.offset..end).unwrap_or_default()
     }
 }
 
@@ -1332,5 +1338,20 @@ Content-Disposition: inline
             !html.contains("PLAINBODY"),
             "plain body leaked into html text: {html:?}"
         );
+    }
+
+    /// Regression: `Display for ContentTransferEncoding` used to `panic!` on
+    /// the attacker-controlled `Other` variant
+    /// (`Content-Transfer-Encoding: x-whatever`), so merely formatting a
+    /// parsed message could abort meli.
+    #[test]
+    fn test_content_transfer_encoding_display_other_no_panic() {
+        let encoding = ContentTransferEncoding::from(&b"x-whatever"[..]);
+        assert!(matches!(encoding, ContentTransferEncoding::Other { .. }));
+        assert_eq!(encoding.to_string(), "x-whatever");
+        // Non-UTF-8 tag bytes must not panic either.
+        let encoding = ContentTransferEncoding::from(&b"\xff\xfe"[..]);
+        let _ = encoding.to_string();
+        let _ = format!("{encoding:?}");
     }
 }

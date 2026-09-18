@@ -243,10 +243,10 @@ where
     focus: FormFocus,
     hide_buttons: bool,
     dirty: bool,
-    cursor_up_shortcut: Key,
-    cursor_down_shortcut: Key,
-    cursor_right_shortcut: Key,
-    cursor_left_shortcut: Key,
+    cursor_up_shortcut: ShortcutKeys,
+    cursor_down_shortcut: ShortcutKeys,
+    cursor_right_shortcut: ShortcutKeys,
+    cursor_left_shortcut: ShortcutKeys,
     id: ComponentId,
 }
 
@@ -285,10 +285,10 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
             field_name_max_length: 10,
             cursor: 0,
             dirty: true,
-            cursor_up_shortcut: Key::Char('k'),
-            cursor_down_shortcut: Key::Char('j'),
-            cursor_right_shortcut: Key::Char('l'),
-            cursor_left_shortcut: Key::Char('h'),
+            cursor_up_shortcut: ShortcutKeys::single(Key::Char('k')),
+            cursor_down_shortcut: ShortcutKeys::single(Key::Char('j')),
+            cursor_right_shortcut: ShortcutKeys::single(Key::Char('l')),
+            cursor_left_shortcut: ShortcutKeys::single(Key::Char('h')),
             id: ComponentId::default(),
         }
     }
@@ -307,10 +307,10 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
 {
     pub fn new(
         action: (Cow<'static, str>, T),
-        cursor_up_shortcut: Key,
-        cursor_down_shortcut: Key,
-        cursor_right_shortcut: Key,
-        cursor_left_shortcut: Key,
+        cursor_up_shortcut: ShortcutKeys,
+        cursor_down_shortcut: ShortcutKeys,
+        cursor_right_shortcut: ShortcutKeys,
+        cursor_left_shortcut: ShortcutKeys,
     ) -> Self {
         Self {
             buttons: ButtonWidget::new(
@@ -334,8 +334,25 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
         self.cursor
     }
 
+    /// The field under the cursor, when the cursor and layout are
+    /// consistent (they always should be; `set_cursor` clamps).
+    fn cursor_field_mut(&mut self) -> Option<&mut Field> {
+        let key = self.layout.get(self.cursor)?;
+        self.fields.get_mut(key)
+    }
+
     pub fn set_cursor(&mut self, new_cursor: usize) {
-        self.cursor = new_cursor;
+        // Clamp only against a populated layout: callers set the cursor
+        // *before* adding the fields (e.g. `Composer::new` asks for the
+        // subject row), and clamping an empty layout would silently move the
+        // focus to row 0. Event handling no longer indexes `layout` with the
+        // cursor (`cursor_field_mut` is fallible), so an out-of-range cursor
+        // can only mean "nothing highlighted", never a panic.
+        self.cursor = if self.layout.is_empty() {
+            new_cursor
+        } else {
+            new_cursor.min(self.layout.len() - 1)
+        };
     }
 
     pub fn hide_buttons(&mut self) {
@@ -419,7 +436,9 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
                 } else {
                     label_attrs
                 };
-                let v = self.fields.get_mut(k).unwrap();
+                let Some(v) = self.fields.get_mut(k) else {
+                    continue;
+                };
                 /* Write field label */
                 grid.write_string(
                     &k.display(),
@@ -472,7 +491,7 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
 
         match *event {
             UIEvent::Input(ref k)
-                if *k == self.cursor_up_shortcut && self.focus == FormFocus::Buttons =>
+                if self.cursor_up_shortcut.contains(k) && self.focus == FormFocus::Buttons =>
             {
                 self.focus = FormFocus::Fields;
                 self.buttons.set_focus(false);
@@ -480,24 +499,28 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
                 return true;
             }
             UIEvent::InsertInput(Key::Up) if self.focus == FormFocus::TextInput => {
-                let field = self.fields.get_mut(&self.layout[self.cursor]).unwrap();
+                let Some(field) = self.cursor_field_mut() else {
+                    return true;
+                };
                 field.process_event(event, context);
                 self.set_dirty(true);
                 return true;
             }
-            UIEvent::Input(ref k) if *k == self.cursor_up_shortcut => {
+            UIEvent::Input(ref k) if self.cursor_up_shortcut.contains(k) => {
                 self.cursor = self.cursor.saturating_sub(1);
                 self.set_dirty(true);
                 return true;
             }
             UIEvent::InsertInput(Key::Down) if self.focus == FormFocus::TextInput => {
-                let field = self.fields.get_mut(&self.layout[self.cursor]).unwrap();
+                let Some(field) = self.cursor_field_mut() else {
+                    return true;
+                };
                 field.process_event(event, context);
                 self.set_dirty(true);
                 return true;
             }
             UIEvent::Input(ref k)
-                if *k == self.cursor_down_shortcut
+                if self.cursor_down_shortcut.contains(k)
                     && self.cursor < self.layout.len().saturating_sub(1) =>
             {
                 self.cursor += 1;
@@ -505,7 +528,7 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
                 return true;
             }
             UIEvent::Input(ref k)
-                if *k == self.cursor_down_shortcut && self.focus == FormFocus::Fields =>
+                if self.cursor_down_shortcut.contains(k) && self.focus == FormFocus::Fields =>
             {
                 self.focus = FormFocus::Buttons;
                 self.buttons.set_focus(true);
@@ -516,7 +539,9 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
                 return true;
             }
             UIEvent::InsertInput(Key::Char('\t')) if self.focus == FormFocus::TextInput => {
-                let field = self.fields.get_mut(&self.layout[self.cursor]).unwrap();
+                let Some(field) = self.cursor_field_mut() else {
+                    return true;
+                };
                 field.process_event(event, context);
                 self.set_dirty(true);
                 return true;
@@ -530,13 +555,17 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
                 return true;
             }
             UIEvent::InsertInput(Key::Right) if self.focus == FormFocus::TextInput => {
-                let field = self.fields.get_mut(&self.layout[self.cursor]).unwrap();
+                let Some(field) = self.cursor_field_mut() else {
+                    return true;
+                };
                 field.process_event(event, context);
                 self.set_dirty(true);
                 return true;
             }
             UIEvent::InsertInput(Key::Left) if self.focus == FormFocus::TextInput => {
-                let field = self.fields.get_mut(&self.layout[self.cursor]).unwrap();
+                let Some(field) = self.cursor_field_mut() else {
+                    return true;
+                };
                 if !field.process_event(event, context) {
                     self.focus = FormFocus::Fields;
                     context
@@ -551,13 +580,17 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
                 return false;
             }
             UIEvent::InsertInput(Key::Backspace) if self.focus == FormFocus::TextInput => {
-                let field = self.fields.get_mut(&self.layout[self.cursor]).unwrap();
+                let Some(field) = self.cursor_field_mut() else {
+                    return true;
+                };
                 field.process_event(event, context);
                 self.set_dirty(true);
                 return true;
             }
             UIEvent::InsertInput(_) if self.focus == FormFocus::TextInput => {
-                let field = self.fields.get_mut(&self.layout[self.cursor]).unwrap();
+                let Some(field) = self.cursor_field_mut() else {
+                    return true;
+                };
                 field.process_event(event, context);
                 self.set_dirty(true);
                 return true;
@@ -585,7 +618,7 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync, F: FormWidgetL
         let mut our_map: ShortcutMap = Default::default();
         our_map.insert("up", self.cursor_up_shortcut.clone());
         our_map.insert("down", self.cursor_down_shortcut.clone());
-        our_map.insert("toggle field editing", Key::Char('\n'));
+        our_map.insert("toggle field editing", Key::Char('\n').into());
         map.insert("fields input", our_map);
 
         map
@@ -609,8 +642,8 @@ where
     /// Is the button widget focused, i.e do we need to draw the highlighting?
     focus: bool,
     dirty: bool,
-    cursor_right_shortcut: Key,
-    cursor_left_shortcut: Key,
+    cursor_right_shortcut: ShortcutKeys,
+    cursor_left_shortcut: ShortcutKeys,
     id: ComponentId,
 }
 
@@ -623,8 +656,8 @@ impl<T: 'static + std::fmt::Debug + Copy + Default + Send + Sync> Default for Bu
             cursor: 0,
             focus: false,
             dirty: true,
-            cursor_right_shortcut: Key::Char('l'),
-            cursor_left_shortcut: Key::Char('h'),
+            cursor_right_shortcut: ShortcutKeys::single(Key::Char('l')),
+            cursor_left_shortcut: ShortcutKeys::single(Key::Char('h')),
             id: ComponentId::default(),
         }
     }
@@ -663,8 +696,8 @@ where
 {
     pub fn new(
         init_val: (Cow<'static, str>, T),
-        cursor_right_shortcut: Key,
-        cursor_left_shortcut: Key,
+        cursor_right_shortcut: ShortcutKeys,
+        cursor_left_shortcut: ShortcutKeys,
     ) -> Self {
         Self {
             layout: vec![init_val.0.clone()],
@@ -735,21 +768,22 @@ where
         match *event {
             UIEvent::Input(Key::Char('\n')) => {
                 self.result = Some(
-                    self.buttons
-                        .get(&self.layout[self.cursor])
+                    self.layout
+                        .get(self.cursor)
+                        .and_then(|k| self.buttons.get(k))
                         .cloned()
                         .unwrap_or_default(),
                 );
                 self.set_dirty(true);
                 return true;
             }
-            UIEvent::Input(ref k) if *k == self.cursor_left_shortcut => {
+            UIEvent::Input(ref k) if self.cursor_left_shortcut.contains(k) => {
                 self.cursor = self.cursor.saturating_sub(1);
                 self.set_dirty(true);
                 return true;
             }
             UIEvent::Input(ref k)
-                if *k == self.cursor_right_shortcut
+                if self.cursor_right_shortcut.contains(k)
                     && self.cursor < self.layout.len().saturating_sub(1) =>
             {
                 self.cursor += 1;
@@ -775,7 +809,7 @@ where
         let mut our_map: ShortcutMap = Default::default();
         our_map.insert("right", self.cursor_right_shortcut.clone());
         our_map.insert("left", self.cursor_left_shortcut.clone());
-        our_map.insert("select", Key::Char('\n'));
+        our_map.insert("select", Key::Char('\n').into());
         map.insert("buttons", our_map);
 
         map
@@ -1150,6 +1184,11 @@ impl ScrollBar {
 
         let visible_rows = std::cmp::min(visible_rows, length);
         let ascii_drawing = grid.ascii_drawing;
+        // Resolved once, not once per scrollbar cell: `conf::value` walks
+        // the theme maps and chases aliases, and the loop below runs up to
+        // `area.height()` times on every draw.
+        let highlighted_fg = crate::conf::value(context, "widgets.options.highlighted").bg;
+        let track_bg = theme_default.bg;
         let ratio: f64 = (height as f64) / (length as f64);
         let scrollbar_height = std::cmp::max((ratio * (visible_rows as f64)) as usize, 1);
         let scrollbar_offset = (ratio * (pos as f64)) as usize;
@@ -1158,7 +1197,7 @@ impl ScrollBar {
         if self.show_arrows {
             grid[area2.upper_left()]
                 .set_ch(if ascii_drawing { '^' } else { '▀' })
-                .set_fg(crate::conf::value(context, "widgets.options.highlighted").bg);
+                .set_fg(highlighted_fg);
             area2 = area2.skip_rows(1);
         }
 
@@ -1169,7 +1208,7 @@ impl ScrollBar {
             }
             grid[area2.upper_left()]
                 .set_ch(if ascii_drawing { '#' } else { '█' })
-                .set_fg(crate::conf::value(context, "widgets.options.highlighted").bg)
+                .set_fg(highlighted_fg)
                 .set_attrs(if !context.settings.terminal.use_color() {
                     theme_default.attrs | Attr::REVERSE
                 } else {
@@ -1180,8 +1219,8 @@ impl ScrollBar {
         if self.show_arrows {
             grid[area2.bottom_right()]
                 .set_ch(if ascii_drawing { 'v' } else { '▄' })
-                .set_fg(crate::conf::value(context, "widgets.options.highlighted").bg)
-                .set_bg(crate::conf::value(context, "theme_default").bg);
+                .set_fg(highlighted_fg)
+                .set_bg(track_bg);
         }
     }
 
@@ -1207,6 +1246,9 @@ impl ScrollBar {
 
         let visible_cols = std::cmp::min(visible_cols, length);
         let ascii_drawing = grid.ascii_drawing;
+        // See `draw`: resolved once per draw, not once per cell.
+        let highlighted_fg = crate::conf::value(context, "widgets.options.highlighted").bg;
+        let track_bg = theme_default.bg;
         let ratio: f64 = (width as f64) / (length as f64);
         let scrollbar_width = std::cmp::min((ratio * (visible_cols as f64)) as usize, 1);
         let scrollbar_offset = (ratio * (pos as f64)) as usize;
@@ -1215,7 +1257,7 @@ impl ScrollBar {
         if self.show_arrows {
             grid[area2.upper_left()]
                 .set_ch(if ascii_drawing { '<' } else { '▐' })
-                .set_fg(crate::conf::value(context, "widgets.options.highlighted").bg);
+                .set_fg(highlighted_fg);
             area2 = area2.skip_cols(1);
         }
 
@@ -1226,7 +1268,7 @@ impl ScrollBar {
             }
             grid[area2.upper_left()]
                 .set_ch(if ascii_drawing { '#' } else { '█' })
-                .set_fg(crate::conf::value(context, "widgets.options.highlighted").bg)
+                .set_fg(highlighted_fg)
                 .set_attrs(if !context.settings.terminal.use_color() {
                     theme_default.attrs | Attr::REVERSE
                 } else {
@@ -1237,8 +1279,8 @@ impl ScrollBar {
         if self.show_arrows {
             grid[area2.bottom_right()]
                 .set_ch(if ascii_drawing { '>' } else { '▌' })
-                .set_fg(crate::conf::value(context, "widgets.options.highlighted").bg)
-                .set_bg(crate::conf::value(context, "theme_default").bg);
+                .set_fg(highlighted_fg)
+                .set_bg(track_bg);
         }
     }
 }
@@ -1449,7 +1491,7 @@ impl ProgressSpinner {
         self.width = Self::KINDS[kind % Self::KINDS.len()]
             .1
             .iter()
-            .map(|f| f.grapheme_len())
+            .map(|f| f.grapheme_width())
             .max()
             .unwrap_or(0);
         self.kind = Ok(kind % Self::KINDS.len());
@@ -1460,7 +1502,7 @@ impl ProgressSpinner {
 
     pub fn set_custom_kind(&mut self, frames: Vec<String>, interval: u64) {
         self.stage = 0;
-        self.width = frames.iter().map(|f| f.grapheme_len()).max().unwrap_or(0);
+        self.width = frames.iter().map(|f| f.grapheme_width()).max().unwrap_or(0);
         if self.width == 0 {
             self.stop();
         }

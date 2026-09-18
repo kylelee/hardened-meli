@@ -160,3 +160,38 @@ fn test_backend_event_flatten() {
         ]
     );
 }
+
+/// An unknown or differently-cased `format` setting must not panic:
+/// config validation lowercases the format, so the lookup has to be
+/// case-insensitive too, and a misspelling is a configuration error.
+#[test]
+fn backend_lookup_is_case_insensitive_and_reports_unknown_format() {
+    use crate::{
+        backends::{Backend, Backends},
+        error::{Error, ErrorKind},
+    };
+
+    let mut backends = Backends::new();
+    backends.register(
+        "dummy".to_string(),
+        Backend {
+            create_fn: Box::new(|| {
+                Box::new(|_, _, _| {
+                    Err(Error::new("dummy backend").set_kind(ErrorKind::NotSupported))
+                })
+            }),
+            validate_conf_fn: Box::new(|_| Ok(())),
+        },
+    );
+    for key in ["dummy", "DUMMY", "dUmMy"] {
+        if backends.get(key).is_err() {
+            panic!("`{key}` must resolve to the registered backend");
+        }
+    }
+    // `BackendCreator` is not `Debug`, so match instead of `expect_err`.
+    let err = match backends.get("dummy-backend-typo") {
+        Ok(_) => panic!("an unknown format must be a configuration error"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind, ErrorKind::Configuration);
+}

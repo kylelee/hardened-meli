@@ -27,6 +27,25 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::{types::Reflow, wcwidth::wcwidth};
 
+/// Whether a `base` + `U+FE0F` (emoji presentation) cluster renders two
+/// columns wide in a terminal.
+///
+/// True for a non-ASCII base that measures a single column: East Asian
+/// Ambiguous / text-default symbols such as `☑` (U+2611) or `⌨` (U+2328)
+/// are rendered two columns wide once the emoji presentation selector
+/// follows them, even though [`wcwidth`] reports one. ASCII bases (`#`,
+/// digits, letters) are not emoji-capable on their own — `#\u{FE0F}`
+/// without the enclosing keycap `U+20E3` stays one column — so they are
+/// excluded.
+///
+/// This is the single source of truth for such a cluster's width:
+/// [`TextProcessing::grapheme_width`] measures with it and
+/// `CellBuffer::write_string` (in meli) reserves the continuation cell
+/// with it, so layout math and grid accounting cannot drift apart.
+pub const fn is_emoji_presentation_base(base: char) -> bool {
+    !base.is_ascii() && matches!(wcwidth(base), Some(1))
+}
+
 pub trait TextProcessing: UnicodeSegmentation + AsRef<str> {
     /// Returns a vector containing each grapheme as a slice.
     fn split_graphemes(&self) -> Vec<&str> {
@@ -49,13 +68,31 @@ pub trait TextProcessing: UnicodeSegmentation + AsRef<str> {
         UnicodeSegmentation::grapheme_indices(self, true).next_back()
     }
 
-    /// Returns the total width of all graphemes using [`wcwidth`] for each
-    /// code-point.
+    /// Returns the total display width of the string: the sum of
+    /// [`wcwidth`] over its code-points, except that a `base` + `U+FE0F`
+    /// (emoji presentation) cluster counts as two columns when its base
+    /// is an emoji-capable single-column symbol (see
+    /// [`is_emoji_presentation_base`]).
     fn grapheme_width(&self) -> usize {
         let mut count = 0;
         let s: &str = self.as_ref();
-        for c in s.chars() {
-            count += wcwidth(c).unwrap_or(0);
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{FE0F}' {
+                // The selector itself is zero-width; the base it follows
+                // accounted for the whole cluster.
+                continue;
+            }
+            let width = wcwidth(c).unwrap_or(0);
+            count += width;
+            if chars.peek() == Some(&'\u{FE0F}') {
+                chars.next();
+                if is_emoji_presentation_base(c) {
+                    // The cluster renders two columns wide (e.g. `☑️`,
+                    // `⌨️`), not `wcwidth(base)`.
+                    count += 1;
+                }
+            }
         }
 
         count
@@ -110,5 +147,24 @@ mod tests {
 
         assert_eq!("こんにちわ世界".grapheme_width(), 14);
         assert_eq!("こ★ん■に●ち▲わ☆世◆界".grapheme_width(), 20);
+    }
+
+    /// `base` + `U+FE0F` clusters occupy two columns when the base is an
+    /// emoji-capable single-column symbol, and stay one column for ASCII
+    /// bases (no keycap) and two columns for wide bases — the same rule
+    /// `CellBuffer::write_string`'s `U+FE0F` branch applies.
+    #[test]
+    fn test_grapheme_width_emoji_presentation() {
+        // Text-default symbol + FE0F: two columns.
+        assert_eq!("\u{2611}\u{FE0F}".grapheme_width(), 2);
+        assert_eq!("\u{2328}\u{FE0F}".grapheme_width(), 2);
+        // Wide base + FE0F: already two columns, not four.
+        assert_eq!("\u{1F4CE}\u{FE0F}".grapheme_width(), 2);
+        // ASCII base + FE0F stays one column.
+        assert_eq!("a\u{FE0F}".grapheme_width(), 1);
+        // Surrounding text keeps its own width.
+        assert_eq!("x\u{2611}\u{FE0F}y".grapheme_width(), 4);
+        // Plain text-default symbol without the selector is one column.
+        assert_eq!("\u{2611}".grapheme_width(), 1);
     }
 }

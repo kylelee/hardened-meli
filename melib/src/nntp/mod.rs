@@ -99,6 +99,20 @@ pub static SUPPORTED_CAPABILITIES: &[&str] = &[
     "AUTHINFO USER",
 ];
 
+/// Number of seconds to look back from the newest known article when issuing
+/// `NEWNEWS`, tolerating clock skew between client and server.
+const NEWNEWS_LOOKBACK_SECS: crate::UnixTimestamp = 10 * 60;
+
+/// Timestamp passed to `NEWNEWS` for a mailbox whose newest known article is
+/// `latest_article`.
+///
+/// Saturating subtraction: `latest_article` derives from the untrusted `Date`
+/// field of an OVER/XOVER line and is `0` when that field is empty or
+/// unparseable, so a plain subtraction would underflow-panic.
+fn newnews_since_timestamp(latest_article: crate::UnixTimestamp) -> crate::UnixTimestamp {
+    latest_article.saturating_sub(NEWNEWS_LOOKBACK_SECS)
+}
+
 #[derive(Clone, Debug)]
 pub struct NntpServerConf {
     pub server_hostname: String,
@@ -224,6 +238,12 @@ impl MailBackend for NntpType {
     }
 
     fn fetch(&mut self, mailbox_hash: MailboxHash) -> ResultStream<Vec<Envelope>> {
+        // Bound on automatic reconnects after a disconnect inside one fetch
+        // call. `fetch_envs` reconnects and reports `ConnectionFailed` (which
+        // `is_disconnected()` matches) for a server that drops the connection
+        // or answers GROUP with a malformed line, so without a bound a broken
+        // server could make this loop reconnect forever.
+        const MAX_FETCH_RECONNECTS: usize = 10;
         let is_online_fut = self.is_online()?;
         let mut state = FetchState {
             mailbox_hash,
@@ -238,9 +258,16 @@ impl MailBackend for NntpType {
                 f.exists.lock().unwrap().clear();
                 f.unseen.lock().unwrap().clear();
             };
+            let mut reconnects = 0;
             loop {
                 match state.fetch_envs().await {
-                    Err(err) if err.kind.is_disconnected() => continue,
+                    Err(err) if err.kind.is_disconnected() => {
+                        reconnects += 1;
+                        if reconnects > MAX_FETCH_RECONNECTS {
+                            return Err(err);
+                        }
+                        continue;
+                    }
                     Err(err) => return Err(err),
                     Ok(Some(ret)) => {
                         emitter.emit(ret).await;
@@ -288,7 +315,7 @@ impl MailBackend for NntpType {
             let mut conn = timeout(timeout_dur, connection.lock()).await?;
             if let Some(mut latest_article) = latest_article {
                 let mut unseen = LazyCountSet::new();
-                let timestamp = latest_article - 10 * 60;
+                let timestamp = newnews_since_timestamp(latest_article);
                 let datetime_str = crate::utils::datetime::timestamp_to_string_utc(
                     timestamp,
                     Some("%Y%m%d %H%M%S"),
@@ -1113,5 +1140,21 @@ impl FetchState {
             *f.unseen.lock().unwrap() = unseen;
         };
         Ok(Some(ret))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_newnews_since_timestamp_saturates_at_epoch() {
+        // An OVER/XOVER line with an empty or unparseable Date field leaves
+        // the envelope timestamp at 0, which used to underflow the lookback
+        // subtraction before `NEWNEWS` was even issued.
+        assert_eq!(newnews_since_timestamp(0), 0);
+        assert_eq!(newnews_since_timestamp(600), 0);
+        assert_eq!(newnews_since_timestamp(601), 1);
+        assert_eq!(newnews_since_timestamp(1_000_000), 999_400);
     }
 }

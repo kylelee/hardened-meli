@@ -693,24 +693,19 @@ impl Threads {
          * - hash_set
          * - message fields in thread_nodes
          */
-        let thread_node_hash = if let Some((key, _)) = self
-            .thread_nodes
-            .iter()
-            .find(|(_, n)| n.message.map(|n| n == old_hash).unwrap_or(false))
-        {
-            *key
-        } else {
+        let Some(thread_node_hash) = self.envelope_to_thread_node.get(&old_hash).copied() else {
             return Err(());
         };
-        debug_assert_eq!(
-            Some(&thread_node_hash),
-            self.envelope_to_thread_node.get(&old_hash)
-        );
-
-        self.thread_nodes
-            .get_mut(&thread_node_hash)
-            .unwrap()
-            .message = Some(new_hash);
+        // The map lookup replaces the old linear scan of `thread_nodes`; keep
+        // the scan's no-panic property if the two structures ever disagree.
+        let Some(node) = self.thread_nodes.get_mut(&thread_node_hash) else {
+            debug_assert!(
+                false,
+                "`envelope_to_thread_node` entry without a matching `thread_nodes` node"
+            );
+            return Err(());
+        };
+        node.message = Some(new_hash);
         let was_unseen = self.thread_nodes[&thread_node_hash].unseen;
         let is_unseen = !envelopes.read().unwrap()[&new_hash].is_seen();
         if was_unseen != is_unseen {
@@ -745,22 +740,25 @@ impl Threads {
     pub fn remove(&mut self, envelope_hash: EnvelopeHash) {
         self.hash_set.remove(&envelope_hash);
 
-        let t_id: ThreadNodeHash = if let Some((pos, n)) = self
-            .thread_nodes
-            .iter_mut()
-            .find(|(_, n)| n.message.map(|n| n == envelope_hash).unwrap_or(false))
-        {
-            n.message = None;
-            *pos
-        } else {
+        let Some(t_id) = self.envelope_to_thread_node.get(&envelope_hash).copied() else {
             return;
         };
-        debug_assert_eq!(
-            Some(&t_id),
-            self.envelope_to_thread_node.get(&envelope_hash)
-        );
+        // As in `update_envelope`: the map lookup replaces the scan, so keep
+        // the scan's graceful early return if the node is missing.
+        let Some(node) = self.thread_nodes.get_mut(&t_id) else {
+            debug_assert!(
+                false,
+                "`envelope_to_thread_node` entry without a matching `thread_nodes` node"
+            );
+            self.envelope_to_thread_node.remove(&envelope_hash);
+            return;
+        };
+        node.message = None;
         self.envelope_to_thread_node.remove(&envelope_hash);
 
+        // [ref:perf] This is an O(#message-ids) reverse lookup that is kept
+        // deliberately: `Threads` has no cheap reverse index from thread node
+        // to message id, and adding one is an untested data-structure change.
         if let Some((message_id, _)) = self.message_ids.iter().find(|(_, h)| **h == t_id) {
             self.missing_message_ids.insert(message_id.clone());
         }
@@ -1542,3 +1540,151 @@ impl Index<&ThreadNodeHash> for Threads {
 //    graph_to_svg(&graph, &settings, &filename).unwrap();
 //    log::debug!("wrote graph to {filename}");
 //}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, RwLock},
+    };
+
+    use super::*;
+
+    /// Build the envelope map the threading code consumes from raw RFC5322
+    /// bytes, keyed by each envelope's computed hash.
+    fn envelopes_from(raw_mails: &[Vec<u8>]) -> (Envelopes, Vec<EnvelopeHash>) {
+        let mut map: HashMap<EnvelopeHash, Envelope> = HashMap::new();
+        let mut hashes = Vec::with_capacity(raw_mails.len());
+        for raw in raw_mails {
+            let env = Envelope::from_bytes(raw.as_slice(), None)
+                .unwrap_or_else(|err| panic!("test mail must parse: {err}"));
+            hashes.push(env.hash());
+            map.insert(env.hash(), env);
+        }
+        (Arc::new(RwLock::new(map)), hashes)
+    }
+
+    fn mail(headers: &str, body: &str) -> Vec<u8> {
+        format!("{headers}\r\n{body}\r\n").into_bytes()
+    }
+
+    /// `Message-ID`/`In-Reply-To`/`References` are attacker controlled. Empty
+    /// ids, self references, cycles, duplicates, references to messages that
+    /// do not exist, a very deep chain, non-ASCII ids and malformed brackets
+    /// must all thread without panicking.
+    #[test]
+    fn adversarial_threading_headers_do_not_panic() {
+        let deep_chain = (0..2_000)
+            .map(|i| format!("<deep-{i}@example.org>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let duplicate_refs = "<dup@example.org> ".repeat(50);
+        let mut deep_mail =
+            String::from("From: g@example.org\r\nMessage-ID: <deep@example.org>\r\nReferences: ");
+        deep_mail.push_str(&deep_chain);
+        deep_mail.push_str("\r\nSubject: deep\r\n");
+
+        let raw_mails = vec![
+            mail(
+                "From: a@example.org\r\nMessage-ID: <root@example.org>\r\nSubject: root\r\n",
+                "body",
+            ),
+            mail(
+                "From: b@example.org\r\nIn-Reply-To: <missing@example.org>\r\nMessage-ID: \
+                 <orphan@example.org>\r\nSubject: orphan\r\n",
+                "body",
+            ),
+            mail(
+                "From: c@example.org\r\nMessage-ID: <self@example.org>\r\nIn-Reply-To: \
+                 <self@example.org>\r\nReferences: <self@example.org>\r\nSubject: self cycle\r\n",
+                "body",
+            ),
+            mail(
+                "From: d@example.org\r\nMessage-ID: <>\r\nSubject: empty id\r\n",
+                "body",
+            ),
+            mail("From: e@example.org\r\nSubject: no id\r\n", "body"),
+            mail(
+                &format!(
+                    "From: f@example.org\r\nMessage-ID: <dup@example.org>\r\nReferences: \
+                     {duplicate_refs}\r\nSubject: repeated refs\r\n"
+                ),
+                "body",
+            ),
+            deep_mail.into_bytes(),
+            mail(
+                "From: h@example.org\r\nMessage-ID: <caf\u{e9}@ex\u{e4}mple.org>\r\nIn-Reply-To: \
+                 <root@example.org>\r\nSubject: non ascii\r\n",
+                "body",
+            ),
+            mail(
+                "From: i@example.org\r\nMessage-ID: <root@example.org>\r\nIn-Reply-To: \
+                 <root@example.org>\r\nSubject: duplicate id\r\n",
+                "body",
+            ),
+            mail(
+                "From: j@example.org\r\nMessage-ID: <<<>>>\r\nReferences: < < >\r\nIn-Reply-To: \
+                 <a@b> <c@d>\r\nSubject: malformed brackets\r\n",
+                "body",
+            ),
+        ];
+        let (envelopes, hashes) = envelopes_from(&raw_mails);
+        assert_eq!(hashes.len(), raw_mails.len());
+
+        let mut threads = Threads::new(hashes.len());
+        for h in &hashes {
+            threads.insert(&envelopes, *h);
+        }
+        // Re-threading the whole set must be panic-free too.
+        threads.amend(&envelopes);
+        for h in &hashes {
+            let node = threads.envelope_to_thread_node.get(h).copied();
+            if let Some(node) = node {
+                threads.update_show_subject(node, *h, &envelopes);
+            }
+        }
+        for h in hashes.iter().rev() {
+            threads.remove(*h);
+        }
+        threads.amend(&envelopes);
+    }
+
+    /// A thread node can briefly reference an envelope that has already been
+    /// dropped from the collection (a refresh removes the envelope, the
+    /// mailbox is re-threaded afterwards). Re-threading and updating the
+    /// subjects must skip the stale hash instead of indexing the map.
+    #[test]
+    fn stale_envelope_hash_does_not_panic() {
+        let raw_mails = vec![
+            mail(
+                "From: a@example.org
+Message-ID: <s-root@example.org>
+Subject: root
+",
+                "body",
+            ),
+            mail(
+                "From: b@example.org
+In-Reply-To: <s-root@example.org>
+Message-ID:                  <s-child@example.org>
+Subject: child
+",
+                "body",
+            ),
+        ];
+        let (envelopes, hashes) = envelopes_from(&raw_mails);
+        let mut threads = Threads::new(hashes.len());
+        for h in &hashes {
+            threads.insert(&envelopes, *h);
+        }
+        // Drop the root envelope from the map without telling `Threads` first.
+        envelopes.write().unwrap().remove(&hashes[0]);
+        threads.amend(&envelopes);
+        for h in &hashes {
+            let node = threads.envelope_to_thread_node.get(h).copied();
+            if let Some(node) = node {
+                threads.update_show_subject(node, *h, &envelopes);
+            }
+        }
+    }
+}

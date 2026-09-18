@@ -444,8 +444,11 @@ impl SmtpConnection {
                     .iter()
                     .find(|l| l.starts_with("AUTH"))
                 {
-                    let l = l["AUTH ".len()..].trim();
-                    for _type in l.split_whitespace() {
+                    // The server may advertise bare `AUTH` with no mechanism
+                    // list (or an `AUTH`-prefixed line shorter than
+                    // `"AUTH "`); `.get()` yields no mechanisms instead of
+                    // panicking on the out-of-bounds slice.
+                    for _type in parse_auth_mechanisms(l) {
                         if _type == "PLAIN" {
                             auth_type.plain = true;
                         } else if _type == "LOGIN" {
@@ -1024,6 +1027,19 @@ impl<'s> Reply<'s> {
     }
 }
 
+/// Extract the authentication mechanism names from an EHLO capability line
+/// that starts with `AUTH`.
+///
+/// A hostile or broken server may send a bare `AUTH` line with no mechanism
+/// list (or an `AUTH`-prefixed line shorter than the `"AUTH "` prefix), so the
+/// prefix is stripped with `str::get` and an empty iterator is returned
+/// instead of panicking on an out-of-bounds slice.
+fn parse_auth_mechanisms(line: &str) -> impl Iterator<Item = &str> {
+    line.get("AUTH ".len()..)
+        .unwrap_or_default()
+        .split_whitespace()
+}
+
 async fn read_lines<'r>(
     _self: &mut (impl futures::io::AsyncRead + std::marker::Unpin + Send),
     ret: &'r mut String,
@@ -1388,5 +1404,19 @@ mod tests {
         // pin the current behaviour instead of asserting it round-trips.
         let err = ReplyCode::try_from("530").unwrap_err();
         assert!(err.to_string().contains("Unknown SMTP reply code"));
+    }
+
+    #[test]
+    fn test_parse_auth_mechanisms_tolerates_bare_auth() {
+        // A bare `AUTH` EHLO line (no mechanism list) used to panic on
+        // `l["AUTH ".len()..]`; it must simply advertise no mechanisms.
+        assert_eq!(
+            parse_auth_mechanisms("AUTH").collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            parse_auth_mechanisms("AUTH PLAIN LOGIN").collect::<Vec<_>>(),
+            vec!["PLAIN", "LOGIN"]
+        );
     }
 }

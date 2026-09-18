@@ -62,8 +62,22 @@ impl Session {
 
     /// Return the account ID corresponding to the [`JmapMailCapability`]
     /// capability.
-    pub fn mail_account_id(&self) -> Id<Account> {
-        self.primary_accounts[JmapMailCapability::uri()].clone()
+    ///
+    /// A malformed session that advertises the mail capability but omits its
+    /// `primaryAccounts` entry is reported as a protocol error instead of
+    /// panicking on the map index.
+    pub fn mail_account_id(&self) -> crate::error::Result<Id<Account>> {
+        self.primary_accounts
+            .get(JmapMailCapability::uri())
+            .cloned()
+            .ok_or_else(|| {
+                crate::error::Error::new(format!(
+                    "Server session advertises the {} capability but has no entry for it in \
+                     `primaryAccounts`",
+                    JmapMailCapability::uri()
+                ))
+                .set_kind(crate::error::ErrorKind::ProtocolError)
+            })
     }
 }
 

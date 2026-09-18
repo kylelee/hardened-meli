@@ -56,7 +56,10 @@ indexmap = { workspace = true }
 isahc = { version = "^1.7.2", optional = true, default-features = false, features = ["http2", "json", "text-decoding"] }
 libc = { workspace = true }
 libloading = { version = "0.8" }
-log = { version = "0.4", features = ["std"] }
+# `release_max_level_off` compiles every `log!` call (melib's re-exported
+# facade included) out of release builds entirely — zero formatting or
+# branch cost; debug builds log normally.
+log = { version = "0.4", features = ["std", "release_max_level_off"] }
 native-tls = { version = "0.2", default-features = false, optional = true }
 nix = { workspace = true, default-features = false, features = ["fs", "socket", "dir", "hostname"] }
 nom = { version = "7" }

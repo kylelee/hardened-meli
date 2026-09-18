@@ -228,8 +228,15 @@ impl Backends {
         b
     }
 
-    pub fn get(&self, key: &str) -> BackendCreator {
-        if !self.map.contains_key(key) {
+    /// The backend creator registered for `key`.
+    ///
+    /// The lookup is case-insensitive (config validation lowercases the
+    /// `format` setting, so `format = "IMAP"` must not take a different
+    /// path here than `format = "imap"`). An unknown format is a
+    /// configuration error, not a panic: the caller reports it to the user.
+    pub fn get(&self, key: &str) -> Result<BackendCreator> {
+        let key = key.to_lowercase();
+        if !self.map.contains_key(&key) {
             if key == "notmuch" {
                 eprint!("{NOTMUCH_ERROR_MSG}");
                 #[cfg(feature = "notmuch")]
@@ -237,9 +244,10 @@ impl Backends {
                     eprint!("{NOTMUCH_ERROR_DETAILS}");
                 }
             }
-            panic!("{key} is not a valid mail backend");
+            return Err(Error::new(format!("`{key}` is not a valid mail backend"))
+                .set_kind(ErrorKind::Configuration));
         }
-        (self.map[key].create_fn)()
+        Ok((self.map[&key].create_fn)())
     }
 
     pub fn register(&mut self, key: String, backend: Backend) {
@@ -325,7 +333,7 @@ impl TryFrom<Vec<RefreshEvent>> for BackendEvent {
 impl BackendEvent {
     /// Flatten a vector of [`BackendEvent`]s.
     #[inline]
-    pub fn flatten(mut val: Vec<Self>) -> Vec<Self> {
+    pub fn flatten(val: Vec<Self>) -> Vec<Self> {
         let refresh_events = val.iter().filter(|v| matches!(v, Self::Refresh(_))).count();
         let refresh_batch_events = val
             .iter()
@@ -345,42 +353,17 @@ impl BackendEvent {
         else {
             return val;
         };
-        if matches!(&val[first], Self::Refresh(_)) {
-            let Self::Refresh(ev) = std::mem::replace(&mut val[first], Self::RefreshBatch(vec![]))
-            else {
-                unreachable!();
-            };
-            let Self::RefreshBatch(ref mut b) = val[first] else {
-                unreachable!();
-            };
-            b.push(ev);
-        }
-        debug_assert!(matches!(&val[first], Self::RefreshBatch(events) if !events.is_empty()));
-        // [ref:msrv]: use extract_if in 1.87.0.
-        let mut i = first + 1;
-
-        while i < val.len() {
-            if matches!(val[i], Self::Refresh(_)) {
-                let Self::Refresh(ev) = val.remove(i) else {
-                    unreachable!();
-                };
-                let Self::RefreshBatch(ref mut b) = val[first] else {
-                    unreachable!();
-                };
-                b.push(ev);
-            } else if matches!(val[i], Self::RefreshBatch(_)) {
-                let Self::RefreshBatch(evs) = val.remove(i) else {
-                    unreachable!();
-                };
-                let Self::RefreshBatch(ref mut b) = val[first] else {
-                    unreachable!();
-                };
-                b.extend(evs);
-            } else {
-                i += 1;
+        let mut out = Vec::with_capacity(val.len());
+        let mut batch = Vec::new();
+        for ev in val.into_iter() {
+            match ev {
+                Self::Refresh(ev) => batch.push(ev),
+                Self::RefreshBatch(evs) => batch.extend(evs),
+                other => out.push(other),
             }
         }
-        val
+        out.insert(first, Self::RefreshBatch(batch));
+        out
     }
 }
 

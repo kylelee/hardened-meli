@@ -19,7 +19,7 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::{cmp::Ordering, collections::VecDeque, iter::Peekable, str::FromStr};
+use std::{cmp::Ordering, collections::VecDeque, iter::Peekable, str::FromStr, sync::Arc};
 
 use unicode_segmentation::UnicodeSegmentation;
 use LineBreakClass::*;
@@ -781,7 +781,16 @@ impl Iterator for LineBreakCandidateIter<'_> {
                         set_last_break!(*last_break, ret);
                         return Some((ret, BreakAllowed));
                     }
-                    self.iter.next();
+                    // Consume the grapheme after an even RI streak without
+                    // emitting a break. `pos` must be advanced to match the
+                    // iterator, or the next iteration's `debug_assert_eq!(idx,
+                    // *pos)` fires and `*pos - grapheme.len()` underflows
+                    // (e.g. `"🇺🇸🇫🇷x"`).
+                    if let Some((nidx, ng)) = self.iter.next() {
+                        *pos = nidx + ng.len();
+                    } else {
+                        *pos = text.len();
+                    }
                     continue;
                 }
                 CL | CP | IS | SY => {
@@ -939,7 +948,7 @@ mod alg {
         offsets.push(0);
         for w in words.iter() {
             if *w == "\n\n" {
-                offsets.push(offsets.iter().last().unwrap() + width - 1);
+                offsets.push(offsets.iter().last().unwrap() + width.saturating_sub(1));
             } else {
                 offsets.push(offsets.iter().last().unwrap() + w.grapheme_width().saturating_sub(1));
             }
@@ -1031,7 +1040,7 @@ mod alg {
         offsets.push(0);
         for w in words.iter() {
             if *w == "\n\n" {
-                offsets.push(offsets.iter().last().unwrap() + width - 1);
+                offsets.push(offsets.iter().last().unwrap() + width.saturating_sub(1));
             } else {
                 offsets.push(offsets.iter().last().unwrap() + w.grapheme_len().saturating_sub(1));
             }
@@ -1499,7 +1508,10 @@ mod segment_tree {
 /// specific lines.
 #[derive(Clone, Debug)]
 pub struct LineBreakText {
-    text: String,
+    /// The text to break. Shared through an `Arc<str>` so that cloning the
+    /// iterator (see [`LineBreakText::remaining_lines`]) does not copy the
+    /// whole body.
+    text: Arc<str>,
     reflow: Reflow,
     paragraph: VecDeque<Line>,
     paragraph_start_index: usize,
@@ -1561,7 +1573,7 @@ impl Default for LineBreakText {
 impl LineBreakText {
     pub fn new(text: String, reflow: Reflow, width: Option<usize>) -> Self {
         Self {
-            text,
+            text: text.into(),
             state: ReflowState::new(reflow, width, 0),
             paragraph: VecDeque::new(),
             paragraph_start_index: 0,
@@ -1589,8 +1601,17 @@ impl LineBreakText {
     }
 
     pub fn set_text(&mut self, new_val: String) -> &mut Self {
-        self.text = new_val;
+        self.text = new_val.into();
         self.reset()
+    }
+
+    /// The number of lines this iterator will still yield.
+    ///
+    /// The clone is cheap (the text is an `Arc<str>`), so this does not copy
+    /// the body; it does run the line-breaking state machine to the end, so
+    /// callers should cache the result.
+    pub fn remaining_lines(&self) -> usize {
+        self.clone().count()
     }
 
     pub fn reset(&mut self) -> &mut Self {
@@ -2743,5 +2764,68 @@ easy to take MORE than nothing.'"#;
                 .map(|line| line.content)
                 .collect::<Vec<_>>();
         }
+    }
+
+    /// `LineBreakText::remaining_lines` must equal the number of lines the
+    /// iterator has left, and must not copy or consume the text.
+    #[test]
+    fn line_break_remaining_lines_matches_yielded_count() {
+        let text = "one two three four five six seven eight nine ten\n\n\
+                    second paragraph with more words in it\n";
+        let mut it = LineBreakText::new(text.to_string(), Reflow::All, Some(10));
+        let total = it.remaining_lines();
+        assert!(total > 1);
+        let mut yielded = 0usize;
+        let mut remaining_after_first = None;
+        while it.next().is_some() {
+            yielded += 1;
+            if remaining_after_first.is_none() {
+                remaining_after_first = Some(it.remaining_lines());
+            }
+        }
+        assert_eq!(yielded, total, "count must match the yielded lines");
+        assert_eq!(
+            remaining_after_first,
+            Some(total - 1),
+            "one consumed line must leave exactly one fewer"
+        );
+        // Already exhausted.
+        assert_eq!(it.remaining_lines(), 0);
+    }
+
+    /// Regression (CWE-1287): two consecutive regional-indicator graphemes
+    /// (flag emoji) made `LineBreakCandidateIter` consume one extra grapheme
+    /// without advancing `pos`, so the next iteration tripped
+    /// `debug_assert_eq!(idx, *pos)` (debug) and underflowed
+    /// `*pos - grapheme.len()` (release). Reachable from any message body.
+    #[test]
+    fn line_break_regional_indicators_no_panic() {
+        for s in [
+            "🇺🇸🇫🇷x",
+            "🇺🇸🇫🇷hello",
+            "🇺🇸🇫🇷",
+            "🇺🇸🇫🇷🇩🇪",
+            "a🇺🇸🇫🇷b",
+            "🇺🇸🇫🇷x🇩🇪🇯🇵y",
+        ] {
+            let _ = LineBreakCandidateIter::new(s).collect::<Vec<_>>();
+            let _ = s.split_lines(10);
+            let _ = s.split_lines_reflow(Reflow::All, Some(10));
+            let _ = s.split_lines_reflow(Reflow::FormatFlowed, Some(10));
+            let _ = LineBreakText::new(s.to_string(), Reflow::All, Some(4))
+                .map(|line| line.content)
+                .collect::<Vec<_>>();
+        }
+    }
+
+    /// Regression (CWE-1287): the `"\n\n"` word offset in `linear` /
+    /// `linear_lines` computed `offset + width - 1`, which underflowed at
+    /// `width == 0`.
+    #[test]
+    fn line_break_linear_width_zero_no_panic() {
+        let _ = linear("\n\nfoo", 0);
+        let _ = linear("a\n\nb", 0);
+        let _ = linear_lines("\n\nfoo", 0, 0);
+        let _ = linear_lines("a\n\nb", 0, 0);
     }
 }

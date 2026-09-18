@@ -61,6 +61,63 @@ fn quote_shell_word(s: &str) -> String {
     ret
 }
 
+/// Find the first matching mailcap entry in `content` for `content_type`.
+///
+/// Returns the raw command field and whether `copiousoutput` was set. Lines
+/// that are malformed (no `;` separator, no command field) are skipped: a
+/// mailcap file is external input and must never make meli panic.
+fn lookup_mailcap_entry(content: &str, content_type: &str) -> Option<MailcapEntry> {
+    let mut lines_iter = content.lines();
+    while let Some(l) = lines_iter.next() {
+        let l = l.trim();
+        if l.starts_with('#') {
+            continue;
+        }
+        if l.is_empty() {
+            continue;
+        }
+
+        let l = if let Some(stripped) = l.strip_suffix('\\') {
+            // Continuation line: the backslash is removed and the next line
+            // is appended. A trailing backslash on the last line has no
+            // continuation; never slice by byte arithmetic because the line
+            // can be shorter than two bytes or end in a multi-byte character.
+            match lines_iter.next() {
+                Some(next) => format!("{stripped}{next}"),
+                None => stripped.to_string(),
+            }
+        } else {
+            l.to_string()
+        };
+        let mut parts_iter = l.split(';');
+        let Some(key) = parts_iter.next() else {
+            continue;
+        };
+        let Some(cmd) = parts_iter.next() else {
+            // A mailcap line without a command field (no `;`) is malformed.
+            log::trace!("malformed mailcap line (no command field): {l}");
+            continue;
+        };
+        if key.starts_with(content_type) || content_type.fnmatches(key) {
+            let mut copiousoutput = false;
+            #[allow(clippy::while_let_on_iterator)]
+            while let Some(flag) = parts_iter.next() {
+                if flag.trim() == "copiousoutput" {
+                    copiousoutput = true;
+                } else {
+                    log::trace!("unknown mailcap flag: {}", flag);
+                }
+            }
+
+            return Some(MailcapEntry {
+                command: cmd.to_string(),
+                copiousoutput,
+            });
+        }
+    }
+    None
+}
+
 pub struct MailcapEntry {
     command: String,
     /* Pass to pager */
@@ -106,53 +163,18 @@ impl MailcapEntry {
         std::fs::File::open(mailcap_path.as_path())?.read_to_string(&mut content)?;
         let content_type = a.content_type().to_string();
 
-        let mut result = None;
-        let mut lines_iter = content.lines();
-        while let Some(l) = lines_iter.next() {
-            let l = l.trim();
-            if l.starts_with('#') {
-                continue;
-            }
-            if l.is_empty() {
-                continue;
-            }
-
-            let l = if l.ends_with('\\') {
-                format!("{}{}", &l[..l.len() - 2], lines_iter.next().unwrap())
-            } else {
-                l.to_string()
-            };
-            let mut parts_iter = l.split(';');
-            let key = parts_iter.next().unwrap();
-            let cmd = parts_iter.next().unwrap();
-            //let flags = parts_iter.next().unwrap();
-            if key.starts_with(&content_type) || content_type.fnmatches(key) {
-                let mut copiousoutput = false;
-                #[allow(clippy::while_let_on_iterator)]
-                while let Some(flag) = parts_iter.next() {
-                    if flag.trim() == "copiousoutput" {
-                        copiousoutput = true;
-                    } else {
-                        log::trace!("unknown mailcap flag: {}", flag);
-                    }
-                }
-
-                result = Some(Self {
-                    command: cmd.to_string(),
-                    copiousoutput,
-                });
-                break;
-            }
-        }
-
-        match result {
+        match lookup_mailcap_entry(&content, &content_type) {
             None => Err(Error::new("Not found")),
             Some(Self {
                 command,
                 copiousoutput,
             }) => {
                 let parts = split_command!(command);
-                let (cmd, args) = (parts[0], &parts[1..]);
+                let Some((cmd, args)) = parts.split_first() else {
+                    return Err(Error::new(format!(
+                        "Malformed mailcap entry for `{content_type}`: command is empty"
+                    )));
+                };
                 let mut needs_stdin = true;
                 let params = a.parameters();
                 /* [ref:TODO]: See mailcap(5)
@@ -307,5 +329,71 @@ impl MailcapEntry {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lookup_mailcap_entry;
+
+    /// Flatten the lookup result to the tuple the tests compare against.
+    fn entry(content: &str, content_type: &str) -> Option<(String, bool)> {
+        lookup_mailcap_entry(content, content_type).map(|e| (e.command, e.copiousoutput))
+    }
+
+    /// Malformed lines (no command field, truncated or non-ASCII
+    /// continuation) must be skipped instead of panicking.
+    #[test]
+    fn malformed_mailcap_lines_are_skipped() {
+        for content in [
+            "text/plain", // no `;`
+            "\\",         // lone backslash
+            "é\\",        // continuation after a multi-byte char
+            "",           // empty file
+        ] {
+            assert!(
+                entry(content, "application/pdf").is_none(),
+                "{content:?} must yield no entry"
+            );
+        }
+
+        // A trailing continuation backslash on the last line has no next line:
+        // it is treated as a literal (removed) instead of panicking.
+        assert_eq!(
+            entry("application/pdf;cmd\\", "application/pdf"),
+            Some(("cmd".to_string(), false))
+        );
+
+        // A malformed line before a valid one must not abort the scan.
+        let content = "text/plain\napplication/pdf;pdfviewer %s;copiousoutput\n";
+        assert_eq!(
+            entry(content, "application/pdf"),
+            Some(("pdfviewer %s".to_string(), true))
+        );
+    }
+
+    /// Valid entries keep matching exactly as before the hardening.
+    #[test]
+    fn valid_mailcap_entries_still_match() {
+        let content = "image/*;feh %s\napplication/pdf;zathura %s\n";
+        assert_eq!(
+            entry(content, "image/png"),
+            Some(("feh %s".to_string(), false))
+        );
+        assert_eq!(
+            entry(content, "application/pdf"),
+            Some(("zathura %s".to_string(), false))
+        );
+        assert!(entry(content, "text/plain").is_none());
+    }
+
+    /// A continuation line joins with the following line.
+    #[test]
+    fn mailcap_continuation_joins_lines() {
+        let content = "application/pdf;pdfviewer \\\n%s\n";
+        assert_eq!(
+            entry(content, "application/pdf"),
+            Some(("pdfviewer %s".to_string(), false))
+        );
     }
 }

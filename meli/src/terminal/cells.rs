@@ -30,7 +30,7 @@ use std::{
 
 use melib::{
     log,
-    text::{search::KMP, wcwidth, TextPresentation},
+    text::{is_emoji_presentation_base, search::KMP, wcwidth, TextPresentation},
 };
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -194,7 +194,7 @@ impl CellBuffer {
         self.use_color = context.settings.terminal.use_color();
         self.force_text_presentation = context.settings.terminal.use_text_presentation();
 
-        let newlen = newcols * newrows;
+        let newlen = newcols.saturating_mul(newrows);
         if (self.cols, self.rows) == (newcols, newrows) || newlen >= Self::MAX_SIZE {
             return newlen < Self::MAX_SIZE;
         }
@@ -209,7 +209,7 @@ impl CellBuffer {
     /// given `Cell` as a blank.
     #[must_use]
     pub(super) fn resize(&mut self, newcols: usize, newrows: usize, blank: Option<Cell>) -> bool {
-        let newlen = newcols * newrows;
+        let newlen = newcols.saturating_mul(newrows);
         if (self.cols, self.rows) == (newcols, newrows) || newlen >= Self::MAX_SIZE {
             return newlen < Self::MAX_SIZE;
         }
@@ -330,22 +330,38 @@ impl CellBuffer {
     ///  | 666666666666 |            |              |
     ///  ```
     pub fn scroll_up(&mut self, scroll_region: &ScrollRegion, top: usize, offset: usize) {
-        let l = scroll_region.left;
+        let (cols, rows) = self.size();
+        if rows == 0 {
+            return;
+        }
+        let l = scroll_region.left.min(cols);
         let r = if scroll_region.right == 0 {
-            self.size().0
+            cols
         } else {
-            scroll_region.right
+            scroll_region.right.min(cols)
         };
+        // Clamp the region to the grid and the offset to the region height, so
+        // that an externally supplied oversized `offset` (e.g. from
+        // `ESC[99999999L` in the embedded terminal) can neither underflow
+        // `bottom - offset` nor index outside the buffer.
+        let bottom = scroll_region.bottom.min(rows.saturating_sub(1));
+        let top = top.min(bottom);
+        let region_height = bottom - top + 1;
+        let offset = offset.min(region_height);
         for y in top..top + offset {
             for x in l..r {
                 self[(x, y)] = Cell::default();
             }
         }
-        for y in top..=(scroll_region.bottom - offset) {
-            for x in l..r {
-                let temp = self[(x, y)];
-                self[(x, y)] = self[(x, y + offset)];
-                self[(x, y + offset)] = temp;
+        // If the whole region was cleared there is nothing left to shift;
+        // otherwise `bottom - offset >= top`, so the bound cannot underflow.
+        if offset < region_height {
+            for y in top..=(bottom - offset) {
+                for x in l..r {
+                    let temp = self[(x, y)];
+                    self[(x, y)] = self[(x, y + offset)];
+                    self[(x, y + offset)] = temp;
+                }
             }
         }
     }
@@ -388,17 +404,30 @@ impl CellBuffer {
     ///  | 666666666666 |            | 555555555555 |
     ///  ```
     pub fn scroll_down(&mut self, scroll_region: &ScrollRegion, top: usize, offset: usize) {
-        for y in (scroll_region.bottom - offset + 1)..=scroll_region.bottom {
-            for x in 0..self.size().0 {
+        let (cols, rows) = self.size();
+        if rows == 0 {
+            return;
+        }
+        // See `scroll_up` for why the region and offset are clamped.
+        let bottom = scroll_region.bottom.min(rows.saturating_sub(1));
+        let top = top.min(bottom);
+        let region_height = bottom - top + 1;
+        let offset = offset.min(region_height);
+        // `bottom + 1 - offset` is `top` when the whole region is scrolled and
+        // cannot underflow because `offset <= region_height`.
+        for y in (bottom + 1 - offset)..=bottom {
+            for x in 0..cols {
                 self[(x, y)] = Cell::default();
             }
         }
 
-        for y in ((top + offset)..=scroll_region.bottom).rev() {
-            for x in 0..self.size().0 {
-                let temp = self[(x, y)];
-                self[(x, y)] = self[(x, y - offset)];
-                self[(x, y - offset)] = temp;
+        if offset < region_height {
+            for y in ((top + offset)..=bottom).rev() {
+                for x in 0..cols {
+                    let temp = self[(x, y)];
+                    self[(x, y)] = self[(x, y - offset)];
+                    self[(x, y - offset)] = temp;
+                }
             }
         }
     }
@@ -791,6 +820,38 @@ impl CellBuffer {
                 if c == crate::emoji_text_presentation_selector!() {
                     let prev_attrs = self[prev_coords].attrs();
                     self[prev_coords].set_attrs(prev_attrs | Attr::FORCE_TEXT);
+                    continue 'char_loop;
+                }
+                if c == '\u{FE0F}' {
+                    let prev_attrs = self[prev_coords].attrs();
+                    self[prev_coords].set_attrs(prev_attrs | Attr::FORCE_EMOJI);
+                    // Emoji presentation renders the grapheme two
+                    // columns wide in the terminal even when the base
+                    // symbol is narrow (East Asian Ambiguous, e.g. `⌨`).
+                    // Grow the cluster to a leading cell plus a
+                    // continuation so the grid matches what the terminal
+                    // actually shows — otherwise everything after the
+                    // cluster drifts one column right (e.g. overrunning
+                    // the status bar's right frame border). The width
+                    // predicate is shared with `grapheme_width`, so
+                    // measurement and accounting stay in sync; the
+                    // continuation is only written when it lies inside
+                    // the requested `area` (the cell buffer itself is
+                    // larger than a sub-area, and writing past its right
+                    // edge would clobber the neighbouring pane's cells).
+                    if is_emoji_presentation_base(self[prev_coords].ch())
+                        && x <= get_x(bottom_right)
+                        && y <= get_y(bottom_right)
+                    {
+                        if let Some(next) = self.get_mut(x, y) {
+                            *next = Cell::default();
+                            next.set_fg(fg_color)
+                                .set_bg(bg_color)
+                                .set_attrs(attrs)
+                                .set_empty(true);
+                            x += 1;
+                        }
+                    }
                     continue 'char_loop;
                 }
 
@@ -1264,6 +1325,13 @@ bitflags::bitflags! {
         const REVERSE    = Self::BLINK.bits() << 1;
         const HIDDEN     = Self::REVERSE.bits() << 1;
         const FORCE_TEXT = Self::HIDDEN.bits() << 1;
+        /// Mirror of [`Self::FORCE_TEXT`]: `write_string` sets this on the
+        /// preceding cell when it sees `U+FE0F` (emoji-presentation
+        /// variation selector), and the flush byte layer appends `FE0F`
+        /// after the cell symbol so the terminal renders the preceding
+        /// glyph in its emoji form (covers `⌨`, `✉`, `🖱` — default
+        /// text-presentation codepoints that need the selector).
+        const FORCE_EMOJI = Self::FORCE_TEXT.bits() << 1;
     }
 }
 
@@ -1286,6 +1354,7 @@ impl std::fmt::Display for Attr {
             Self::REVERSE => write!(f, "Reverse"),
             Self::HIDDEN => write!(f, "Hidden"),
             Self::FORCE_TEXT => write!(f, "ForceTextRepresentation"),
+            Self::FORCE_EMOJI => write!(f, "ForceEmojiRepresentation"),
             combination => {
                 let mut ctr = 0;
                 if combination.intersects(Self::BOLD) {
@@ -1346,6 +1415,12 @@ impl std::fmt::Display for Attr {
                     }
                     Self::FORCE_TEXT.fmt(f)?;
                 }
+                if combination.intersects(Self::FORCE_EMOJI) {
+                    if ctr > 0 {
+                        write!(f, "|")?;
+                    }
+                    Self::FORCE_EMOJI.fmt(f)?;
+                }
                 write!(f, "")
             }
         }
@@ -1390,6 +1465,7 @@ impl Attr {
             "Reverse" => Ok(Self::REVERSE),
             "Hidden" => Ok(Self::HIDDEN),
             "ForceTextRepresentation" => Ok(Self::FORCE_TEXT),
+            "ForceEmojiRepresentation" => Ok(Self::FORCE_EMOJI),
             combination if combination.contains('|') => {
                 let mut ret = Self::DEFAULT;
                 for c in combination.trim().split('|') {
@@ -1678,7 +1754,7 @@ pub mod boundaries {
                     0b1101 => '+',
                     0b1110 => '+',
                     0b1111 => '+',
-                    _ => unsafe { std::hint::unreachable_unchecked() },
+                    _ => unreachable!("Boundary is a four-bit flags type"),
                 };
             }
             match self.bits() {
@@ -1697,7 +1773,7 @@ pub mod boundaries {
                 0b1101 => '┬',
                 0b1110 => '┤',
                 0b1111 => '┼',
-                _ => unsafe { std::hint::unreachable_unchecked() },
+                _ => unreachable!("Boundary is a four-bit flags type"),
             }
         }
 
@@ -1999,6 +2075,48 @@ mod tests {
     use super::KMP;
     use crate::terminal::{Screen, Virtual};
 
+    /// A `base + VS16` cluster (emoji presentation) must occupy two grid
+    /// cells — the leading cell carries the glyph plus `FORCE_EMOJI`, the
+    /// next is a continuation — even when the base symbol is narrow
+    /// (East Asian Ambiguous, e.g. `⌨`). Terminals render the cluster two
+    /// columns wide; a one-cell accounting drifts everything after it one
+    /// column to the right (observed as the status bar's right frame
+    /// border being visually overrun by the hints).
+    #[test]
+    fn write_string_emoji_presentation_cluster_is_two_cells() {
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(screen.resize(10, 1));
+        let area = screen.area();
+        let (cols, _) = screen.grid_mut().write_string(
+            "a\u{2328}\u{FE0F}b",
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            area,
+            None,
+            None,
+        );
+        let grid = screen.grid();
+        assert_eq!(grid[(0, 0)].ch(), 'a');
+        assert_eq!(grid[(1, 0)].ch(), '\u{2328}');
+        assert!(
+            grid[(1, 0)]
+                .attrs()
+                .intersects(crate::terminal::Attr::FORCE_EMOJI),
+            "VS16 must set FORCE_EMOJI on the leading cell"
+        );
+        assert!(
+            grid[(2, 0)].empty(),
+            "cluster must consume a continuation cell"
+        );
+        assert_eq!(
+            grid[(3, 0)].ch(),
+            'b',
+            "the next glyph starts after the cluster"
+        );
+        assert_eq!(cols, 4, "write_string must report the two-column cluster");
+    }
+
     const _ALICE_CHAPTER_1: &str = "CHAPTER I. Down the Rabbit-Hole
 
 Alice was beginning to get very tired of sitting by her sister on the\x20
@@ -2295,5 +2413,46 @@ of the house!’ (Which was very likely true.)";
             .trim_start(),
             screen.grid().to_string()
         );
+    }
+
+    /// An oversized scroll count (reachable from an escape sequence, e.g.
+    /// `ESC[18446744073709551615M`) must clamp instead of underflowing or
+    /// indexing outside the buffer.
+    #[test]
+    fn scroll_with_oversized_offset_does_not_panic() {
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(screen.resize(20, 24));
+
+        let full = super::ScrollRegion {
+            top: 0,
+            bottom: 23,
+            left: 0,
+            right: 0,
+        };
+        for offset in [0, 1, 23, 24, 25, usize::MAX] {
+            screen.grid_mut().scroll_up(&full, 0, offset);
+            screen.grid_mut().scroll_down(&full, 0, offset);
+        }
+
+        let partial = super::ScrollRegion {
+            top: 5,
+            bottom: 10,
+            left: 0,
+            right: 0,
+        };
+        for offset in [0, 1, 6, 7, usize::MAX] {
+            screen.grid_mut().scroll_up(&partial, 5, offset);
+            screen.grid_mut().scroll_down(&partial, 5, offset);
+        }
+    }
+
+    /// A resize whose dimensions multiply past `MAX_SIZE` (or overflow
+    /// `usize`) must be refused, not panic or allocate.
+    #[test]
+    fn resize_with_huge_dimensions_does_not_panic() {
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(!screen.resize(usize::MAX, usize::MAX));
+        assert!(!screen.resize(usize::MAX, 2));
+        assert!(screen.resize(1, 1));
     }
 }

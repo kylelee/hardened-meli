@@ -598,3 +598,51 @@ fn test_ical_build_event() {
         Some("summary".to_owned())
     );
 }
+
+/// Regression (CWE-674): `Parser::peek_at` used to recurse once per skipped CR
+/// byte and per folded `\n<SP>`/`\n<TAB>` continuation, so a vCard/iCalendar
+/// file with a long run of newlines aborted the process with an uncatchable
+/// stack overflow. The look-ahead is iterative now; these inputs must parse
+/// (or fail) without aborting.
+#[test]
+fn test_vobject_long_newline_run_no_stack_overflow() {
+    // A run of blank CRLF lines before a valid component: rejected
+    // (`NoPropertyName`) but must not overflow the stack.
+    let mut blank_crlf = "\r\n".repeat(200_000);
+    blank_crlf.push_str("BEGIN:VCARD\r\nVERSION:2.1\r\nFN:x\r\nEND:VCARD\r\n");
+    let _ = Parser::new(&blank_crlf).consume_component();
+
+    // A run of bare CR bytes (each was one recursive frame).
+    let mut bare_cr = "\r".repeat(200_000);
+    bare_cr.push_str("BEGIN:VCARD\r\nVERSION:2.1\r\nFN:x\r\nEND:VCARD\r\n");
+    let _ = Parser::new(&bare_cr).consume_component();
+
+    // A property value continued by a very long run of folded lines.
+    let mut folded = String::from("BEGIN:VCARD\r\nVERSION:2.1\r\nFN:a");
+    folded.push_str(&"\r\n ".repeat(200_000));
+    folded.push_str("b\r\nEND:VCARD\r\n");
+    let parsed = Parser::new(&folded).consume_component();
+    assert!(parsed.is_ok(), "unexpected error: {parsed:?}");
+}
+
+/// `peek_at` folding semantics must be unchanged by the iterative rewrite:
+/// CRs are skipped, `CRLF`/`LF` collapse to a single `\n`, and a following
+/// space or tab unfolds the continuation. `consume_char` is the public
+/// consumer of the look-ahead, so its results pin the semantics.
+#[test]
+fn test_vobject_peek_at_folding_semantics_frozen() {
+    assert_eq!(Parser::new("abc").consume_char(), Some('a'));
+    assert_eq!(Parser::new("\r\nabc").consume_char(), Some('\n'));
+    assert_eq!(Parser::new("\nabc").consume_char(), Some('\n'));
+    assert_eq!(Parser::new("a\nb").consume_char(), Some('a'));
+    assert_eq!(Parser::new("\r").consume_char(), None);
+    assert_eq!(Parser::new("").consume_char(), None);
+    // Folded continuations are unfolded: the char after `\r\n ` / `\r\n\t` is
+    // produced directly, consuming the whole fold.
+    assert_eq!(Parser::new("\r\n b").consume_char(), Some('b'));
+    assert_eq!(Parser::new("\r\n\tb").consume_char(), Some('b'));
+    // CRLF (without a following WSP) is a plain line terminator.
+    let mut p = Parser::new("\r\nabc");
+    assert_eq!(p.consume_char(), Some('\n'));
+    assert_eq!(p.pos, 2);
+}

@@ -37,9 +37,51 @@ use crate::{
         themes::*,
         FileSettings,
     },
-    terminal::{Color, Key},
+    terminal::{Color, Key, ShortcutKeys},
     Attr,
 };
+
+/// TEMP: verify the sample-config shortcut comments round-trip through
+/// the real deserialization path.
+#[test]
+fn sample_config_shortcuts_roundtrip() {
+    let sample = std::fs::read_to_string(
+        env!("CARGO_MANIFEST_DIR").to_string() + "/docs/samples/sample-config.toml",
+    )
+    .unwrap();
+    let sec = &sample[sample.find("###shortcuts").unwrap()..sample.find("#[composing]").unwrap()];
+    let mut text = String::new();
+    for line in sec.lines() {
+        if line.starts_with("###shortcuts") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("#[shortcuts.") {
+            // `ShortcutsOverride` holds the sections directly; the
+            // outer `[shortcuts]` table belongs to `FileSettings`.
+            text.push('[');
+            text.push_str(rest);
+            text.push('\n');
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("## ") {
+            if rest.contains(" = ") && !rest.starts_with("All shortcut") {
+                text.push_str(rest);
+                text.push('\n');
+            }
+        }
+    }
+    let override_: crate::conf::ShortcutsOverride =
+        toml::from_str(&text).expect("sample shortcut block must deserialize via the real path");
+    // Spot-check round-trips.
+    assert_eq!(
+        override_.listing.as_ref().unwrap().scroll_up.to_string(),
+        "Up/k"
+    );
+    assert_eq!(
+        override_.general.as_ref().unwrap().quit.to_string(),
+        "Esc/q"
+    );
+}
 
 pub struct ConfigFile {
     pub path: PathBuf,
@@ -197,18 +239,125 @@ focus_right = "Right"
     let thread_view = config.shortcuts.thread_view.key_values();
     assert_eq!(
         thread_view.get("focus_left"),
-        Some(&Key::Left),
+        Some(&ShortcutKeys::single(Key::Left)),
         "focus_left must parse from [shortcuts.thread-view]"
     );
     assert_eq!(
         thread_view.get("focus_right"),
-        Some(&Key::Right),
+        Some(&ShortcutKeys::single(Key::Right)),
         "focus_right must parse from [shortcuts.thread-view]"
     );
 
     if let Err(err) = tempdir.close() {
         eprintln!("Could not cleanup tempdir: {err}");
     }
+}
+
+/// Shortcut fields accept up to two comma-separated keys; a bare single
+/// value keeps its previous single-key meaning.
+#[test]
+fn test_conf_multi_key_shortcut_parse() {
+    let tempdir = tempfile::tempdir().unwrap();
+    // Each binding parses in its own config file (`deny_unknown_fields`
+    // and section field sets differ between sections).
+    for (field, value, expected) in [
+        (
+            "scroll_up",
+            "\"Up,k\"",
+            ShortcutKeys::double(Key::Up, Key::Char('k')),
+        ),
+        ("scroll_down", "\"Down\"", ShortcutKeys::single(Key::Down)),
+        ("scroll_up", "'j'", ShortcutKeys::single(Key::Char('j'))),
+    ] {
+        let config = format!(
+            r#"
+[accounts.shortcut-test]
+root_mailbox = "{}"
+format = "maildir"
+send_mail = 'false'
+identity = "username@hostname.local"
+
+[shortcuts.listing]
+{field} = {value}
+"#,
+            tempdir.path().display()
+        );
+        let new_file = ConfigFile::new(&config, &tempdir).unwrap();
+        let config = FileSettings::validate(new_file.path.clone(), true)
+            .expect("could not parse multi-key shortcut config");
+        let listing = config.shortcuts.listing.key_values();
+        assert_eq!(
+            listing.get(field),
+            Some(&expected),
+            "{field} = {value} must parse as {expected:?}"
+        );
+    }
+    if let Err(err) = tempdir.close() {
+        eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+
+/// More than two comma-separated keys must be rejected at parse time.
+#[test]
+fn test_conf_three_key_shortcut_rejected() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = format!(
+        r#"
+[accounts.shortcut-test]
+root_mailbox = "{}"
+format = "maildir"
+send_mail = 'false'
+identity = "username@hostname.local"
+
+[shortcuts.listing]
+scroll_up = "a,b,c"
+"#,
+        tempdir.path().display()
+    );
+    let new_file = ConfigFile::new(&config, &tempdir).unwrap();
+    let err = FileSettings::validate(new_file.path.clone(), true).unwrap_err();
+    assert!(
+        err.to_string().contains("at most two comma-separated keys"),
+        "three-key binding must be rejected with a clear error, got: {err}"
+    );
+
+    if let Err(err) = tempdir.close() {
+        eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+/// The horizontal navigation defaults mirror the vertical ones (arrow +
+/// vim key either way), and the two settings that used to default to
+/// `h` — which now belongs to the navigation key group — moved off it:
+/// `thread-view.collapse_subtree` to `H` and
+/// `envelope-view.toggle_expand_headers` to `x`. Users who prefer the
+/// old single-key behavior can rebind them in their config.
+#[test]
+fn test_conf_navigation_keygroup_conflicts_resolved() {
+    let general = GeneralShortcuts::default().key_values();
+    assert_eq!(
+        general.get("scroll_left"),
+        Some(&ShortcutKeys::double(Key::Left, Key::Char('h'))),
+        "general.scroll_left must default to Left/h"
+    );
+    assert_eq!(
+        general.get("scroll_right"),
+        Some(&ShortcutKeys::double(Key::Right, Key::Char('l'))),
+        "general.scroll_right must default to Right/l"
+    );
+
+    let thread_view = ThreadViewShortcuts::default().key_values();
+    assert_eq!(
+        thread_view.get("collapse_subtree"),
+        Some(&ShortcutKeys::single(Key::Char('H'))),
+        "collapse_subtree must not claim the navigation key h"
+    );
+
+    let env_view = EnvelopeViewShortcuts::default().key_values();
+    assert_eq!(
+        env_view.get("toggle_expand_headers"),
+        Some(&ShortcutKeys::single(Key::Char('x'))),
+        "toggle_expand_headers must not claim the navigation key h"
+    );
 }
 
 #[test]
@@ -235,14 +384,14 @@ save_all_attachments = "C-s"
     let env_view = config.shortcuts.envelope_view.key_values();
     assert_eq!(
         env_view.get("save_all_attachments"),
-        Some(&Key::Ctrl('s')),
+        Some(&ShortcutKeys::single(Key::Ctrl('s'))),
         "save_all_attachments must parse from [shortcuts.envelope-view] as C-s"
     );
 
     let defaults = EnvelopeViewShortcuts::default().key_values();
     assert_eq!(
         defaults.get("save_all_attachments"),
-        Some(&Key::Ctrl('s')),
+        Some(&ShortcutKeys::single(Key::Ctrl('s'))),
         "save_all_attachments must default to C-s"
     );
 
@@ -308,9 +457,9 @@ identity = "username@hostname.local"
     }
 }
 
-/// Arrow keys are the default vertical navigation everywhere: every
-/// shortcut section's `scroll_up`/`scroll_down` defaults to `Up`/`Down`,
-/// not `k`/`j`.
+/// Vertical navigation defaults are vim-style doubles everywhere: every
+/// shortcut section's `scroll_up`/`scroll_down` defaults to `Up`/`k` and
+/// `Down`/`j` (either key scrolls).
 #[test]
 fn test_conf_arrow_navigation_defaults() {
     for (section, values) in [
@@ -323,13 +472,13 @@ fn test_conf_arrow_navigation_defaults() {
     ] {
         assert_eq!(
             values.get("scroll_up"),
-            Some(&Key::Up),
-            "{section}.scroll_up must default to Up"
+            Some(&ShortcutKeys::double(Key::Up, Key::Char('k'))),
+            "{section}.scroll_up must default to Up/k"
         );
         assert_eq!(
             values.get("scroll_down"),
-            Some(&Key::Down),
-            "{section}.scroll_down must default to Down"
+            Some(&ShortcutKeys::double(Key::Down, Key::Char('j'))),
+            "{section}.scroll_down must default to Down/j"
         );
     }
 }
@@ -339,7 +488,7 @@ fn test_conf_composer_close_shortcut_default() {
     let defaults = ComposingShortcuts::default().key_values();
     assert_eq!(
         defaults.get("close"),
-        Some(&Key::Esc),
+        Some(&ShortcutKeys::single(Key::Esc)),
         "composing.close must default to Esc"
     );
 }
@@ -368,7 +517,7 @@ close = "C-x"
     let composing = config.shortcuts.composing.key_values();
     assert_eq!(
         composing.get("close"),
-        Some(&Key::Ctrl('x')),
+        Some(&ShortcutKeys::single(Key::Ctrl('x'))),
         "close must parse from [shortcuts.composing] as C-x"
     );
 
@@ -699,4 +848,94 @@ interval_ms = 51"#
             "sequence".to_string() => frames,
         },
     );
+}
+
+/// Minimal valid account config whose `root_mailbox` is an existing directory,
+/// with `extra` appended (e.g. a `[listing]` or `[terminal]` table).
+fn minimal_config(root: &std::path::Path, extra: &str) -> String {
+    let root = root.display();
+    format!(
+        "[accounts.account-name]\nroot_mailbox = \"{root}\"\nformat = \"maildir\"\n\
+         send_mail = 'false'\nidentity = \"email@example.com\"\n{extra}\n"
+    )
+}
+
+/// An empty custom spinner would later panic in the status bar
+/// (`wrapping_rem(0)`); it must be replaced with the default at load time and
+/// reported to the user.
+#[test]
+fn test_empty_progress_spinner_sequence_is_rejected_with_warning() {
+    let root = tempfile::tempdir().unwrap();
+    for spinner in [
+        "progress_spinner_sequence = []",
+        "progress_spinner_sequence = { frames = [], interval_ms = 100 }",
+    ] {
+        let config = minimal_config(root.path(), &format!("[terminal]\n{spinner}"));
+        let s = FileSettings::validate_string(config, false).unwrap();
+        assert!(
+            s.terminal.progress_spinner_sequence.is_none(),
+            "empty frames must fall back to the default"
+        );
+        assert_eq!(s.config_warnings.len(), 1, "{:?}", s.config_warnings);
+        assert!(
+            s.config_warnings[0].contains("progress_spinner_sequence"),
+            "{:?}",
+            s.config_warnings
+        );
+    }
+}
+
+/// `sidebar_ratio > 100` underflows the listing layout arithmetic later; it
+/// must be clamped at load time and reported.
+#[test]
+fn test_sidebar_ratio_out_of_range_is_clamped_with_warning() {
+    let root = tempfile::tempdir().unwrap();
+    let config = minimal_config(root.path(), "[listing]\nsidebar_ratio = 200");
+    let s = FileSettings::validate_string(config, false).unwrap();
+    assert_eq!(s.listing.sidebar_ratio, 100);
+    assert_eq!(s.config_warnings.len(), 1, "{:?}", s.config_warnings);
+    assert!(
+        s.config_warnings[0].contains("sidebar_ratio"),
+        "{:?}",
+        s.config_warnings
+    );
+
+    // Valid values are untouched and produce no warning.
+    let config = minimal_config(root.path(), "[listing]\nsidebar_ratio = 50");
+    let s = FileSettings::validate_string(config, false).unwrap();
+    assert_eq!(s.listing.sidebar_ratio, 50);
+    assert!(s.config_warnings.is_empty());
+}
+
+/// Warnings collected while loading must reach `Settings`, which `State::new`
+/// then drains into user-facing notifications.
+#[test]
+fn test_config_warnings_propagate_to_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = minimal_config(root.path(), "[listing]\nsidebar_ratio = 200");
+    let file = ConfigFile::new(&config, &dir).unwrap();
+    let settings = crate::conf::Settings::from_path(file.path.clone()).unwrap();
+    assert_eq!(settings.listing.sidebar_ratio, 100);
+    assert_eq!(
+        settings.config_warnings.len(),
+        1,
+        "{:?}",
+        settings.config_warnings
+    );
+    assert!(settings.config_warnings[0].contains("sidebar_ratio"));
+}
+
+/// `get_included_configs` used `conf_path.parent().unwrap()`; a parentless
+/// path (empty or `/`) must return an error, not panic.
+#[test]
+fn test_get_included_configs_parentless_path_does_not_panic() {
+    use std::path::Path;
+
+    use crate::conf::preprocessing::get_included_configs;
+
+    for path in [Path::new(""), Path::new("/")] {
+        let res = get_included_configs(path);
+        assert!(res.is_err(), "{path:?} must not yield includes");
+    }
 }

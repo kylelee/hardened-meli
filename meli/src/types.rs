@@ -67,6 +67,11 @@ pub enum StatusEvent {
     JobCanceled(JobId),
     SetMouse(bool),
     ScrollUpdate(ScrollUpdate),
+    /// Sent by the focused listing/tree component whenever its cursor
+    /// changes `(AccountHash, MailboxHash)`. The [`StatusBar`] consumes it
+    /// to track which mailbox's `MailboxStatus::Parsing` ratio drives the
+    /// central `LineGauge`; ignored by every other component.
+    FocusMailbox(AccountHash, MailboxHash),
 }
 
 /// [`ThreadEvent`] encapsulates all of the possible values we need to transfer
@@ -321,6 +326,11 @@ impl std::fmt::Display for NotificationType {
 
 #[derive(Debug)]
 pub enum UIEvent {
+    /// Request to exit the application, emitted when the quit binding
+    /// is not consumed by any focused sub-view (layered quit: views
+    /// close first, only a top-level view exits the app). `State`
+    /// records it and the main loop performs the actual shutdown.
+    Exit,
     Input(Key),
     CmdInput(Key),
     InsertInput(Key),

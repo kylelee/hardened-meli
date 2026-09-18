@@ -453,10 +453,16 @@ impl MailBackend for JmapType {
         let connection = self.connection.clone();
         Ok(Box::pin(try_fn_stream(|emitter| async move {
             // Suggested minimum from RFC8620 Section 2 "The JMAP Session Resource" is 500.
-            let batch_size: u64 = store.core_capabilities.lock().unwrap()
-                [JmapCoreCapability::uri()]
-            .max_objects_in_get
-            .min(500);
+            let batch_size: u64 = {
+                let core_capabilities = store.core_capabilities.lock().unwrap();
+                core_capabilities
+                    .get(JmapCoreCapability::uri())
+                    .map(|c| c.max_objects_in_get)
+                    .unwrap_or(500)
+                    // A `0` limit would make the fetch position advance by
+                    // zero and loop forever; keep it within 1..=500.
+                    .clamp(1, 500)
+            };
             let mut fetch_state = EmailFetcher {
                 connection,
                 store,
@@ -561,7 +567,7 @@ impl MailBackend for JmapType {
              */
             let (upload_url, mail_account_id) = {
                 let g = conn.session_guard().await?;
-                (g.upload_url.clone(), g.mail_account_id())
+                (g.upload_url.clone(), g.mail_account_id()?)
             };
             let res_text = conn
                 .post_async(
@@ -618,16 +624,14 @@ impl MailBackend for JmapType {
                 }
                 Ok(s) => s,
             };
-            let m = email::EmailImportResponse::try_from(v.method_responses.remove(0)).map_err(
-                |err| {
-                    let ierr: Result<email::EmailImportError> = deserialize_from_str(&res_text);
-                    if let Ok(err) = ierr {
-                        Error::new(format!("Could not save message: {err:?}"))
-                    } else {
-                        err
-                    }
-                },
-            )?;
+            let m = email::EmailImportResponse::try_from(v.take_first()?).map_err(|err| {
+                let ierr: Result<email::EmailImportError> = deserialize_from_str(&res_text);
+                if let Ok(err) = ierr {
+                    Error::new(format!("Could not save message: {err:?}"))
+                } else {
+                    err
+                }
+            })?;
 
             if let Some(err) = m.not_created.and_then(|m| m.get(&creation_id).cloned()) {
                 return Err(Error::new(format!("Could not save message: {err:?}")));
@@ -656,9 +660,16 @@ impl MailBackend for JmapType {
         let store = self.store.clone();
         let connection = self.connection.clone();
         let filter = if let Some(mailbox_hash) = mailbox_hash {
-            let mailbox_id = self.store.mailboxes.read().unwrap()[&mailbox_hash]
-                .id
-                .clone();
+            let mailbox_id = {
+                let mailboxes_lck = self.store.mailboxes.read().unwrap();
+                mailboxes_lck
+                    .get(&mailbox_hash)
+                    .map(|m| m.id.clone())
+                    .ok_or_else(|| {
+                        Error::new(format!("Mailbox with hash {mailbox_hash} not found"))
+                            .set_kind(ErrorKind::NotFound)
+                    })?
+            };
 
             let mut f =
                 Filter::Condition(email::EmailFilterCondition::new().in_mailbox(Some(mailbox_id)));
@@ -671,7 +682,7 @@ impl MailBackend for JmapType {
         Ok(Box::pin(async move {
             let mut conn = connection.lock().await;
             conn.connect().await?;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
             let email_call = email::EmailQuery::new(
                 Query::new()
                     .account_id(mail_account_id)
@@ -697,7 +708,7 @@ impl MailBackend for JmapType {
                 Ok(s) => s,
             };
             store.online_status.update_timestamp(None).await;
-            let m = QueryResponse::<email::EmailObject>::try_from(v.method_responses.remove(0))?;
+            let m = QueryResponse::<email::EmailObject>::try_from(v.take_first()?)?;
             let QueryResponse::<email::EmailObject> { ids, .. } = m;
             let ret = ids.into_iter().map(|id| id.into_hash()).collect();
             Ok(ret)
@@ -724,7 +735,7 @@ impl MailBackend for JmapType {
         Ok(Box::pin(async move {
             let mailbox_state = store.mailbox_state.lock().await.clone();
             let mut conn = connection.lock().await;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
             let mailbox_set_call = mailbox::MailboxSet::new(
                 Set::<mailbox::MailboxObject>::new(mailbox_state)
                     .account_id(mail_account_id)
@@ -751,7 +762,12 @@ impl MailBackend for JmapType {
                         None
                     }
                 })
-                .unwrap();
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "Server did not return a mailbox with the renamed path `{new_path}`"
+                    ))
+                    .set_kind(ErrorKind::ProtocolError)
+                })?;
             *store.mailboxes.write().unwrap() = new_mailboxes;
             Ok(new_mailbox)
         }))
@@ -766,7 +782,7 @@ impl MailBackend for JmapType {
         Ok(Box::pin(async move {
             let mailbox_state = store.mailbox_state.lock().await.clone();
             let mut conn = connection.lock().await;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
             let mailbox_set_call = mailbox::MailboxSet::new(
                 Set::<mailbox::MailboxObject>::new(mailbox_state)
                     .account_id(mail_account_id)
@@ -799,7 +815,12 @@ impl MailBackend for JmapType {
                 .values()
                 .find(|m| m.path() == path)
                 .map(|m| m.hash())
-                .unwrap();
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "Server did not return the created mailbox `{path}`"
+                    ))
+                    .set_kind(ErrorKind::ProtocolError)
+                })?;
 
             Ok((id, new_mailboxes))
         }))
@@ -823,7 +844,7 @@ impl MailBackend for JmapType {
         let connection = self.connection.clone();
         Ok(Box::pin(async move {
             let mut conn = connection.lock().await;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
             let mailbox_state = store.mailbox_state.lock().await.clone();
 
             let mailbox_set_call = mailbox::MailboxSet::new(
@@ -853,7 +874,7 @@ impl MailBackend for JmapType {
                 not_destroyed,
                 new_state,
                 ..
-            } = SetResponse::<mailbox::MailboxObject>::try_from(v.method_responses.remove(0))?;
+            } = SetResponse::<mailbox::MailboxObject>::try_from(v.take_first()?)?;
             *store.mailbox_state.lock().await = Some(new_state);
             if let Some(ids) = not_destroyed {
                 if !ids.is_empty() {
@@ -908,7 +929,7 @@ impl MailBackend for JmapType {
         Ok(Box::pin(async move {
             let mailbox_state = store.mailbox_state.lock().await.clone();
             let mut conn = connection.lock().await;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
             let mailbox_set_call = mailbox::MailboxSet::new(
                 Set::<mailbox::MailboxObject>::new(mailbox_state)
                     .account_id(mail_account_id)
@@ -930,9 +951,7 @@ impl MailBackend for JmapType {
                 new_state,
                 not_updated,
                 ..
-            } = SetResponse::<mailbox::MailboxObject>::try_from(
-                *v.method_responses.last().unwrap(),
-            )?;
+            } = SetResponse::<mailbox::MailboxObject>::try_from(v.last()?)?;
             *conn.store.mailbox_state.lock().await = Some(new_state);
             conn.last_method_response = Some(res_text);
             if let Some(ids) = not_updated {
@@ -1015,7 +1034,7 @@ impl MailBackend for JmapType {
             }
             let batch_len = update_map.len();
             let conn = connection.lock().await;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
             let state = conn.store.email_state.lock().await.clone();
 
             let email_set_call = email::EmailSet::new(
@@ -1045,7 +1064,7 @@ impl MailBackend for JmapType {
                 not_updated,
                 new_state,
                 ..
-            } = SetResponse::<email::EmailObject>::try_from(v.method_responses.remove(0))?;
+            } = SetResponse::<email::EmailObject>::try_from(v.take_first()?)?;
             *conn.store.email_state.lock().await = Some(new_state);
             if let Some(ids) = not_updated {
                 if !ids.is_empty() {
@@ -1139,7 +1158,7 @@ impl MailBackend for JmapType {
             }
             let batch_len = update_map.len();
             let conn = connection.lock().await;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
             let state = conn.store.email_state.lock().await.clone();
 
             let email_set_call = email::EmailSet::new(
@@ -1177,7 +1196,7 @@ impl MailBackend for JmapType {
                 not_updated,
                 new_state,
                 ..
-            } = SetResponse::<email::EmailObject>::try_from(v.method_responses.remove(0))?;
+            } = SetResponse::<email::EmailObject>::try_from(v.take_first()?)?;
             if let Some(ref ids) = not_updated {
                 for id in ids.keys() {
                     updated_map.swap_remove(id);
@@ -1195,7 +1214,7 @@ impl MailBackend for JmapType {
                 drop(tag_index_lck);
             }
             let GetResponse::<email::EmailObject> { list, .. } =
-                GetResponse::try_from(v.method_responses.pop().unwrap())?;
+                GetResponse::try_from(v.take_last()?)?;
             if !list.is_empty() {
                 let list = list
                     .into_iter()
@@ -1262,7 +1281,7 @@ impl MailBackend for JmapType {
             }
             let batch_len = destroy_vec.len();
             let conn = connection.lock().await;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
             let state = conn.store.email_state.lock().await.clone();
 
             let email_set_call = email::EmailSet::new(
@@ -1292,7 +1311,7 @@ impl MailBackend for JmapType {
                 not_destroyed,
                 new_state,
                 ..
-            } = SetResponse::<email::EmailObject>::try_from(v.method_responses.remove(0))?;
+            } = SetResponse::<email::EmailObject>::try_from(v.take_first()?)?;
             *conn.store.email_state.lock().await = Some(new_state);
             if let Some(ref ids) = not_destroyed {
                 for id in ids.keys() {
@@ -1385,7 +1404,7 @@ impl MailBackend for JmapType {
                 })
             };
             let conn = connection.lock().await;
-            let mail_account_id = conn.session_guard().await?.mail_account_id();
+            let mail_account_id = conn.session_guard().await?.mail_account_id()?;
 
             // [ref:TODO] smarter identity detection based on From: ?
             let Some(identity_id) = conn.session_guard().await?.mail_identity_id() else {
@@ -1434,7 +1453,7 @@ impl MailBackend for JmapType {
                     .await?
                     .text()
                     .await?;
-                let v: MethodResponse = match deserialize_from_str(&res_text) {
+                let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                     Err(err) => {
                         _ = conn.store.online_status.set(None, Err(err.clone())).await;
                         return Err(err);
@@ -1443,14 +1462,26 @@ impl MailBackend for JmapType {
                 };
 
                 // [ref:TODO] handle this better?
-                let res: Value = serde_json::from_str(v.method_responses[0].get())?;
+                let res: Value = serde_json::from_str(v.take_first()?.get())?;
 
-                let _new_state = res[1]["newState"].as_str().unwrap().to_string();
-                let _old_state = res[1]["oldState"].as_str().unwrap().to_string();
+                let missing_field = |field: &str| {
+                    Error::new(format!(
+                        "Server's Email/import response is missing the `{field}` field"
+                    ))
+                    .set_kind(ErrorKind::ProtocolError)
+                };
+                let _new_state = res[1]["newState"]
+                    .as_str()
+                    .ok_or_else(|| missing_field("newState"))?
+                    .to_string();
+                let _old_state = res[1]["oldState"]
+                    .as_str()
+                    .ok_or_else(|| missing_field("oldState"))?
+                    .to_string();
                 let email_id = Id::from(
                     res[1]["created"]["newid"]["id"]
                         .as_str()
-                        .unwrap()
+                        .ok_or_else(|| missing_field("created.newid.id"))?
                         .to_string(),
                 );
 

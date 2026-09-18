@@ -881,7 +881,13 @@ impl std::convert::TryFrom<&RawValue> for EmailQueryChangesResponse {
 
     fn try_from(t: &RawValue) -> std::result::Result<Self, Self::Error> {
         let res: (String, Self, String) = deserialize_from_str(t.get())?;
-        assert_eq!(&res.0, "Email/queryChanges");
+        if res.0 != "Email/queryChanges" {
+            return Err(crate::error::Error::new(format!(
+                "Expected an `Email/queryChanges` method response, but the server sent `{}`",
+                res.0
+            ))
+            .set_kind(crate::error::ErrorKind::ProtocolError));
+        }
         Ok(res.1)
     }
 }

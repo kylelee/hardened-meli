@@ -206,7 +206,10 @@ divert(-1)
 changequote(`"', `"')dnl
 "#;
     let mut ret = vec![];
-    let prefix = conf_path.parent().unwrap().to_path_buf();
+    let prefix = conf_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
     let mut stack = vec![(None::<PathBuf>, conf_path.to_path_buf())];
     let mut contents = String::new();
     while let Some((parent, p)) = stack.pop() {

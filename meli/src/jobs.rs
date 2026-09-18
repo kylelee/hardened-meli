@@ -256,13 +256,44 @@ impl JobExecutor {
             workers.push((new_worker, p));
         }
 
-        // Reactor thread
+        // Reactor / async-job thread.
+        //
+        // Every `IsAsync::Async` job (all remote-backend work: IMAP fetch,
+        // watch, refresh...) runs on this single `smol::Executor`. A panic
+        // inside any of those futures — or inside the `Drop` of a canceled
+        // one, which also runs here — propagates out of `ex.run` and kills
+        // this thread. With the thread gone, every subsequent async job
+        // never runs and never completes: timers stop firing, the watch
+        // stream stops restarting, fetches never resolve — the UI freezes
+        // with the main thread alive but waiting on events that will never
+        // arrive. (Captured with `gdb -p` on a frozen instance: only the
+        // input thread and the main thread remain.)
+        //
+        // So do not let one job's panic take the whole lane down: restart
+        // the executor in a loop and log the panic. State held by the dead
+        // futures (connection handles, canceled jobs) is dropped during
+        // unwinding, which is exactly the resource-release semantics the
+        // cancel path already relies on.
         thread::Builder::new()
             .name("meli-reactor".to_string())
             .spawn(move || {
-                let ex = smol::Executor::new();
-
-                futures::executor::block_on(ex.run(futures::future::pending::<()>()));
+                loop {
+                    let executor = smol::Executor::new();
+                    let run = || {
+                        futures::executor::block_on(executor.run(futures::future::pending::<()>()))
+                    };
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).is_err() {
+                        log::error!(
+                            "async job executor panicked; restarting it (a pending \
+                             job may have been lost)"
+                        );
+                        continue;
+                    }
+                    // `ex.run(pending)` never completes; a `Ok` here is
+                    // unreachable, but keep the loop well-typed and avoid a
+                    // spin on a hypothetical immediate return.
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
             })
             .unwrap();
 

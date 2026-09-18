@@ -16,6 +16,10 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+- 底栏三段式重构（计划 `statusbar-gauge-spinner`）：底栏单行经 `Layout::horizontal` 切分为左状态段、中部 `LineGauge` 段、右 hints 段。中部 `LineGauge` 由焦点邮箱的 `MailboxStatus::Parsing(done, total)` 驱动，按 `done/total` 推进并显示 `Fetch N/T` 标签；右段从 `Component::shortcuts()` 实时聚合 `q:quit ?:toggle_help F5:refresh`（行窄时按 `…` / `...` 截断）。左段右缘新增后端 chip `[maildir]` / `[imap ✓]` / `[imap ✘]` 与焦点邮箱标签 `📩 INBOX:42`，均由 `context.accounts` 加新的 `StatusBar.focus: Option<(AccountHash, MailboxHash)>` 字段在 `draw` 时现算，不引入新 theme key。ASCII 终端以 `+`/`x` 替代 ✓/✘ 并去掉信封 emoji；中部 gauge 使用 `filled_symbol # / .` 与 `status.bar` 反色（与 Insert 模式指示器共用同一调色板分叉）。
+
+- 底栏数据通道。`StatusEvent` 新增 `FocusMailbox(AccountHash, MailboxHash)`，由当前 listing/树组件报告用户焦点；`Component` trait 新增 `status_watch()` 默认 `None`，`Listing` 覆写为返回光标 `(AccountHash, MailboxHash)`，`Tabbed` 转发活跃子组件的返回值。`StatusBar` 消费 `FocusMailbox` 记录焦点；同时新增**非消费**的 `MailboxUpdate((acc, mb))` 与 `AccountStatusChange(acc, _)` 事件臂，仅在事件 `AccountHash` 命中焦点账号时标脏，非焦点刷新不再触发底栏重绘。`Listing` 内 8 处、`Tabbed` 内 2 处 `UpdateStatus` 发送点统一收敛到一个 helper，同时发出字符串与结构化焦点事件。
+
 - 输入线程私有 CSI 看门狗：检测「字节被 crossterm 消费但无事件产生」的卡死（如 mux/终端迟到的 `CSI ?` 私有序列回复在 crossterm 0.29 解析器内无限缓冲吞键），3s 停滞 + 2s 输入静默判定后自动注入 DA1 查询（`ESC[c`）触发终端回复使解析器整包清缓冲，恢复后续按键（被吞按键不可恢复）；连续 3 次注入无恢复则进程内停用；正常使用零注入。输入循环主等待重构为 `poll(2)`，输入线程将 stdin 换为非阻塞 tty 描述以避免 crossterm 内部读取死锁。新增 `scripts/test-private-csi-watchdog.sh` PTY 回归门（tmux 缺失时 SKIP）。
 
 - Composer 新增关闭快捷键（`[shortcuts.composing]` 的 `close` 键，默认 `Esc`）：在邮件编辑界面按 `Esc` 关闭标签页返回之前的界面，草稿有未保存修改时弹出 x/y/n 对话框（不保存退出 / 保存草稿退出 / 取消）；附件管理模式按 `Esc` 返回主编辑界面。同步补齐移除附件、附件内层保存、收件人确认、gpg 密钥确认四处 `has_changes` 缺口，避免 Esc 关闭时静默丢弃未保存修改（计划 `composer-esc-exit`）。
@@ -29,6 +33,8 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 - 看门狗已知限制（与 vendor 补丁时代的非回归项一致或为新增残留）：`<`（SGR 鼠标半截序列）卡死不受 DA1 注入保护；迟到 OSC 10/11 回复产生的垃圾键为正常事件、看门狗对其失明；mux 以 <2s 间隔持续注入 `CSI ?` 回复时看门狗不触发；极慢链路大粘贴理论上有 DA1 字节混入风险；卡死恢复延迟最坏 ≈5s（T_STALL 3s + T_QUIET 2s + DA1 往返）；stdin 非 tty（重定向）时 crossterm 私有 `/dev/tty` 无法置非阻塞、看门狗观察受限；stdin 指向非控制终端的 tty 时输入源会切换到 `/dev/tty`。
 
 ### 缺陷修复（Bug Fixes）
+
+- 增量批次保留 `MailboxStatus::Parsing` 总量（计划 `statusbar-gauge-spinner`）：`Account::process_event` 的增量 `Fetch` 分支此前每批都会把运行中 total 清零（`Parsing(prev_len + len, 0)`），导致任何依赖 `MailboxStatus` 的 `LineGauge` 在第一批之后无法恢复进度。现在把 `done` 与 `total` 同时读出，与累计的 `done` 一起原样写回，并附注释说明 total 为何是承重字段。
 
 - 修复启动时版本迁移提示误判：`${XDG_DATA_HOME}/meli/.version` 中残留的非 semver 值（如 `meli-git`）此前按字符串字典序被当作"更新的版本"，导致每次启动都弹出降级警告与 CAUTION 交互询问。现在该值会被诚实报告为一行 warning，按"早于全部已知版本"处理（经 `is_applicable` 预检后照常提供适用迁移），并在运行结束时写回当前版本，一次启动即自愈。
 - 版本比较改为 semver 数值比较：修复 `0.10.0` 等合法版本因字典序（`'1' < '9'`）被误判为旧版本的问题；pre-release（如 `0.8.8-rc1`）现按 semver 先行级排在同版本号正式版之前，其迁移定位不再回退为全量迁移。

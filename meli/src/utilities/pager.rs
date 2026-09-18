@@ -66,6 +66,83 @@ fn collapse_blank_line_runs(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(ret)
 }
 
+/// Render a `ratatui::widgets::Scrollbar` over `area` into `grid`.
+///
+/// `position` is the pager's first visible row/column, `content_len` the
+/// total wrapped lines/columns and `viewport_len` the visible window size,
+/// so the thumb length and offset encode the reading-position ratio. The
+/// widget renders into a temporary ratatui buffer pre-filled with
+/// `theme_default` (so the gutter keeps the theme background) and is
+/// blitted back onto the grid — the same bridge pattern
+/// `StatusBar::render_line_gauge` uses.
+pub fn draw_scrollbar(
+    grid: &mut CellBuffer,
+    area: Area,
+    context: &Context,
+    horizontal: bool,
+    position: usize,
+    viewport_len: usize,
+    content_len: usize,
+) {
+    use ratatui::widgets::{
+        Scrollbar as RatatuiScrollbar, ScrollbarOrientation, ScrollbarState,
+        StatefulWidget as RatatuiStatefulWidget,
+    };
+
+    if area.is_empty() || content_len == 0 {
+        return;
+    }
+    let theme_default = crate::conf::value(context, "theme_default");
+    let mut thumb = crate::conf::value(context, "widgets.options.highlighted");
+    if !context.settings.terminal.use_color() {
+        thumb.attrs |= Attr::REVERSE;
+    }
+    // Same palette as the previous meli `ScrollBar`: thumb/arrow foreground
+    // is the highlighted option's background color.
+    let thumb_style = ratatui::style::Style::new()
+        .fg(thumb.bg.into())
+        .add_modifier(thumb.attrs.into());
+    let track_style = ratatui::style::Style::from(theme_default);
+    let orientation = if horizontal {
+        ScrollbarOrientation::HorizontalBottom
+    } else {
+        ScrollbarOrientation::VerticalRight
+    };
+    let mut scrollbar = RatatuiScrollbar::new(orientation)
+        .thumb_style(thumb_style)
+        .track_style(track_style)
+        .begin_style(thumb_style)
+        .end_style(thumb_style);
+    if grid.ascii_drawing {
+        scrollbar = scrollbar
+            .thumb_symbol("#")
+            .track_symbol(Some(if horizontal { "-" } else { "|" }))
+            .begin_symbol(Some(if horizontal { "<" } else { "^" }))
+            .end_symbol(Some(if horizontal { ">" } else { "v" }));
+    }
+    // ratatui's `position` ranges over `0..content_length` (position =
+    // content_length - 1 puts the thumb exactly at the track bottom) and
+    // `viewport_content_length` only sizes the thumb. Map the pager's
+    // scroll range (positions 0..=content_len - viewport_len) onto that
+    // scale so the thumb both starts at the top and ends flush at the
+    // bottom.
+    let scrollable = content_len
+        .saturating_sub(viewport_len)
+        .saturating_add(1)
+        .max(1);
+    let mut state = ScrollbarState::new(scrollable)
+        .position(position)
+        .viewport_content_length(viewport_len);
+    let rect = ratatui::layout::Rect::new(0, 0, area.width() as u16, area.height() as u16);
+    let mut buf = ratatui::buffer::Buffer::empty(rect);
+    // Pre-fill with the theme so untouched cells keep the theme background
+    // after the blit (parity with the old clear_area-then-draw behaviour).
+    // One call instead of a bounds-checked `cell_mut` per cell.
+    buf.set_style(rect, track_style);
+    RatatuiStatefulWidget::render(scrollbar, buf.area, &mut buf, &mut state);
+    crate::terminal::ratatui_bridge::blit_buffer_to_cellbuffer_at(&buf, grid, area);
+}
+
 /// A pager for text.
 /// `Pager` holds its own content in its own `CellBuffer` and when `draw` is
 /// called, it draws the current view of the text. It is responsible for
@@ -96,6 +173,22 @@ pub struct Pager {
     filter_job: Option<(String, JoinHandle<Result<EmbeddedGrid>>)>,
     text_lines: Vec<Line>,
     line_breaker: LineBreakText,
+    /// Cached `linkify` scan of [`Pager::text`], computed on first use and
+    /// invalidated whenever the text changes.
+    ///
+    /// `draw_page` used to rescan the entire body (not just the visible
+    /// lines) and allocate a fresh `Vec<Link>` on every draw, so a few
+    /// hundred KB of mail cost a full scan per scroll step.
+    links: Option<Vec<Link<'static>>>,
+    /// Total wrapped line count of [`Pager::text`], computed on first use.
+    ///
+    /// [`Pager::size`] reports only the lines materialized so far, because
+    /// the line breaker is consumed lazily while rendering. A scrollbar built
+    /// from that count keeps growing as the user reads and cannot show
+    /// progress over content that has not been wrapped yet, so the mail view
+    /// asks for the real total instead. Invalidated whenever the text or the
+    /// wrap width changes.
+    total_height: Option<usize>,
     movement: Option<PageMovement>,
     id: ComponentId,
 }
@@ -120,6 +213,8 @@ impl Clone for Pager {
             filtered_content: self.filtered_content.clone(),
             text_lines: self.text_lines.clone(),
             line_breaker: self.line_breaker.clone(),
+            links: self.links.clone(),
+            total_height: self.total_height,
             movement: self.movement,
             id: ComponentId::default(),
         }
@@ -180,6 +275,8 @@ impl Pager {
         }
 
         self.text = collapse_blank_line_runs(text).into_owned();
+        self.links = None;
+        self.total_height = None;
         self.text_lines.clear();
         self.line_breaker = LineBreakText::new(self.text.clone(), self.reflow, width);
         self.height = 0;
@@ -188,6 +285,26 @@ impl Pager {
         self.set_dirty(true);
         self.initialised = false;
         self.cursor = (0, 0);
+    }
+
+    /// One-shot `linkify` scan of `text`, cached in [`Pager::links`].
+    fn scan_links(text: &str) -> Vec<Link<'static>> {
+        let finder = linkify::LinkFinder::new();
+        finder
+            .links(text)
+            .filter_map(|l| {
+                Some(Link {
+                    start: l.start(),
+                    end: l.end(),
+                    value: std::borrow::Cow::Owned(l.as_str().to_string()),
+                    kind: match l.kind() {
+                        linkify::LinkKind::Url => LinkKind::Url,
+                        linkify::LinkKind::Email => LinkKind::Email,
+                        _ => return None,
+                    },
+                })
+            })
+            .collect()
     }
 
     pub fn from_string(
@@ -310,6 +427,28 @@ impl Pager {
         (self.width, self.height)
     }
 
+    /// The total number of wrapped lines in the current text (not just the
+    /// prefix materialized so far), counted once and cached.
+    ///
+    /// Counting runs the line-breaking state machine over the remaining text
+    /// on a cheap clone of the breaker (the text is shared through an
+    /// `Arc<str>`), so it costs one pass over the body and no extra copy.
+    pub fn total_height(&mut self) -> usize {
+        if let Some(total) = self.total_height {
+            return total;
+        }
+        let total = if self.filtered_content.is_some() {
+            // Filtered content is an already-rendered grid: `height` is its
+            // full height.
+            self.height
+        } else {
+            self.height
+                .saturating_add(self.line_breaker.remaining_lines())
+        };
+        self.total_height = Some(total);
+        total
+    }
+
     pub fn initialise(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
         // Wrap at the *actual* area width. Clamping the wrap width up to
         // `pager.minimum_width` (default 80) made every wrapped line wider
@@ -331,6 +470,7 @@ impl Pager {
 
                 self.line_breaker = line_breaker;
                 self.text_lines.clear();
+                self.total_height = None;
             };
             self.height = self.text_lines.len();
             self.width = width;
@@ -422,22 +562,13 @@ impl Pager {
         {
             let mut area2 = area;
 
-            let finder = linkify::LinkFinder::new();
-            let links = finder
-                .links(&self.text)
-                .filter_map(|l| {
-                    Some(Link {
-                        start: l.start(),
-                        end: l.end(),
-                        value: l.as_str().into(),
-                        kind: match l.kind() {
-                            linkify::LinkKind::Url => LinkKind::Url,
-                            linkify::LinkKind::Email => LinkKind::Email,
-                            _ => return None,
-                        },
-                    })
-                })
-                .collect::<Vec<Link<'_>>>();
+            // Scan for links once per text (not once per draw): the finder
+            // walks the whole body, and `Link` owns its value so the cached
+            // scan can outlive this call.
+            if self.links.is_none() {
+                self.links = Some(Self::scan_links(&self.text));
+            }
+            let links = self.links.as_ref().expect("filled just above");
             let mut cur_link_idx = 0;
             for l in self
                 .text_lines
@@ -616,6 +747,8 @@ impl Pager {
 
 impl Component for Pager {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        #[cfg(debug_assertions)]
+        let __draw_span = crate::state::DrawSpan::enter("Pager");
         if !self.is_dirty() {
             return;
         }
@@ -744,23 +877,22 @@ impl Component for Pager {
         );
         self.draw_page(grid, area.take_cols(cols).take_rows(rows), context);
         if self.show_scrollbar && rows < height {
-            ScrollBar::default().set_show_arrows(true).draw(
+            draw_scrollbar(
                 grid,
                 area.nth_col(area.width().saturating_sub(1)),
                 context,
-                /* position */
+                /* horizontal */ false,
                 self.cursor.1,
-                /* visible_rows */
                 rows,
-                /* length */
                 height,
             );
         }
         if self.show_scrollbar && cols < width {
-            ScrollBar::default().set_show_arrows(true).draw_horizontal(
+            draw_scrollbar(
                 grid,
                 area.nth_row(area.height().saturating_sub(1)),
                 context,
+                /* horizontal */ true,
                 self.cursor.0,
                 cols,
                 width,
@@ -922,10 +1054,28 @@ impl Component for Pager {
                         return true;
                     }
                 };
-                let stdin = command_obj.stdin.as_mut().expect("failed to open stdin");
-                stdin
-                    .write_all(self.text.as_bytes())
-                    .expect("Failed to write to stdin");
+                let Some(stdin) = command_obj.stdin.as_mut() else {
+                    context.replies.push_back(UIEvent::Notification {
+                        title: Some(format!("Could not pipe to {bin}").into()),
+                        source: None,
+                        body: "the child process has no stdin pipe".into(),
+                        kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
+                    });
+                    return true;
+                };
+                if let Err(err) = stdin.write_all(self.text.as_bytes()) {
+                    // A filter command that exits without reading all of its
+                    // stdin (e.g. `head -1`) closes the pipe: report the
+                    // broken pipe instead of panicking.
+                    context.replies.push_back(UIEvent::Notification {
+                        title: Some(format!("Could not pipe to {bin}").into()),
+                        source: None,
+                        body: format!("could not write pager text to the child's stdin: {err}")
+                            .into(),
+                        kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
+                    });
+                    return true;
+                }
 
                 context.replies.push_back(UIEvent::Notification {
                     title: None,
@@ -1577,5 +1727,158 @@ mod tests {
                 "para six",
             ]
         );
+    }
+
+    /// The pager scrollbar (ratatui `Scrollbar` in the last column) must only
+    /// appear when the text is taller than the viewport, and its thumb must
+    /// track the scroll position: at the top of the track at cursor 0, lower
+    /// after a page down, at the bottom after `End`.
+    #[test]
+    fn test_pager_scrollbar_tracks_scroll_position() {
+        let mut context = mock_context();
+        let text = (0..200)
+            .map(|i| format!("line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut pager = Pager::from_string(text, &context, None, None, ThemeAttribute::default());
+        pager.set_show_scrollbar(true);
+        let mut screen =
+            crate::terminal::Screen::<crate::terminal::Virtual>::new(Default::default());
+        pager.process_event(&mut UIEvent::Resize, &mut context);
+        assert!(screen.resize(40, 10));
+        let area = screen.area();
+
+        // Glyphs of the last (gutter) column, top to bottom.
+        fn gutter(
+            screen: &crate::terminal::Screen<crate::terminal::Virtual>,
+            area: Area,
+        ) -> Vec<char> {
+            let grid = screen.grid();
+            grid.bounds_iter(area.nth_col(area.width() - 1))
+                .flatten()
+                .map(|(x, y)| grid[(x, y)].ch())
+                .collect()
+        }
+        fn thumb_rows(gutter: &[char]) -> Vec<usize> {
+            gutter
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c == '█')
+                .map(|(i, _)| i)
+                .collect()
+        }
+
+        pager.draw(screen.grid_mut(), area, &mut context);
+        let top_gutter = gutter(&screen, area);
+        assert_eq!(top_gutter.first(), Some(&'▲'), "top arrow missing");
+        assert_eq!(top_gutter.last(), Some(&'▼'), "bottom arrow missing");
+        let at_top = thumb_rows(&top_gutter);
+        assert!(
+            !at_top.is_empty() && at_top[0] <= 1,
+            "thumb must start near the track top at cursor 0, got {at_top:?} in {top_gutter:?}"
+        );
+
+        pager.movement = Some(PageMovement::PageDown(10));
+        pager.dirty = true;
+        pager.draw(screen.grid_mut(), area, &mut context);
+        let mid = thumb_rows(&gutter(&screen, area));
+        assert!(
+            !mid.is_empty() && mid[0] > at_top[0],
+            "thumb must move down after paging, got {mid:?}"
+        );
+
+        pager.movement = Some(PageMovement::End);
+        pager.dirty = true;
+        pager.draw(screen.grid_mut(), area, &mut context);
+        let end_gutter = gutter(&screen, area);
+        let at_end = thumb_rows(&end_gutter);
+        assert!(
+            !at_end.is_empty() && at_end[at_end.len() - 1] >= end_gutter.len() - 2,
+            "thumb must sit at the track bottom after End, got {at_end:?} in {end_gutter:?}"
+        );
+
+        // Short text that fits the viewport: no scrollbar glyphs; the gutter
+        // column is ordinary (blank) content area.
+        let mut short = Pager::from_string(
+            "hi\nthere".to_string(),
+            &context,
+            None,
+            None,
+            ThemeAttribute::default(),
+        );
+        short.set_show_scrollbar(true);
+        short.draw(screen.grid_mut(), area, &mut context);
+        let short_gutter = gutter(&screen, area);
+        assert!(
+            !short_gutter.contains(&'█')
+                && !short_gutter.contains(&'▲')
+                && !short_gutter.contains(&'▼'),
+            "no scrollbar must be drawn when content fits, got {short_gutter:?}"
+        );
+    }
+
+    /// Horizontal scrolling follows the navigation key group: both the
+    /// arrow keys and their vim counterparts (`h`/`l`) scroll the pager
+    /// horizontally via the `general.scroll_left`/`scroll_right`
+    /// defaults (`Left/h` and `Right/l`).
+    #[test]
+    fn test_pager_horizontal_scroll_keygroup() {
+        use crate::terminal::{Screen, Virtual};
+
+        let mut context = mock_context();
+        let mut pager = Pager::from_string(
+            "x".repeat(400),
+            &context,
+            None,
+            None,
+            ThemeAttribute::default(),
+        );
+        let theme_default = crate::conf::value(&context, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        pager.draw(screen.grid_mut(), area, &mut context);
+        // `initialise` wraps the text at the pane width, so drive the
+        // content width wider than the pane directly (the state a
+        // filtered/HTML pager ends up in) to exercise the horizontal
+        // scrolling arms.
+        pager.line_breaker.set_width(Some(400));
+        pager.set_dirty(true);
+        pager.draw(screen.grid_mut(), area, &mut context);
+        assert!(
+            pager.cols_lt_width,
+            "precondition: content must overflow horizontally"
+        );
+
+        for key in [Key::Char('l'), Key::Right] {
+            let mut event = UIEvent::Input(key.clone());
+            assert!(
+                pager.process_event(&mut event, &mut context),
+                "{key:?} must scroll right"
+            );
+            pager.draw(screen.grid_mut(), area, &mut context);
+            assert_eq!(pager.cursor.0, 1, "{key:?} must shift the cursor right");
+
+            // Walk back with either scroll-left binding.
+            let mut event = UIEvent::Input(Key::Char('h'));
+            assert!(pager.process_event(&mut event, &mut context));
+            pager.draw(screen.grid_mut(), area, &mut context);
+            assert_eq!(pager.cursor.0, 0);
+        }
+        for key in [Key::Char('h'), Key::Left] {
+            // Pre-scroll right so the left edge guard admits the key.
+            let mut event = UIEvent::Input(Key::Char('l'));
+            assert!(pager.process_event(&mut event, &mut context));
+            pager.draw(screen.grid_mut(), area, &mut context);
+            assert_eq!(pager.cursor.0, 1);
+
+            let mut event = UIEvent::Input(key.clone());
+            assert!(
+                pager.process_event(&mut event, &mut context),
+                "{key:?} must scroll left"
+            );
+            pager.draw(screen.grid_mut(), area, &mut context);
+            assert_eq!(pager.cursor.0, 0, "{key:?} must shift the cursor back left");
+        }
     }
 }

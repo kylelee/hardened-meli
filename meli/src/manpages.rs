@@ -181,12 +181,11 @@ impl ManPages {
         } else {
             self.text_gz()
         });
-        let mut v = String::with_capacity(
-            str::parse::<usize>(unsafe {
-                std::str::from_utf8_unchecked(gz.header().unwrap().comment().unwrap())
-            })
-            .unwrap_or_else(|_| panic!("{self:?} was not compressed with size comment header")),
-        );
+        // The uncompressed size is stored in the gzip comment for the build;
+        // it is only a pre-allocation hint. Ignore it (rather than unwrapping
+        // the header/comment, which panics on a missing field, or reserving an
+        // attacker-controlled capacity) and let the string grow as it is read.
+        let mut v = String::new();
         gz.read_to_string(&mut v)?;
 
         Ok(v)

@@ -216,6 +216,37 @@ fn list_unsubscribe_cancel_does_not_send() {
     assert!(view.pending_unsubscribe.is_none());
 }
 
+/// `MailViewState::load_bytes` must not fabricate a message when the envelope
+/// it refers to has been removed from the collection while its body bytes were
+/// being fetched: it skips the load instead of panicking on the new
+/// `Option`-returning `Collection::get_env`/`get_env_mut`.
+#[test]
+fn load_bytes_with_missing_envelope_does_not_fabricate_a_message() {
+    let mut ctx = mock_context();
+    let (account_hash, mailbox_hash, env_hash) = insert_list_unsubscribe_envelope(&ctx);
+    let mut view = MailView::new(
+        Some((account_hash, mailbox_hash, env_hash)),
+        false,
+        &mut ctx,
+    );
+
+    // The envelope is removed before its body bytes arrive.
+    ctx.accounts[&account_hash]
+        .collection
+        .remove(env_hash, mailbox_hash);
+    assert!(!ctx.accounts[&account_hash].contains_key(env_hash));
+
+    super::state::MailViewState::load_bytes(
+        &mut view,
+        b"Subject: x\r\n\r\nbody".to_vec(),
+        &mut ctx,
+    );
+    assert!(
+        !matches!(view.state, super::state::MailViewState::Loaded { .. }),
+        "a removed envelope must not produce a Loaded view"
+    );
+}
+
 #[test]
 fn test_view_filter_text_plain() {
     let bytes = b"Content-Transfer-Encoding: 8bit

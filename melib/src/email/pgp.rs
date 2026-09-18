@@ -155,8 +155,9 @@ pub fn convert_attachment_to_rfc_spec(input: &[u8]) -> Vec<u8> {
     if input.is_empty() {
         return Vec::new();
     }
-    let re = regex::bytes::Regex::new(r"[^\r]\n").unwrap();
-    if re.find_iter(input).count() > 0 {
+    // Equivalent to the former `regex::bytes::Regex::new(r"[^\r]\n")` probe,
+    // without compiling (and `unwrap()`ing) a regex on every call.
+    if input.windows(2).any(|w| w[0] != b'\r' && w[1] == b'\n') {
         return input.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n");
     }
     input.to_vec()

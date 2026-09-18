@@ -282,6 +282,15 @@ impl Account {
             }
             MailboxJobRequest::CreateMailbox { ref mut handle, .. } => {
                 try_handle! { handle, (mailbox_hash, mut mailboxes) => {
+                    // The mailbox map is supplied by the backend; a hash that
+                    // is not present (or a self/missing parent) must not panic.
+                    if !mailboxes.contains_key(&mailbox_hash) {
+                        log::error!(
+                            "Backend reported creation of unknown mailbox hash {mailbox_hash}; \
+                             ignoring the event."
+                        );
+                        return;
+                    }
                     self.main_loop_handler.send(ThreadEvent::UIEvent(
                             UIEvent::MailboxCreate((self.hash, mailbox_hash)),
                     ));
@@ -305,23 +314,27 @@ impl Account {
                     };
                     // if new mailbox has parent, we need to update its children field
                     if let Some(parent_hash) = mailboxes[&mailbox_hash].parent() {
-                        self.mailbox_entries
-                            .entry(parent_hash)
-                            .and_modify(|parent| {
-                                parent.ref_mailbox =
-                                    mailboxes.remove(&parent_hash).unwrap();
-                            });
+                        if let Some(parent_mailbox) = mailboxes.remove(&parent_hash) {
+                            self.mailbox_entries
+                                .entry(parent_hash)
+                                .and_modify(|parent| {
+                                    parent.ref_mailbox = parent_mailbox;
+                                });
+                        }
                     }
                     let status = MailboxStatus::default();
 
+                    let Some(created) = mailboxes.remove(&mailbox_hash) else {
+                        log::error!(
+                            "Backend returned an inconsistent mailbox map for {mailbox_hash}; \
+                             ignoring the event."
+                        );
+                        return;
+                    };
+                    let path = created.path().to_string();
                     self.mailbox_entries.insert(
                         mailbox_hash,
-                        MailboxEntry::new(
-                            status,
-                            mailboxes[&mailbox_hash].path().to_string(),
-                            mailboxes.remove(&mailbox_hash).unwrap(),
-                            new,
-                        ),
+                        MailboxEntry::new(status, path, created, new),
                     );
                     self.collection
                         .threads
@@ -367,15 +380,24 @@ impl Account {
                         .write()
                         .unwrap()
                         .remove(&mailbox_hash);
-                    let deleted_mailbox =
-                        self.mailbox_entries.shift_remove(&mailbox_hash).unwrap();
+                    let Some(deleted_mailbox) =
+                        self.mailbox_entries.shift_remove(&mailbox_hash)
+                    else {
+                        log::error!(
+                            "Tried to delete unknown mailbox hash {mailbox_hash}; ignoring the \
+                             event."
+                        );
+                        return;
+                    };
                     // if deleted mailbox had parent, we need to update its children field
                     if let Some(parent_hash) = deleted_mailbox.ref_mailbox.parent() {
-                        self.mailbox_entries
-                            .entry(parent_hash)
-                            .and_modify(|parent| {
-                                parent.ref_mailbox = mailboxes.remove(&parent_hash).unwrap();
-                            });
+                        if let Some(parent_mailbox) = mailboxes.remove(&parent_hash) {
+                            self.mailbox_entries
+                                .entry(parent_hash)
+                                .and_modify(|parent| {
+                                    parent.ref_mailbox = parent_mailbox;
+                                });
+                        }
                     }
                     self.collection
                         .mailboxes

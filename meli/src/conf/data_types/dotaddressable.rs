@@ -52,6 +52,7 @@ impl DotAddressable for u64 {}
 impl DotAddressable for crate::terminal::Color {}
 impl DotAddressable for crate::terminal::Attr {}
 impl DotAddressable for crate::terminal::Key {}
+impl DotAddressable for crate::terminal::ShortcutKeys {}
 impl DotAddressable for usize {}
 impl DotAddressable for Query {}
 impl DotAddressable for melib::LogLevel {}

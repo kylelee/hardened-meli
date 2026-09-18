@@ -19,8 +19,6 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::str::FromStr;
-
 use nom::{
     bytes::complete::{is_not, tag},
     combinator::opt,
@@ -97,7 +95,15 @@ pub fn over_article(input: &str) -> IResult<&str, (UID, Envelope)> {
     :bytes metadata item
     :lines metadata item
     */
+    // Parse the article number as a non-empty run of digits, so that a
+    // non-numeric or overflowing field yields a parse error instead of a panic
+    // when it is converted below.
     let (input, num) = is_not("\t")(input)?;
+    if !num.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(nom::Err::Error(
+            (input, "over_article(): invalid article number").into(),
+        ));
+    }
     let (input, _) = tag("\t")(input)?;
     let (input, subject) = opt(is_not("\t"))(input)?;
     let (input, _) = tag("\t")(input)?;
@@ -152,7 +158,45 @@ pub fn over_article(input: &str) -> IResult<&str, (UID, Envelope)> {
             if let Some(message_id) = message_id {
                 env.set_message_id(message_id.as_bytes());
             }
-            (usize::from_str(num).unwrap(), env)
+            let uid = match usize::from_str(num) {
+                Ok(uid) => uid,
+                Err(_) => {
+                    return Err(nom::Err::Error(
+                        (input, "over_article(): invalid article number").into(),
+                    ));
+                }
+            };
+            (uid, env)
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID: &str =
+        "1234\tSubject\tFrom\tMon, 1 Jan 2024 00:00:00 +0000\t<msg@id>\t\t1000\t10\r\n";
+
+    #[test]
+    fn test_over_article_article_number() {
+        let (rest, (uid, env)) = over_article(VALID).expect("valid XOVER line should parse");
+        assert!(rest.is_empty());
+        assert_eq!(uid, 1234);
+        assert_eq!(env.message_id().as_str(), "msg@id");
+    }
+
+    #[test]
+    fn test_over_article_non_numeric_article_number() {
+        let res = over_article(
+            "abc\tSubject\tFrom\tMon, 1 Jan 2024 00:00:00 +0000\t<msg@id>\t\t1000\t10\r\n",
+        );
+        assert!(res.is_err(), "expected error, got {res:?}");
+        // An overflowing number must not panic either.
+        let res = over_article(concat!(
+            "999999999999999999999999999999999999\tSubject\tFrom\tMon, 1 Jan 2024 00:00:00 +0000\t",
+            "<msg@id>\t\t1000\t10\r\n"
+        ));
+        assert!(res.is_err(), "expected error, got {res:?}");
+    }
 }

@@ -297,7 +297,7 @@ mod http {
                 let mut ret = vec![];
                 while let Some(res) = message_iter.next() {
                     let envelope = res?;
-                    let bytes = message_iter.env_bytes(&envelope.hash()).to_vec();
+                    let bytes = message_iter.env_bytes(&envelope.hash())?.to_vec();
                     ret.push(Mail { envelope, bytes });
                 }
                 Ok(ret)

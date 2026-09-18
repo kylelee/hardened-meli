@@ -38,6 +38,17 @@ pub struct TerminalSettings {
     /// Default: 4.
     pub tab_width: u8,
     pub ascii_drawing: bool,
+    /// Render emoji-style icons throughout the UI.
+    ///
+    /// When `false`, the status bar substitutes braille / plain ASCII
+    /// analogues for every glyph it would otherwise render (the mailbox
+    /// carousel → `⠧⠴⠦⠖⠴⠦` or a plain `|/-'\\` fallback, the idle and
+    /// offline icons → `#` / `!`, the mail-count glyphs → `+` / `~` / `=`,
+    /// the keyboard-shortcut header → `^K`). Useful on terminals that
+    /// cannot display emoji or where the user prefers ASCII art. Default:
+    /// true.
+    #[serde(default)]
+    pub emoji_capable: ToggleFlag,
     pub use_color: ToggleFlag,
     /// Draw `OSC8` hyperlinks.
     /// Default: True
@@ -79,6 +90,7 @@ impl Default for TerminalSettings {
             draw_hyperlinks: ToggleFlag::InternalVal(true),
             use_color: ToggleFlag::InternalVal(true),
             use_mouse: ToggleFlag::InternalVal(false),
+            emoji_capable: ToggleFlag::InternalVal(true),
             mouse_flag: Some("🖱️ ".to_string()),
             window_title: Some("meli".to_string()),
             file_picker_command: None,
@@ -106,6 +118,14 @@ impl TerminalSettings {
     pub fn draw_hyperlinks(&self) -> bool {
         self.draw_hyperlinks.is_true()
     }
+
+    /// Whether the terminal can render emoji. When `false`, the status
+    /// bar falls back to braille or plain-ASCII analogues for every glyph
+    /// it would otherwise emit. Defaults to true.
+    #[inline]
+    pub fn emoji_capable(&self) -> bool {
+        self.emoji_capable.is_true()
+    }
 }
 
 impl DotAddressable for TerminalSettings {
@@ -118,6 +138,7 @@ impl DotAddressable for TerminalSettings {
                     "themes" => Err(Error::new("unimplemented")),
                     "tab_width" => self.tab_width.lookup(field, tail),
                     "ascii_drawing" => self.ascii_drawing.lookup(field, tail),
+                    "emoji_capable" => self.emoji_capable.lookup(field, tail),
                     "draw_hyperlinks" => self.draw_hyperlinks.lookup(field, tail),
                     "force_text_presentation" => self.force_text_presentation.lookup(field, tail),
                     "use_color" => self.use_color.lookup(field, tail),

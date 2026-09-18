@@ -23,4 +23,8 @@ debian/meli/
 # AI
 .omo
 .codegraph
+.ai-jail
 log
+
+# debug-build per-run logs
+/log/

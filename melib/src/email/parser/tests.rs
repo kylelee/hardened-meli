@@ -745,6 +745,42 @@ fn test_email_parser_bytesext_trait() {
     assert!(BytesExt::is_quoted(b"\"aaa\"".as_ref()));
 }
 
+#[test]
+fn test_email_parser_bytesext_replace_edge_cases() {
+    // Empty `from` returns the input unchanged instead of looping forever.
+    assert_eq!(BytesExt::replace(&b"abc"[..], b"", b"X"), b"abc".to_vec());
+    // `to` equal to `from` advances past the consumed match and terminates.
+    assert_eq!(
+        BytesExt::replace(&b"aaaa"[..], b"aa", b"aa"),
+        b"aaaa".to_vec()
+    );
+    // Adjacent matches are all replaced.
+    assert_eq!(BytesExt::replace(&b"aaaa"[..], b"aa", b"b"), b"bb".to_vec());
+    // Matches at the very start and end.
+    assert_eq!(
+        BytesExt::replace(&b"XabX"[..], b"X", b"Y"),
+        b"YabY".to_vec()
+    );
+    // Single-byte match at the very start/end.
+    assert_eq!(BytesExt::replace(&b"abc"[..], b"a", b""), b"bc".to_vec());
+    assert_eq!(BytesExt::replace(&b"abc"[..], b"c", b""), b"ab".to_vec());
+    // No match at all.
+    assert_eq!(BytesExt::replace(&b"abc"[..], b"z", b"y"), b"abc".to_vec());
+    // The IMAP string unescaping cases this is used for.
+    assert_eq!(
+        BytesExt::replace(&b"a\\\\b"[..], b"\\\\", b"\\"),
+        b"a\\b".to_vec()
+    );
+    assert_eq!(
+        BytesExt::replace(&b"a\\\"b"[..], b"\\\"", b"\""),
+        b"a\"b".to_vec()
+    );
+    assert_eq!(
+        BytesExt::replace(&b"a\r\nb"[..], b"\r\n", b"\n"),
+        b"a\nb".to_vec()
+    );
+}
+
 // C8a: the multipart boundary twin loops (`multipart_parts` and `parts`,
 // i.e. `parts_f`) must always terminate and never panic on hostile input
 // (CWE-835 non-termination, CWE-1287 out-of-bounds/underflow). Regression
@@ -988,4 +1024,128 @@ fn test_multipart_parts_clean_two_part_freeze() {
         rest,
         b"\r\nContent-Type: text/plain\r\n\r\nsecond part\r\n--BOUND--\r\n".as_slice()
     );
+}
+
+// C9: malformed-address hardening. `display_addr` and `mailto` both used to
+// panic on crafted input (unwrap of a missing `<` in the *decoded* display
+// name, `usize` underflow on a quoted display name shorter than two bytes,
+// and a one-past-the-end cursor after a bare `?body` tag). These tests feed
+// malformed and byte-truncated inputs and require no panic.
+
+/// Run `f` and report whether it panicked; the caller asserts on the result.
+fn catch_panic(f: impl FnOnce()) -> std::thread::Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+}
+
+#[test]
+fn test_mailto_truncated_body_tag_no_panic() {
+    // `?body` with no `=` used to advance the cursor past the end of the
+    // decoded URI and panic on the next slice.
+    let inputs: &[&[u8]] = &[
+        b"mailto:foo@bar?body",
+        b"mailto:foo@bar?body=",
+        b"mailto:foo@bar?body&x=1",
+        b"mailto:foo@bar?subject=x&body",
+        b"mailto:foo@bar?body",
+        b"mailto:foo@bar?body=value",
+    ];
+    for input in inputs {
+        let r = catch_panic(|| {
+            let _ = crate::email::parser::generic::mailto(input);
+        });
+        assert!(
+            r.is_ok(),
+            "mailto({:?}) panicked",
+            String::from_utf8_lossy(input)
+        );
+    }
+    // The truncated form degrades gracefully to an empty body.
+    let (_, mailto) = crate::email::parser::generic::mailto(b"mailto:foo@bar?body").unwrap();
+    assert_eq!(mailto.body.as_deref(), Some(""));
+}
+
+#[test]
+fn test_display_addr_hostile_no_panic() {
+    // Encoded-word display names are decoded before the `<` is looked for, so
+    // the decoded byte string can be shorter than the input.
+    let corpus: &[&[u8]] = &[
+        b"=?utf-8?B?zp3Orc6/z4Ig?= Name <foo@example.com>",
+        b"=?utf-8?Q?=3C?= <foo@example.com>",
+        b"=?utf-8?Q?=22?= <foo@example.com>",
+        b"\"quoted\" <foo@example.com>",
+        b"\"=\" <a@b>",
+        b"a@b <c@d>",
+        b"<foo@example.com>",
+        b"=?utf-8?B?//?=",
+        b"\xff\xfe <a@b>",
+    ];
+    for input in corpus {
+        let r = catch_panic(|| {
+            let _ = display_addr(input);
+            let _ = mailbox(input);
+            let _ = crate::email::parser::address::address(input);
+            let _ = rfc2822address_list(input);
+        });
+        assert!(
+            r.is_ok(),
+            "address parser panicked on {:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+#[test]
+fn test_address_parsers_byte_truncation_no_panic() {
+    // Byte-truncate a known-good encoded-word address at every offset; none
+    // of the address entry points may panic.
+    let good: &[u8] = b"=?utf-8?B?zp3Orc6/z4Igz4TOt8+C?= Name <foo.bar@example.com>";
+    for n in 0..=good.len() {
+        let truncated = &good[..n];
+        let r = catch_panic(|| {
+            let _ = display_addr(truncated);
+            let _ = mailbox(truncated);
+            let _ = crate::email::parser::address::address(truncated);
+            let _ = rfc2822address_list(truncated);
+        });
+        assert!(
+            r.is_ok(),
+            "address parser panicked on truncation at byte {n}: {:?}",
+            String::from_utf8_lossy(truncated)
+        );
+    }
+}
+
+#[test]
+fn test_full_message_byte_truncation_no_panic() {
+    // A known-good multipart message with an encoded-word subject and a
+    // quoted-printable part; every byte-truncated prefix must parse (or fail)
+    // without panicking anywhere in the mail path.
+    let good: &[u8] = b"From: =?utf-8?B?zp3Orc6/z4Igz4TOt8+C?= <foo@example.com>\r\n\
+To: bar@example.com\r\n\
+Subject: =?utf-8?Q?hello_=E2=82=AC?=\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"BOUND\"\r\n\
+\r\n\
+--BOUND\r\n\
+Content-Type: text/plain; charset=\"utf-8\"\r\n\
+Content-Transfer-Encoding: quoted-printable\r\n\
+\r\n\
+hello=20world\r\n\
+--BOUND\r\n\
+Content-Type: application/octet-stream; name=\"x.bin\"\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+aGVsbG8=\r\n\
+--BOUND--\r\n";
+    for n in 0..=good.len() {
+        let truncated = good[..n].to_vec();
+        let r = catch_panic(move || {
+            if let Ok(mail) = crate::email::Mail::new(truncated, None) {
+                let body = mail.envelope().body_bytes(mail.bytes());
+                let _ = body.attachments();
+                let _ = body.text(crate::email::attachment_types::Text::Plain);
+            }
+        });
+        assert!(r.is_ok(), "Mail::new panicked on truncation at byte {n}");
+    }
 }

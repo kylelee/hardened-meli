@@ -1277,9 +1277,17 @@ impl MailBackend for ImapType {
                     err
                 )
             })?;
-            Ok(BackendMailbox::clone(
-                &uid_store.mailboxes.lock().await[&new_hash],
-            ))
+            let mailboxes_lck = uid_store.mailboxes.lock().await;
+            mailboxes_lck
+                .get(&new_hash)
+                .map(|m| BackendMailbox::clone(m))
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "Mailbox rename was successful but the new mailbox `{new_path}` was not \
+                         returned by the subsequent mailbox listing"
+                    ))
+                    .set_kind(ErrorKind::ProtocolError)
+                })
         }))
     }
 
@@ -1292,12 +1300,18 @@ impl MailBackend for ImapType {
         //let connection = self.connection.clone();
         Ok(Box::pin(async move {
             let mailboxes = uid_store.mailboxes.lock().await;
-            let permissions = mailboxes[&mailbox_hash].permissions();
+            let Some(mailbox) = mailboxes.get(&mailbox_hash) else {
+                return Err(
+                    Error::new(format!("Mailbox with hash {mailbox_hash} not found"))
+                        .set_kind(ErrorKind::NotFound),
+                );
+            };
+            let permissions = mailbox.permissions();
             if !permissions.change_permissions {
                 return Err(Error::new(format!(
                     "You do not have permission to change permissions for mailbox `{}`. Set \
                      permissions for this mailbox are {}",
-                    mailboxes[&mailbox_hash].name(),
+                    mailbox.name(),
                     permissions
                 )));
             }

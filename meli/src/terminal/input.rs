@@ -123,6 +123,28 @@ static SAVED_STDIN: Mutex<Option<SavedStdin>> = Mutex::new(None);
 /// install so guards only ever restore what they installed.
 static STDIN_SWAP_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// The single description every fd 0 swap installs, kept for the rest of
+/// the process.
+///
+/// crossterm's process-global event reader registers the fd 0 open file
+/// description it finds on first use with `mio`/`epoll`. Every `$EDITOR`
+/// round trip replaces fd 0 via `dup2`, which would close the previously
+/// registered description; the kernel then silently drops its epoll
+/// registration, `event::poll` answers "no event" forever while meli's own
+/// `poll(2)` keeps seeing the tty readable (input dies, the loop spins),
+/// and even `watchdog`'s DA1 injection cannot help because the reply can
+/// no longer be read. Keeping this description alive keeps the
+/// registration valid: readiness is a property of the tty, so the stale
+/// entry still fires even though fd 0 was re-pointed.
+///
+/// Only the *first* swapped-in description is retained — the event reader
+/// is created once, on the input thread's first `poll`, so the first swap
+/// is the registered one. Every later swap `dup2`s this same description
+/// onto fd 0 and drops its own freshly opened `/dev/tty` instead of
+/// retaining it: the previous `Vec` grew by one descriptor (and one
+/// `open(2)`) per `$EDITOR` round trip for the whole process lifetime.
+static SWAP_KEEPALIVE: Mutex<Option<OwnedFd>> = Mutex::new(None);
+
 /// Restores fd 0 to the descriptor the process was started with, if an
 /// input thread currently holds it swapped to a nonblocking tty.
 ///
@@ -228,7 +250,7 @@ fn drain_events(mut closure: impl FnMut((Key, Vec<u8>)), mut resize: impl FnMut(
                 Ok(ev) => match BridgeEvent::from(ev) {
                     BridgeEvent::Key(key) => {
                         let bytes = encode_key(&key);
-                        log::trace!("get_events: {:?} ({:?})", key, bytes);
+                        log::debug!("input delivered: {key:?} (bytes {bytes:?})");
                         closure((key, bytes));
                         // A delivered event can never answer
                         // `ShouldInject`; the decision is deliberately
@@ -239,6 +261,7 @@ fn drain_events(mut closure: impl FnMut((Key, Vec<u8>)), mut resize: impl FnMut(
                         return true;
                     }
                     BridgeEvent::Resize(cols, rows) => {
+                        log::debug!("input delivered: Resize {cols}x{rows}");
                         resize(cols, rows);
                         let _ = observe_watchdog(watchdog::Observation::EventDelivered {
                             now: Instant::now(),
@@ -410,6 +433,21 @@ impl FdSwap {
         if stdin_target {
             restore_stdin_for_child_spawn();
         }
+        // See [`SWAP_KEEPALIVE`]: every stdin swap installs the same
+        // process-lifetime description, so the caller's freshly opened
+        // `replacement` is only adopted on the first swap and is closed on
+        // every later one. The guard is held for the whole call so the
+        // borrowed descriptor stays alive across the `dup2`.
+        let mut keepalive;
+        let replacement: &OwnedFd = if stdin_target {
+            keepalive = SWAP_KEEPALIVE.lock().unwrap_or_else(|err| err.into_inner());
+            if keepalive.is_none() {
+                *keepalive = Some(replacement);
+            }
+            keepalive.as_ref().expect("filled just above")
+        } else {
+            &replacement
+        };
         let stdin = std::io::stdin();
         let target_fd = match &target {
             FdSwapTarget::Stdin => stdin.as_fd(),
@@ -433,8 +471,8 @@ impl FdSwap {
             saved: Some(saved),
         };
         let swapped = match &mut swap.target {
-            FdSwapTarget::Stdin => nix::unistd::dup2_stdin(&replacement),
-            FdSwapTarget::Owned(fd) => nix::unistd::dup2(&replacement, fd),
+            FdSwapTarget::Stdin => nix::unistd::dup2_stdin(replacement),
+            FdSwapTarget::Owned(fd) => nix::unistd::dup2(replacement, fd),
         };
         if let Err(err) = swapped {
             log::trace!("get_events: dup2 for fd swap failed: {err}");
@@ -444,7 +482,9 @@ impl FdSwap {
             return None;
         }
         // The replacement's own number is now redundant: the target
-        // number refers to its description.
+        // number refers to its description. For the stdin target the
+        // description lives on in [`SWAP_KEEPALIVE`] (either the one just
+        // adopted, or the process-lifetime one already there).
         if stdin_target {
             if let Some(saved) = swap.saved.take() {
                 *SAVED_STDIN.lock().unwrap_or_else(|err| err.into_inner()) = Some(SavedStdin {
@@ -773,6 +813,10 @@ pub fn get_events(
                 {
                     // meli saw tty bytes; crossterm consumed them and
                     // answered with no event: swallow evidence.
+                    log::debug!(
+                        "input watchdog: tty bytes seen but crossterm delivered no event \
+                         (swallow evidence)"
+                    );
                     let _ = observe_watchdog(watchdog::Observation::InputConsumedNoEvent {
                         now: Instant::now(),
                     });

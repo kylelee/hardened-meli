@@ -236,16 +236,26 @@ impl MaildirMailbox {
             MailboxHash(h.finish())
         };
 
-        let path = fs_path
-            .strip_prefix(
-                PathBuf::from(&settings.root_mailbox)
-                    .expand()
-                    .parent()
-                    .unwrap_or_else(|| Path::new("/")),
-            )
-            .ok()
-            .unwrap()
-            .to_path_buf();
+        // The display path is relative to the configured root's parent.
+        // `strip_prefix` can only fail if the (expanded) root mailbox is not
+        // under its own parent, which should not happen — fall back to the
+        // full path rather than panicking on `.ok().unwrap()`.
+        let root_parent = PathBuf::from(&settings.root_mailbox)
+            .expand()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let path = match fs_path.strip_prefix(&root_parent) {
+            Ok(stripped) => stripped.to_path_buf(),
+            Err(err) => {
+                log::debug!(
+                    "Could not strip root prefix {} from {}: {err}",
+                    root_parent.display(),
+                    fs_path.display()
+                );
+                fs_path.clone()
+            }
+        };
 
         let read_only = if let Ok(metadata) = std::fs::metadata(&fs_path) {
             metadata.permissions().readonly()

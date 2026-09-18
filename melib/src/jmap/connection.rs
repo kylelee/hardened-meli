@@ -332,7 +332,7 @@ impl JmapConnection {
             .lock()
             .unwrap()
             .clone_from(&session.capabilities);
-        let mail_account_id = session.mail_account_id();
+        let mail_account_id = session.mail_account_id()?;
         {
             let mut metadata = self.store.metadata.lock().unwrap();
             metadata.insert("session".into(), serde_json::json! {session});
@@ -366,7 +366,7 @@ impl JmapConnection {
                 Ok(s) => s,
             };
             let GetResponse::<Identity> { list, .. } =
-                GetResponse::<Identity>::try_from(v.method_responses.remove(0))?;
+                GetResponse::<Identity>::try_from(v.take_first()?)?;
             list
         };
         if id_list.is_empty() {
@@ -441,7 +441,7 @@ impl JmapConnection {
                 Ok(s) => s,
             };
             let GetResponse::<Identity> { list, .. } =
-                GetResponse::<Identity>::try_from(v.method_responses.remove(0))?;
+                GetResponse::<Identity>::try_from(v.take_first()?)?;
             id_list = list;
         }
         self.session_guard().await?.identities =
@@ -469,7 +469,7 @@ impl JmapConnection {
             } else {
                 return Ok(None);
             };
-        let mail_account_id = self.session_guard().await?.mail_account_id();
+        let mail_account_id = self.session_guard().await?.mail_account_id()?;
         let mut events = vec![];
         loop {
             let email_changes_call: EmailChanges = EmailChanges::new(
@@ -547,8 +547,7 @@ impl JmapConnection {
                 }
                 Ok(s) => s,
             };
-            let mut changes_response =
-                ChangesResponse::<EmailObject>::try_from(v.method_responses.remove(0))?;
+            let mut changes_response = ChangesResponse::<EmailObject>::try_from(v.take_first()?)?;
             if changes_response.new_state == current_state {
                 return Ok(None);
             }
@@ -566,7 +565,7 @@ impl JmapConnection {
                 }
             }
             // [ref:TODO]: process changes_response.updated too
-            let get_response = GetResponse::<EmailObject>::try_from(v.method_responses.remove(0))?;
+            let get_response = GetResponse::<EmailObject>::try_from(v.take_first()?)?;
 
             {
                 let GetResponse::<EmailObject> { list, .. } = get_response;
