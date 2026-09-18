@@ -142,38 +142,123 @@
 #sound_file = "path" # optional
 #
 ###shortcuts
-#[shortcuts.composing]
-#edit = 'e'
-#close = 'Esc'
+## All shortcut sections and their default values are listed below.
+## Format: `key` or a comma-separated pair `primary,secondary`
+## (both keys trigger the action). Special key names: `Up` `Down` `Left`
+## `Right` `Home` `End` `PageUp` `PageDown` `Backspace` `Delete` `Insert`
+## `Esc` `Enter` `Tab` `Space` `F1`..`F12`; modifiers `C-<char>` `M-<char>`;
+## plain characters are written as-is (`j`, `k`, `?`).
+#
+#[shortcuts.listing]
+## scroll_up = "Up,k"
+## scroll_down = "Down,j"
+## new_mail = "m"
+## next_account = "H"
+## next_mailbox = "J"
+## next_page = "PageDown"
+## prev_account = "L"
+## prev_mailbox = "K"
+## open_mailbox = "Enter"
+## toggle_mailbox_collapse = " "
+## prev_page = "PageUp"
+## search = "/"
+## refresh = "F5"
+## set_seen = "n"
+## send_to_trash = "D"
+## union_modifier = "C-u"
+## diff_modifier = "C-d"
+## intersection_modifier = "C-i"
+## select_entry = "V"
+## select_motion = "v"
+## increase_sidebar = "C-f"
+## decrease_sidebar = "C-d"
+## next_entry = "C-n"
+## previous_entry = "C-p"
+## toggle_menu_visibility = "`"
+## focus_left = "Left,h"
+## focus_right = "Right,l"
+## exit_entry = "i"
+## open_entry = "Enter"
 #
 #[shortcuts.contact-list]
-#create_contact = 'c'
-#edit_contact = 'e'
-#
-##Mail listing defaults
-#[shortcuts.listing]
-#prev_page = "PageUp"
-#next_page = "PageDown"
-#prev_mailbox = 'K'
-#next_mailbox = 'J'
-#prev_account = 'l'
-#next_account = 'h'
-#new_mail = 'm'
-#set_seen = 'n'
-#exit_entry = 'i'
-#
-##Pager defaults
+## scroll_up = "Up,k"
+## scroll_down = "Down,j"
+## create_contact = "c"
+## edit_contact = "e"
+## export_contact = "E"
+## delete_contact = "d"
+## mail_contact = "m"
+## next_account = "H"
+## prev_account = "L"
+## toggle_menu_visibility = "`"
 #
 #[shortcuts.pager]
-#scroll_up = 'k'
-#scroll_down = 'j'
-#page_up = "PageUp"
-#page_down = "PageDown"
+## page_down = "PageDown"
+## page_up = "PageUp"
+## scroll_down = "Down,j"
+## scroll_up = "Up,k"
+## select_filter = "f"
 #
-##Envelope view defaults
+#[shortcuts.general]
+## toggle_help = "?"
+## enter_command_mode = ":"
+## quit = "Esc,q"
+## go_to_tab = "M-n"
+## next_tab = "T"
+## scroll_right = "Right,l"
+## scroll_left = "Left,h"
+## scroll_up = "Up,k"
+## scroll_down = "Down,j"
+## next_page = "PageDown"
+## prev_page = "PageUp"
+## home_page = "Home"
+## end_page = "End"
+## open_entry = "Enter"
+## info_message_next = ">"
+## info_message_previous = "<"
+## focus_in_text_field = "Enter"
+## next_search_result = "n"
+## previous_search_result = "N"
+#
+#[shortcuts.composing]
+## edit = "e"
+## send_mail = "s"
+## close = "Esc"
+## scroll_up = "Up,k"
+## scroll_down = "Down,j"
+## reset_date = "F1"
+## reset_body = "F2"
 #
 #[shortcuts.envelope-view]
-#save_all_attachments = "C-s"
+## add_addresses_to_contacts = "c"
+## edit = "e"
+## go_to_url = "g"
+## open_attachment = "a"
+## open_mailcap = "m"
+## open_html = "v"
+## reply = "R"
+## reply_to_author = "C-r"
+## reply_to_all = "C-g"
+## forward = "C-f"
+## return_to_normal_view = "r"
+## save_all_attachments = "C-s"
+## toggle_expand_headers = "x"
+## toggle_url_mode = "u"
+## view_raw_source = "M-r"
+## change_charset = "d"
+#
+#[shortcuts.thread-view]
+## scroll_up = "Up,k"
+## scroll_down = "Down,j"
+## collapse_subtree = "H"
+## next_page = "PageDown"
+## prev_page = "PageUp"
+## reverse_thread_order = "C-r"
+## toggle_mailview = "p"
+## toggle_threadview = "t"
+## toggle_layout = " "
+## focus_left = "Left,h"
+## focus_right = "Right,l"
 #
 #[composing]
 #editor_command = 'vim +/^$' # optional, by default $EDITOR is used.
