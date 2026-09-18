@@ -25,6 +25,10 @@ pub type Parameters = IndexMap<String, String>;
 #[macro_export]
 macro_rules! parameters(
     { $($key:expr => $value:expr),* } => {
+        // `allow(unused_mut)` is required here, not optional: an empty
+        // invocation (`parameters!()`) expands to zero `insert` calls,
+        // leaving the binding genuinely unused-mut. This is public macro
+        // API, so both expansion shapes must stay warning-clean.
         #[allow(unused_mut)]
         {
             let mut m : ::indexmap::IndexMap<String, String> =

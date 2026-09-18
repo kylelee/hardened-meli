@@ -215,7 +215,6 @@ impl MailView {
                 match account.envelope_bytes_by_hash(coordinates.2) {
                     Ok(fut) => {
                         log::debug!("init_futures: spawning fetch-envelope");
-                        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
                         let mut handle = account.main_loop_handler.job_executor.spawn(
                             "fetch-envelope".into(),
                             fut,
