@@ -20,7 +20,7 @@
 
 use std::{borrow::Cow, path::Path};
 
-use super::MailView;
+use super::{state::PendingReplyAction, MailView};
 use crate::{
     command::{
         actions::{Action, ViewAction},
@@ -31,6 +31,7 @@ use crate::{
     melib::{Attachment, AttachmentBuilder, Envelope, Mail},
     terminal::Key,
     types::{Link, LinkKind, UIEvent},
+    utilities::UIDialog,
     view::{EnvelopeView, ViewFilter, ViewFilterContent, ViewOptions, ViewSettings},
     AccountHash, Context, EnvelopeHash, MailboxHash,
 };
@@ -214,6 +215,86 @@ fn list_unsubscribe_cancel_does_not_send() {
     assert!(!has_draft_artifact(&replies));
     assert!(view.unsubscribe_dialog.is_none());
     assert!(view.pending_unsubscribe.is_none());
+}
+
+/// Quitting (`Esc`) while the add-to-contacts selector is open must consume
+/// the key and tear the selector down once the main loop feeds the
+/// `ComponentUnrealize` reply back. Regression for the embedded dialogs that
+/// kept consuming `q`/`Esc` and trapped `MailView` until `:quit`.
+#[test]
+fn contact_selector_quit_key_closes_dialog() {
+    let mut ctx = mock_context();
+    let coordinates = insert_list_unsubscribe_envelope(&ctx);
+    let mut view = MailView::new(Some(coordinates), false, &mut ctx);
+
+    let mut event = UIEvent::Action(Action::View(ViewAction::AddAddressesToContacts));
+    assert!(view.process_event(&mut event, &mut ctx));
+    assert!(view.contact_selector.is_some());
+
+    let mut event = UIEvent::Input(Key::Esc);
+    assert!(
+        view.process_event(&mut event, &mut ctx),
+        "the contact selector must consume the quit key"
+    );
+
+    // The main loop feeds component replies (ComponentUnrealize) back in.
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::ComponentUnrealize(_))),
+        "quit must emit ComponentUnrealize, got: {replies:?}"
+    );
+    for mut ev in replies {
+        _ = view.process_event(&mut ev, &mut ctx);
+    }
+    assert!(
+        view.contact_selector.is_none(),
+        "quit must clear the embedded contact selector"
+    );
+}
+
+/// Same as [`contact_selector_quit_key_closes_dialog`] for the forward
+/// dialog: `forward_as_attachment` defaults to `ask`, so the dialog is built
+/// with both forwarding choices; quitting it must clear the field once the
+/// `ComponentUnrealize` reply is re-dispatched.
+#[test]
+fn forward_dialog_quit_key_closes_dialog() {
+    let mut ctx = mock_context();
+    let coordinates = insert_list_unsubscribe_envelope(&ctx);
+    let mut view = MailView::new(Some(coordinates), false, &mut ctx);
+    view.forward_dialog = Some(Box::new(UIDialog::new(
+        "How do you want the email to be forwarded?",
+        vec![
+            (
+                Some(PendingReplyAction::ForwardInline),
+                "inline".to_string(),
+            ),
+            (
+                Some(PendingReplyAction::ForwardAttachment),
+                "as attachment".to_string(),
+            ),
+        ],
+        true,
+        None,
+        &ctx,
+    )));
+    assert!(view.forward_dialog.is_some());
+
+    let mut event = UIEvent::Input(Key::Esc);
+    assert!(
+        view.process_event(&mut event, &mut ctx),
+        "the forward dialog must consume the quit key"
+    );
+
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    for mut ev in replies {
+        _ = view.process_event(&mut ev, &mut ctx);
+    }
+    assert!(
+        view.forward_dialog.is_none(),
+        "quit must clear the embedded forward dialog"
+    );
 }
 
 /// `MailViewState::load_bytes` must not fabricate a message when the envelope

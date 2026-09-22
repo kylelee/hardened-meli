@@ -23,7 +23,7 @@
 
 use melib::{Error, Result, ToggleFlag};
 
-use super::{deserializers::non_empty_opt_string, DotAddressable, Themes};
+use super::{deserializers::non_empty_opt_string, themes::DEFAULT_THEME, DotAddressable, Themes};
 
 /// Settings for terminal display
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -82,7 +82,7 @@ const fn tab_width() -> u8 {
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
-            theme: "dark".to_string(),
+            theme: DEFAULT_THEME.to_string(),
             themes: Themes::default(),
             tab_width: tab_width(),
             ascii_drawing: false,

@@ -77,6 +77,16 @@ pub const fn wcwidth(ucs: char) -> Option<usize> {
     }
 }
 
+/// Whether a character is in the East-Asian Ambiguous width table.
+///
+/// (Unicode East Asian Width property `A`): one column in Latin-locale
+/// terminals, two in CJK-locale terminals. Callers that size UI layout
+/// should measure these as two columns (the wider rendering) so the
+/// grid agrees with what the terminal actually displays.
+pub const fn is_east_asian_ambiguous(ucs: char) -> bool {
+    bisearch(ucs as u32, super::tables::AMBIGUOUS)
+}
+
 /// Determine columns needed for a fixed-size character array.
 pub const fn wcswidth(pwcs: &[char]) -> Option<usize> {
     let mut width = 0;

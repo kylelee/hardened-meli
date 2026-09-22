@@ -121,7 +121,14 @@ impl ContactList {
             self.id_positions.reserve(contacts.len());
         }
         self.dirty = true;
-        let mut min_width = ("Name".len(), "E-mail".len(), 0, "external".len(), 0, 0);
+        let mut min_width = (
+            melib::text::TextProcessing::grapheme_width("Name"),
+            melib::text::TextProcessing::grapheme_width("E-mail"),
+            0,
+            melib::text::TextProcessing::grapheme_width("external"),
+            0,
+            0,
+        );
 
         for c in contacts.values() {
             /* name */
@@ -239,15 +246,9 @@ impl ContactList {
     fn highlight_line(&self, grid: &mut CellBuffer, area: Area, idx: usize, context: &Context) {
         /* Reset previously highlighted line */
         let mut theme = if idx == self.new_cursor_pos {
-            if idx.is_multiple_of(2) {
-                crate::conf::value(context, "mail.listing.plain.even_selected")
-            } else {
-                crate::conf::value(context, "mail.listing.plain.odd_selected")
-            }
-        } else if idx.is_multiple_of(2) {
-            crate::conf::value(context, "mail.listing.plain.even")
+            crate::conf::value(context, "mail.listing.plain.selected")
         } else {
-            crate::conf::value(context, "mail.listing.plain.odd")
+            crate::conf::value(context, "mail.listing.plain")
         };
         if !grid.use_color {
             theme.attrs |= Attr::REVERSE;
@@ -307,18 +308,28 @@ impl ContactList {
             account_attrs.fg,
             account_attrs.bg,
             account_attrs.attrs,
-            area.skip_cols(area.width().saturating_sub(s.len())),
+            area.skip_cols(
+                area.width()
+                    .saturating_sub(melib::text::TextProcessing::grapheme_width(s.as_str())),
+            ),
             None,
             None,
         );
 
-        if a.name.grapheme_len() + s.len() > width + 1 {
+        if melib::text::TextProcessing::grapheme_width(a.name.as_str())
+            + melib::text::TextProcessing::grapheme_width(s.as_str())
+            > width + 1
+        {
             grid.write_string(
                 "…",
                 account_attrs.fg,
                 account_attrs.bg,
                 account_attrs.attrs,
-                area.skip_cols(area.width().saturating_sub(s.len() + 1)),
+                area.skip_cols(
+                    area.width().saturating_sub(
+                        melib::text::TextProcessing::grapheme_width(s.as_str()) + 1,
+                    ),
+                ),
                 None,
                 None,
             );
@@ -471,14 +482,10 @@ impl ContactList {
                 self.theme_default,
             );
         }
-        // zebra parity base colors for the visible rows
+        // Seat all visible rows on the single base row attribute.
+        let base_theme = crate::conf::value(context, "mail.listing.plain");
         for i in top_idx..self.length.min(top_idx + rows) {
-            let theme = if i.is_multiple_of(2) {
-                crate::conf::value(context, "mail.listing.plain.even")
-            } else {
-                crate::conf::value(context, "mail.listing.plain.odd")
-            };
-            grid.change_theme(area.nth_row(i % rows), theme);
+            grid.change_theme(area.nth_row(i % rows), base_theme);
         }
         self.highlight_line(
             grid,
@@ -492,11 +499,17 @@ impl ContactList {
 
 impl Component for ContactList {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        /* Keep content clear of the Tabbed rounded frame ring, which is
-         * drawn over this tab body area's outermost cells. */
-        let area = area.skip(1, 1).skip_cols_from_end(1).skip_rows_from_end(1);
+        /* `Tabbed` treats the contact list as a pinned child and, unlike
+         * for inset children, does not draw an outer body frame over it:
+         * the pane ring is this component's own chrome, painted flush to
+         * the body area with the content laid out inside it (same contract
+         * as `Listing`). */
         if let ViewMode::View(ref mut mgr) = self.mode {
-            mgr.draw(grid, area, context);
+            let inner = draw_rounded_frame(grid, area, crate::conf::value(context, "tab.focused"));
+            for frame_area in frame_flush_areas(grid, area) {
+                context.dirty_areas.push_back(frame_area);
+            }
+            mgr.draw(grid, inner, context);
             return;
         }
 
@@ -506,6 +519,12 @@ impl Component for ContactList {
         if !self.initialized {
             self.initialize(context);
         }
+
+        let inner = draw_rounded_frame(grid, area, crate::conf::value(context, "tab.focused"));
+        for frame_area in frame_flush_areas(grid, area) {
+            context.dirty_areas.push_back(frame_area);
+        }
+        let area = inner;
 
         let total_cols = area.width();
 

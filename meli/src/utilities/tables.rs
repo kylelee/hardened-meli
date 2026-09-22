@@ -67,48 +67,34 @@ impl TableRowFormat {
 
 #[derive(Clone, Debug)]
 pub struct TableThemeConfig {
-    pub theme: TableTheme,
+    pub theme: ThemeAttribute,
     //pub row_formats: HashMap<usize, SmallVec<[(u8, TableRowFormat); 6]>>,
 }
 
 impl TableThemeConfig {
     pub fn new(theme_default: ThemeAttribute) -> Self {
         Self {
-            theme: TableTheme::Single(theme_default),
+            theme: theme_default,
         }
     }
 
-    pub fn set_single_theme(&mut self, value: ThemeAttribute) -> &mut Self {
-        self.theme = TableTheme::Single(value);
+    pub fn set_theme(&mut self, value: ThemeAttribute) -> &mut Self {
+        self.theme = value;
         self
     }
-
-    pub fn set_even_odd_theme(&mut self, even: ThemeAttribute, odd: ThemeAttribute) -> &mut Self {
-        self.theme = TableTheme::EvenOdd { even, odd };
-        self
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum TableTheme {
-    Single(ThemeAttribute),
-    EvenOdd {
-        even: ThemeAttribute,
-        odd: ThemeAttribute,
-    },
 }
 
 #[derive(Clone, Debug)]
 pub struct TableCursorConfig {
     pub handle: bool,
-    pub theme: TableTheme,
+    pub theme: ThemeAttribute,
 }
 
 impl TableCursorConfig {
     pub fn new(theme_default: ThemeAttribute) -> Self {
         Self {
             handle: false,
-            theme: TableTheme::Single(theme_default),
+            theme: theme_default,
         }
     }
 
@@ -117,13 +103,8 @@ impl TableCursorConfig {
         self
     }
 
-    pub fn set_single_theme(&mut self, value: ThemeAttribute) -> &mut Self {
-        self.theme = TableTheme::Single(value);
-        self
-    }
-
-    pub fn set_even_odd_theme(&mut self, even: ThemeAttribute, odd: ThemeAttribute) -> &mut Self {
-        self.theme = TableTheme::EvenOdd { even, odd };
+    pub fn set_theme(&mut self, value: ThemeAttribute) -> &mut Self {
+        self.theme = value;
         self
     }
 }
@@ -293,29 +274,14 @@ impl<const N: usize> DataColumns<N> {
             x_offset = 0;
         }
 
-        match self.theme_config.theme {
-            TableTheme::Single(row_attr) => {
-                grid.change_theme(total_area, row_attr);
-            }
-            TableTheme::EvenOdd { even, odd } => {
-                grid.change_theme(total_area, even);
-                for (top_idx, row) in (top_idx..).zip(0..total_area.height()) {
-                    if top_idx % 2 != 0 {
-                        grid.change_theme(total_area.nth_row(row), odd);
-                    }
-                }
-            }
-        }
+        grid.change_theme(total_area, self.theme_config.theme);
 
         if self.cursor_config.handle && (top_idx..(top_idx + height)).contains(&cursor_pos) {
             let offset = cursor_pos - top_idx;
-            let row_attr = match self.cursor_config.theme {
-                TableTheme::Single(attr) => attr,
-                TableTheme::EvenOdd { even, odd: _ } if cursor_pos.is_multiple_of(2) => even,
-                TableTheme::EvenOdd { even: _, odd } => odd,
-            };
-
-            grid.change_theme(total_area.skip_rows(offset).take_rows(1), row_attr);
+            grid.change_theme(
+                total_area.skip_rows(offset).take_rows(1),
+                self.cursor_config.theme,
+            );
         }
     }
 

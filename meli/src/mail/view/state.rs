@@ -325,6 +325,7 @@ mod tests {
             unsubscribe_dialog: None,
             pending_unsubscribe: None,
             theme_default: Default::default(),
+            pane_fill: None,
             active_jobs: Default::default(),
             initialized: false,
             state: loaded_state(),

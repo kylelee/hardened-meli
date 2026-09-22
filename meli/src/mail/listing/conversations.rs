@@ -19,7 +19,10 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::{collections::BTreeMap, iter::FromIterator};
+use std::{
+    collections::{BTreeMap, HashMap},
+    iter::FromIterator,
+};
 
 use indexmap::IndexSet;
 use melib::{Address, SortField, SortOrder, TagHash, Threads};
@@ -28,9 +31,8 @@ use super::*;
 use crate::{components::PageMovement, jobs::JoinHandle};
 
 macro_rules! row_attr {
-    ($field:ident, $color_cache:expr, even: $even:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
+    ($field:ident, $color_cache:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
         let color_cache = &$color_cache;
-        let even = $even;
         let unseen = $unseen;
         let highlighted = $highlighted;
         let selected = $selected;
@@ -54,10 +56,8 @@ macro_rules! row_attr {
                 color_cache.selected.bg
             } else if unseen {
                 color_cache.unseen.bg
-            } else if even {
-                color_cache.even.bg
             } else {
-                color_cache.odd.bg
+                color_cache.base.bg
             },
             attrs: if highlighted && selected {
                 color_cache.highlighted_selected.attrs
@@ -72,9 +72,8 @@ macro_rules! row_attr {
             },
         }
     }};
-    ($color_cache:expr, even: $even:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
+    ($color_cache:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
         let color_cache = &$color_cache;
-        let even = $even;
         let unseen = $unseen;
         let highlighted = $highlighted;
         let selected = $selected;
@@ -98,10 +97,8 @@ macro_rules! row_attr {
                 color_cache.selected.bg
             } else if unseen {
                 color_cache.unseen.bg
-            } else if even {
-                color_cache.even.bg
             } else {
-                color_cache.odd.bg
+                color_cache.base.bg
             },
             attrs: if highlighted && selected {
                 color_cache.highlighted_selected.attrs
@@ -132,7 +129,7 @@ pub struct ConversationsListing {
     error: std::result::Result<(), String>,
 
     #[allow(clippy::type_complexity)]
-    search_job: Option<(String, JoinHandle<Result<Vec<EnvelopeHash>>>)>,
+    search_job: Option<(String, MailboxHash, JoinHandle<Result<SearchResult>>)>,
     filter_term: String,
     filtered_selection: Vec<ThreadHash>,
     filtered_order: HashMap<ThreadHash, usize>,
@@ -147,6 +144,9 @@ pub struct ConversationsListing {
     modifier_active: bool,
     modifier_command: Option<Modifier>,
     view_area: Option<Area>,
+    /// Whether the grid (not the open view) holds the keyboard focus; the
+    /// Entry-state subpane ring then renders focused.
+    grid_has_keyboard: bool,
     parent: ComponentId,
     id: ComponentId,
 }
@@ -273,6 +273,10 @@ impl MailListingTrait for ConversationsListing {
 
         let threads = account.collection.get_threads(self.cursor_pos.1);
         let tags_lck = account.collection.tag_index.read().unwrap();
+        // Hold one envelope read guard for the whole rebuild: `make_entry_string`
+        // needs the envelope map for the deterministic attachment check, and a
+        // per-row `get_env` would both churn the lock and nest read locks.
+        let envelopes = account.collection.envelopes.read().unwrap();
 
         self.length = 0;
         if self.error.is_err() {
@@ -304,7 +308,7 @@ impl MailListingTrait for ConversationsListing {
             } else {
                 continue 'items_for_loop;
             };
-            if !context.accounts[&self.cursor_pos.0].contains_key(root_env_hash) {
+            if !envelopes.contains_key(&root_env_hash) {
                 //log::debug!("key = {}", root_env_hash);
                 //log::debug!(
                 //    "name = {} {}",
@@ -315,10 +319,7 @@ impl MailListingTrait for ConversationsListing {
 
                 continue 'items_for_loop;
             }
-            let Some(root_envelope) = context.accounts[&self.cursor_pos.0]
-                .collection
-                .get_env(root_env_hash)
-            else {
+            let Some(root_envelope) = envelopes.get(&root_env_hash) else {
                 // Stale thread root: skip the conversation row.
                 continue 'items_for_loop;
             };
@@ -347,12 +348,7 @@ impl MailListingTrait for ConversationsListing {
                     ))
                 })
                 .filter_map(|(env_hash, show_subject)| {
-                    Some((
-                        context.accounts[&self.cursor_pos.0]
-                            .collection
-                            .get_env(env_hash)?,
-                        show_subject,
-                    ))
+                    Some((envelopes.get(&env_hash)?, show_subject))
                 })
             {
                 if show_subject {
@@ -374,11 +370,12 @@ impl MailListingTrait for ConversationsListing {
             }
 
             let strings = self.make_entry_string(
-                &root_envelope,
+                root_envelope,
                 context,
                 &tags_lck,
                 &from_address_list,
                 &threads,
+                &envelopes,
                 &other_subjects,
                 &tags,
                 thread,
@@ -476,8 +473,19 @@ impl ListingTrait for ConversationsListing {
         {
             self.refresh_mailbox(context, false);
         }
+        // Pane background: the grid fills with "pane.focused" while it
+        // holds the keyboard, "pane.unfocused" otherwise; rows keep their
+        // own theme colors on top of it.
+        let pane_fill = crate::conf::value(
+            context,
+            if self.grid_has_keyboard {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        );
         if let Err(message) = self.error.as_ref() {
-            grid.clear_area(area, self.color_cache.theme_default);
+            grid.clear_area(area, pane_fill);
             grid.write_string(
                 message,
                 self.color_cache.theme_default.fg,
@@ -527,7 +535,7 @@ impl ListingTrait for ConversationsListing {
             self.cursor_pos.2 = self.new_cursor_pos.2;
         }
 
-        grid.clear_area(area, self.color_cache.theme_default);
+        grid.clear_area(area, pane_fill);
         // Page_no has changed, so draw new page
         self.draw_rows(grid, area, context, top_idx);
 
@@ -554,14 +562,20 @@ impl ListingTrait for ConversationsListing {
 
         let account = &context.accounts[&self.cursor_pos.0];
         let threads = account.collection.get_threads(self.cursor_pos.1);
+        let (mut missing_env, mut no_thread_node, mut not_in_rows, mut mapped) =
+            (0usize, 0usize, 0usize, 0usize);
+        let results_len = results.len();
         for env_hash in results {
             if !account.collection.contains_key(&env_hash) {
+                missing_env += 1;
                 continue;
             }
             let Some(env_thread_node_hash) = threads.envelope_to_thread_node.get(&env_hash) else {
+                no_thread_node += 1;
                 continue;
             };
             let Some(thread_node) = threads.thread_nodes.get(env_thread_node_hash) else {
+                no_thread_node += 1;
                 continue;
             };
             let thread = threads.find_group(thread_node.group);
@@ -569,21 +583,31 @@ impl ListingTrait for ConversationsListing {
                 continue;
             }
             if self.rows.all_threads.contains(&thread) {
+                mapped += 1;
                 self.filtered_selection.push(thread);
                 self.filtered_order
                     .insert(thread, self.filtered_selection.len().saturating_sub(1));
+            } else {
+                not_in_rows += 1;
             }
         }
+        log::debug!(
+            "conversations filter `{}`: {} results -> {} mapped (missing_env {missing_env}, \
+             no_thread_node {no_thread_node}, not_in_rows {not_in_rows}); mailbox {} has {} \
+             threads in rows",
+            self.filter_term,
+            results_len,
+            mapped,
+            self.cursor_pos.1,
+            self.rows.all_threads.len()
+        );
         if !self.filtered_selection.is_empty() {
             threads.group_inner_sort_by(
                 &mut self.filtered_selection,
                 self.sort,
                 &context.accounts[&self.cursor_pos.0].collection.envelopes,
             );
-            self.new_cursor_pos.2 = std::cmp::min(
-                self.filtered_selection.len().saturating_sub(1),
-                self.cursor_pos.2,
-            );
+            self.new_cursor_pos.2 = 0;
         }
         let previous_selection = self.rows.clear(true);
         self.redraw_threads_list(
@@ -592,6 +616,10 @@ impl ListingTrait for ConversationsListing {
                 as Box<dyn Iterator<Item = ThreadHash>>,
         );
         self.rows.restore_selection(previous_selection);
+        // The row set was rebuilt: force a full list repaint — the
+        // incremental `row_updates` path would leave stale rows on
+        // screen until the next keypress.
+        self.force_draw = true;
     }
 
     fn view_area(&self) -> Option<Area> {
@@ -633,33 +661,15 @@ impl ListingTrait for ConversationsListing {
                 self.force_draw = true;
             }
             Focus::Entry => {
-                if let Some((thread_hash, env_hash)) = self
-                    .get_thread_under_cursor(self.new_cursor_pos.2)
-                    .and_then(|thread| {
-                        self.rows
-                            .thread_to_env
-                            .get(&thread)
-                            .and_then(|e| Some((thread, *e.first()?)))
-                    })
-                {
+                if self.cursor_selection().is_some() {
                     self.force_draw = true;
                     self.dirty = true;
-                    self.kick_parent(
-                        self.parent,
-                        ListingMessage::OpenEntryUnderCursor {
-                            thread_hash,
-                            env_hash,
-                            show_thread: true,
-                            go_to_first_unread: true,
-                        },
-                        context,
-                    );
+                    self.kick_open_under_cursor(context);
                     self.cursor_pos.2 = self.new_cursor_pos.2;
                 } else {
                     return;
                 }
             }
-            Focus::EntryFullscreen => {}
         }
         self.focus = new_value;
         self.kick_parent(
@@ -681,6 +691,42 @@ impl std::fmt::Display for ConversationsListing {
 }
 
 impl ConversationsListing {
+    /// The (thread, envelope) under the cursor, if any.
+    pub(crate) fn cursor_selection(&self) -> Option<(ThreadHash, EnvelopeHash)> {
+        self.get_thread_under_cursor(self.new_cursor_pos.2)
+            .and_then(|thread| {
+                self.rows
+                    .thread_to_env
+                    .get(&thread)
+                    .and_then(|e| Some((thread, *e.first()?)))
+            })
+    }
+
+    /// Queue an `OpenEntryUnderCursor` for the cursor entry: refreshes the
+    /// open view to the newly selected mail while the grid holds the
+    /// keyboard (the layout follows the selection).
+    pub(crate) fn kick_open_under_cursor(&self, context: &mut Context) {
+        if let Some((thread_hash, env_hash)) = self.cursor_selection() {
+            self.kick_parent(
+                self.parent,
+                ListingMessage::OpenEntryUnderCursor {
+                    thread_hash,
+                    env_hash,
+                    go_to_first_unread: true,
+                },
+                context,
+            );
+        }
+    }
+
+    /// Mark that the grid (not the open view) holds the keyboard focus;
+    /// the Entry-state subpane ring then renders focused.
+    pub(crate) fn set_grid_has_keyboard(&mut self, value: bool) {
+        self.grid_has_keyboard = value;
+        self.dirty = true;
+        self.force_draw = true;
+    }
+
     pub fn new(
         parent: ComponentId,
         coordinates: (AccountHash, MailboxHash),
@@ -707,6 +753,7 @@ impl ConversationsListing {
             modifier_active: false,
             modifier_command: None,
             view_area: None,
+            grid_has_keyboard: false,
             parent,
             id: ComponentId::default(),
         })
@@ -720,6 +767,7 @@ impl ConversationsListing {
         tags_lck: &BTreeMap<TagHash, String>,
         from: &[Address],
         threads: &Threads,
+        envelopes: &HashMap<EnvelopeHash, Envelope>,
         other_subjects: &IndexSet<String>,
         tags_set: &IndexSet<TagHash>,
         hash: ThreadHash,
@@ -766,13 +814,32 @@ impl ConversationsListing {
         } else {
             root_envelope.subject().trim().to_string()
         };
+        let subject = if thread.len() > 1 {
+            format!("{} ({})", subject, thread.len())
+        } else {
+            subject
+        };
+        // Head the title with the attachment flag. This is the single
+        // deterministic attachment marker for a conversation row: the flags
+        // column no longer carries one, so a stale `Thread` counter cannot
+        // make the paperclip flicker. Detection is envelope-level via
+        // `thread_has_attachments` (see its docs).
+        let subject = if thread_has_attachments(threads, envelopes, hash) {
+            let flag = mailbox_settings!(
+                context[self.cursor_pos.0][&self.cursor_pos.1]
+                    .listing
+                    .attachment_flag
+            )
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(DEFAULT_ATTACHMENT_FLAG);
+            format!("{flag} {subject}")
+        } else {
+            subject
+        };
         EntryStrings {
             date: DateString(self.format_date(context, thread.date())),
-            subject: SubjectString(if thread.len() > 1 {
-                format!("{} ({})", subject, thread.len())
-            } else {
-                subject
-            }),
+            subject: SubjectString(subject),
             flag: FlagString::new(
                 root_envelope.flags(),
                 self.rows
@@ -782,7 +849,9 @@ impl ConversationsListing {
                     .unwrap_or(false),
                 thread.snoozed(),
                 thread.unseen() > 0,
-                thread.has_attachments(),
+                // The title head is the sole attachment marker (see above);
+                // the flags column stays free of the paperclip.
+                false,
                 context,
                 (self.cursor_pos.0, self.cursor_pos.1),
             ),
@@ -810,6 +879,9 @@ impl ConversationsListing {
         let thread_hash = self.rows.env_to_thread[&env_hash];
         let threads = account.collection.get_threads(self.cursor_pos.1);
         let tags_lck = account.collection.tag_index.read().unwrap();
+        // One envelope read guard for the row: `make_entry_string` needs the
+        // map for the deterministic attachment check.
+        let envelopes = account.collection.envelopes.read().unwrap();
         let idx: usize = self.rows.thread_order[&thread_hash];
 
         let mut other_subjects = IndexSet::new();
@@ -824,14 +896,7 @@ impl ConversationsListing {
                     .message()
                     .map(|env_hash| (env_hash, threads.thread_nodes()[&h].show_subject()))
             })
-            .filter_map(|(env_hash, show_subject)| {
-                Some((
-                    context.accounts[&self.cursor_pos.0]
-                        .collection
-                        .get_env(env_hash)?,
-                    show_subject,
-                ))
-            })
+            .filter_map(|(env_hash, show_subject)| Some((envelopes.get(&env_hash)?, show_subject)))
         {
             if show_subject {
                 other_subjects.insert(envelope.subject().to_string());
@@ -849,7 +914,7 @@ impl ConversationsListing {
                 from_address_list.push(addr.clone());
             }
         }
-        let Some(envelope) = account.collection.get_env(env_hash) else {
+        let Some(envelope) = envelopes.get(&env_hash) else {
             // Stale row: the envelope was removed, leave the previous entry
             // strings in place instead of fabricating a row.
             log::error!(
@@ -858,25 +923,33 @@ impl ConversationsListing {
             return;
         };
         let strings = self.make_entry_string(
-            &envelope,
+            envelope,
             context,
             &tags_lck,
             &from_address_list,
             &threads,
+            &envelopes,
             &other_subjects,
             &tags,
             thread_hash,
         );
-        drop(envelope);
         if let Some(row) = self.rows.entries.get_mut(idx) {
             row.1 = strings;
         }
     }
 
     fn draw_rows(&self, grid: &mut CellBuffer, area: Area, context: &Context, top_idx: usize) {
+        let pane_fill = crate::conf::value(
+            context,
+            if self.grid_has_keyboard {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        );
         let account = &context.accounts[&self.cursor_pos.0];
         let threads = account.collection.get_threads(self.cursor_pos.1);
-        grid.clear_area(area, self.color_cache.theme_default);
+        grid.clear_area(area, pane_fill);
         for (idx, ((thread_hash, root_env_hash), strings)) in
             self.rows.entries.iter().enumerate().skip(top_idx)
         {
@@ -891,18 +964,34 @@ impl ConversationsListing {
             // particular `is_thread_selected` walks the whole thread (one
             // `selection` HashMap lookup per envelope), so calling it per
             // themed column cost 4 × thread length lookups per row/frame.
-            let even = idx.is_multiple_of(2);
             let unseen = thread.unseen() > 0;
             let highlighted = self.cursor_pos.2 == idx;
             let selected = self.rows.is_thread_selected(*thread_hash);
 
-            let row_attr = row_attr!(
+            // A base conversation block (not the cursor block, not
+            // selected) sits directly on the pane background: the four
+            // themed rows keep their fg/attrs accents (unseen bold, zebra
+            // fg, subject/from/date colors) but their bg follows the pane,
+            // so an unfocused grid dims as a whole. Highlighted and
+            // selected blocks keep their own fills.
+            let on_pane = !highlighted && !selected;
+            let themed = |attr: ThemeAttribute| {
+                if on_pane {
+                    ThemeAttribute {
+                        bg: pane_fill.bg,
+                        ..attr
+                    }
+                } else {
+                    attr
+                }
+            };
+
+            let row_attr = themed(row_attr!(
                 self.color_cache,
-                even: even,
                 unseen: unseen,
                 highlighted: highlighted,
                 selected: selected
-            );
+            ));
             // draw flags
             let (mut x, _) = grid.write_string(
                 &strings.flag,
@@ -919,14 +1008,13 @@ impl ConversationsListing {
                 }
                 x += 1;
             }
-            let subject_attr = row_attr!(
+            let subject_attr = themed(row_attr!(
                 subject,
                 self.color_cache,
-                even: even,
                 unseen: unseen,
                 highlighted: highlighted,
                 selected: selected
-            );
+            ));
             // draw subject
             let (x_, subject_overflowed) = grid.write_string(
                 &strings.subject,
@@ -973,14 +1061,13 @@ impl ConversationsListing {
                 }
             }
             // Next line, draw date
-            let date_attr = row_attr!(
+            let date_attr = themed(row_attr!(
                 date,
                 self.color_cache,
-                even: even,
                 unseen: unseen,
                 highlighted: highlighted,
                 selected: selected
-            );
+            ));
             x = 0;
             x += grid
                 .write_string(
@@ -997,14 +1084,13 @@ impl ConversationsListing {
                 grid[c].set_ch('▁').set_fg(row_attr.fg).set_bg(row_attr.bg);
             }
             x += 4;
-            let from_attr = row_attr!(
+            let from_attr = themed(row_attr!(
                 from,
                 self.color_cache,
-                even: even,
                 unseen: unseen,
                 highlighted: highlighted,
                 selected: selected
-            );
+            ));
             // draw from
             x += grid
                 .write_string(
@@ -1064,11 +1150,6 @@ impl ConversationsListing {
 
 impl Component for ConversationsListing {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        if matches!(self.focus, Focus::EntryFullscreen) {
-            self.view_area = area.into();
-            return;
-        }
-
         if !self.is_dirty() {
             return;
         }
@@ -1104,24 +1185,40 @@ impl Component for ConversationsListing {
              * rendering as a subpane in the left third while the parent
              * listing skips its own pane frame (the open `ThreadView`
              * draws its own), so the subpane must draw its own rounded
-             * frame too — unfocused-styled, because the keyboard focus
-             * sits in the `ThreadView` (the same convention the
-             * `ThreadView`'s internal panes follow). `Focus::None` keeps
-             * the parent listing's outer pane frame and draws edge to
-             * edge. The row math below must share this inner-area basis
-             * with `draw_list` (it derives its own rows from the area
-             * passed in), otherwise a row refresh would use rows/offsets
-             * shifted by the ring and paint over it. */
+             * frame too — unfocused-styled while the keyboard focus sits
+             * in the `ThreadView` (the same convention the `ThreadView`'s
+             * internal panes follow), focused while the grid holds the
+             * keyboard. `Focus::None` keeps the parent listing's outer
+             * pane frame and draws edge to edge. The row math below must
+             * share this inner-area basis with `draw_list` (it derives
+             * its own rows from the area passed in), otherwise a row
+             * refresh would use rows/offsets shifted by the ring and
+             * paint over it. */
+            // In `Focus::Entry` the grid shrinks to the left 30% column
+            // and the view takes the right 70%.
             let list_inner = if matches!(self.focus, Focus::Entry) {
-                let list_area = area.take_cols(area.width() / 3);
+                let (list_area, _) = crate::mail::pane_split(area);
                 let inner = draw_rounded_frame(
                     grid,
                     list_area,
-                    crate::conf::value(context, "tab.unfocused"),
+                    if self.grid_has_keyboard {
+                        crate::conf::value(context, "tab.focused")
+                    } else {
+                        crate::conf::value(context, "tab.unfocused")
+                    },
                 );
-                for frame_area in frame_ring_areas(list_area) {
+                for frame_area in frame_flush_areas(grid, list_area) {
                     context.dirty_areas.push_back(frame_area);
                 }
+                let pane_fill = crate::conf::value(
+                    context,
+                    if self.grid_has_keyboard {
+                        "pane.focused"
+                    } else {
+                        "pane.unfocused"
+                    },
+                );
+                grid.clear_area(inner, pane_fill);
                 inner
             } else {
                 area
@@ -1131,14 +1228,13 @@ impl Component for ConversationsListing {
                 /* Initialize coordinates/rows via `draw_list`'s refresh
                  * path; its own `rows == 0` guard then stops it before
                  * rendering anything. */
-                self.draw_list(grid, list_inner, context);
                 if matches!(self.focus, Focus::Entry) {
                     /* The subpane's ring is up but no list row fits its
                      * inner area; still hand the view its split area so
                      * it does not paint over the ring (degenerate pane
                      * heights 3-4). */
-                    let entry_area = area.skip_cols(1 + area.width() / 3);
-                    let gap_area = area.nth_col(area.width() / 3);
+                    let (_, entry_area) = crate::mail::pane_split(area);
+                    let gap_area = crate::mail::pane_gap(area);
                     grid.clear_area(gap_area, self.color_cache.theme_default);
                     context.dirty_areas.push_back(gap_area);
                     self.view_area = entry_area.into();
@@ -1350,13 +1446,21 @@ impl Component for ConversationsListing {
         }
         if matches!(self.focus, Focus::Entry) {
             if self.length == 0 && self.dirty {
-                grid.clear_area(area, self.color_cache.theme_default);
+                let pane_fill = crate::conf::value(
+                    context,
+                    if self.grid_has_keyboard {
+                        "pane.focused"
+                    } else {
+                        "pane.unfocused"
+                    },
+                );
+                grid.clear_area(area, pane_fill);
                 context.dirty_areas.push_back(area);
                 return;
             }
 
-            let entry_area = area.skip_cols(1 + area.width() / 3);
-            let gap_area = area.nth_col(area.width() / 3);
+            let (_, entry_area) = crate::mail::pane_split(area);
+            let gap_area = crate::mail::pane_gap(area);
             grid.clear_area(gap_area, self.color_cache.theme_default);
             context.dirty_areas.push_back(gap_area);
             self.view_area = entry_area.into();
@@ -1375,76 +1479,14 @@ impl Component for ConversationsListing {
             ShortcutMaps::default()
         };
 
-        match (&event, self.focus) {
-            (UIEvent::VisibilityChange(true), _) => {
-                self.force_draw = true;
-                self.set_dirty(true);
-                return true;
-            }
-            (UIEvent::Input(ref k), Focus::Entry)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]) =>
-            {
-                self.set_focus(Focus::EntryFullscreen, context);
-                return true;
-            }
-            (UIEvent::Input(ref k), Focus::EntryFullscreen)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-            {
-                self.set_focus(Focus::Entry, context);
-                return true;
-            }
-            (UIEvent::Input(ref k), Focus::Entry)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-            {
-                self.set_focus(Focus::None, context);
-                return true;
-            }
-            _ => {}
+        if let (UIEvent::VisibilityChange(true), _) = (&*event, self.focus) {
+            self.force_draw = true;
+            self.set_dirty(true);
+            return true;
         }
 
         if self.length > 0 {
             match *event {
-                UIEvent::Input(ref k)
-                    if matches!(self.focus, Focus::None)
-                        && (shortcut!(k == shortcuts[Shortcuts::LISTING]["open_entry"])
-                            || shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"])) =>
-                {
-                    self.set_focus(Focus::Entry, context);
-
-                    return true;
-                }
-                UIEvent::Input(ref k)
-                    if !matches!(self.focus, Focus::None)
-                        && (shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"])
-                            || context.settings.shortcuts.general.quit.contains(k)) =>
-                {
-                    self.set_focus(Focus::None, context);
-                    return true;
-                }
-                UIEvent::Input(ref k)
-                    if matches!(self.focus, Focus::Entry)
-                        && shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]) =>
-                {
-                    self.set_focus(Focus::EntryFullscreen, context);
-                    return true;
-                }
-                UIEvent::Input(ref k)
-                    if !matches!(self.focus, Focus::None)
-                        && shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-                {
-                    match self.focus {
-                        Focus::Entry => {
-                            self.set_focus(Focus::None, context);
-                        }
-                        Focus::EntryFullscreen => {
-                            self.set_focus(Focus::Entry, context);
-                        }
-                        Focus::None => {
-                            unreachable!();
-                        }
-                    }
-                    return true;
-                }
                 UIEvent::Input(ref key)
                     if !self.unfocused()
                         && shortcut!(key == shortcuts[Shortcuts::LISTING]["select_entry"]) =>
@@ -1572,42 +1614,50 @@ impl Component for ConversationsListing {
             UIEvent::Resize => {
                 self.set_dirty(true);
             }
-            UIEvent::Action(ref action) => match action {
-                Action::Listing(Search {
-                    term: ref filter_term,
+            UIEvent::Action(Action::Listing(Search {
+                term: ref filter_term,
+                raw_search,
+            })) => {
+                // The search must work with an open view too (the grid
+                // pane keeps rendering the filtered rows); it is a
+                // listing-level operation, not a grid-focus one.
+                //
+                // Every backend runs the search as a job on the executor
+                // thread pool: remote backends on the reactor thread,
+                // local ones on the blocking pool. A local fallback scan
+                // reads every mail file in the mailbox, so driving it on
+                // this thread would freeze the UI on large mailboxes. The
+                // completion (`JobFinished`) applies the filter.
+                match context.accounts[&self.cursor_pos.0].search(
+                    filter_term,
                     raw_search,
-                }) if !self.unfocused() => {
-                    match context.accounts[&self.cursor_pos.0].search(
-                        filter_term,
-                        *raw_search,
-                        self.sort,
-                        self.cursor_pos.1,
-                    ) {
-                        Ok(job) => {
-                            let handle = context.accounts[&self.cursor_pos.0]
-                                .main_loop_handler
-                                .job_executor
-                                .spawn(
-                                    "search".into(),
-                                    job,
-                                    context.accounts[&self.cursor_pos.0].is_async(),
-                                );
-                            self.search_job = Some((filter_term.to_string(), handle));
-                        }
-                        Err(err) => {
-                            context.replies.push_back(UIEvent::Notification {
-                                title: Some("Could not perform search".into()),
-                                source: None,
-                                body: err.to_string().into(),
-                                kind: Some(crate::types::NotificationType::Error(err.kind)),
-                            });
-                        }
-                    };
-                    self.set_dirty(true);
-                    return true;
-                }
-                _ => {}
-            },
+                    self.sort,
+                    self.cursor_pos.1,
+                ) {
+                    Ok(job) => {
+                        let handle = context.accounts[&self.cursor_pos.0]
+                            .main_loop_handler
+                            .job_executor
+                            .spawn(
+                                "search".into(),
+                                job,
+                                context.accounts[&self.cursor_pos.0].is_async(),
+                            );
+                        self.search_job =
+                            Some((filter_term.to_string(), self.cursor_pos.1, handle));
+                    }
+                    Err(err) => {
+                        context.replies.push_back(UIEvent::Notification {
+                            title: Some("Could not perform search".into()),
+                            source: None,
+                            body: err.to_string().into(),
+                            kind: Some(crate::types::NotificationType::Error(err.kind)),
+                        });
+                    }
+                };
+                self.set_dirty(true);
+                return true;
+            }
             UIEvent::Input(Key::Esc) | UIEvent::Input(Key::Char('\x1b'))
                 if !self.unfocused() && !&self.filter_term.is_empty() =>
             {
@@ -1620,14 +1670,34 @@ impl Component for ConversationsListing {
                 if self
                     .search_job
                     .as_ref()
-                    .map(|(_, j)| j == job_id)
+                    .map(|(_, _, j)| j == job_id)
                     .unwrap_or(false) =>
             {
-                let (filter_term, mut handle) = self.search_job.take().unwrap();
+                let (filter_term, mailbox_hash, mut handle) = self.search_job.take().unwrap();
                 match handle.chan.try_recv() {
                     Err(_) => { /* search was canceled */ }
                     Ok(None) => { /* something happened, perhaps a worker thread panicked */ }
-                    Ok(Some(Ok(results))) => self.filter(filter_term, results, context),
+                    Ok(Some(Ok(results))) => {
+                        log::debug!(
+                            "search job finished: {} results for {:?}",
+                            results.envelopes.len(),
+                            filter_term
+                        );
+                        super::notify_if_search_degraded(context, &results);
+                        if self.cursor_pos.1 == mailbox_hash {
+                            self.filter(filter_term, results.envelopes, context)
+                        } else {
+                            // The user switched mailboxes while the scan
+                            // was running: applying the old mailbox's
+                            // hashes here would filter the new one with
+                            // stale results. Drop them.
+                            log::debug!(
+                                "dropping stale search results for mailbox {mailbox_hash:?}; \
+                                 the listing now shows mailbox {:?}",
+                                self.cursor_pos.1
+                            );
+                        }
+                    }
                     Ok(Some(Err(err))) => {
                         context.replies.push_back(UIEvent::Notification {
                             title: Some("Could not perform search".into()),
@@ -1646,12 +1716,7 @@ impl Component for ConversationsListing {
     }
 
     fn is_dirty(&self) -> bool {
-        match self.focus {
-            Focus::None | Focus::Entry => {
-                self.dirty || self.force_draw || !self.rows.row_updates.is_empty()
-            }
-            Focus::EntryFullscreen => false,
-        }
+        self.dirty || self.force_draw || !self.rows.row_updates.is_empty()
     }
 
     fn set_dirty(&mut self, value: bool) {
@@ -1820,10 +1885,10 @@ mod tests {
         let tab_unfocused = crate::conf::value(&ctx, "tab.unfocused");
         {
             let grid = screen.grid();
-            // Full 80-col pane: the subpane takes x=0..=25, so its ring
-            // owns columns 0 and 25 and rows 0 and 23.
+            // Full 80-col pane: the subpane takes 30% (x=0..=23), so its
+            // ring owns columns 0 and 23 and rows 0 and 23.
             assert_eq!(grid[(0, 0)].ch(), '╭', "subpane top-left ring corner");
-            assert_eq!(grid[(25, 0)].ch(), '╮', "subpane top-right ring corner");
+            assert_eq!(grid[(23, 0)].ch(), '╮', "subpane top-right ring corner");
             let first_row = grid_row_text(grid, 1);
             assert!(
                 first_row.contains("row update frame"),
@@ -1843,24 +1908,24 @@ mod tests {
             "row update must not paint over the ring's top-left corner"
         );
         assert_eq!(
-            grid[(25, 0)].ch(),
+            grid[(23, 0)].ch(),
             '╮',
             "row update must not paint over the ring's top-right corner"
         );
         for y in 1..23 {
             assert_eq!(
-                grid[(25, y)].ch(),
+                grid[(23, y)].ch(),
                 '│',
                 "ring right column must survive the row refresh at y={y}"
             );
             assert_eq!(
-                grid[(25, y)].fg(),
+                grid[(23, y)].fg(),
                 tab_unfocused.fg,
                 "ring right column must keep the unfocused attr at y={y}"
             );
         }
         assert_eq!(grid[(0, 23)].ch(), '╰', "subpane bottom-left ring corner");
-        assert_eq!(grid[(25, 23)].ch(), '╯', "subpane bottom-right ring corner");
+        assert_eq!(grid[(23, 23)].ch(), '╯', "subpane bottom-right ring corner");
         let first_row = grid_row_text(grid, 1);
         assert!(
             first_row.contains("row update frame"),
@@ -1872,7 +1937,7 @@ mod tests {
     /// Degenerate pane heights (3-4 rows) in `Focus::Entry`: the
     /// subpane's inner area fits no conversation row, but the subpane
     /// ring is still drawn and the view must still receive its split
-    /// area (right two thirds) instead of falling back to the whole
+    /// area (right 70%) instead of falling back to the whole
     /// pane, which would paint over the ring.
     #[test]
     fn conversations_entry_tiny_height_keeps_split_area() {
@@ -1897,15 +1962,110 @@ mod tests {
         let grid = screen.grid();
         // The subpane ring survives even though no row fits inside it.
         assert_eq!(grid[(0, 0)].ch(), '╭', "subpane top-left ring corner");
-        assert_eq!(grid[(25, 0)].ch(), '╮', "subpane top-right ring corner");
+        assert_eq!(grid[(23, 0)].ch(), '╮', "subpane top-right ring corner");
         assert_eq!(grid[(0, 3)].ch(), '╰', "subpane bottom-left ring corner");
-        assert_eq!(grid[(25, 3)].ch(), '╯', "subpane bottom-right ring corner");
-        // The view keeps the split area: x=27..=79 on every row.
+        assert_eq!(grid[(23, 3)].ch(), '╯', "subpane bottom-right ring corner");
+        // The view keeps the split area: x=25..=79 on every row.
         let view_area = listing
             .view_area()
             .expect("tiny-height Entry state must still set the view area");
-        assert_eq!(view_area.upper_left(), (27, 0));
-        assert_eq!(view_area.width(), 53);
+        assert_eq!(view_area.upper_left(), (25, 0));
+        assert_eq!(view_area.width(), 55);
         println!("conversations_entry_tiny_height_keeps_split_area: split area pinned");
+    }
+
+    /// A thread with any attachment-bearing envelope must head its title with
+    /// exactly one attachment flag, immediately before the title start; the
+    /// flags column carries no paperclip. Attachment-free threads show none.
+    #[test]
+    fn conversations_thread_attachment_flag_heads_title() {
+        let mut ctx = crate::golden::mock_context();
+        let (account_hash, inbox_hash) = register_inbox(&mut ctx);
+        // Thread of two: the root carries no attachment, the reply does —
+        // the flag must still show, since *any* envelope in the thread
+        // having an attachment marks the whole row.
+        let root = Envelope::from_bytes(
+            b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: attached thread mail\r\nMessage-ID: <attached-root@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\nroot body\r\n",
+            None,
+        )
+        .unwrap();
+        let reply = Envelope::from_bytes(
+            b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: attachment inside here\r\nMessage-ID: <attached-reply@x.example>\r\nIn-Reply-To: <attached-root@x.example>\r\nReferences: <attached-root@x.example>\r\nDate: Thu, 2 Jan 2025 10:30:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"bnd\"\r\n\r\n--bnd\nContent-Type: text/plain; charset=utf-8\n\nsee attached\n--bnd\nContent-Type: application/pdf; name=\"doc.pdf\"\nContent-Disposition: attachment; filename=\"doc.pdf\"\n\n%PDF-1.4 fake\n--bnd--\n",
+            None,
+        )
+        .unwrap();
+        assert!(
+            reply.has_attachments(),
+            "test reply must parse as bearing an attachment"
+        );
+        let plain = Envelope::from_bytes(
+            b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: plain thread mail\r\nMessage-ID: <plain@x.example>\r\nDate: Thu, 2 Jan 2025 11:30:00 +0000\r\n\r\nplain body\r\n",
+            None,
+        )
+        .unwrap();
+        let collection = &mut ctx.accounts[&account_hash].collection;
+        collection.insert(root, inbox_hash);
+        collection.insert(reply, inbox_hash);
+        collection.insert(plain, inbox_hash);
+
+        let mut listing =
+            ConversationsListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx);
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        let row_texts: Vec<String> = (0..grid.rows).map(|y| grid_row_text(grid, y)).collect();
+        let attached_row = row_texts
+            .iter()
+            .find(|r| r.contains("attachment inside here"))
+            .expect("thread with an attachment must be drawn");
+        // `thread_subject_pack` (default on) folds the thread's differing
+        // subjects into the title; whichever subject comes first marks the
+        // title start.
+        let title_start = ["attached thread mail", "attachment inside here"]
+            .iter()
+            .filter_map(|s| attached_row.find(s))
+            .min()
+            .expect("thread title must be drawn");
+        let plain_row = row_texts
+            .iter()
+            .find(|r| r.contains("plain thread mail"))
+            .expect("attachment-free thread must be drawn");
+        assert!(
+            !plain_row.contains('📎'),
+            "attachment-free thread must not show the flag; row was {plain_row:?}"
+        );
+        // Both rows carry the same flags, so the attachment-free row's title
+        // starts at the same column as the attached row's subject string. The
+        // title-head flag must therefore begin exactly there, and the flags
+        // column before it must be free of the paperclip; a marker left in the
+        // flags column would instead start earlier.
+        let subject_col = plain_row
+            .find("plain thread mail")
+            .expect("attachment-free title must be drawn");
+        let icon_at = attached_row
+            .find('📎')
+            .expect("attached row must show an attachment flag");
+        assert_eq!(
+            icon_at, subject_col,
+            "the attachment flag must head the title, not sit in the flags column; row was \
+             {attached_row:?}"
+        );
+        assert!(
+            !attached_row[..subject_col].contains('📎'),
+            "the flags column must carry no attachment flag; row was {attached_row:?}"
+        );
+        let gap = &attached_row[icon_at + '📎'.len_utf8()..title_start];
+        assert!(
+            gap.chars().all(|c| c == ' ' || c == '\u{FE0E}'),
+            "attachment flag must sit immediately before the title, gap was {gap:?}"
+        );
+        assert_eq!(
+            attached_row.matches('📎').count(),
+            1,
+            "the title head must be the only attachment flag; row was {attached_row:?}"
+        );
     }
 }

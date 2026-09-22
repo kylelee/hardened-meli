@@ -66,6 +66,14 @@ impl Default for TextField {
 }
 
 impl TextField {
+    /// Replace the text content in place, keeping the autocomplete
+    /// configuration. The cursor moves to the end of the new text.
+    pub fn set_text(&mut self, text: String) {
+        self.inner = UText::new(text);
+        let len = self.inner.as_str().len();
+        self.inner.set_cursor(len);
+    }
+
     pub fn new(inner: UText, autocomplete: Option<(AutoCompleteFn, Box<AutoComplete>)>) -> Self {
         Self {
             inner,

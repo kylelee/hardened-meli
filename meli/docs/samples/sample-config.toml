@@ -170,8 +170,6 @@
 ## intersection_modifier = "C-i"
 ## select_entry = "V"
 ## select_motion = "v"
-## increase_sidebar = "C-f"
-## decrease_sidebar = "C-d"
 ## next_entry = "C-n"
 ## previous_entry = "C-p"
 ## toggle_menu_visibility = "`"
@@ -201,7 +199,7 @@
 #
 #[shortcuts.general]
 ## toggle_help = "?"
-## enter_command_mode = ":"
+## enter_command_mode = ":,M-x"
 ## quit = "Esc,q"
 ## go_to_tab = "M-n"
 ## next_tab = "T"
@@ -254,9 +252,6 @@
 ## next_page = "PageDown"
 ## prev_page = "PageUp"
 ## reverse_thread_order = "C-r"
-## toggle_mailview = "p"
-## toggle_threadview = "t"
-## toggle_layout = " "
 ## focus_left = "Left,h"
 ## focus_right = "Right,l"
 #

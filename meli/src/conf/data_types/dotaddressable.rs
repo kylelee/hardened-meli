@@ -45,7 +45,6 @@ impl DotAddressable for (String, String) {}
 impl DotAddressable for char {}
 impl DotAddressable for data_types::IndexStyle {}
 impl DotAddressable for data_types::SearchBackend {}
-impl DotAddressable for data_types::ThreadLayout {}
 impl DotAddressable for data_types::NotificationEnable {}
 impl DotAddressable for u8 {}
 impl DotAddressable for u64 {}

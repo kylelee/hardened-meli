@@ -71,13 +71,42 @@ In the case of a link the setting's real value depends on the value of the refer
 This allows for defaults within a group of associated values.
 Cyclic references in a theme results in an error:
 .Pp
-.Dl spooky theme contains a cycle: fg:  mail.listing.compact.even -> mail.listing.compact.highlighted -> mail.listing.compact.odd -> mail.listing.compact.even
+.Dl spooky theme contains a cycle: fg:  mail.listing.compact -> mail.listing.compact.highlighted -> mail.listing.plain -> mail.listing.compact
 .Pp
-Two themes are included by default,
+The following themes are compiled into the binary, ported from the Zed editor's built-in
+theme family:
+.Ql "Ayu Dark" (the default),
+.Ql "Ayu Mirage" ,
+.Ql "Ayu Light" ,
+.Ql "One Dark" ,
+.Ql "One Light" ,
+.Ql "Gruvbox Dark" ,
+.Ql "Gruvbox Dark Hard" ,
+.Ql "Gruvbox Dark Soft" ,
+.Ql "Gruvbox Light" ,
+.Ql "Gruvbox Light Hard" ,
+.Ql "Gruvbox Light Soft" .
+.Pp
+The community ports shipped in the crate's
+.Pa meli/themes/
+directory are compiled in as well (e.g\&
+.Ql "Catppuccin Mocha" ,
+.Ql "Tokyo Night" ,
+.Ql "Dracula" ,
+.Ql "Nord Dark" ,
+.Ql "Zedokai" );
+all of them appear in the
+.Ic :toggle theme
+picker without any installation.
+The legacy names
 .Ql light
 and
-.Ql dark Ns
-\&.
+.Ql dark
+remain valid in existing configurations as aliases of
+.Ql "Ayu Light"
+and
+.Ql "Ayu Dark" ,
+and can still be re-skinned like any other theme.
 .Sh EXAMPLES
 Specific settings from already defined themes can be overwritten:
 .Bd -literal
@@ -90,9 +119,9 @@ theme = "dark"
 "mail.view.headers" = { fg = "30" }
 "mail.view.body" = {fg = "HotPink3", bg = "LightSalmon1"}
 # Linked value keys can be whatever key:
-"mail.listing.compact.even_unseen" = { bg = "mail.sidebar_highlighted_account" }
+"mail.listing.compact.unseen" = { bg = "mail.sidebar_highlighted_account" }
 # Linked color value keys can optionally refer to another field:
-"mail.listing.compact.odd_unseen" = { bg = "mail.sidebar_highlighted_account.fg" }
+"mail.listing.plain.unseen" = { bg = "mail.sidebar_highlighted_account.fg" }
 .sp
 # define new theme. Undefined settings will inherit from the default "dark" theme.
 [terminal.themes."hunter2"]
@@ -104,12 +133,25 @@ color_aliases= { "Jebediah" = "#b4da55" }
 Custom themes can be included in your configuration files or be saved independently in your
 .Pa $XDG_CONFIG_HOME/meli/themes/
 directory as TOML files.
+When a theme name is defined in more than one place, it resolves to its
+highest-priority definition: a file in the themes directory shadows a
+configuration table, which shadows the theme compiled into the binary.
+This shadowing applies when a theme is applied
+.Po via Ic :toggle theme Pc ;
+at startup, themes are resolved only from configuration tables and the
+themes compiled into the binary.
+The
+.Ic :toggle theme
+picker lists every name once, labeled with its source
+.Pq built-in, config, or file .
 To start creating a theme right away, you can begin by editing the default theme keys and values:
 .Pp
 .Dl meli print-default-theme > ~/.config/meli/themes/new_theme.toml
 .Pp
 .Pa new_theme.toml
-will now include all keys and values of the "dark" theme.
+will now include all keys and values of the
+.Ql "Ayu Dark"
+default theme, with every link resolved.
 .Pp
 .Dl meli print-loaded-themes
 .Pp
@@ -205,6 +247,10 @@ tab.unfocused
 .It
 tab.bar
 .It
+pane.focused
+.It
+pane.unfocused
+.It
 widgets.list.header
 .It
 widgets.form.label
@@ -235,45 +281,25 @@ mail.sidebar_highlighted_account_unread_count
 .It
 mail.sidebar_highlighted_account_index
 .It
-mail.listing.compact.even
+mail.listing.compact
 .It
-mail.listing.compact.odd
+mail.listing.compact.unseen
 .It
-mail.listing.compact.even_unseen
+mail.listing.compact.selected
 .It
-mail.listing.compact.odd_unseen
+mail.listing.compact.highlighted
 .It
-mail.listing.compact.even_selected
+mail.listing.compact.highlighted_selected
 .It
-mail.listing.compact.odd_selected
+mail.listing.plain
 .It
-mail.listing.compact.even_highlighted
+mail.listing.plain.unseen
 .It
-mail.listing.compact.odd_highlighted
+mail.listing.plain.selected
 .It
-mail.listing.compact.even_highlighted_selected
+mail.listing.plain.highlighted
 .It
-mail.listing.compact.odd_highlighted_selected
-.It
-mail.listing.plain.even
-.It
-mail.listing.plain.odd
-.It
-mail.listing.plain.even_unseen
-.It
-mail.listing.plain.odd_unseen
-.It
-mail.listing.plain.even_selected
-.It
-mail.listing.plain.odd_selected
-.It
-mail.listing.plain.even_highlighted
-.It
-mail.listing.plain.odd_highlighted
-.It
-mail.listing.plain.even_highlighted_selected
-.It
-mail.listing.plain.odd_highlighted_selected
+mail.listing.plain.highlighted_selected
 .It
 mail.listing.conversations
 .It
@@ -294,8 +320,6 @@ mail.listing.conversations.highlighted_selected
 mail.view.headers
 .It
 mail.view.headers_names
-.It
-mail.view.headers_area
 .It
 mail.view.body
 .It
@@ -321,6 +345,18 @@ pager.highlight_search
 .It
 pager.highlight_search_current
 .El
+.Pp
+In the bundled Ayu themes,
+.Ql pane.focused
+and
+.Ql pane.unfocused
+chain the
+.Ql tab.focused
+and
+.Ql tab.unfocused
+backgrounds respectively; a background link to a key resolves to the
+background channel of the referred key, so the pane fills follow the tab
+colors instead of hand-picked values.
 .Sh COLOR NAMES
 .TS
 allbox tab(:);

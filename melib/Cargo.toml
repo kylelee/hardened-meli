@@ -75,6 +75,7 @@ smallvec = { workspace = true }
 smol = { version = "2" }
 socket2 = { version = "0.6", features = [] }
 unicode-segmentation = { version = "1.2.1", default-features = false }
+unicode-width = { workspace = true }
 url = { version = "2.5", optional = true }
 uuid = { version = "^1", features = ["serde", "v4", "v5"] }
 xdg = { version = "2.1.0" }

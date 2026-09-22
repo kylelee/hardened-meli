@@ -112,6 +112,10 @@ pub struct EnvelopeView {
     pub launch_url_dialog: Option<Box<UIConfirmationDialog>>,
     pub pending_launch_url: Option<String>,
     pub view_settings: ViewSettings,
+    /// The hosting pane's background ("pane.focused"/"pane.unfocused"),
+    /// set by the parent `MailView` so empty regions of the view follow
+    /// the keyboard focus. `None` falls back to `view_settings.theme_default`.
+    pane_fill: Option<ThemeAttribute>,
     pub active_jobs: HashSet<JobId>,
     pub main_loop_handler: MainLoopHandler,
     pub id: ComponentId,
@@ -131,6 +135,11 @@ impl std::fmt::Display for EnvelopeView {
 }
 
 impl EnvelopeView {
+    /// Set the hosting pane's background fill; see the `pane_fill` field.
+    pub fn set_pane_fill(&mut self, fill: Option<ThemeAttribute>) {
+        self.pane_fill = fill;
+    }
+
     pub fn new(
         mail: Mail,
         pager: Option<Pager>,
@@ -158,6 +167,7 @@ impl EnvelopeView {
             body_text: String::new(),
             filters: vec![],
             view_settings,
+            pane_fill: None,
             headers_no: 5,
             headers_cursor: 0,
             headers_full_height: None,
@@ -907,14 +917,25 @@ impl Component for EnvelopeView {
         #[cfg(debug_assertions)]
         let __draw_span = crate::state::DrawSpan::enter("EnvelopeView");
         self.view_settings.theme_default = crate::conf::value(context, "theme_default");
+        let pane_fill = self.pane_fill.unwrap_or(self.view_settings.theme_default);
 
-        let hdr_theme = crate::conf::value(context, "mail.view.headers");
-        let hdr_name_theme = crate::conf::value(context, "mail.view.headers_names");
-        let hdr_area_theme = crate::conf::value(context, "mail.view.headers_area");
+        // The whole header band is one uniform strip of the pane fill: the
+        // name/value cells keep their `mail.view.headers*` fg/attrs accents,
+        // while every blank cell (the gap between name and value,
+        // inter-field gaps, trailing blanks and the strip fill itself) takes
+        // the pane fill so the band dims/brightens with the pane.
+        let hdr_theme = ThemeAttribute {
+            bg: pane_fill.bg,
+            ..crate::conf::value(context, "mail.view.headers")
+        };
+        let hdr_name_theme = ThemeAttribute {
+            bg: pane_fill.bg,
+            ..crate::conf::value(context, "mail.view.headers_names")
+        };
 
         let y: usize = {
             if self.options.contains(ViewOptions::SOURCE) {
-                grid.clear_area(area, self.view_settings.theme_default);
+                grid.clear_area(area, pane_fill);
                 context.dirty_areas.push_back(area);
                 self.headers_full_height = Some(0);
                 0
@@ -922,7 +943,7 @@ impl Component for EnvelopeView {
                 let envelope = &self.mail;
                 let height_p = self.pager.size().1;
 
-                grid.clear_area(area.take_rows(self.headers_no), hdr_area_theme);
+                grid.clear_area(area.take_rows(self.headers_no), pane_fill);
                 let height = area
                     .height()
                     .saturating_sub(self.headers_no)
@@ -951,7 +972,7 @@ impl Component for EnvelopeView {
                                 if y <= area.height() {
                                     grid.clear_area(
                                         area.skip_rows(y).take_rows(1),
-                                        hdr_area_theme,
+                                        pane_fill,
                                     );
                                     let (_x, _y) =
                                         grid.write_string(
@@ -975,7 +996,7 @@ impl Component for EnvelopeView {
                                         );
                                     grid.clear_area(
                                         area.skip_rows(y + _y + __y).skip_cols(_x + 1 + __x).take_rows(1),
-                                        hdr_area_theme,
+                                        pane_fill,
                                     );
                                     if __y > 0 {
                                         if __y > 3 && !self.view_settings.expand_headers {
@@ -983,7 +1004,7 @@ impl Component for EnvelopeView {
                                         }
                                         grid.clear_area(
                                             area.skip_rows(y + _y + 1).take_rows(__y).take_cols(2),
-                                            hdr_area_theme,
+                                            pane_fill,
                                         );
                                     }
                                     y += _y +__y + 1;
@@ -1045,7 +1066,7 @@ impl Component for EnvelopeView {
                     let mut x = 0;
                     if let Some(id) = id {
                         if sticky || skip_header_ctr == 0 {
-                            grid.clear_area(area.nth_row(y), hdr_area_theme);
+                            grid.clear_area(area.nth_row(y), pane_fill);
                             let (_x, _y) = grid.write_string(
                                 "List-ID: ",
                                 hdr_name_theme.fg,
@@ -1173,7 +1194,7 @@ impl Component for EnvelopeView {
                     self.headers_full_height = Some(y);
                     self.headers_measured_width = area.width();
                 }
-                grid.clear_area(area.skip_rows(y), self.view_settings.theme_default);
+                grid.clear_area(area.skip_rows(y), pane_fill);
                 context.dirty_areas.push_back(area.take_rows(y + 3));
                 if !self.view_settings.sticky_headers {
                     let height_p = self.pager.size().1;
@@ -1355,6 +1376,11 @@ impl Component for EnvelopeView {
                 None,
                 self.view_settings.body_theme,
             );
+            // The mail view draws its own combined scrollbar over the
+            // last column (tracking headers + body as one document);
+            // the pager must reserve that column in its wrap width or
+            // body text renders over the scrollbar.
+            self.pager.set_reserve_scrollbar_column(true);
             // The mail view draws one scrollbar itself (see below) that
             // spans the whole view and encodes the combined reading
             // position; the pager's own bar only tracks the body and
@@ -1370,6 +1396,7 @@ impl Component for EnvelopeView {
             }
             s.draw(grid, area.skip_rows(y), context);
         } else {
+            self.pager.set_pane_fill(self.pane_fill);
             self.pager.draw(grid, area.skip_rows(y), context);
             // One scrollbar over the whole view, encoding the combined
             // reading position in *rows* over the whole document:
@@ -1440,7 +1467,7 @@ impl Component for EnvelopeView {
                 None,
             );
         } else {
-            grid.clear_area(l.skip_cols_from_end(8), self.view_settings.theme_default);
+            grid.clear_area(l.skip_cols_from_end(8), pane_fill);
         }
 
         self.dirty = false;

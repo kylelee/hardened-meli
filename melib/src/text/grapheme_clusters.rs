@@ -74,28 +74,41 @@ pub trait TextProcessing: UnicodeSegmentation + AsRef<str> {
     /// is an emoji-capable single-column symbol (see
     /// [`is_emoji_presentation_base`]).
     fn grapheme_width(&self) -> usize {
-        let mut count = 0;
-        let s: &str = self.as_ref();
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\u{FE0F}' {
-                // The selector itself is zero-width; the base it follows
-                // accounted for the whole cluster.
-                continue;
-            }
-            let width = wcwidth(c).unwrap_or(0);
-            count += width;
-            if chars.peek() == Some(&'\u{FE0F}') {
-                chars.next();
-                if is_emoji_presentation_base(c) {
-                    // The cluster renders two columns wide (e.g. `☑️`,
-                    // `⌨️`), not `wcwidth(base)`.
-                    count += 1;
-                }
+        use unicode_width::UnicodeWidthStr;
+        // Delegate to the unicode-width crate's CJK-context string-level
+        // calculation (Ambiguous = 2, Wide = 2, letters narrow, emoji ZWJ
+        // ligatures and presentation sequences handled atomically), then
+        // correct for terminal-UI characters that CJK mode over-widens.
+        //
+        // Box-drawing (U+2500..U+257F) and block elements (U+2580..U+259F)
+        // are the border/gauge vocabulary of every terminal UI; they
+        // render one column on all terminals including CJK-locale ones,
+        // but width_cjk measures the Ambiguous ones as two. Leaving them
+        // at two doubled every border line and scrollbar glyph, pushing
+        // content past the viewport edge.
+        //
+        // Correction is per-grapheme-cluster (not per-char) so that ZWJ
+        // emoji ligatures keep their atomic two-column width from
+        // width_cjk's string-level pass.
+        let s = self.as_ref();
+        let raw = s.width_cjk();
+        // Fast path: pure ASCII never contains wide characters.
+        if raw == s.len() {
+            return raw;
+        }
+        let mut correction = 0;
+        for g in self.split_graphemes() {
+            let g_cjk = {
+                use unicode_width::UnicodeWidthStr;
+                g.width_cjk()
+            };
+            // Only box-drawing / block-element clusters need narrowing;
+            // everything else keeps the string-level width_cjk result.
+            if g_cjk > 1 && g.chars().all(|c| matches!(c as u32, 0x2500..=0x259F)) {
+                correction += g_cjk - 1;
             }
         }
-
-        count
+        raw.saturating_sub(correction)
     }
 
     /// Returns the amount of graphemes.
@@ -135,18 +148,30 @@ mod tests {
     use crate::text::TextPresentation;
 
     #[test]
+    fn box_drawing_stays_narrow() {
+        // Terminal-UI border characters render one column on all
+        // terminals, including CJK-locale ones.
+        assert_eq!("\u{2500}".grapheme_width(), 1); // ─ light horizontal
+        assert_eq!("\u{2502}".grapheme_width(), 1); // │ light vertical
+        assert_eq!("\u{2551}".grapheme_width(), 1); // ║ double vertical
+        assert_eq!("\u{2588}".grapheme_width(), 1); // █ full block
+                                                    // A border line of 10 chars is 10 columns, not 20.
+        assert_eq!("──────────".grapheme_width(), 10);
+    }
+
+    #[test]
     fn test_grapheme_width() {
-        assert_eq!("●".grapheme_width(), 1);
-        assert_eq!("●📎".grapheme_width(), 3);
-        assert_eq!("●📎︎".grapheme_width(), 3);
-        assert_eq!("●\u{FE0E}📎\u{FE0E}".grapheme_width(), 3);
+        assert_eq!("●".grapheme_width(), 2);
+        assert_eq!("●📎".grapheme_width(), 4);
+        assert_eq!("●📎︎".grapheme_width(), 4);
+        assert_eq!("●\u{FE0E}📎\u{FE0E}".grapheme_width(), 4);
         assert_eq!("🎃".grapheme_width(), 2);
         assert_eq!("👻".grapheme_width(), 2);
-        assert_eq!("🛡︎".grapheme_width(), 2);
-        assert_eq!("🛡︎".text_pr().grapheme_width(), 2);
+        assert_eq!("🛡︎".grapheme_width(), 1); // text presentation → narrow
+        assert_eq!("🛡︎".text_pr().grapheme_width(), 1); // text presentation → narrow
 
         assert_eq!("こんにちわ世界".grapheme_width(), 14);
-        assert_eq!("こ★ん■に●ち▲わ☆世◆界".grapheme_width(), 20);
+        assert_eq!("こ★ん■に●ち▲わ☆世◆界".grapheme_width(), 26);
     }
 
     /// `base` + `U+FE0F` clusters occupy two columns when the base is an
@@ -164,7 +189,7 @@ mod tests {
         assert_eq!("a\u{FE0F}".grapheme_width(), 1);
         // Surrounding text keeps its own width.
         assert_eq!("x\u{2611}\u{FE0F}y".grapheme_width(), 4);
-        // Plain text-default symbol without the selector is one column.
+        // Ballot box: narrow (not East-Asian Ambiguous).
         assert_eq!("\u{2611}".grapheme_width(), 1);
     }
 }

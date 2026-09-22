@@ -269,7 +269,10 @@ impl Opt {
                 Ok(())
             }
             SubCommand::PrintDefaultTheme => {
-                print!("{}", conf::Themes::default().key_to_string("dark", false));
+                print!(
+                    "{}",
+                    conf::Themes::default().key_to_string(conf::DEFAULT_THEME, true)
+                );
                 Ok(())
             }
             SubCommand::PrintAppDirectories => {

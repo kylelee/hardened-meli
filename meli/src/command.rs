@@ -358,6 +358,16 @@ define_commands!([
                   tokens: &[One(Literal("toggle")), One(Literal("thread_snooze"))],
                   parser: parser::toggle
                 },
+                { tags: ["toggle theme"],
+                  desc: "open the theme picker: live-preview themes with the arrow keys",
+                  tokens: &[One(Literal("toggle")), One(Literal("theme"))],
+                  parser: parser::toggle
+                },
+                { tags: ["toggle mouse"],
+                  desc: "toggle mouse support",
+                  tokens: &[One(Literal("toggle")), One(Literal("mouse"))],
+                  parser: parser::toggle
+                },
                 { tags: ["search"],
                   desc: "search <TERM>, searches list with given term",
                   tokens: &[One(Literal("search")), One(RestOfStringValue)],

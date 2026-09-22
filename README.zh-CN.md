@@ -4,6 +4,8 @@
 
 [English](./README.md) | **简体中文**
 
+https://github.com/user-attachments/assets/5cdbbc3e-9b49-46e4-ae37-be0a58cf300c
+
 **安全加强和用户体验优化的 meli 版本 —— BSD/Linux/macos 终端邮件客户端，支持多账户与 Maildir / mbox / notmuch / IMAP / JMAP / NNTP (Usenet)。**
 
 基于上游加固（hardened）而来：<https://github.com/meli/meli>
@@ -121,7 +123,7 @@ $ meli --help
 另见在线[快速入门教程](https://meli-email.org/documentation.html#quick-start)。
 
 安装 `meli` 后，可参阅 `meli(1)`、`meli.conf(5)`、`meli(7)` 与 `meli-themes(5)` 获取文档。
-示例配置与主题文件位于 `meli/docs/samples/` 子目录。
+示例配置位于 `meli/docs/samples/` 子目录；主题文件位于 `meli/themes/`。
 配置项示例见 `meli.conf.examples(5)`。
 手册页也[在线托管](https://meli-email.org/documentation.html "meli documentation")。
 `meli` 默认在以下位置查找配置文件：`${XDG_CONFIG_HOME}/meli/config.toml`。
@@ -170,7 +172,7 @@ MELI_CONFIG=./test_config cargo run
 - 联系人列表（+只读 vCard 与 mutt alias 文件支持）
 - 强制 UTF-8（其他编码只读）
 - 可配置快捷键
-- 主题定制（theming）
+- 主题定制（theming）：**内置几十套主题，开箱即用**——Zed 编辑器官方主题家族（Ayu、One、Gruvbox，来自 [zed.dev](https://zed.dev)）加社区贡献者移植的热门主题包（Catppuccin、Dracula、GitHub、Nord、Tokyo Night、Nightfox、Fleet 等），全部编译进二进制；`:toggle theme` 打开选择器，方向键实时预览整套界面，回车即保存到配置文件
 - `NO_COLOR` 支持
 - 纯 ASCII 绘制字符选项
 - 查看 text/html 附件（默认内置 HTML 渲染器，可用 `pager.html_filter` 配置外部命令）
@@ -194,7 +196,7 @@ HTML 邮件默认由内置渲染器渲染：先经 ammonia 白名单清洗（移
 另见在线[快速入门教程](https://meli-email.org/documentation.html#quick-start)。
 
 安装 `meli` 后，可参阅 `meli(1)`、`meli.conf(5)`、`meli(7)` 与 `meli-themes(5)` 获取文档。
-示例配置与主题文件位于 `meli/docs/samples/` 子目录。
+示例配置位于 `meli/docs/samples/` 子目录；主题文件位于 `meli/themes/`。
 手册页也[在线托管](https://meli-email.org/documentation.html "meli documentation")。
 
 `meli` 默认在以下位置查找配置文件：`${XDG_CONFIG_HOME}/meli/config.toml`。

@@ -46,7 +46,7 @@ pub use self::{
     input::{get_events, InputCommand},
     keys::*,
     ratatui_bridge::{
-        center_inside_via_layout, draw_rounded_frame, frame_ring_areas, place_inside_via_layout,
+        center_inside_via_layout, draw_rounded_frame, frame_flush_areas, place_inside_via_layout,
     },
     text_editing::*,
 };

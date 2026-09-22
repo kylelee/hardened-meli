@@ -1837,6 +1837,8 @@ dependencies = [
  "syn 1.0.109",
  "tempfile",
  "toml",
+ "unicode-width 0.2.2",
+ "url",
  "xdg",
 ]
 
@@ -1880,6 +1882,7 @@ dependencies = [
  "tempfile",
  "toml",
  "unicode-segmentation",
+ "unicode-width 0.2.2",
  "url",
  "uuid",
  "xdg",

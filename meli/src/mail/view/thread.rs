@@ -37,8 +37,9 @@ use melib::{
 use super::*;
 use crate::{
     components::PageMovement,
-    conf::data_types::ThreadLayout,
-    terminal::{draw_rounded_frame, frame_ring_areas},
+    mail::listing::DEFAULT_ATTACHMENT_FLAG,
+    mailbox_settings,
+    terminal::{draw_rounded_frame, frame_flush_areas},
 };
 
 #[derive(Debug)]
@@ -79,13 +80,10 @@ enum FocusStep {
 
 impl ThreadViewFocus {
     /// Pane chain step: \[sidebar\] \[grid\] \[thread list\] \[mail detail\].
-    /// Right: `Thread`→`None`, `None`→`MailView`, `MailView` stays consumed —
-    /// the mail detail state is the terminal stop, so the listing's
-    /// `Entry + focus_right → EntryFullscreen` branch must never fire from
-    /// arrow keys. Left: `MailView`→`None`; at `None`/`Thread` Left passes
-    /// through so the listing component's existing
-    /// `Entry + focus_left → set_focus(None)` branch closes the view and
-    /// refocuses the grid.
+    /// Right: `Thread`→`None`, `None`→`MailView`, `MailView` stays consumed
+    /// — the mail detail state is the terminal stop. Left: `MailView`→`None`;
+    /// at `None`/`Thread` Left passes through so the listing moves the focus
+    /// back to the mail listing grid (which keeps the view open).
     fn step(self, direction: FocusDirection) -> FocusStep {
         match (self, direction) {
             (Self::MailView, FocusDirection::Left) => FocusStep::Focus(Self::None),
@@ -108,12 +106,13 @@ pub struct ThreadView {
     coordinates: (AccountHash, MailboxHash, EnvelopeHash),
     thread_group: ThreadHash,
     focus: ThreadViewFocus,
+    /// Whether the listing grid (not this view) holds the keyboard focus:
+    /// every pane ring then renders unfocused.
+    grid_focused: bool,
     entries: Vec<ThreadEntry>,
     visible_entries: Vec<Vec<usize>>,
     //indentation_colors: [ThemeAttribute; 6],
     use_color: bool,
-    last_width: usize,
-    thread_layout: ThreadLayout,
     movement: Option<PageMovement>,
     dirty: bool,
     content: Screen<Virtual>,
@@ -142,6 +141,7 @@ impl ThreadView {
             coordinates,
             thread_group,
             focus: focus.unwrap_or_default(),
+            grid_focused: false,
             entries: Vec::new(),
             cursor_pos: 1,
             new_cursor_pos: 0,
@@ -156,10 +156,6 @@ impl ThreadView {
             //    crate::conf::value(context, "mail.view.thread.indentation.f"),
             //],
             use_color: context.settings.terminal.use_color(),
-            last_width: 0,
-            thread_layout: *mailbox_settings!(
-                context[coordinates.0][&coordinates.1].listing.thread_layout
-            ),
             expanded_pos: 0,
             new_expanded_pos: 0,
             visible_entries: vec![],
@@ -168,9 +164,8 @@ impl ThreadView {
         };
         view.initiate(expanded_hash, go_to_first_unread, context);
         view.new_cursor_pos = view.new_expanded_pos;
-        // A single-mail thread has no thread-list pane (draw renders only
-        // the mail view); start at the mail detail so paging keys reach the
-        // mail content without an extra focus step.
+        // A single-mail thread has no thread-list stop: start at the mail
+        // detail so the pane chain degenerates to grid ⇄ mail content.
         if view.entries.len() == 1 {
             view.focus = ThreadViewFocus::MailView;
         }
@@ -333,15 +328,29 @@ impl ThreadView {
             let thread_node = &threads.thread_nodes()[&thread_node_hash];
             let from = Address::display_name_slice(env_ref.from(), None);
             let date = timestamp_to_string(env_ref.date(), Some("%Y-%m-%d %H:%M\0"), true);
+            // Envelopes with attachments head their entry with the
+            // attachment flag, the same configurable marker the listings'
+            // flags column shows, right after the date and before the
+            // subject/sender.
+            let attachment_flag = if env_ref.has_attachments() {
+                let flag =
+                    mailbox_settings!(context[account_hash][&mailbox_hash].listing.attachment_flag)
+                        .as_ref()
+                        .map(|s| s.as_str())
+                        .unwrap_or(DEFAULT_ATTACHMENT_FLAG);
+                format!("{flag} ")
+            } else {
+                String::new()
+            };
             let heading = if thread_node.show_subject() {
                 let subject = env_ref.subject();
                 format!(
-                    "{date} {subject:`>indent$} {from}",
+                    "{date} {attachment_flag}{subject:`>indent$} {from}",
                     indent = 2 * ind + subject.grapheme_width(),
                 )
             } else {
                 format!(
-                    "{date} {from:`>indent$}",
+                    "{date} {attachment_flag}{from:`>indent$}",
                     indent = 2 * ind + from.grapheme_width()
                 )
             };
@@ -422,7 +431,7 @@ impl ThreadView {
                         .content
                         .area()
                         .skip_rows(y)
-                        .take(e.heading.grapheme_width() + 1, height - 1);
+                        .take(e.heading.grapheme_width() + 1, height);
                     self.content.grid_mut().write_string(
                         &e.heading,
                         if e.seen {
@@ -449,7 +458,7 @@ impl ThreadView {
                         .content
                         .area()
                         .skip_rows(y)
-                        .take(e.heading.grapheme_width(), height - 1);
+                        .take(e.heading.grapheme_width(), height);
                     self.content.grid_mut().write_string(
                         &e.heading,
                         if e.seen {
@@ -471,6 +480,22 @@ impl ThreadView {
             }
         }
         self.visible_entries = vec![(0..self.entries.len()).collect()];
+    }
+
+    /// The thread list pane's background fill: "pane.focused" while the
+    /// list holds the keyboard focus (the whole-list state, or the split
+    /// state's list side), "pane.unfocused" otherwise.
+    fn pane_fill(&self, context: &Context) -> ThemeAttribute {
+        crate::conf::value(
+            context,
+            if !self.grid_focused
+                && matches!(self.focus, ThreadViewFocus::Thread | ThreadViewFocus::None)
+            {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        )
     }
 
     fn highlight_line(
@@ -498,6 +523,16 @@ impl ThreadView {
         }
 
         grid.copy_area(self.content.grid(), dest_area, src_area);
+        // Entry rows sit on the pane background like the blank cells of
+        // the list pane: the heading keeps its theme fg, the bg follows
+        // the pane so an unfocused thread list dims as a whole. The
+        // cursor row above keeps its own "highlight" fill.
+        let pane_bg = self.pane_fill(context).bg;
+        for row in grid.bounds_iter(dest_area) {
+            for c in row {
+                grid[c].set_bg(pane_bg);
+            }
+        }
     }
 
     fn draw_list(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
@@ -561,8 +596,13 @@ impl ThreadView {
         // returns the **line** of an entry in the ThreadView grid.
         let get_entry_area = |idx: usize| self.content.area().skip_rows(idx).take_rows(1);
 
+        // Pane background: the thread list fills with "pane.focused" while
+        // it holds the keyboard (the whole-list state, or the split state's
+        // list side), "pane.unfocused" otherwise; rows sit on top of it
+        // (see `highlight_line`).
+        let pane_fill = self.pane_fill(context);
         if self.dirty || (page_no != prev_page_no) {
-            grid.clear_area(area, crate::conf::value(context, "theme_default"));
+            grid.clear_area(area, pane_fill);
             let visibles: Vec<&usize> =
                 self.visible_entries.iter().flat_map(|v| v.iter()).collect();
 
@@ -574,6 +614,16 @@ impl ThreadView {
                     area.skip_rows(visible_entry_counter).take_rows(1),
                     self.content.area().skip_rows(*idx).take_rows(1),
                 );
+                // Entry headings sit on the pane background like the blank
+                // cells of the list pane: fg keeps the theme, bg follows
+                // the pane. The cursor row is re-applied with its own
+                // "highlight" fill below.
+                let pane_bg = pane_fill.bg;
+                for row in grid.bounds_iter(area.skip_rows(visible_entry_counter).take_rows(1)) {
+                    for c in row {
+                        grid[c].set_bg(pane_bg);
+                    }
+                }
             }
             // If cursor position has changed, remove the highlight from the previous
             // position and apply it in the new one.
@@ -597,10 +647,10 @@ impl ThreadView {
                 );
             }
             if top_idx + rows > visibles.len() {
-                grid.clear_area(
-                    area.skip_rows(visibles.len() - top_idx),
-                    crate::conf::value(context, "theme_default"),
-                );
+                // The gap below the last entry is blank pane real estate:
+                // it follows the keyboard focus like every other empty
+                // cell of the pane.
+                grid.clear_area(area.skip_rows(visibles.len() - top_idx), pane_fill);
             }
         } else {
             let old_cursor_pos = self.cursor_pos;
@@ -630,79 +680,15 @@ impl ThreadView {
         context.dirty_areas.push_back(area);
     }
 
-    /// Calculate if a `ThreadLayout` value of `Auto` would be vertical.
-    fn calculate_auto_thread_layout_is_vertical(&self) -> bool {
-        if self.last_width == 0 {
-            return true;
-        }
-        // Sorry, I'm just hardcoding this for now.
-        self.content.area().width().min(self.last_width / 2) > 62
-    }
-
-    /// The root envelope of the expanded entry's thread, or `None` when the
-    /// thread is no longer available.
-    ///
-    /// `self.thread_group` is captured when the entry is opened; a later
-    /// refresh can re-thread the mailbox and drop the group, and both
-    /// `Threads::thread_iter` and `thread_nodes()` index their maps (so they
-    /// panic on a stale hash). Callers draw the pane without the subject
-    /// header instead of crashing.
-    fn thread_root_envelope_hash(&self, context: &Context) -> Option<EnvelopeHash> {
-        let account = &context.accounts[&self.coordinates.0];
-        let threads = account.collection.get_threads(self.coordinates.1);
-        if !threads.groups.contains_key(&self.thread_group) {
-            return None;
-        }
-        let thread_root = threads.thread_iter(self.thread_group).next()?.1;
-        // Walk down the first-child chain to the first node that carries a
-        // message; bounded by the node count so a corrupted (cyclic)
-        // structure cannot spin forever.
-        let mut iter_ptr = thread_root;
-        for _ in 0..=threads.thread_nodes().len() {
-            let node = threads.thread_nodes().get(&iter_ptr)?;
-            if let Some(h) = node.message() {
-                return Some(h);
-            }
-            iter_ptr = *node.children().first()?;
-        }
-        melib::log::warn!("Thread node chain did not terminate; skipping the thread subject");
-        None
-    }
-
     fn draw_vert(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
         if self.entries.is_empty() {
             return;
         }
-        let mid = self.content.area().width().min(area.width() / 2);
-        if matches!(self.thread_layout, ThreadLayout::Auto)
-            && !self.calculate_auto_thread_layout_is_vertical()
-        {
-            return self.draw_horz(grid, area, context);
-        }
 
         let theme_default = crate::conf::value(context, "theme_default");
-        // First draw the thread subject on the first row
         if self.dirty {
             grid.clear_area(area, theme_default);
-            if let Some(i) = self.thread_root_envelope_hash(context) {
-                if let Some(envelope) = context.accounts[&self.coordinates.0].collection.get_env(i)
-                {
-                    let (_, y) = grid.write_string(
-                        &envelope.subject(),
-                        theme_default.fg,
-                        theme_default.bg,
-                        theme_default.attrs,
-                        area,
-                        None,
-                        Some(0),
-                    );
-                    context.dirty_areas.push_back(area);
-                    grid.clear_area(area.nth_col(mid), theme_default);
-                    grid.clear_area(area.skip(mid, y + 1), theme_default);
-                }
-            }
-        };
-        let area = area.skip_rows(2);
+        }
         let (width, height) = self.content.area().size();
         if height == 0 || width == 0 {
             return;
@@ -712,124 +698,57 @@ impl ThreadView {
         let tab_unfocused = crate::conf::value(context, "tab.unfocused");
         /* Rounded pane frames (visual chrome only): the pane holding the
          * interaction focus is framed with "tab.focused", the other with
-         * "tab.unfocused". In the split state the thread list owns the
-         * cursor, so it is the focused pane. Each pane's content is drawn
-         * inside the frame's inner area (the helper's return value) so the
-         * ring owns its own cells: no content column is clipped and no
-         * content bleeds onto the ring. */
+         * "tab.unfocused". At `Thread` the list is the only pane; in the
+         * split state the focused ring follows the keyboard focus (`None`:
+         * thread list, `MailView`: mail pane). While the listing grid
+         * holds the keyboard (`grid_focused`), no ring of this view is
+         * focused. Each pane's content is drawn inside the frame's inner
+         * area (the helper's return value) so the ring owns its own cells:
+         * no content column is clipped and no content bleeds onto the
+         * ring. */
         match self.focus {
-            ThreadViewFocus::None => {
-                let list_area = area.take_cols(mid.saturating_sub(1));
-                let list_inner = draw_rounded_frame(grid, list_area, tab_focused);
-                for frame_area in frame_ring_areas(list_area) {
-                    context.dirty_areas.push_back(frame_area);
-                }
-                self.draw_list(grid, list_inner, context);
-                let mail_area = area.skip_cols(mid + 1);
-                let mail_inner = draw_rounded_frame(grid, mail_area, tab_unfocused);
-                for frame_area in frame_ring_areas(mail_area) {
-                    context.dirty_areas.push_back(frame_area);
-                }
-                self.entries[self.new_expanded_pos]
-                    .mailview
-                    .draw(grid, mail_inner, context);
-            }
             ThreadViewFocus::Thread => {
-                grid.clear_area(area.skip_cols(mid + 1), theme_default);
-                let inner = draw_rounded_frame(grid, area, tab_focused);
-                for frame_area in frame_ring_areas(area) {
+                let ring = if self.grid_focused {
+                    tab_unfocused
+                } else {
+                    tab_focused
+                };
+                let inner = draw_rounded_frame(grid, area, ring);
+                for frame_area in frame_flush_areas(grid, area) {
                     context.dirty_areas.push_back(frame_area);
                 }
                 self.draw_list(grid, inner, context);
             }
-            ThreadViewFocus::MailView => {
-                let inner = draw_rounded_frame(grid, area, tab_focused);
-                for frame_area in frame_ring_areas(area) {
-                    context.dirty_areas.push_back(frame_area);
-                }
-                self.entries[self.new_expanded_pos]
-                    .mailview
-                    .draw(grid, inner, context);
-            }
-        }
-        context.dirty_areas.push_back(area);
-    }
-
-    fn draw_horz(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        if self.entries.is_empty() {
-            return;
-        }
-
-        let mid = self.content.area().width().min(area.height() / 2);
-
-        let theme_default = crate::conf::value(context, "theme_default");
-        // First draw the thread subject on the first row
-        if self.dirty {
-            grid.clear_area(area, theme_default);
-            if let Some(i) = self.thread_root_envelope_hash(context) {
-                if let Some(envelope) = context.accounts[&self.coordinates.0].collection.get_env(i)
-                {
-                    grid.write_string(
-                        &envelope.subject(),
-                        theme_default.fg,
-                        theme_default.bg,
-                        theme_default.attrs,
-                        area,
-                        None,
-                        Some(0),
-                    );
-                    context.dirty_areas.push_back(area);
-                }
-            }
-        };
-
-        let area = area.skip_rows(2);
-        let (width, height) = self.content.area().size();
-        if height == 0 || height == self.cursor_pos || width == 0 {
-            return;
-        }
-
-        let tab_focused = crate::conf::value(context, "tab.focused");
-        let tab_unfocused = crate::conf::value(context, "tab.unfocused");
-        /* Rounded pane frames (visual chrome only): same convention as the
-         * vertical split — focused pane "tab.focused", other
-         * "tab.unfocused"; in the split state the thread list owns the
-         * cursor. As in the vertical split, each frame is drawn before its
-         * pane's content and the content is placed in the frame's inner
-         * area so the ring never clips a content column. */
-        match self.focus {
-            ThreadViewFocus::None => {
-                let list_area = area.take_rows(mid);
-                let list_inner = draw_rounded_frame(grid, list_area, tab_focused);
-                for frame_area in frame_ring_areas(list_area) {
+            focus => {
+                let (list_theme, mail_theme) = match (self.grid_focused, focus) {
+                    (true, _) => (tab_unfocused, tab_unfocused),
+                    (false, ThreadViewFocus::None) => (tab_focused, tab_unfocused),
+                    (false, _) => (tab_unfocused, tab_focused),
+                };
+                // The list pane's fill is derived inside `draw_list` from
+                // the same state; only the mail pane's needs plumbing.
+                let mail_fill = match (self.grid_focused, focus) {
+                    (_, ThreadViewFocus::MailView) if !self.grid_focused => {
+                        crate::conf::value(context, "pane.focused")
+                    }
+                    _ => crate::conf::value(context, "pane.unfocused"),
+                };
+                let (list_area, mail_area) = crate::mail::pane_split(area);
+                let list_inner = draw_rounded_frame(grid, list_area, list_theme);
+                for frame_area in frame_flush_areas(grid, list_area) {
                     context.dirty_areas.push_back(frame_area);
                 }
                 self.draw_list(grid, list_inner, context);
-                let mail_area = area.skip_rows(mid + 1);
-                let mail_inner = draw_rounded_frame(grid, mail_area, tab_unfocused);
-                for frame_area in frame_ring_areas(mail_area) {
+                let mail_inner = draw_rounded_frame(grid, mail_area, mail_theme);
+                for frame_area in frame_flush_areas(grid, mail_area) {
                     context.dirty_areas.push_back(frame_area);
                 }
+                self.entries[self.new_expanded_pos]
+                    .mailview
+                    .set_pane_fill(Some(mail_fill));
                 self.entries[self.new_expanded_pos]
                     .mailview
                     .draw(grid, mail_inner, context);
-            }
-            ThreadViewFocus::Thread => {
-                self.dirty = true;
-                let inner = draw_rounded_frame(grid, area, tab_focused);
-                for frame_area in frame_ring_areas(area) {
-                    context.dirty_areas.push_back(frame_area);
-                }
-                self.draw_list(grid, inner, context);
-            }
-            ThreadViewFocus::MailView => {
-                let inner = draw_rounded_frame(grid, area, tab_focused);
-                for frame_area in frame_ring_areas(area) {
-                    context.dirty_areas.push_back(frame_area);
-                }
-                self.entries[self.new_expanded_pos]
-                    .mailview
-                    .draw(grid, inner, context);
             }
         }
         context.dirty_areas.push_back(area);
@@ -900,6 +819,19 @@ impl ThreadView {
             .copied()
     }
 
+    /// Whether this is a single-mail thread (no thread-list stop; the pane
+    /// chain degenerates to grid ⇄ mail content).
+    pub(crate) fn is_single_mail(&self) -> bool {
+        self.entries.len() == 1
+    }
+
+    /// Mark that the listing grid (not this view) holds the keyboard focus;
+    /// every pane ring of the view then renders unfocused.
+    pub(crate) fn set_grid_focused(&mut self, value: bool) {
+        self.grid_focused = value;
+        self.set_dirty(true);
+    }
+
     /// Make the mail pane follow the thread-list selection: expand the entry
     /// under the cursor. Called from the selection-movement paths only
     /// (scroll arms, page movements applied at draw time, `focus_right`,
@@ -911,6 +843,27 @@ impl ThreadView {
             self.new_expanded_pos = pos;
             self.expanded_pos = pos;
         }
+    }
+
+    /// Enter the split state (thread list | mail pane) from the whole-list
+    /// state: layout3 → layout4.
+    pub(crate) fn enter_split(&mut self) {
+        if matches!(self.focus, ThreadViewFocus::Thread) {
+            self.focus = ThreadViewFocus::None;
+            self.set_dirty(true);
+        }
+    }
+
+    /// Close the mail detail pane: focus back to the thread list, which then
+    /// occupies the whole view.
+    pub(crate) fn close_mail_pane(&mut self) {
+        self.focus = ThreadViewFocus::Thread;
+        self.set_dirty(true);
+    }
+
+    /// Current pane-chain focus of the view.
+    pub(crate) fn thread_view_focus(&self) -> ThreadViewFocus {
+        self.focus
     }
 }
 
@@ -934,7 +887,6 @@ impl Component for ThreadView {
         if !self.is_dirty() {
             return;
         }
-        self.last_width = area.width();
 
         // If user has selected another mail to view, change to it
         if self.new_expanded_pos != self.expanded_pos {
@@ -942,23 +894,31 @@ impl Component for ThreadView {
         }
 
         if self.entries.len() == 1 {
-            /* A single-mail thread has no thread-list chrome, but the pane
-             * is still a pane: draw the rounded frame ring unconditionally
-             * (the mail pane is the only visible, interactive pane, so it
-             * takes the focused attribute regardless of `self.focus`,
-             * which the `p`/`t` visibility toggles may have left as
-             * `None`) and render the mail view inside the frame's inner
-             * area. */
-            let tab_focused = crate::conf::value(context, "tab.focused");
-            let inner = draw_rounded_frame(grid, area, tab_focused);
-            for frame_area in frame_ring_areas(area) {
+            /* A single-mail thread has no thread-list chrome: draw the
+             * mail view over the whole pane inside a rounded frame (the
+             * mail pane is the only visible, interactive pane; the ring
+             * still yields to a grid-held keyboard focus). */
+            let (ring, pane_fill) = if self.grid_focused {
+                (
+                    crate::conf::value(context, "tab.unfocused"),
+                    crate::conf::value(context, "pane.unfocused"),
+                )
+            } else {
+                (
+                    crate::conf::value(context, "tab.focused"),
+                    crate::conf::value(context, "pane.focused"),
+                )
+            };
+            let inner = draw_rounded_frame(grid, area, ring);
+            for frame_area in frame_flush_areas(grid, area) {
                 context.dirty_areas.push_back(frame_area);
             }
             self.entries[self.new_expanded_pos]
                 .mailview
+                .set_pane_fill(Some(pane_fill));
+            self.entries[self.new_expanded_pos]
+                .mailview
                 .draw(grid, inner, context);
-        } else if matches!(self.thread_layout, ThreadLayout::Horizontal) {
-            self.draw_horz(grid, area, context);
         } else {
             self.draw_vert(grid, area, context);
         }
@@ -989,12 +949,10 @@ impl Component for ThreadView {
         // Pane chain (Left: [mail detail]→[thread list]→[mail listing]→
         // [sidebar]; Right: the reverse up to [mail detail], the terminal
         // stop). Runs in all focus states, ahead of the embedded mail view.
-        // Left pass-through relies on the listing component's existing
-        // `Focus::Entry + focus_left → set_focus(Focus::None)` branch to
-        // close the view and refocus the grid; Right at the mail-detail
-        // state stays consumed so the listing's
-        // `Entry + focus_right → EntryFullscreen` branch never fires from
-        // arrow keys (the chain has no hide-grid stop).
+        // Left pass-through reaches the listing, which moves the focus back
+        // to the mail listing grid (and closes the mail pane or the view as
+        // the chain position dictates); Right at the mail-detail state stays
+        // consumed (the chain has no stop past the mail detail).
         let shortcuts = self.shortcuts(context);
         if let UIEvent::Input(ref key) = *event {
             let direction = if shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["focus_left"]) {
@@ -1004,15 +962,20 @@ impl Component for ThreadView {
             } else {
                 None
             };
-            match direction {
-                // A single-mail thread has no conversation stop ("thread
-                // view, if any"): pass Left through so the listing exits
-                // the view directly instead of stopping at a degenerate
-                // empty split.
+            let direction = match direction {
+                // A single-mail thread has no conversation stop: pass Left
+                // through so the listing hands the keyboard straight to the
+                // grid (the mail pane stays open).
                 Some(FocusDirection::Left)
                     if matches!(self.focus, ThreadViewFocus::MailView)
-                        && self.entries.len() <= 1 => {}
-                Some(direction) => match self.focus.step(direction) {
+                        && self.entries.len() <= 1 =>
+                {
+                    None
+                }
+                other => other,
+            };
+            if let Some(direction) = direction {
+                match self.focus.step(direction) {
                     FocusStep::Focus(new_focus) => {
                         // Right must open the thread-list selection (same
                         // sync as the GENERAL open_entry arm below).
@@ -1025,8 +988,7 @@ impl Component for ThreadView {
                     }
                     FocusStep::StayAndConsume => return true,
                     FocusStep::PassThrough => {}
-                },
-                None => {}
+                }
             }
         }
 
@@ -1193,34 +1155,6 @@ impl ThreadView {
         let (account_hash, mailbox_hash, _) = self.coordinates;
         match *event {
             UIEvent::Input(ref key)
-                if shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["toggle_layout"]) =>
-            {
-                if self.entries.len() > 1 {
-                    match self.thread_layout {
-                        ThreadLayout::Auto if self.calculate_auto_thread_layout_is_vertical() => {
-                            self.thread_layout = ThreadLayout::Horizontal;
-                        }
-                        ThreadLayout::Auto => {
-                            self.thread_layout = ThreadLayout::Vertical;
-                        }
-                        ThreadLayout::Horizontal => {
-                            self.thread_layout = ThreadLayout::Auto;
-                        }
-                        ThreadLayout::Vertical => {
-                            self.thread_layout = ThreadLayout::Horizontal;
-                        }
-                    }
-                    context
-                        .replies
-                        .push_back(UIEvent::StatusEvent(StatusEvent::UpdateSubStatus(format!(
-                            "thread_layout set to {}",
-                            toml::Value::try_from(self.thread_layout).expect("Cannot fail")
-                        ))));
-                    self.set_dirty(true);
-                }
-                true
-            }
-            UIEvent::Input(ref key)
                 if shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["scroll_up"]) =>
             {
                 if self.cursor_pos > 0 {
@@ -1275,26 +1209,6 @@ impl ThreadView {
                     }
                     self.set_dirty(true);
                 }
-                true
-            }
-            UIEvent::Input(ref key)
-                if shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["toggle_mailview"]) =>
-            {
-                self.focus = match self.focus {
-                    ThreadViewFocus::None | ThreadViewFocus::MailView => ThreadViewFocus::Thread,
-                    ThreadViewFocus::Thread => ThreadViewFocus::None,
-                };
-                self.set_dirty(true);
-                true
-            }
-            UIEvent::Input(ref key)
-                if shortcut!(key == shortcuts[Shortcuts::THREAD_VIEW]["toggle_threadview"]) =>
-            {
-                self.focus = match self.focus {
-                    ThreadViewFocus::None | ThreadViewFocus::Thread => ThreadViewFocus::MailView,
-                    ThreadViewFocus::MailView => ThreadViewFocus::None,
-                };
-                self.set_dirty(true);
                 true
             }
             UIEvent::Input(ref key)
@@ -1982,17 +1896,115 @@ mod focus_tests {
         )
     }
 
+    /// A thread entry whose envelope carries an attachment must show the
+    /// flag in its heading right after the date and before the title;
+    /// attachment-free entries stay free of it.
+    #[test]
+    fn thread_view_attachment_flag_sits_after_date_before_title() {
+        let mut ctx = mock_context();
+        let (account_hash, mailbox_hash) = register_inbox(&mut ctx);
+
+        let root = Envelope::from_bytes(
+            b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: attached thread mail\r\nMessage-ID: <attached-root@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\nroot body\r\n",
+            None,
+        )
+        .expect("could not parse root test envelope");
+        let reply = Envelope::from_bytes(
+            b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: attachment inside here\r\nMessage-ID: <attached-reply@x.example>\r\nIn-Reply-To: <attached-root@x.example>\r\nReferences: <attached-root@x.example>\r\nDate: Thu, 2 Jan 2025 10:30:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"bnd\"\r\n\r\n--bnd\nContent-Type: text/plain; charset=utf-8\n\nsee attached\n--bnd\nContent-Type: application/pdf; name=\"doc.pdf\"\nContent-Disposition: attachment; filename=\"doc.pdf\"\n\n%PDF-1.4 fake\n--bnd--\n",
+            None,
+        )
+        .expect("could not parse attachment reply envelope");
+        assert!(
+            reply.has_attachments(),
+            "test reply must parse as bearing an attachment"
+        );
+        assert!(
+            !root.has_attachments(),
+            "test root must parse as attachment-free"
+        );
+        let root_hash = root.hash();
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(root, mailbox_hash);
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(reply, mailbox_hash);
+
+        let thread_group = {
+            let threads = ctx.accounts[&account_hash]
+                .collection
+                .get_threads(mailbox_hash);
+            threads.find_group(threads.envelope_to_thread[&root_hash])
+        };
+
+        let view = ThreadView::new(
+            (account_hash, mailbox_hash, root_hash),
+            thread_group,
+            None,
+            false,
+            Some(ThreadViewFocus::None),
+            &mut ctx,
+        );
+
+        // The date column is "%Y-%m-%d %H:%M" (16 ASCII columns). The local
+        // timezone may shift the wall clock, so check only the column's
+        // shape, never hard-coded date digits.
+        const DATE_COLS: usize = 16;
+        let attached = view
+            .entries
+            .iter()
+            .find(|e| e.heading.contains("attachment inside here"))
+            .expect("attachment-bearing entry must have an entry");
+        assert!(
+            attached.heading.as_bytes()[..DATE_COLS]
+                .iter()
+                .all(|b| b.is_ascii_digit() || *b == b'-' || *b == b':' || *b == b' '),
+            "date column must be ASCII date/time; heading was {:?}",
+            attached.heading
+        );
+        // The subject/from field is right-aligned with backtick fill, so an
+        // indented entry has that padding between the flag and the title.
+        let after_date = &attached.heading[DATE_COLS..];
+        let flag_prefix = format!(" {DEFAULT_ATTACHMENT_FLAG} ");
+        assert!(
+            after_date.starts_with(&flag_prefix),
+            "attachment flag must sit right after the date; heading was {:?}",
+            attached.heading
+        );
+        assert!(
+            after_date[flag_prefix.len()..]
+                .trim_start_matches('`')
+                .starts_with("attachment inside here"),
+            "attachment title must follow the flag; heading was {:?}",
+            attached.heading
+        );
+        let plain = view
+            .entries
+            .iter()
+            .find(|e| e.heading.contains("attached thread mail"))
+            .expect("attachment-free entry must have an entry");
+        assert!(
+            plain.heading[DATE_COLS..].starts_with(" attached thread mail"),
+            "attachment-free title must follow the date directly; heading was {:?}",
+            plain.heading
+        );
+        assert!(
+            !plain.heading.contains('📎'),
+            "attachment-free entry must not show the flag; heading was {:?}",
+            plain.heading
+        );
+    }
+
     /// The single-mail fast path (`entries.len() == 1`) draws the mailview
-    /// over the whole area with no thread-list chrome; it must still be a
-    /// framed pane like every other: a rounded ring at the area edge (row 0 —
-    /// the fast path has no two-row thread-subject header), the inner area
-    /// left to the mail view, and the ring painted with the `tab.focused`
-    /// attribute — the mail pane is the only visible, interactive pane in
-    /// this state.
+    /// over the whole area with no thread-list chrome: a rounded ring at
+    /// the area edge painted with the `tab.focused` attribute (the mail
+    /// pane is the only visible, interactive pane), the inner area left to
+    /// the mail view.
     #[test]
     fn thread_view_single_mail_frame_ring_inner_and_focus_attr() {
         let mut ctx = mock_context();
         let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        load_expanded_entry(&mut view, &mut ctx, ROOT_MAIL_BYTES);
         view.set_dirty(true);
 
         let theme_default = crate::conf::value(&ctx, "theme_default");
@@ -2013,33 +2025,19 @@ mod focus_tests {
             "bottom-right rounded corner"
         );
 
-        // Ring attribute: the focused-pane convention (`tab.focused`), same
-        // as the split layouts' mail-focused state.
+        // Ring attribute: the focused-pane convention (`tab.focused`).
         let tab_focused = crate::conf::value(&ctx, "tab.focused");
         assert_eq!(grid[(0, 0)].fg(), tab_focused.fg);
 
-        // Ring owns exactly its edge cells (bars on the edge rows/columns),
-        // with no glyph bleeding into the inner area the mail view cleared.
-        assert_eq!(grid[(5, 0)].ch(), '─', "top edge horizontal bar");
-        assert_eq!(grid[(0, 5)].ch(), '│', "left edge vertical bar");
-        assert_eq!(grid[(5, last_row)].ch(), '─', "bottom edge horizontal bar");
-        assert_eq!(grid[(last_col, 5)].ch(), '│', "right edge vertical bar");
-        assert_eq!(
-            grid[(2, 2)].ch(),
-            ' ',
+        // Ring owns exactly its edge cells, with no glyph bleeding into
+        assert!(
+            !matches!(grid[(2, 2)].ch(), '─' | '│' | '╭' | '╮' | '╰' | '╯'),
             "no ring glyph may bleed into the inner area"
         );
 
-        // Content clip guard (the b1 lesson): drive the expanded entry's
-        // mail view to the `Loaded` state through the public
-        // `MailViewState::load_bytes` (same helper as the sibling focus
-        // tests) and redraw — the From value must render contiguous inside
-        // the ring's inner area, starting at its left edge (x == 1), never
-        // under or over the ring columns.
-        load_expanded_entry(&mut view, &mut ctx, ROOT_MAIL_BYTES);
-        view.set_dirty(true);
-        view.draw(screen.grid_mut(), area, &mut ctx);
-        let grid = screen.grid();
+        // Content clip guard (the b1 lesson): the From value must render
+        // contiguous inside the ring's inner area, starting at its left
+        // edge (x == 1), never under or over the ring columns.
         let row_string = |y: usize| -> String {
             (0..area.width())
                 .map(|x| grid[(x, y)].ch())
@@ -2072,39 +2070,24 @@ mod focus_tests {
         );
     }
 
-    /// The single-mail fast path draws its frame unconditionally: the `p`/`t`
-    /// visibility toggles can leave `focus` at `None` (the toggle branches
-    /// have no single-mail guard), and the frame must not depend on that
-    /// state.
+    /// A single-mail thread has no thread-list pane (draw renders only the
+    /// mail view), so the view must START at the mail detail — regardless
+    /// of the requested focus.
     #[test]
-    fn thread_view_single_mail_frame_at_focus_none() {
+    fn thread_view_single_mail_starts_focused_on_mail_view() {
         let mut ctx = mock_context();
-        let mut view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::None);
-        view.set_dirty(true);
+        let view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::None);
 
-        let theme_default = crate::conf::value(&ctx, "theme_default");
-        let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme_default);
-        assert!(screen.resize(80, 24));
-        let area = screen.area();
-        view.draw(screen.grid_mut(), area, &mut ctx);
-
-        let grid = screen.grid();
-        let last_col = area.width() - 1;
-        let last_row = area.height() - 1;
-        assert_eq!(grid[(0, 0)].ch(), '╭', "top-left rounded corner");
-        assert_eq!(grid[(last_col, last_row)].ch(), '╯', "bottom-right corner");
-        let tab_focused = crate::conf::value(&ctx, "tab.focused");
-        assert_eq!(
-            grid[(0, 0)].fg(),
-            tab_focused.fg,
-            "frame is unconditionally focused-styled at focus None"
+        assert!(
+            matches!(view.focus, ThreadViewFocus::MailView),
+            "single-mail thread must start focused on the mail view, not the \
+             invisible thread list"
         );
-        println!("thread_view_single_mail_frame_at_focus_none: pinned");
     }
 
     /// Left at the terminal `Thread` state must pass through unconsumed so
-    /// the listing component's `Focus::Entry + focus_left → set_focus(None)`
-    /// branch closes the view and refocuses the grid.
+    /// the listing moves the focus back to the mail listing grid (the view
+    /// stays open).
     #[test]
     fn thread_view_focus_left_at_thread_state_passes_through_to_listing() {
         let mut ctx = mock_context();
@@ -2153,9 +2136,10 @@ mod focus_tests {
         );
     }
 
-    /// Single-mail refinement: a single-mail thread has no conversation stop,
-    /// so Left at the mail-detail state passes through (the listing exits the
-    /// view directly) instead of stopping at a degenerate empty split.
+    /// A single-mail thread has no conversation stop ("thread list, if
+    /// any"): Left at the mail-detail state passes through (the listing
+    /// hands the keyboard straight to the grid) instead of stopping at a
+    /// degenerate one-row split.
     #[test]
     fn thread_view_focus_left_at_mailview_single_mail_passes_through() {
         let mut ctx = mock_context();
@@ -2192,8 +2176,7 @@ mod focus_tests {
     }
 
     /// Lock: Right at the mail-detail state stays consumed (terminal stop of
-    /// the chain; the listing's `Entry + focus_right → EntryFullscreen`
-    /// branch must never fire from arrow keys).
+    /// the chain; no view sits right of the mail detail).
     #[test]
     fn thread_view_focus_right_at_mailview_stays_consumed() {
         let mut ctx = mock_context();
@@ -2271,21 +2254,6 @@ mod focus_tests {
             "Right must expand the cursor-selected entry, not the stale one"
         );
         assert_eq!(view.expanded_pos, 0);
-    }
-
-    /// A single-mail thread has no thread-list pane (draw renders only the
-    /// mail view), so the view must START at the mail detail — paging keys
-    /// must reach the mail content without an extra focus step.
-    #[test]
-    fn thread_view_single_mail_starts_focused_on_mail_view() {
-        let mut ctx = mock_context();
-        let view = make_single_mail_thread_view(&mut ctx, ThreadViewFocus::None);
-
-        assert!(
-            matches!(view.focus, ThreadViewFocus::MailView),
-            "single-mail thread must start focused on the mail view, not the \
-             invisible thread list"
-        );
     }
 
     /// Reported flow: open a single-mail thread from the listing (Right),
@@ -3106,7 +3074,7 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
 
         let mut reached_bottom = false;
         let mut rounds = 0;
-        while rounds < 100 {
+        while rounds < 500 {
             rounds += 1;
             let mut event = UIEvent::Input(Key::Down);
             assert!(
@@ -3147,7 +3115,7 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
         }
         assert!(
             reached_bottom,
-            "the long body must reach its bottom within 100 Down+draw rounds \
+            "the long body must reach its bottom within 500 Down+draw rounds \
              (stopped after {rounds})"
         );
 

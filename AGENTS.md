@@ -28,6 +28,4 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 
 ## Debugging / runtime
 
-- Trace logs: build with `--features debug-tracing` (plus `imap-trace`/`smtp-trace`/`nntp-trace`/`jmap-trace` for protocol dumps), run with `MELI_DEBUG_STDERR=yes` and redirect stderr: `meli 2> trace.log`.
-- Config: `${XDG_CONFIG_HOME}/meli/config.toml`; override per-run with `MELI_CONFIG=<path>` or `meli -c <path>`.
-- Coverage and perf/flamegraph recipes: `DEVELOPMENT.md`. Optional runtime deps (gpg, notmuch): `BUILD.md`.
+- Trace logs: a debug build writes all logs to `./log/`. Build with `--features debug-tracing` (plus `imap-trace`/`smtp-trace`/`nntp-trace`/`jmap-trace` for protocol dumps) for extra tracing; set `MELI_DEBUG_STDERR=yes` to log to stderr instead.

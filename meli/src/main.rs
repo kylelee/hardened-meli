@@ -187,16 +187,9 @@ fn run_app(mut opt: Opt) -> Result<()> {
                                     }
                                 }
                                 UIMode::Command => {
-                                    match k {
-                                        Key::Char('\n') => {
-                                            state.mode = UIMode::Normal;
-                                            state.rcv_event(UIEvent::ChangeMode(UIMode::Normal));
-                                            state.redraw();
-                                        },
-                                        k => {
-                                            state.rcv_event(UIEvent::CmdInput(k));
-                                            state.redraw();
-                                        },
+                                    {
+                                        state.rcv_event(UIEvent::CmdInput(k));
+                                        state.redraw();
                                     }
                                 },
                                 UIMode::Embedded => {
@@ -245,6 +238,21 @@ fn run_app(mut opt: Opt) -> Result<()> {
                                 }
                             }
                             state.rcv_event(UIEvent::StatusEvent(StatusEvent::JobFinished(id)));
+                            // A finished job may have applied state a
+                            // component now marks dirty (e.g. the search
+                            // filter); paint it now — the UIEvent arm
+                            // redraws, this arm must too. Only bypass the
+                            // draw-rate limiter when something is actually
+                            // dirty: housekeeping jobs (is_online probes,
+                            // mailbox refreshes, …) finish in bursts during
+                            // IMAP syncs and must not each force a full
+                            // repaint. With nothing dirty, fall back to the
+                            // plain rate-limited redraw.
+                            if state.any_component_dirty() {
+                                state.redraw_force();
+                            } else {
+                                state.redraw();
+                            }
                         },
                     }
                 },

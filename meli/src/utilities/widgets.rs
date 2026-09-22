@@ -1083,6 +1083,9 @@ impl AutoComplete {
         grid.clear_area(popup_area, panel_attrs);
         let inner_area =
             crate::terminal::ratatui_bridge::draw_rounded_frame(grid, popup_area, border);
+        for frame_area in crate::terminal::ratatui_bridge::frame_flush_areas(grid, popup_area) {
+            context.dirty_areas.push_back(frame_area);
+        }
         let rows = inner_area.height();
         if rows == 0 {
             context.dirty_areas.push_back(popup_area);

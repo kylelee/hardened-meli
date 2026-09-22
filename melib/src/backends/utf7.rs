@@ -144,7 +144,16 @@ fn decode_utf7_part(text: &str) -> String {
     }
 
     #[allow(deprecated)]
-    let text_u16 = base64::decode(text_b64).unwrap();
+    let text_u16 = match base64::decode(text_b64) {
+        Ok(v) => v,
+        // Some servers emit a literal `&` inside a mailbox name without
+        // escaping it as `&-` (e.g. `R&D-team`). `decode_utf7_imap`'s regex
+        // then matches the bogus `&D-` sequence, whose payload is not valid
+        // base64. RFC 3501 mandates mUTF-7, but a strict panic here would
+        // abort the whole folder listing, so fall back to the original text
+        // (Postel's law) instead.
+        Err(_) => return text.to_string(),
+    };
     let (cow, _encoding_used, _had_errors) = UTF_16BE.decode(&text_u16);
     let result = cow.as_ref();
 
@@ -193,5 +202,34 @@ mod tests {
     #[test]
     fn decode_consecutive_accents() {
         assert_eq!(decode_utf7_imap("th&AOkA4g-tre"), "théâtre")
+    }
+
+    #[test]
+    fn decode_literal_ampersand_is_not_a_panic() {
+        // Non-conforming servers send a literal `&` without the required
+        // `&-` escaping; the regex matches the bogus `&D-` and the payload
+        // `D` is not valid base64. The original text must be preserved.
+        assert_eq!(decode_utf7_imap("R&D-team"), "R&D-team");
+    }
+
+    #[test]
+    fn decode_ampersand_escape() {
+        assert_eq!(decode_utf7_imap("&-"), "&");
+    }
+
+    #[test]
+    fn decode_cjk_vector() {
+        // Vector computed independently with python3:
+        //   >>> base64.b64encode("已发送".encode("utf-16-be")).decode()
+        //   'XfJT0ZAB'
+        // i.e. UTF-16BE bytes `5d f2 53 d1 90 01`, with `/` mapped to `,`.
+        assert_eq!(decode_utf7_imap("&XfJT0ZAB-"), "已发送");
+    }
+
+    #[test]
+    fn encode_decode_cjk_roundtrip() {
+        // Same independently computed vector pins the encoder output.
+        assert_eq!(encode_utf7_imap("已发送"), "&XfJT0ZAB-");
+        assert_eq!(decode_utf7_imap(&encode_utf7_imap("已发送")), "已发送");
     }
 }

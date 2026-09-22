@@ -435,11 +435,15 @@ impl StatusBar {
                 None,
             );
             x += x_rel;
-            // Key glyphs render green+bold inside the hints run so the
-            // binding pops out of the descriptive label text.
+            // Key glyphs render in the theme's highlight-selected
+            // accent color (the `...highlighted_selected` background)
+            // so the binding pops out of the descriptive label text
+            // and follows the active theme.
+            let selected = crate::conf::value(context, "mail.listing.compact.highlighted_selected");
+            let key_fg = selected.bg;
             for span in &hints_spans {
                 let (fg, attrs) = if span.key {
-                    (Color::Green, attribute.attrs | Attr::BOLD)
+                    (key_fg, attribute.attrs | Attr::BOLD)
                 } else {
                     (attribute.fg, attribute.attrs)
                 };
@@ -661,18 +665,22 @@ impl StatusBar {
     /// Priority list (in display order):
     ///
     /// 1. `general.toggle_help`         — label `Help`
-    /// 2. `scroll_up`                   — label `Scroll Up`
-    /// 3. `scroll_down`                 — label `Scroll Down`
-    /// 4. `focus_left`                  — label `Switch Left View`
-    /// 5. `focus_right`                 — label `Switch Right View`
-    /// 6. `close`                       — label `Close View` (only on
+    /// 2. `general.enter_command_mode`  — label `Command`
+    /// 3. `scroll_up`                   — label `Scroll Up`
+    /// 4. `scroll_down`                 — label `Scroll Down`
+    /// 5. `focus_left`                  — label `Switch Left View`
+    /// 6. `focus_right`                 — label `Switch Right View`
+    /// 7. `close`                       — label `Close View` (only on
     ///    sub-views that expose a close binding, e.g. composing)
-    /// 7. `general.quit`                — label `Exit`
+    /// 8. `general.quit`                — label `Quit`
     ///
-    /// Bindings missing from the active view are skipped silently. Format:
-    /// `⌨️ (?:Help)(Up:Scroll Up)(Down:Scroll Down)...(q:Exit)` — every
-    /// hint is rendered as `(key:label)` with no separator between them,
-    /// and the key glyph of each hint renders green+bold (see
+    /// Bindings missing from the active view are skipped silently. Every
+    /// key glyph comes from the *configured* binding (remapping a
+    /// shortcut changes its hint); with the defaults the format is
+    /// `⌨️ (?:Help)(:/<M-x>:Command)(Up:Scroll Up)(Down:Scroll
+    /// Down)...(<Esc>/q:Quit)` — every hint is rendered as `(key:label)`
+    /// with no separator between them, and the key glyph of each hint
+    /// renders in the theme's highlight-selected color (see
     /// [`HintSpan`]) so the actionable binding stands out from the
     /// descriptive label. Truncates with `…` (or `...` in ASCII
     /// terminals) when the joined text would overflow the configured
@@ -707,7 +715,7 @@ impl StatusBar {
             }
             None
         };
-        // Seven entries in fixed display order: help first (so it
+        // Eight entries in fixed display order: help first (so it
         // survives narrow ellipsis), then scroll, then focus switches,
         // then view close, then exit pinned last so it is the final
         // actionable hint.
@@ -715,14 +723,19 @@ impl StatusBar {
             &'static str,
             Option<&crate::terminal::ShortcutKeys>,
             &'static str,
-        ); 7] = [
+        ); 8] = [
             ("help", general.and_then(|m| m.get("toggle_help")), "Help"),
+            (
+                "enter_command_mode",
+                general.and_then(|m| m.get("enter_command_mode")),
+                "Command",
+            ),
             ("scroll_up", pick_key("scroll_up"), "Scroll Up"),
             ("scroll_down", pick_key("scroll_down"), "Scroll Down"),
             ("focus_left", pick_key("focus_left"), "Switch Left View"),
             ("focus_right", pick_key("focus_right"), "Switch Right View"),
             ("close", pick_key("close"), "Close View"),
-            ("quit", general.and_then(|m| m.get("quit")), "Exit"),
+            ("quit", general.and_then(|m| m.get("quit")), "Quit"),
         ];
         let entries: Vec<(&crate::terminal::ShortcutKeys, &'static str)> = pickers
             .iter()
@@ -736,8 +749,8 @@ impl StatusBar {
         } else {
             "…"
         };
-        // Build one colored run per hint: `(` plain, key glyph
-        // green+bold, `:label)` plain. The hint form renders placeholder
+        // Build one colored run per hint: `(` plain, key glyph in the
+        // theme's highlight-selected color (+bold), `:label)` plain. The hint form renders placeholder
         // keys in angle brackets (`<Up>/k`, `<Esc>/q`) so they read as
         // key descriptions rather than literal text (see
         // [`crate::terminal::ShortcutKeys::hint_display`]).
@@ -749,7 +762,7 @@ impl StatusBar {
         }
         // Use a generous maximum: the status bar clips the segment at
         // the row's remaining width anyway; this only governs the
-        // ellipsis cutoff. Seven labelled hints run ~100–110 cells, so
+        // ellipsis cutoff. Eight labelled hints run ~100–110 cells, so
         // the previous 80-column budget truncated too aggressively.
         let mut spans = truncate_spans_with_ellipsis(spans, 200, ellipsis);
         if spans.is_empty() {
@@ -868,7 +881,7 @@ impl Component for StatusBar {
         // The frame ring writes cells directly (blit), so push its strips
         // for the incremental flush — without this the ring only appears
         // on full repaints (mirrors Tabbed's own frame push).
-        for frame_area in crate::terminal::ratatui_bridge::frame_ring_areas(bar_area) {
+        for frame_area in crate::terminal::ratatui_bridge::frame_flush_areas(grid, bar_area) {
             context.dirty_areas.push_back(frame_area);
         }
         let [command_line, status_row] = Layout::vertical([
@@ -1214,6 +1227,16 @@ impl Component for StatusBar {
                     }
                 };
             }
+            UIEvent::CmdInput(Key::Char('\n')) => {
+                if let Some(suggestion) = self.auto_complete.get_suggestion() {
+                    self.ex_buffer.set_text(suggestion);
+                }
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+                self.dirty = true;
+                return true;
+            }
             UIEvent::CmdInput(Key::Char('\t')) => {
                 if let Some(suggestion) = self.auto_complete.get_suggestion().or_else(|| {
                     if self.auto_complete.cursor() == 0 {
@@ -1225,12 +1248,9 @@ impl Component for StatusBar {
                         None
                     }
                 }) {
-                    let mut utext = UText::new(suggestion);
-                    let len = utext.as_str().len();
-                    utext.set_cursor(len);
                     self.container.set_dirty(true);
                     self.set_dirty(true);
-                    self.ex_buffer = TextField::new(utext, None);
+                    self.ex_buffer.set_text(suggestion);
                 }
             }
             UIEvent::CmdInput(Key::Char(c)) => {
@@ -1274,14 +1294,11 @@ impl Component for StatusBar {
                 let pos = self.ex_buffer_cmd_history_pos.map(|p| p + 1).unwrap_or(0);
                 let pos = std::cmp::min(pos, self.cmd_history.len().saturating_sub(1));
                 if Some(pos) != self.ex_buffer_cmd_history_pos {
-                    let mut utext = UText::new(
-                        self.cmd_history[self.cmd_history.len().saturating_sub(1) - pos].clone(),
-                    );
-                    let len = utext.as_str().len();
-                    utext.set_cursor(len);
+                    let history_entry =
+                        self.cmd_history[self.cmd_history.len().saturating_sub(1) - pos].clone();
                     self.container.set_dirty(true);
                     self.set_dirty(true);
-                    self.ex_buffer = TextField::new(utext, None);
+                    self.ex_buffer.set_text(history_entry);
                     self.ex_buffer_cmd_history_pos = Some(pos);
                     self.dirty = true;
                 }
@@ -1297,14 +1314,11 @@ impl Component for StatusBar {
                     self.ex_buffer.clear();
                     self.dirty = true;
                 } else if let Some(pos) = self.ex_buffer_cmd_history_pos.map(|p| p - 1) {
-                    let mut utext = UText::new(
-                        self.cmd_history[self.cmd_history.len().saturating_sub(1) - pos].clone(),
-                    );
-                    let len = utext.as_str().len();
-                    utext.set_cursor(len);
+                    let history_entry =
+                        self.cmd_history[self.cmd_history.len().saturating_sub(1) - pos].clone();
                     self.container.set_dirty(true);
                     self.set_dirty(true);
-                    self.ex_buffer = TextField::new(utext, None);
+                    self.ex_buffer.set_text(history_entry);
                     self.ex_buffer_cmd_history_pos = Some(pos);
                     self.dirty = true;
                 }
@@ -1666,20 +1680,25 @@ impl Component for Tabbed {
             self.children[self.cursor_pos].draw(grid, child_area, context);
         }
 
-        /* Rounded outer frame around the tab body (visual chrome only). The
-         * visible tab is the focused pane, so its frame uses "tab.focused";
-         * there is no unfocused pane at this layer. Drawn after the children
-         * so partial child redraws cannot leave the border ring eaten; the
-         * ring cells are pushed for flushing. The shortcuts overlay below
-         * draws after the frame, so it layers on top. */
+        /* Rounded outer frame around the tab body (visual chrome only),
+         * drawn only for inset children — they are laid out one cell
+         * inside the body and rely on this frame for their border.
+         * Pinned children (the mail listing, the contact list) draw
+         * their own pane rings flush to the body edges; painting a
+         * full-body frame over them would merge the pane tops into one
+         * border. The visible tab is the focused pane, so its frame
+         * uses "tab.focused". Drawn after the children so partial child
+         * redraws cannot leave the border ring eaten; the ring cells
+         * are pushed for flushing. The shortcuts overlay below draws
+         * after the frame, so it layers on top. */
         let body_area = if self.children.len() > 1 {
             below_tab_row
         } else {
             area
         };
-        if self.is_dirty() && body_area.width() >= 2 && body_area.height() >= 2 {
+        if inset_child && self.is_dirty() && body_area.width() >= 2 && body_area.height() >= 2 {
             draw_rounded_frame(grid, body_area, crate::conf::value(context, "tab.focused"));
-            for frame_area in frame_ring_areas(body_area) {
+            for frame_area in frame_flush_areas(grid, body_area) {
                 context.dirty_areas.push_back(frame_area);
             }
         }
@@ -1713,6 +1732,9 @@ impl Component for Tabbed {
                     dialog_area,
                     crate::conf::value(context, "tab.focused"),
                 );
+                for frame_area in frame_flush_areas(grid, dialog_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
                 let (x, y) = grid.write_string(
                     "shortcuts",
                     crate::conf::value(context, "tab.focused").fg,
@@ -1885,6 +1907,9 @@ impl Component for Tabbed {
                 dialog_area,
                 crate::conf::value(context, "tab.focused"),
             );
+            for frame_area in frame_flush_areas(grid, dialog_area) {
+                context.dirty_areas.push_back(frame_area);
+            }
             let (x, y) = grid.write_string(
                 "shortcuts",
                 crate::conf::value(context, "tab.focused").fg,
@@ -2354,12 +2379,14 @@ impl Component for Tabbed {
 }
 
 /// One colored run of the status-bar hints segment. The key glyph of a
-/// `(key:label)` hint renders green+bold so the actionable binding
-/// stands out from the descriptive label text.
+/// `(key:label)` hint renders in the theme's highlight-selected color
+/// (+bold) so the actionable binding stands out from the descriptive
+/// label text.
 #[derive(Debug)]
 struct HintSpan {
     text: String,
-    /// Render with `Color::Green` and bold (the key glyph of a hint).
+    /// Render with the theme's highlight-selected color and bold (the
+    /// key glyph of a hint).
     key: bool,
 }
 

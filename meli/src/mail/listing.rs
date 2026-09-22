@@ -33,17 +33,17 @@ use std::{
 use futures::future::try_join_all;
 use melib::{
     backends::EnvelopeHashBatch, mbox::MboxMetadata, utils::datetime, Flag, FlagOp,
-    ShellExpandTrait, UnixTimestamp,
+    ShellExpandTrait, Threads, UnixTimestamp,
 };
 use smallvec::SmallVec;
 
 use super::*;
 use crate::{
-    accounts::{JobRequest, MailboxStatus},
+    accounts::{JobRequest, MailboxStatus, SearchResult},
     components::ExtendShortcutsMaps,
     jobs::IsAsync,
     terminal::{
-        draw_rounded_frame, frame_ring_areas,
+        draw_rounded_frame, frame_flush_areas,
         ratatui_bridge::{area_to_rect, rect_to_area},
     },
 };
@@ -65,6 +65,22 @@ pub const DEFAULT_SELECTED_FLAG: &str = "☑️";
 pub const DEFAULT_UNSEEN_FLAG: &str = concat!("●", emoji_text_presentation_selector!());
 pub const DEFAULT_SNOOZED_FLAG: &str = concat!("💤", emoji_text_presentation_selector!());
 pub const DEFAULT_HIGHLIGHT_SELF_FLAG: &str = concat!("✸", emoji_text_presentation_selector!());
+
+/// Tell the user that a search only returned in-memory fallback matches
+/// because the authoritative backend (remote server or sqlite3 index)
+/// failed. Shared by every listing component that applies a
+/// [`SearchResult`].
+fn notify_if_search_degraded(context: &mut Context, result: &SearchResult) {
+    if result.degraded {
+        context.replies.push_back(UIEvent::Notification {
+            title: None,
+            source: None,
+            body: "Server search failed; showing local matches only. Results may be incomplete."
+                .into(),
+            kind: Some(crate::types::NotificationType::Info),
+        });
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct RowsState<T> {
@@ -273,7 +289,6 @@ pub use self::offline::*;
 pub enum Focus {
     None,
     Entry,
-    EntryFullscreen,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -301,20 +316,13 @@ impl std::fmt::Display for Modifier {
 pub struct ColorCache {
     pub theme_default: ThemeAttribute,
 
+    // Single base attribute for listing rows: the former even/odd zebra
+    // striping was removed, so every row shares this by default.
+    pub base: ThemeAttribute,
     pub unseen: ThemeAttribute,
     pub highlighted: ThemeAttribute,
     pub selected: ThemeAttribute,
     pub highlighted_selected: ThemeAttribute,
-    pub even: ThemeAttribute,
-    pub odd: ThemeAttribute,
-    pub even_unseen: ThemeAttribute,
-    pub even_highlighted: ThemeAttribute,
-    pub even_selected: ThemeAttribute,
-    pub odd_unseen: ThemeAttribute,
-    pub odd_highlighted: ThemeAttribute,
-    pub odd_selected: ThemeAttribute,
-    pub even_highlighted_selected: ThemeAttribute,
-    pub odd_highlighted_selected: ThemeAttribute,
     pub tag_default: ThemeAttribute,
     pub highlight_self: ThemeAttribute,
 
@@ -334,72 +342,36 @@ impl ColorCache {
         };
         let mut ret = match style {
             IndexStyle::Plain => Self {
-                even: crate::conf::value(context, "mail.listing.plain.even"),
-                odd: crate::conf::value(context, "mail.listing.plain.odd"),
-                even_unseen: crate::conf::value(context, "mail.listing.plain.even_unseen"),
-                odd_unseen: crate::conf::value(context, "mail.listing.plain.odd_unseen"),
-                even_highlighted: crate::conf::value(
+                base: crate::conf::value(context, "mail.listing.plain"),
+                unseen: crate::conf::value(context, "mail.listing.plain.unseen"),
+                highlighted: crate::conf::value(context, "mail.listing.plain.highlighted"),
+                selected: crate::conf::value(context, "mail.listing.plain.selected"),
+                highlighted_selected: crate::conf::value(
                     context,
-                    "mail.listing.plain.even_highlighted",
+                    "mail.listing.plain.highlighted_selected",
                 ),
-                odd_highlighted: crate::conf::value(context, "mail.listing.plain.odd_highlighted"),
-                odd_highlighted_selected: crate::conf::value(
-                    context,
-                    "mail.listing.plain.odd_highlighted_selected",
-                ),
-                even_selected: crate::conf::value(context, "mail.listing.plain.even_selected"),
-                even_highlighted_selected: crate::conf::value(
-                    context,
-                    "mail.listing.plain.even_highlighted_selected",
-                ),
-                odd_selected: crate::conf::value(context, "mail.listing.plain.odd_selected"),
                 ..default
             },
             IndexStyle::Threaded => Self {
-                even_unseen: crate::conf::value(context, "mail.listing.plain.even_unseen"),
-                even_selected: crate::conf::value(context, "mail.listing.plain.even_selected"),
-                even_highlighted: crate::conf::value(
+                base: crate::conf::value(context, "mail.listing.plain"),
+                unseen: crate::conf::value(context, "mail.listing.plain.unseen"),
+                highlighted: crate::conf::value(context, "mail.listing.plain.highlighted"),
+                selected: crate::conf::value(context, "mail.listing.plain.selected"),
+                highlighted_selected: crate::conf::value(
                     context,
-                    "mail.listing.plain.even_highlighted",
+                    "mail.listing.plain.highlighted_selected",
                 ),
-                even_highlighted_selected: crate::conf::value(
-                    context,
-                    "mail.listing.plain.even_highlighted_selected",
-                ),
-                odd_unseen: crate::conf::value(context, "mail.listing.plain.odd_unseen"),
-                odd_selected: crate::conf::value(context, "mail.listing.plain.odd_selected"),
-                odd_highlighted: crate::conf::value(context, "mail.listing.plain.odd_highlighted"),
-                odd_highlighted_selected: crate::conf::value(
-                    context,
-                    "mail.listing.plain.odd_highlighted_selected",
-                ),
-                even: crate::conf::value(context, "mail.listing.plain.even"),
-                odd: crate::conf::value(context, "mail.listing.plain.odd"),
                 ..default
             },
             IndexStyle::Compact => Self {
-                even_unseen: crate::conf::value(context, "mail.listing.compact.even_unseen"),
-                even_selected: crate::conf::value(context, "mail.listing.compact.even_selected"),
-                even_highlighted: crate::conf::value(
+                base: crate::conf::value(context, "mail.listing.compact"),
+                unseen: crate::conf::value(context, "mail.listing.compact.unseen"),
+                highlighted: crate::conf::value(context, "mail.listing.compact.highlighted"),
+                selected: crate::conf::value(context, "mail.listing.compact.selected"),
+                highlighted_selected: crate::conf::value(
                     context,
-                    "mail.listing.compact.even_highlighted",
+                    "mail.listing.compact.highlighted_selected",
                 ),
-                even_highlighted_selected: crate::conf::value(
-                    context,
-                    "mail.listing.compact.even_highlighted_selected",
-                ),
-                odd_unseen: crate::conf::value(context, "mail.listing.compact.odd_unseen"),
-                odd_selected: crate::conf::value(context, "mail.listing.compact.odd_selected"),
-                odd_highlighted: crate::conf::value(
-                    context,
-                    "mail.listing.compact.odd_highlighted",
-                ),
-                odd_highlighted_selected: crate::conf::value(
-                    context,
-                    "mail.listing.compact.odd_highlighted_selected",
-                ),
-                even: crate::conf::value(context, "mail.listing.compact.even"),
-                odd: crate::conf::value(context, "mail.listing.compact.odd"),
                 ..default
             },
             IndexStyle::Conversations => Self {
@@ -413,11 +385,7 @@ impl ColorCache {
                     context,
                     "mail.listing.conversations.highlighted_selected",
                 ),
-                // Zebra parity shares the plain listing keys, like the
-                // threaded style does; conversations has no even/odd keys of
-                // its own.
-                even: crate::conf::value(context, "mail.listing.plain.even"),
-                odd: crate::conf::value(context, "mail.listing.plain.odd"),
+                base: crate::conf::value(context, "mail.listing.conversations"),
                 ..default
             },
         };
@@ -425,10 +393,7 @@ impl ColorCache {
             ret.highlighted.attrs |= Attr::REVERSE;
             ret.tag_default.attrs |= Attr::REVERSE;
             ret.highlight_self.attrs |= Attr::REVERSE;
-            ret.even_highlighted.attrs |= Attr::REVERSE;
-            ret.odd_highlighted.attrs |= Attr::REVERSE;
-            ret.even_highlighted_selected.attrs |= Attr::REVERSE | Attr::DIM;
-            ret.odd_highlighted_selected.attrs |= Attr::REVERSE | Attr::DIM;
+            ret.highlighted_selected.attrs |= Attr::REVERSE | Attr::DIM;
         }
         ret
     }
@@ -510,6 +475,80 @@ column_str!(struct FromString(String));
 column_str!(struct SubjectString(String));
 column_str!(struct FlagString(String));
 column_str!(struct TagString(String, SmallVec<[Option<Color>; 8]>));
+
+/// Deterministic, envelope-level check whether any envelope in the thread
+/// rooted at `thread_hash` carries an attachment.
+///
+/// Do **not** use `Thread::has_attachments()` for this decision: that counter
+/// is aggregated exactly once, when the thread is inserted into the [`Threads`]
+/// tree, and therefore goes stale after a refresh or rebuild (the paperclip
+/// then "sometimes shows, later stops showing"). This walks the thread's
+/// `message()` nodes instead and consults each envelope's own parse-time
+/// cached `has_attachments`, the same source the plain listing relies on, so
+/// the result tracks the envelopes currently in the collection.
+pub(crate) fn thread_has_attachments(
+    threads: &Threads,
+    envelopes: &HashMap<EnvelopeHash, Envelope>,
+    thread_hash: ThreadHash,
+) -> bool {
+    threads.thread_iter(thread_hash).any(|(_, h)| {
+        threads.thread_nodes()[&h]
+            .message()
+            .and_then(|env_hash| envelopes.get(&env_hash))
+            .is_some_and(Envelope::has_attachments)
+    })
+}
+
+#[cfg(test)]
+mod thread_has_attachments_tests {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, RwLock},
+    };
+
+    use melib::{Envelope, EnvelopeHash, Threads};
+
+    use super::thread_has_attachments;
+
+    /// The old `Thread::has_attachments()` counter and the new helper must
+    /// diverge once the counter is stale: a `Thread` whose counter says zero
+    /// while one of its envelopes still reports an attachment must keep the
+    /// marker. `Thread::attachments` is a public field reachable through
+    /// `Threads::thread_ref_mut`, so the stale state a refresh/rebuild leaves
+    /// behind is reproducible from meli without touching melib.
+    #[test]
+    fn stale_thread_counter_does_not_hide_the_attachment() {
+        let raw = b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: attached mail\r\nMessage-ID: <stale-counter@x.example>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"bnd\"\r\n\r\n--bnd\nContent-Type: text/plain; charset=utf-8\n\nbody\n--bnd\nContent-Type: application/pdf; name=\"doc.pdf\"\nContent-Disposition: attachment; filename=\"doc.pdf\"\n\n%PDF-1.4 fake\n--bnd--\n";
+        let envelope = Envelope::from_bytes(raw, None).unwrap();
+        assert!(
+            envelope.has_attachments(),
+            "fixture must carry an attachment"
+        );
+        let env_hash = envelope.hash();
+        let envelopes: Arc<RwLock<HashMap<EnvelopeHash, Envelope>>> =
+            Arc::new(RwLock::new(HashMap::from([(env_hash, envelope)])));
+        let mut threads = Threads::new(1);
+        threads.insert(&envelopes, env_hash);
+        let thread_hash = threads.envelope_to_thread[&env_hash];
+        // Simulate the post-refresh stale counter: inserted with an
+        // attachment, then zeroed without rebuilding the thread tree.
+        threads.thread_ref_mut(thread_hash).attachments = 0;
+        assert!(
+            !threads.thread_ref(thread_hash).has_attachments(),
+            "the counter is deliberately stale for this regression test"
+        );
+        let envelopes_lck = envelopes.read().unwrap();
+        assert!(
+            thread_has_attachments(&threads, &envelopes_lck, thread_hash),
+            "the envelope-level helper must still report the attachment"
+        );
+        assert_ne!(
+            threads.thread_ref(thread_hash).has_attachments(),
+            thread_has_attachments(&threads, &envelopes_lck, thread_hash),
+            "the stale counter and the deterministic helper must diverge"
+        );
+    }
+}
 
 impl FlagString {
     pub(self) fn new(
@@ -1236,12 +1275,64 @@ impl ListingComponent {
             Threaded(l) => l.as_component().id(),
         }
     }
+
+    /// Propagate the keyboard-focus flag to the listing grid component:
+    /// its Entry-state subpane ring renders focused while the grid (not
+    /// the open view) holds the keyboard.
+    fn set_grid_has_keyboard(&mut self, value: bool) {
+        match self {
+            Compact(l) => l.set_grid_has_keyboard(value),
+            Conversations(l) => l.set_grid_has_keyboard(value),
+            Plain(l) => l.set_grid_has_keyboard(value),
+            Threaded(l) => l.set_grid_has_keyboard(value),
+            Offline(_) => {}
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum ListingFocus {
     Menu,
-    Mailbox,
+    MailList,
+    View,
+}
+
+impl ListingComponent {
+    /// The (thread, envelope) under the grid cursor, if any.
+    fn cursor_selection(&self) -> Option<(ThreadHash, EnvelopeHash)> {
+        match self {
+            Compact(l) => l.cursor_selection(),
+            Conversations(l) => l.cursor_selection(),
+            Plain(l) => l.cursor_selection(),
+            Threaded(l) => l.cursor_selection(),
+            Offline(_) => None,
+        }
+    }
+
+    /// Queue an `OpenEntryUnderCursor` for the cursor entry (view refresh
+    /// while the grid holds the keyboard).
+    fn kick_open_under_cursor(&self, context: &mut Context) {
+        match self {
+            Compact(l) => l.kick_open_under_cursor(context),
+            Conversations(l) => l.kick_open_under_cursor(context),
+            Plain(l) => l.kick_open_under_cursor(context),
+            Threaded(l) => l.kick_open_under_cursor(context),
+            Offline(_) => {}
+        }
+    }
+}
+
+impl ListingComponent {
+    /// Apply a search result to the active component.
+    pub fn filter(&mut self, filter_term: String, results: Vec<EnvelopeHash>, context: &Context) {
+        match self {
+            Compact(l) => l.filter(filter_term, results, context),
+            Conversations(l) => l.filter(filter_term, results, context),
+            Plain(l) => l.filter(filter_term, results, context),
+            Threaded(l) => l.filter(filter_term, results, context),
+            Offline(_) => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1292,15 +1383,18 @@ pub struct Listing {
     theme_default: ThemeAttribute,
     sidebar_divider: char,
     sidebar_divider_theme: ThemeAttribute,
-    mail_view_divider: char,
-    mail_view_divider_theme: ThemeAttribute,
     // State
     menu_visibility: bool,
-    /// This is the width of the right container to the entire width.
-    ratio: usize, // right/(container width) * 100
-    prev_ratio: usize,
-    menu_width: WidgetWidth,
     focus: ListingFocus,
+    /// Cached `is_menu_visible()` from the previous draw: when the sidebar
+    /// occlusion flips, every pane must repaint or stale pixels (the old
+    /// sidebar/grid split) survive the layout shift.
+    prev_menu_visible: bool,
+    /// Cached layout4 flag (view owns the whole pane): flips force a full
+    /// repaint of every pane.
+    prev_view_fullscreen: bool,
+    /// on the grid refresh the view only when the selection changed.
+    last_opened_env: Option<EnvelopeHash>,
     view: Option<Box<ThreadView>>,
 }
 
@@ -1325,36 +1419,31 @@ impl Component for Listing {
         }
         let total_cols = area.width();
 
-        let right_component_width = if self.is_menu_visible() {
-            if self.focus == ListingFocus::Menu {
-                (self.ratio * total_cols) / 100
-            } else {
-                match self.menu_width {
-                    WidgetWidth::Set(ref mut v) | WidgetWidth::Hold(ref mut v) => {
-                        if *v == 0 {
-                            *v = 1;
-                        } else if *v >= total_cols {
-                            *v = total_cols.saturating_sub(2);
-                        }
-                        total_cols.saturating_sub(*v)
-                    }
-                    WidgetWidth::Unset => {
-                        self.menu_width =
-                            WidgetWidth::Set(total_cols - ((self.ratio * total_cols) / 100));
-                        (self.ratio * total_cols) / 100
-                    }
-                }
+        let menu_visible = self.is_menu_visible();
+        if menu_visible != self.prev_menu_visible {
+            // The sidebar occlusion flipped: every pane must repaint or
+            // stale pixels (the old sidebar/grid split) survive the shift.
+            self.prev_menu_visible = menu_visible;
+            self.dirty = true;
+            self.component.set_dirty(true);
+            if let Some(view) = self.view.as_mut() {
+                view.set_dirty(true);
             }
+        }
+
+        // Fixed split: the mailbox list keeps 30% of the width (layout1),
+        // the right pane 70%.
+        let right_component_width = if menu_visible {
+            total_cols - total_cols * 3 / 10
         } else {
             total_cols
         };
         let mid = area.width().saturating_sub(right_component_width);
         /* Top-level horizontal split via ratatui Layout: sidebar | divider
-         * column | right side. Identical to the previous take_cols/nth_col/
-         * skip_cols math for every size. The degenerate single-pane cases
-         * (no sidebar / sidebar only) hand the whole area to one pane
-         * without a divider column, exactly as before, so the split is only
-         * computed when both are visible (1 <= mid < total width). */
+         * column | right side. The degenerate single-pane cases (no
+         * sidebar) hand the whole area to the right pane without a divider
+         * column, so the split is only computed when the sidebar is
+         * visible. */
         let (menu_area, divider_area, list_area) =
             if right_component_width != total_cols && right_component_width != 0 {
                 let [menu, divider, right] = Layout::horizontal([
@@ -1389,18 +1478,12 @@ impl Component for Listing {
         }
 
         let account_hash = self.accounts[self.cursor_pos.account].hash;
-        /* Rounded pane frames (visual chrome only): each visible pane gets
-         * a border ring styled by listing focus — the pane under the focus
-         * cursor (sidebar after `focus_left`, else the list) uses
-         * "tab.focused" and the other "tab.unfocused". Each frame is drawn
-         * before its pane's content and the content is rendered in the
-         * frame's returned inner area, so the ring owns its own cells and
-         * never covers content (the first list row, line start/end). An
-         * open ThreadView draws its own pane frames over the whole list
-         * pane, so the listing skips its frame there rather than layer a
-         * second ring under the view's; in that state the component, its
-         * view_area and the view keep the full pane area. Pane areas and
-         * interior dividers are unchanged. */
+        /* Rounded pane frames (visual chrome only): the pane holding the
+         * keyboard focus is framed with "tab.focused", the other with
+         * "tab.unfocused". With a view open (layout2/3/4) the listing
+         * skips its own frame — the grid subpane and the view draw their
+         * own rings — and the component, its view_area and the view keep
+         * the full pane area. */
         let tab_focused = crate::conf::value(context, "tab.focused");
         let tab_unfocused = crate::conf::value(context, "tab.unfocused");
         let (menu_attr, list_attr) = if matches!(self.focus, ListingFocus::Menu) {
@@ -1409,6 +1492,23 @@ impl Component for Listing {
             (tab_unfocused, tab_focused)
         };
         let view_drawn = self.status.is_none() && self.component.unfocused() && self.view.is_some();
+        // Layout4: the view owns the whole pane (thread list | mail view
+        // inside, 30/70) — the grid is hidden, exactly two panes on
+        // screen. Layout2/layout3 keep [grid 30% | view 70%].
+        let view_fullscreen = self.view.as_ref().is_some_and(|v| {
+            !v.is_single_mail() && !matches!(v.thread_view_focus(), ThreadViewFocus::Thread)
+        });
+        if view_fullscreen != self.prev_view_fullscreen {
+            // The grid pane appears/disappears: every pane must repaint or
+            // stale pixels survive the shift.
+            self.prev_view_fullscreen = view_fullscreen;
+            self.dirty = true;
+            self.component.set_dirty(true);
+            if let Some(view) = self.view.as_mut() {
+                view.set_dirty(true);
+            }
+        }
+
         if right_component_width == total_cols {
             if Self::should_replace_with_offline(context, account_hash)
                 && !matches!(self.component, ListingComponent::Offline(_))
@@ -1425,46 +1525,41 @@ impl Component for Listing {
                 area
             } else {
                 let inner = draw_rounded_frame(grid, area, list_attr);
-                for frame_area in frame_ring_areas(area) {
+                for frame_area in frame_flush_areas(grid, area) {
                     context.dirty_areas.push_back(frame_area);
                 }
                 inner
             };
             if let Some(s) = self.status.as_mut() {
                 s.draw(grid, content_area, context);
+            } else if view_drawn && view_fullscreen {
+                // Layout4: only the view is on screen.
+                if let Some(view) = &mut self.view {
+                    view.draw(grid, content_area, context);
+                }
             } else {
                 self.component.draw(grid, content_area, context);
                 if self.component.unfocused() {
                     if let Some(view) = &mut self.view {
-                        view.draw(grid, self.component.view_area().unwrap_or(area), context);
-                        if let Some(view_area) = self.component.view_area() {
-                            if view_area != area {
-                                let divider_area =
-                                    area.nth_col(area.width() - view_area.width() - 1);
-                                for row in grid.bounds_iter(divider_area) {
-                                    for c in row {
-                                        grid[c]
-                                            .set_ch(self.mail_view_divider)
-                                            .set_fg(self.mail_view_divider_theme.fg)
-                                            .set_bg(self.mail_view_divider_theme.bg)
-                                            .set_attrs(self.mail_view_divider_theme.attrs);
-                                    }
-                                }
-                                context.dirty_areas.push_back(divider_area);
-                            }
-                        }
+                        // Computed here (not via the component's cached
+                        // `view_area`, which a not-dirty component draw
+                        // leaves stale — bound to a previous screen
+                        // generation) with the same fixed split the
+                        // components render: grid 30% | gap | view.
+                        let (_, view_area) = crate::mail::pane_split(area);
+                        view.draw(grid, view_area, context);
                     }
                 }
             }
         } else if right_component_width == 0 {
             let menu_inner = draw_rounded_frame(grid, area, menu_attr);
-            for frame_area in frame_ring_areas(area) {
+            for frame_area in frame_flush_areas(grid, area) {
                 context.dirty_areas.push_back(frame_area);
             }
             self.draw_menu(grid, menu_inner, context);
         } else {
             let menu_inner = draw_rounded_frame(grid, menu_area, menu_attr);
-            for frame_area in frame_ring_areas(menu_area) {
+            for frame_area in frame_flush_areas(grid, menu_area) {
                 context.dirty_areas.push_back(frame_area);
             }
             self.draw_menu(grid, menu_inner, context);
@@ -1482,7 +1577,7 @@ impl Component for Listing {
                 list_area
             } else {
                 let inner = draw_rounded_frame(grid, list_area, list_attr);
-                for frame_area in frame_ring_areas(list_area) {
+                for frame_area in frame_flush_areas(grid, list_area) {
                     context.dirty_areas.push_back(frame_area);
                 }
                 inner
@@ -1494,31 +1589,60 @@ impl Component for Listing {
                 self.component.draw(grid, content_area, context);
                 if self.component.unfocused() {
                     if let Some(view) = &mut self.view {
-                        view.draw(grid, self.component.view_area().unwrap_or(area), context);
-                        if let Some(view_area) = self.component.view_area() {
-                            if view_area != area {
-                                let divider_area =
-                                    area.nth_col(area.width() - view_area.width() - 1);
-                                for row in grid.bounds_iter(divider_area) {
-                                    for c in row {
-                                        grid[c]
-                                            .set_ch(self.mail_view_divider)
-                                            .set_fg(self.mail_view_divider_theme.fg)
-                                            .set_bg(self.mail_view_divider_theme.bg)
-                                            .set_attrs(self.mail_view_divider_theme.attrs);
-                                    }
-                                }
-                                context.dirty_areas.push_back(divider_area);
-                            }
-                        }
+                        // Computed here (not via the component's cached
+                        // `view_area`, which a not-dirty component draw
+                        // leaves stale — bound to a previous screen
+                        // generation) with the same fixed split the
+                        // components render: grid 30% | gap | view.
+                        let (_, view_area) = crate::mail::pane_split(area);
+                        view.draw(grid, view_area, context);
                     }
                 }
             }
         }
         self.dirty = false;
+        // Grid-focus layouts (layout2/layout3): a cursor move on the grid
+        // (j/k, paging, filtering) refreshes the open view to the newly
+        // selected entry; the layout follows the selection (single mail →
+        // layout2, thread → layout3) because the view is rebuilt.
+        if self.status.is_none()
+            && matches!(self.focus, ListingFocus::MailList)
+            && self.view.is_some()
+            && self.component.unfocused()
+        {
+            let selection = self.component.cursor_selection();
+            if let Some((_, env_hash)) = selection {
+                if self.last_opened_env != Some(env_hash) {
+                    self.last_opened_env = Some(env_hash);
+                    self.component.kick_open_under_cursor(context);
+                }
+            }
+        }
     }
 
     fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
+        // Listing-level search commands are not pane-scoped: at `MailList`
+        // or `Menu` focus deliver them to the component before any focus
+        // routing below — a menu-held keyboard must not swallow them.
+        // At `View` focus the view owns the keyboard and the action is its
+        // in-body search, so it must fall through to the view-first routing
+        // further down instead of being hijacked by the grid component.
+        // (Style switches and entry operations stay on their own paths
+        // below: they are handled by the listing itself.)
+        if matches!(self.focus, ListingFocus::MailList | ListingFocus::Menu)
+            && matches!(
+                event,
+                UIEvent::Action(Action::Listing(
+                    ListingAction::Search { .. } | ListingAction::Select { .. }
+                ))
+            )
+        {
+            log::debug!(
+                "listing: forwarding {event:?} to the component (focus {:?})",
+                self.focus
+            );
+            return self.component.process_event(event, context);
+        }
         match event {
             UIEvent::ConfigReload { old_settings: _ } => {
                 self.theme_default = crate::conf::value(context, "theme_default");
@@ -1526,9 +1650,6 @@ impl Component for Listing {
                 self.sidebar_divider =
                     *account_settings!(context[account_hash].listing.sidebar_divider);
                 self.sidebar_divider_theme = conf::value(context, "mail.sidebar_divider");
-                self.mail_view_divider =
-                    *account_settings!(context[account_hash].listing.mail_view_divider);
-                self.mail_view_divider_theme = conf::value(context, "mail.view.divider");
                 self.menu.grid_mut().empty();
                 self.set_dirty(true);
             }
@@ -1560,7 +1681,29 @@ impl Component for Listing {
                     .get_index_of(account_hash)
                     .expect("Invalid account_hash in UIEventMailbox{Delete,Create}");
                 if self.cursor_pos.account == account_index {
+                    // This is a background reconcile of the current account (the
+                    // watcher reporting that it (re)connected or refreshed), not
+                    // a user navigation, so it must not steal the keyboard focus
+                    // from the sidebar. `change_account` resets the focus via
+                    // `close_view`, so remember the pre-reconcile focus and put
+                    // it back. A `View` focus cannot survive because
+                    // `change_account` force-closes the open view, and
+                    // `close_view` already lands the grid for that case.
+                    let previous_focus = match self.focus {
+                        ListingFocus::Menu => Some(ListingFocus::Menu),
+                        ListingFocus::MailList => Some(ListingFocus::MailList),
+                        ListingFocus::View => None,
+                    };
                     self.change_account(context);
+                    match previous_focus {
+                        // `change_account` (via `close_view`) lands the
+                        // keyboard on the grid; handing the focus back to
+                        // the sidebar must take the grid's keyboard
+                        // highlight with it (see `focus_menu`).
+                        Some(ListingFocus::Menu) => self.focus_menu(),
+                        Some(focus) => self.focus = focus,
+                        None => {}
+                    }
                 } else {
                     let previous_collapsed_mailboxes: BTreeSet<MailboxHash> = self.accounts
                         [account_index]
@@ -1702,12 +1845,12 @@ impl Component for Listing {
                     self.accounts[self.cursor_pos.account].entries.get(*idx)
                 {
                     let account_hash = self.accounts[self.cursor_pos.account].hash;
+                    let mailbox_hash = *mailbox_hash;
                     self.cursor_pos.menu = MenuEntryCursor::Mailbox(*idx);
-                    self.status = None;
+                    self.close_view(context);
                     self.component
                         .process_event(&mut UIEvent::VisibilityChange(false), context);
-                    self.component
-                        .set_coordinates((account_hash, *mailbox_hash));
+                    self.component.set_coordinates((account_hash, mailbox_hash));
                     self.component
                         .process_event(&mut UIEvent::VisibilityChange(true), context);
                     self.menu.grid_mut().empty();
@@ -1729,6 +1872,28 @@ impl Component for Listing {
                                 context,
                             );
                         }
+                        match new_value {
+                            Focus::None => {
+                                // The grid released the entry: drop any
+                                // residual view (idempotent with
+                                // `close_view`) and land the keyboard on
+                                // the grid.
+                                if let Some(view) = self.view.take() {
+                                    view.unrealize(context);
+                                }
+                                if self.focus == ListingFocus::View {
+                                    self.focus = ListingFocus::MailList;
+                                }
+                            }
+                            Focus::Entry => {
+                                // The entry is open; the keyboard stays on
+                                // the grid (layout2/layout3 keep the grid
+                                // pane focused after opening — the
+                                // `OpenEntryUnderCursor` reply has run
+                                // first, so the view exists).
+                                self.component.set_grid_has_keyboard(true);
+                            }
+                        }
                         // Need to clear gap between sidebar and listing component, if any.
                         self.dirty = true;
                     }
@@ -1740,25 +1905,26 @@ impl Component for Listing {
                     Some(ListingMessage::OpenEntryUnderCursor {
                         env_hash,
                         thread_hash,
-                        show_thread,
                         go_to_first_unread,
                     }) => {
                         let (a, m) = self.component.coordinates();
                         if let Some(view) = self.view.take() {
                             view.unrealize(context);
                         }
-                        self.view = Some(Box::new(ThreadView::new(
+                        self.last_opened_env = Some(env_hash);
+                        let mut view = Box::new(ThreadView::new(
                             (a, m, env_hash),
                             thread_hash,
                             Some(env_hash),
                             go_to_first_unread,
-                            if show_thread {
-                                None
-                            } else {
-                                Some(ThreadViewFocus::MailView)
-                            },
+                            Some(ThreadViewFocus::Thread),
                             context,
-                        )));
+                        ));
+                        // The keyboard stays on the grid after opening
+                        // (layout2/layout3 open grid-focused): the view's
+                        // rings render dimmed.
+                        view.set_grid_focused(true);
+                        self.view = Some(view);
                     }
                 }
                 return true;
@@ -1783,7 +1949,14 @@ impl Component for Listing {
             _ => {}
         }
 
+        // View-first routing: while a view is open, non-Input events (live
+        // updates, refreshes) always reach it first; Input events reach it
+        // first only when it owns the keyboard (`ListingFocus::View`). At
+        // `MailList` focus the grid owns the keyboard, so Input events skip
+        // the view entirely.
         if self.component.unfocused()
+            && self.view.is_some()
+            && (!matches!(&*event, UIEvent::Input(_)) || self.focus == ListingFocus::View)
             && self
                 .view
                 .as_mut()
@@ -1793,30 +1966,14 @@ impl Component for Listing {
             return true;
         }
 
-        if self.focus == ListingFocus::Mailbox && self.status.is_some() {
+        if matches!(self.focus, ListingFocus::MailList | ListingFocus::View)
+            && self.status.is_some()
+        {
             if let Some(s) = self.status.as_mut() {
                 if s.process_event(event, context) {
                     return true;
                 }
             }
-        }
-
-        let mut have_forwarded_to_component = false;
-        // Forward events to self.component if it's focused, otherwise forward any
-        // unhandled events to self.component at the end of this function.
-        if (self.focus == ListingFocus::Mailbox && self.status.is_none())
-            && ((self.component.unfocused()
-                && self
-                    .view
-                    .as_mut()
-                    .map(|v| v.process_event(event, context))
-                    .unwrap_or(false))
-                || {
-                    have_forwarded_to_component = true;
-                    self.component.process_event(event, context)
-                })
-        {
-            return true;
         }
 
         // Only the `UIEvent::Input` arms below resolve shortcut bindings,
@@ -1834,7 +1991,140 @@ impl Component for Listing {
         } else {
             ShortcutMaps::default()
         };
-        if self.focus == ListingFocus::Mailbox {
+
+        // Pane-chain pre-arms (Hyprland-style window management over
+        // [sidebar] [grid] [thread list] [mail detail]): they run ahead of
+        // the component's own arms so the direction keys always move the
+        // focus along the chain, and the exit keys close the focus layer
+        // (the mail pane only at the mail-detail layer, else the whole
+        // view). `status` keeps its own layered quit arm below.
+        if let UIEvent::Input(k) = &*event {
+            let focus_right = shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]);
+            let focus_left = shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]);
+            let open_entry = shortcut!(k == shortcuts[Shortcuts::LISTING]["open_entry"]);
+            let exit_entry = shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"])
+                || context.settings.shortcuts.general.quit.contains(k);
+            if self.status.is_none() {
+                match self.focus {
+                    ListingFocus::MailList if focus_right || open_entry => {
+                        // From layout1's grid: open the cursor entry. The
+                        // view is created by the queued
+                        // `OpenEntryUnderCursor` reply; the focus stays on
+                        // the grid (layout2 for a single mail, layout3
+                        // for a thread). With the view already open
+                        // (layout2/layout3 grid focus) the key moves the
+                        // keyboard onto the right pane (layout2: the mail
+                        // view, layout3: → layout4's thread list).
+                        if self.view.is_some() {
+                            if let Some(view) = self.view.as_mut() {
+                                view.enter_split();
+                            }
+                            self.component.set_grid_has_keyboard(false);
+                            if let Some(view) = self.view.as_mut() {
+                                view.set_grid_focused(false);
+                            }
+                            self.focus = ListingFocus::View;
+                            // The grid's and the view's pane highlights
+                            // swap with the keyboard; both panes must
+                            // repaint on the next frame.
+                            self.set_dirty(true);
+                        } else {
+                            self.component.set_focus(Focus::Entry, context);
+                        }
+                        return true;
+                    }
+                    ListingFocus::MailList if focus_left => {
+                        // From layout2's or layout3's grid: close the
+                        // view back to layout1 with the focus on the
+                        // mailbox list. From layout1's grid: hand the
+                        // focus to the mailbox list.
+                        match self.view.as_ref() {
+                            Some(view) if view.is_single_mail() => {
+                                self.close_view(context);
+                                if self.menu_visibility {
+                                    self.focus_menu();
+                                }
+                            }
+                            Some(view)
+                                if matches!(view.thread_view_focus(), ThreadViewFocus::Thread) =>
+                            {
+                                self.close_view(context);
+                                if self.menu_visibility {
+                                    self.focus_menu();
+                                }
+                            }
+                            Some(_) => {}
+                            None => {
+                                if self.menu_visibility {
+                                    self.focus_menu();
+                                }
+                            }
+                        }
+                        self.set_dirty(true);
+                        return true;
+                    }
+                    ListingFocus::MailList if exit_entry && self.view.is_some() => {
+                        // quit from layout2/layout3's grid: back to
+                        // layout1, the focus on the grid.
+                        self.close_view(context);
+                        return true;
+                    }
+                    ListingFocus::View if focus_left => {
+                        // From layout4's thread list: close the mail pane
+                        // and land on layout3's grid. From layout2's mail
+                        // view (single-mail Left passes through the view):
+                        // focus layout2's grid.
+                        self.component.set_grid_has_keyboard(true);
+                        if let Some(view) = self.view.as_mut() {
+                            if !view.is_single_mail() {
+                                view.close_mail_pane();
+                            }
+                            view.set_grid_focused(true);
+                        }
+                        self.focus = ListingFocus::MailList;
+                        self.set_dirty(true);
+                        return true;
+                    }
+                    ListingFocus::View if exit_entry => {
+                        // quit from layout2's mail view: close the view
+                        // back to layout1. quit from layout4: close the
+                        // mail pane and land on layout3's grid.
+                        if self.view.as_ref().is_some_and(|v| v.is_single_mail()) {
+                            self.close_view(context);
+                        } else {
+                            if let Some(view) = self.view.as_mut() {
+                                view.close_mail_pane();
+                                view.set_grid_focused(true);
+                            }
+                            self.component.set_grid_has_keyboard(true);
+                            self.focus = ListingFocus::MailList;
+                            self.set_dirty(true);
+                        }
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut have_forwarded_to_component = false;
+        // Forward events to self.component if it's focused, otherwise forward any
+        // unhandled events to self.component at the end of this function.
+        if matches!(self.focus, ListingFocus::MailList | ListingFocus::View)
+            && self.status.is_none()
+            && {
+                have_forwarded_to_component = true;
+                self.component.process_event(event, context)
+            }
+        {
+            return true;
+        }
+        // Background-job completions (search/select results) reach the
+        // component here — the focus gate above only handles input.
+        if matches!(event, UIEvent::StatusEvent(StatusEvent::JobFinished(_))) {
+            return self.component.process_event(event, context);
+        }
+        if matches!(self.focus, ListingFocus::MailList | ListingFocus::View) {
             match *event {
                 UIEvent::Input(ref k)
                     if self.status.is_some()
@@ -1846,57 +2136,11 @@ impl Component for Listing {
                     self.set_dirty(true);
                     return true;
                 }
-                UIEvent::Input(Key::Mouse(MouseEvent::Press(MouseButton::Left, x, _y)))
-                    if self.is_menu_visible() =>
-                {
-                    match self.menu_width {
-                        WidgetWidth::Hold(wx) | WidgetWidth::Set(wx)
-                            if wx + 1 == usize::from(x) =>
-                        {
-                            self.menu_width = WidgetWidth::Hold(wx - 1);
-                        }
-                        WidgetWidth::Set(_) => return false,
-                        WidgetWidth::Hold(x) => {
-                            self.menu_width = WidgetWidth::Set(x);
-                        }
-                        WidgetWidth::Unset => return false,
-                    }
-                    self.set_dirty(true);
-                    return true;
-                }
-                UIEvent::Input(Key::Mouse(MouseEvent::Hold(x, _y))) if self.is_menu_visible() => {
-                    match self.menu_width {
-                        WidgetWidth::Hold(ref mut hx) => {
-                            *hx = usize::from(x).saturating_sub(1);
-                        }
-                        _ => return false,
-                    }
-                    self.set_dirty(true);
-                    return true;
-                }
-                UIEvent::Input(Key::Mouse(MouseEvent::Release(x, _y)))
-                    if self.is_menu_visible() =>
-                {
-                    match self.menu_width {
-                        WidgetWidth::Hold(_) => {
-                            self.menu_width = WidgetWidth::Set(usize::from(x).saturating_sub(1));
-                        }
-                        _ => return false,
-                    }
-                    self.set_dirty(true);
-                    return true;
-                }
                 UIEvent::Input(ref k)
-                    if self.is_menu_visible()
+                    if self.status.is_some()
                         && shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
                 {
-                    self.focus = ListingFocus::Menu;
-                    if self.show_menu_scrollbar != ShowMenuScrollbar::Never {
-                        self.menu_scrollbar_show_timer.rearm();
-                        self.show_menu_scrollbar = ShowMenuScrollbar::True;
-                    }
-                    self.prev_ratio = self.ratio;
-                    self.ratio = 50;
+                    self.focus_menu();
                     self.set_dirty(true);
                 }
                 UIEvent::Input(ref k)
@@ -1989,24 +2233,6 @@ impl Component for Listing {
                     if shortcut!(k == shortcuts[Shortcuts::LISTING]["toggle_menu_visibility"]) =>
                 {
                     self.menu_visibility = !self.menu_visibility;
-                    self.set_dirty(true);
-                }
-                UIEvent::Input(ref k)
-                    if shortcut!(k == shortcuts[Shortcuts::LISTING]["increase_sidebar"]) =>
-                {
-                    self.ratio = self.ratio.saturating_sub(2);
-                    self.prev_ratio = self.prev_ratio.saturating_sub(2);
-                    self.menu_width = WidgetWidth::Unset;
-                    self.set_dirty(true);
-                }
-                UIEvent::Input(ref k)
-                    if shortcut!(k == shortcuts[Shortcuts::LISTING]["decrease_sidebar"]) =>
-                {
-                    self.ratio += 2;
-                    self.ratio = std::cmp::min(100, self.ratio);
-                    self.prev_ratio += 2;
-                    self.prev_ratio = std::cmp::min(100, self.prev_ratio);
-                    self.menu_width = WidgetWidth::Unset;
                     self.set_dirty(true);
                 }
                 _ => {}
@@ -2332,13 +2558,15 @@ impl Component for Listing {
                 UIEvent::Input(ref k)
                     if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]) =>
                 {
-                    // Right opens the sidebar-selected entry, mirroring
-                    // `open_mailbox` (Enter); previously it only shifted focus,
-                    // so the stale/default mailbox stayed open.
+                    // Right from layout1 switches the layout directly:
+                    // open the cursor entry — a single mail → layout2, a
+                    // thread → layout3 — with the focus on the grid
+                    // (mirroring `open_mailbox` for the mailbox switch).
                     self.cursor_pos = self.menu_cursor_pos;
                     self.change_account(context);
-                    self.focus = ListingFocus::Mailbox;
-                    self.ratio = self.prev_ratio;
+                    self.focus = ListingFocus::MailList;
+                    self.component.set_grid_has_keyboard(true);
+                    self.component.set_focus(Focus::Entry, context);
                     self.set_dirty(true);
                     context
                         .replies
@@ -2359,8 +2587,8 @@ impl Component for Listing {
                     self.cursor_pos = self.menu_cursor_pos;
                     self.change_account(context);
                     self.set_dirty(true);
-                    self.focus = ListingFocus::Mailbox;
-                    self.ratio = self.prev_ratio;
+                    self.focus = ListingFocus::MailList;
+                    self.component.set_grid_has_keyboard(true);
                     context
                         .replies
                         .push_back(UIEvent::StatusEvent(StatusEvent::ScrollUpdate(
@@ -2399,8 +2627,8 @@ impl Component for Listing {
                 {
                     self.cursor_pos = self.menu_cursor_pos;
                     self.change_account(context);
-                    self.focus = ListingFocus::Mailbox;
-                    self.ratio = self.prev_ratio;
+                    self.focus = ListingFocus::MailList;
+                    self.component.set_grid_has_keyboard(true);
                     self.set_dirty(true);
                     context
                         .replies
@@ -2518,6 +2746,14 @@ impl Component for Listing {
 
                             amount -= 1;
                         }
+                    }
+                    // Layout1: moving the mailbox selection switches the
+                    // mailbox right away — the grid follows, the focus
+                    // stays on the mailbox list.
+                    if self.menu_cursor_pos != self.cursor_pos {
+                        self.cursor_pos = self.menu_cursor_pos;
+                        self.change_account(context);
+                        self.focus_menu();
                     }
                     if self.show_menu_scrollbar != ShowMenuScrollbar::Never {
                         self.menu_scrollbar_show_timer.rearm();
@@ -2826,7 +3062,7 @@ impl Component for Listing {
         }
         // Forward unhandled events to self.component if that hasn't happened already.
         if !(have_forwarded_to_component
-            || (self.focus == ListingFocus::Mailbox
+            || (matches!(self.focus, ListingFocus::MailList | ListingFocus::View)
                 && self.status.is_none()
                 && self.component.unfocused()))
         {
@@ -3017,7 +3253,15 @@ impl Listing {
             })
             .collect();
         let first_account_hash = account_entries[0].hash;
+        // The sidebar is hidden on launch when the account setting says so;
+        // its visibility also decides which pane owns the initial keyboard
+        // focus. A visible sidebar (the layout1 default) is focused so the
+        // first keystrokes navigate the mailbox list, while a hidden sidebar
+        // leaves the focus on the mail list grid.
+        let menu_visibility =
+            !*account_settings!(context[first_account_hash].listing.hide_sidebar_on_launch);
         let mut ret = Self {
+            last_opened_env: None,
             component: Offline(OfflineListing::new((
                 first_account_hash,
                 MailboxHash::default(),
@@ -3051,17 +3295,14 @@ impl Listing {
                 context[first_account_hash].listing.sidebar_divider
             ),
             sidebar_divider_theme: conf::value(context, "mail.sidebar_divider"),
-            mail_view_divider: *account_settings!(
-                context[first_account_hash].listing.mail_view_divider
-            ),
-            mail_view_divider_theme: conf::value(context, "mail.view.divider"),
-            menu_visibility: !*account_settings!(
-                context[first_account_hash].listing.hide_sidebar_on_launch
-            ),
-            ratio: *account_settings!(context[first_account_hash].listing.sidebar_ratio),
-            prev_ratio: *account_settings!(context[first_account_hash].listing.sidebar_ratio),
-            menu_width: WidgetWidth::Unset,
-            focus: ListingFocus::Mailbox,
+            menu_visibility,
+            focus: if menu_visibility {
+                ListingFocus::Menu
+            } else {
+                ListingFocus::MailList
+            },
+            prev_menu_visible: menu_visibility,
+            prev_view_fullscreen: false,
         };
         ret.component.realize(ret.id().into(), context);
         {
@@ -3075,11 +3316,41 @@ impl Listing {
             }
         }
         ret.change_account(context);
+        // `change_account` switches to the account's index style, and
+        // `set_index_style` calls `close_view`, which by contract lands the
+        // keyboard on the grid. Re-assert the launch focus here so a visible
+        // sidebar still owns the keyboard once construction settles; the
+        // field initializer above covers the no-mailbox/offline path that
+        // never reaches `set_index_style`.
+        ret.focus = if menu_visibility {
+            ListingFocus::Menu
+        } else {
+            ListingFocus::MailList
+        };
+        // Keep `grid_has_keyboard` in sync with the launch focus (see
+        // `focus_menu`): the pane background highlights the keyboard holder.
+        ret.component
+            .set_grid_has_keyboard(matches!(ret.focus, ListingFocus::MailList));
         ret
     }
 
     fn draw_menu(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        grid.clear_area(area, self.theme_default);
+        // The whole pane must fall back to the focused-pane background, not
+        // the (content-area) `theme_default`: rows not covered by the menu
+        // buffer (short folder trees) and the per-account spacing rows must
+        // keep the pane background when the theme changes. The background
+        // follows the keyboard focus ("pane.focused" while the sidebar owns
+        // it, "pane.unfocused" otherwise); entry strings keep their own
+        // `mail.sidebar*` colors on top of it.
+        let pane_fill = crate::conf::value(
+            context,
+            if matches!(self.focus, ListingFocus::Menu) {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        );
+        grid.clear_area(area, pane_fill);
         let total_height: usize = 3 * (self.accounts.len())
             + self
                 .accounts
@@ -3089,11 +3360,19 @@ impl Listing {
         let min_width: usize = area.width();
         let (width, height) = self.menu.grid().size();
         let cursor = match self.focus {
-            ListingFocus::Mailbox => self.cursor_pos,
+            ListingFocus::MailList | ListingFocus::View => self.cursor_pos,
             ListingFocus::Menu => self.menu_cursor_pos,
         };
         if min_width > width || height < total_height || self.dirty {
             let _ = self.menu.resize(min_width, total_height);
+            // Re-fill the offscreen menu buffer with the *current*
+            // sidebar theme: `CellBuffer::resize` grows with the
+            // construction-time default cell, which carries the theme
+            // that was active when the `Screen` was created, so stale
+            // colors would leak through around `write_string` runs
+            // (account title tails, spacing rows) after a theme switch.
+            let menu_area = self.menu.area();
+            self.menu.grid_mut().clear_area(menu_area, pane_fill);
             let mut y = 0;
             for a in 0..self.accounts.len() {
                 let menu_area = self.menu.area().skip_rows(y);
@@ -3205,7 +3484,7 @@ impl Listing {
             .collect();
 
         let cursor = match self.focus {
-            ListingFocus::Mailbox => self.cursor_pos,
+            ListingFocus::MailList | ListingFocus::View => self.cursor_pos,
             ListingFocus::Menu => self.menu_cursor_pos,
         };
 
@@ -3232,6 +3511,37 @@ impl Listing {
         let mail_sidebar_index_value = crate::conf::value(context, "mail.sidebar_index");
         let mail_sidebar_unread_count_value =
             crate::conf::value(context, "mail.sidebar_unread_count");
+        // Base entry rows sit directly on the pane background, like the
+        // blank cells of `draw_menu`: they keep their `mail.sidebar*`
+        // fg/attrs but their bg follows the pane, so an unfocused sidebar
+        // dims as a whole. Only the cursor entry keeps its own
+        // `mail.sidebar_highlighted*` fill so the selection stays legible
+        // in both states; the active-account accents keep their fg accent
+        // and ride the pane background too.
+        let pane_fill = crate::conf::value(
+            context,
+            if matches!(self.focus, ListingFocus::Menu) {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        );
+        let on_pane_bg = |attr: &ThemeAttribute| ThemeAttribute {
+            bg: pane_fill.bg,
+            ..*attr
+        };
+        let mail_sidebar_account_name_value = on_pane_bg(&mail_sidebar_account_name_value);
+        let mail_sidebar_highlighted_account_name_value =
+            on_pane_bg(&mail_sidebar_highlighted_account_name_value);
+        let mail_sidebar_highlighted_account_value =
+            on_pane_bg(&mail_sidebar_highlighted_account_value);
+        let mail_sidebar_highlighted_account_index_value =
+            on_pane_bg(&mail_sidebar_highlighted_account_index_value);
+        let mail_sidebar_highlighted_account_unread_count_value =
+            on_pane_bg(&mail_sidebar_highlighted_account_unread_count_value);
+        let mail_sidebar_value = on_pane_bg(&mail_sidebar_value);
+        let mail_sidebar_index_value = on_pane_bg(&mail_sidebar_index_value);
+        let mail_sidebar_unread_count_value = on_pane_bg(&mail_sidebar_unread_count_value);
         let has_sibling_str: &str = account_settings!(
             context[self.accounts[aidx].hash]
                 .listing
@@ -3328,7 +3638,7 @@ impl Listing {
             mail_sidebar_account_name_value
         };
         // Print account name first
-        self.menu.grid_mut().write_string(
+        let (account_name_width, _) = self.menu.grid_mut().write_string(
             &self.accounts[aidx].name,
             account_attrs.fg,
             account_attrs.bg,
@@ -3337,6 +3647,20 @@ impl Listing {
             None,
             None,
         );
+        // The account title row must carry its (possibly highlighted)
+        // background to the end of the pane, like folder rows do via
+        // their tail loop below; otherwise the cells past the account
+        // name keep whatever the offscreen buffer held before.
+        for c in self
+            .menu
+            .grid_mut()
+            .row_iter(area, account_name_width..area.width(), 0)
+        {
+            self.menu.grid_mut()[c]
+                .set_fg(account_attrs.fg)
+                .set_bg(account_attrs.bg)
+                .set_attrs(account_attrs.attrs);
+        }
         area = self.menu.area().skip_rows(account_y);
 
         if lines.is_empty() {
@@ -3573,6 +3897,9 @@ impl Listing {
     }
 
     fn change_account(&mut self, context: &mut Context) {
+        // The view belongs to the previous account/mailbox; close it so no
+        // stale view (or sidebar occlusion) survives the switch.
+        self.close_view(context);
         let account_hash = context.accounts[self.cursor_pos.account].hash();
         let previous_collapsed_mailboxes: BTreeSet<MailboxHash> = self.accounts
             [self.cursor_pos.account]
@@ -3706,11 +4033,47 @@ impl Listing {
         );
     }
 
+    /// Move the keyboard focus onto the mailbox sidebar and arm the
+    /// transient scrollbar hint (unless the sidebar is configured to
+    /// never show one).
+    fn focus_menu(&mut self) {
+        self.focus = ListingFocus::Menu;
+        // Keep `grid_has_keyboard` mirroring `focus == ListingFocus::MailList`
+        // so every pane renders the keyboard-held pane highlighted and the
+        // rest dimmed from a single source of truth.
+        self.component.set_grid_has_keyboard(false);
+        if self.show_menu_scrollbar != ShowMenuScrollbar::Never {
+            self.menu_scrollbar_show_timer.rearm();
+            self.show_menu_scrollbar = ShowMenuScrollbar::True;
+        }
+    }
+
+    /// Close the open thread view and land the keyboard on the grid. The
+    /// sidebar (if it was hidden by the open mail pane) comes back
+    /// automatically via `is_menu_visible`.
+    fn close_view(&mut self, context: &mut Context) {
+        if let Some(view) = self.view.take() {
+            view.unrealize(context);
+        }
+        self.last_opened_env = None;
+        if !matches!(self.component.focus(), Focus::None) {
+            self.component.set_focus(Focus::None, context);
+        }
+        self.component.set_grid_has_keyboard(true);
+        self.focus = ListingFocus::MailList;
+        self.set_dirty(true);
+    }
+
     fn is_menu_visible(&self) -> bool {
-        !matches!(self.component.focus(), Focus::EntryFullscreen) && self.menu_visibility
+        // The mailbox list is only visible in layout1: any open view
+        // (layout2/3/4) replaces it — exactly two panes are on screen.
+        self.menu_visibility && self.view.is_none()
     }
 
     fn set_index_style(&mut self, new_style: IndexStyle, context: &mut Context) {
+        // The view belongs to the previous listing style; close it so no
+        // stale view (or sidebar occlusion) survives the switch.
+        self.close_view(context);
         let old = match new_style {
             IndexStyle::Plain => {
                 if matches!(self.component, Plain(_)) {
@@ -3773,7 +4136,6 @@ pub enum ListingMessage {
     OpenEntryUnderCursor {
         env_hash: EnvelopeHash,
         thread_hash: ThreadHash,
-        show_thread: bool,
         go_to_first_unread: bool,
     },
     UpdateView,
@@ -3851,8 +4213,8 @@ mod listing_menu_tests {
 
     use melib::{
         backends::{
-            AccountHash, BackendMailbox, Mailbox, MailboxHash, MailboxPermissions,
-            SpecialUsageMailbox,
+            AccountHash, BackendEventConsumer, BackendMailbox, Backends, Mailbox, MailboxHash,
+            MailboxPermissions, SpecialUsageMailbox,
         },
         Result,
     };
@@ -4015,6 +4377,29 @@ mod listing_menu_tests {
         )
     }
 
+    /// Register a second mock account so the cross-account navigation
+    /// paths (the sidebar `scroll_up`/`scroll_down` account wrap) are
+    /// exercisable. Built like the mock account in `Context::new_mock`.
+    fn register_second_account(context: &mut Context) -> AccountHash {
+        let name = "second".to_string();
+        let mut account_conf = crate::conf::AccountConf::default();
+        account_conf.conf.format = "maildir".to_string();
+        account_conf.account.format = "maildir".to_string();
+        account_conf.account.root_mailbox = shared_test_home().path().display().to_string();
+        let account_hash = AccountHash::from_bytes(name.as_bytes());
+        let account = crate::accounts::Account::new(
+            account_hash,
+            name,
+            account_conf,
+            &Backends::new(),
+            context.main_loop_handler.clone(),
+            BackendEventConsumer::new(std::sync::Arc::new(|_, _| {})),
+        )
+        .unwrap();
+        context.accounts.insert(account_hash, account);
+        account_hash
+    }
+
     #[test]
     fn listing_menu_focus_right_opens_selected_mailbox() {
         let mut ctx = mock_context();
@@ -4026,6 +4411,9 @@ mod listing_menu_tests {
         ctx.settings.shortcuts.listing.scroll_down = Key::Down.into();
         let (account_hash, _inbox_hash, archive_hash) = register_two_mailboxes(&mut ctx);
         let mut listing = Listing::new(&mut ctx);
+        // `Listing::new` lands on the visible sidebar now; this test drives
+        // the layout1 grid → sidebar transition, so restore the grid start.
+        listing.focus = ListingFocus::MailList;
         assert_eq!(
             listing.cursor_pos.menu,
             MenuEntryCursor::Mailbox(0),
@@ -4044,7 +4432,7 @@ mod listing_menu_tests {
 
         let consumed = listing.process_event(&mut UIEvent::Input(Key::Right), &mut ctx);
         assert!(consumed);
-        assert_eq!(listing.focus, ListingFocus::Mailbox);
+        assert_eq!(listing.focus, ListingFocus::MailList);
         assert_eq!(
             listing.cursor_pos.menu,
             MenuEntryCursor::Mailbox(1),
@@ -4066,6 +4454,9 @@ mod listing_menu_tests {
         ctx.settings.shortcuts.listing.scroll_down = Key::Down.into();
         register_two_mailboxes(&mut ctx);
         let mut listing = Listing::new(&mut ctx);
+        // `Listing::new` lands on the visible sidebar now; start on the
+        // grid so the Left transition below is still exercised.
+        listing.focus = ListingFocus::MailList;
 
         listing.process_event(&mut UIEvent::Input(Key::Left), &mut ctx);
         assert_eq!(listing.focus, ListingFocus::Menu);
@@ -4073,7 +4464,7 @@ mod listing_menu_tests {
         listing.menu_cursor_pos.menu = MenuEntryCursor::Status;
         let consumed = listing.process_event(&mut UIEvent::Input(Key::Right), &mut ctx);
         assert!(consumed);
-        assert_eq!(listing.focus, ListingFocus::Mailbox);
+        assert_eq!(listing.focus, ListingFocus::MailList);
         assert!(
             listing.status.is_some(),
             "focus_right at the Status entry must open the account status view"
@@ -4090,6 +4481,9 @@ mod listing_menu_tests {
         ctx.settings.shortcuts.listing.focus_left = ShortcutKeys::double(Key::Left, Key::Char('h'));
         register_two_mailboxes(&mut ctx);
         let mut listing = Listing::new(&mut ctx);
+        // `Listing::new` lands on the visible sidebar now; start on the
+        // grid so the Left transition into the sidebar is still exercised.
+        listing.focus = ListingFocus::MailList;
         listing.process_event(&mut UIEvent::Input(Key::Left), &mut ctx);
         assert_eq!(listing.focus, ListingFocus::Menu);
 
@@ -4130,34 +4524,39 @@ mod listing_menu_tests {
         );
     }
 
-    /// Navigation key group on the mail list: with the menu hidden (the
-    /// state in which the horizontal keys reach the scroll arms instead of
-    /// the sidebar `focus_left` branch), the default bindings — vim keys
-    /// and arrow keys alike — are consumed by the listing's scroll arms
-    /// (`listing.scroll_up`/`scroll_down` doubles, plus
-    /// `general.scroll_left`/`scroll_right` for the horizontal pair).
+    /// Navigation key group on the mail list: the vertical keys — vim keys
+    /// and arrow keys alike — are consumed by the listing's scroll arms;
+    /// the horizontal pair belongs to the pane chain now: h/Left hand the
+    /// focus to the sidebar, l/Right hand it back (opening the
+    /// sidebar-selected mailbox).
     #[test]
     fn listing_mail_list_navigation_keygroup_consumed() {
         let mut ctx = mock_context();
         register_two_mailboxes(&mut ctx);
         let mut listing = Listing::new(&mut ctx);
-        // The sidebar's `focus_left` branch (menu visible) owns h/Left by
-        // design; hide the menu so the plain scroll arms are exercised.
-        listing.menu_visibility = false;
-        for key in [
-            Key::Char('j'),
-            Key::Down,
-            Key::Char('k'),
-            Key::Up,
-            Key::Char('l'),
-            Key::Right,
-            Key::Char('h'),
-            Key::Left,
-        ] {
+        // `Listing::new` lands on the visible sidebar now; the key group
+        // under test is the grid's, so start from the mail list.
+        listing.focus = ListingFocus::MailList;
+        for key in [Key::Char('j'), Key::Down, Key::Char('k'), Key::Up] {
             assert!(
                 listing.process_event(&mut UIEvent::Input(key.clone()), &mut ctx),
                 "{key:?} must be consumed by the mail list scroll arms"
             );
+        }
+        for key in [Key::Char('h'), Key::Left] {
+            assert!(
+                listing.process_event(&mut UIEvent::Input(key.clone()), &mut ctx),
+                "{key:?} must be consumed by the pane chain"
+            );
+            assert_eq!(listing.focus, ListingFocus::Menu);
+            // l/Right hands the focus back to the mail list (and opens the
+            // sidebar-selected mailbox), so the next iteration starts from
+            // the grid again.
+            assert!(
+                listing.process_event(&mut UIEvent::Input(Key::Char('l')), &mut ctx),
+                "focus_right at the sidebar must be consumed"
+            );
+            assert_eq!(listing.focus, ListingFocus::MailList);
         }
     }
 
@@ -4173,6 +4572,9 @@ mod listing_menu_tests {
             ctx.settings.shortcuts.listing.scroll_up = Key::Up.into();
             register_two_mailboxes(&mut ctx);
             let mut listing = Listing::new(&mut ctx);
+            // `Listing::new` lands on the visible sidebar now; start from
+            // the grid so Left still drives the layout1 pane switch.
+            listing.focus = ListingFocus::MailList;
 
             listing.process_event(&mut UIEvent::Input(Key::Left), &mut ctx);
             listing.menu_cursor_pos.menu = MenuEntryCursor::Status;
@@ -4206,6 +4608,9 @@ mod listing_menu_tests {
 
             ctx.settings.shortcuts.listing.open_entry = Key::Char('\n').into();
             let mut listing = Listing::new(&mut ctx);
+            // `Listing::new` lands on the visible sidebar now; the test
+            // opens an entry with the grid's `open_entry`, so start there.
+            listing.focus = ListingFocus::MailList;
             let theme_default = crate::conf::value(&ctx, "theme_default");
             let mut screen = Screen::<Virtual>::new(theme_default);
             assert!(screen.resize(80, 24));
@@ -4240,163 +4645,950 @@ mod listing_menu_tests {
         }
     }
 
-    /// A standalone (single-mail thread) mail opened and the component put
-    /// into `Focus::EntryFullscreen` directly (key-driven `focus_right`
-    /// cannot reach it: with the view open, the listing routes input to the
-    /// `ThreadView` first and its `MailView` focus state consumes arrow
-    /// keys). The view covers the whole surface and the listing skips its
-    /// own frames (`view_drawn`), so the frame must come from the
-    /// `ThreadView`'s single-mail fast path — pinned here as rounded
-    /// corners at the screen edges.
+    /// Regression: a fresh listing must start with the keyboard on the
+    /// mailbox sidebar (layout1) when the sidebar is visible on launch, so
+    /// the first keystrokes navigate mailboxes instead of the mail list.
     #[test]
-    fn listing_open_solo_fullscreen_frame() {
+    fn startup_focus_lands_on_visible_sidebar() {
         let mut ctx = mock_context();
-        let (_a, inbox_hash, _arch) = register_two_mailboxes(&mut ctx);
-        let bytes = b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: fullscreen frame mail\r\nMessage-ID: <fullscreen-solo@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\nfullscreen body line\r\n";
-        let mut env = Envelope::from_bytes(bytes, None).unwrap();
-        env.set_flags(melib::Flag::SEEN);
-        let account_hash = *ctx.accounts.iter().next().unwrap().0;
-        ctx.accounts[&account_hash]
-            .collection
-            .insert(env, inbox_hash);
-
-        ctx.settings.shortcuts.listing.open_entry = Key::Char('\n').into();
-        let mut listing = Listing::new(&mut ctx);
-        let theme_default = crate::conf::value(&ctx, "theme_default");
-        let mut screen = Screen::<Virtual>::new(theme_default);
-        assert!(screen.resize(80, 24));
-        let area = screen.area();
-        listing.draw(screen.grid_mut(), area, &mut ctx);
-        let mut event = UIEvent::Input(Key::Char('\n'));
-        assert!(listing.process_event(&mut event, &mut ctx));
-        for _ in 0..8 {
-            let replies = ctx.replies();
-            if replies.is_empty() {
-                break;
-            }
-            for mut ev in replies {
-                let _ = listing.process_event(&mut ev, &mut ctx);
-            }
-        }
-        assert!(listing.view.is_some(), "open_entry must create the view");
-        listing
-            .component
-            .set_focus(Focus::EntryFullscreen, &mut ctx);
-        listing.draw(screen.grid_mut(), area, &mut ctx);
-
-        let grid = screen.grid();
-        let last_col = area.width() - 1;
-        let last_row = area.height() - 1;
-        assert_eq!(grid[(0, 0)].ch(), '╭', "fullscreen top-left corner");
-        assert_eq!(grid[(last_col, 0)].ch(), '╮', "fullscreen top-right corner");
-        assert_eq!(
-            grid[(last_col, last_row)].ch(),
-            '╯',
-            "fullscreen bottom-right corner"
+        register_two_mailboxes(&mut ctx);
+        let listing = Listing::new(&mut ctx);
+        assert!(
+            listing.is_menu_visible(),
+            "the sidebar must be visible at construction by default"
         );
-        let tab_focused = crate::conf::value(&ctx, "tab.focused");
         assert_eq!(
-            grid[(0, 0)].fg(),
-            tab_focused.fg,
-            "fullscreen frame uses the focused attribute"
+            listing.focus,
+            ListingFocus::Menu,
+            "a visible sidebar owns the initial keyboard focus"
         );
-        println!("listing_open_solo_fullscreen_frame: fullscreen ring pinned");
     }
 
-    /// Conversations style, entry open, then `Focus::EntryFullscreen` and
-    /// back to `Focus::Entry` (key-driven `focus_right` cannot reach the
-    /// fullscreen state once the view owns the keys, so the focus flips
-    /// are driven directly like the solo fullscreen precedent). Entry
-    /// state: sidebar frame + conversation-subpane frame (unfocused, the
-    /// `ThreadView` owns the focus) + `ThreadView` frame. Fullscreen: the
-    /// `ThreadView` frame covers the whole pane alone. The round trip must
-    /// restore exactly the Entry-state frames — no residue, no doubled
-    /// borders.
+    /// Regression: with `listing.hide_sidebar_on_launch = true` the sidebar
+    /// is not visible at construction, so the initial focus must stay on
+    /// the mail list grid — there is no sidebar to focus.
     #[test]
-    fn conversations_entry_fullscreen_roundtrip() {
+    fn startup_focus_stays_on_grid_when_sidebar_hidden() {
         let mut ctx = mock_context();
-        ctx.settings.listing.index_style = IndexStyle::Conversations;
-        let (_a, inbox_hash, _arch) = register_two_mailboxes(&mut ctx);
-        let bytes = b"From: Carol Example <carol@example.org>\r\nTo: Bob Example <bob@example.org>\r\nSubject: roundtrip frame mail\r\nMessage-ID: <roundtrip-solo@x.example>\r\nDate: Thu, 2 Jan 2025 09:30:00 +0000\r\n\r\nroundtrip body line\r\n";
-        let mut env = Envelope::from_bytes(bytes, None).unwrap();
-        env.set_flags(melib::Flag::SEEN);
-        let account_hash = *ctx.accounts.iter().next().unwrap().0;
-        ctx.accounts[&account_hash]
-            .collection
-            .insert(env, inbox_hash);
+        register_two_mailboxes(&mut ctx);
+        ctx.settings.listing.hide_sidebar_on_launch = true;
+        let listing = Listing::new(&mut ctx);
+        assert!(
+            !listing.is_menu_visible(),
+            "`hide_sidebar_on_launch` must keep the sidebar hidden"
+        );
+        assert_eq!(
+            listing.focus,
+            ListingFocus::MailList,
+            "a sidebar hidden on launch leaves the initial focus on the grid"
+        );
+    }
 
-        ctx.settings.shortcuts.listing.open_entry = Key::Char('\n').into();
+    /// Regression: shortly after construction the account watcher reports the
+    /// current account coming online/refreshing. That background reconcile
+    /// runs `change_account`, which force-closes the (not yet open) view and
+    /// lands the keyboard on the grid; it must not steal the sidebar focus
+    /// that `Listing::new` just granted.
+    #[test]
+    fn account_status_change_keeps_startup_menu_focus() {
+        let mut ctx = mock_context();
+        let (account_hash, ..) = register_two_mailboxes(&mut ctx);
         let mut listing = Listing::new(&mut ctx);
+        assert_eq!(
+            listing.focus,
+            ListingFocus::Menu,
+            "precondition: construction focuses the visible sidebar"
+        );
+
+        listing.process_event(
+            &mut UIEvent::AccountStatusChange(account_hash, None),
+            &mut ctx,
+        );
+
+        assert!(
+            listing.is_menu_visible(),
+            "the startup account reconcile must keep the sidebar visible"
+        );
+        assert_eq!(
+            listing.focus,
+            ListingFocus::Menu,
+            "the startup account reconcile must not steal the keyboard from the sidebar"
+        );
+    }
+
+    /// Regression: when the sidebar is hidden on launch there is no sidebar
+    /// focus to preserve, so the startup account reconcile must leave the
+    /// keyboard on the grid.
+    #[test]
+    fn account_status_change_keeps_grid_focus_when_sidebar_hidden() {
+        let mut ctx = mock_context();
+        let (account_hash, ..) = register_two_mailboxes(&mut ctx);
+        ctx.settings.listing.hide_sidebar_on_launch = true;
+        let mut listing = Listing::new(&mut ctx);
+        assert!(
+            !listing.is_menu_visible(),
+            "precondition: `hide_sidebar_on_launch` keeps the sidebar hidden"
+        );
+        assert_eq!(
+            listing.focus,
+            ListingFocus::MailList,
+            "precondition: a hidden sidebar leaves the focus on the grid"
+        );
+
+        listing.process_event(
+            &mut UIEvent::AccountStatusChange(account_hash, None),
+            &mut ctx,
+        );
+
+        assert!(
+            !listing.is_menu_visible(),
+            "`hide_sidebar_on_launch` must keep the sidebar hidden across the reconcile"
+        );
+        assert_eq!(
+            listing.focus,
+            ListingFocus::MailList,
+            "with no visible sidebar the reconcile leaves the keyboard on the grid"
+        );
+    }
+
+    /// Regression: a `View` focus cannot survive the reconcile because
+    /// `change_account` force-closes the open view; the grid is the only
+    /// consistent landing for the keyboard.
+    #[test]
+    fn account_status_change_lands_on_grid_when_view_force_closed() {
+        let mut ctx = mock_context();
+        let (account_hash, ..) = register_two_mailboxes(&mut ctx);
+        let mut listing = Listing::new(&mut ctx);
+        listing.focus = ListingFocus::View;
+
+        listing.process_event(
+            &mut UIEvent::AccountStatusChange(account_hash, None),
+            &mut ctx,
+        );
+
+        assert_eq!(
+            listing.focus,
+            ListingFocus::MailList,
+            "the force-closed view must land the keyboard on the grid"
+        );
+    }
+
+    /// Regression: when the reconcile restores a sidebar focus it must
+    /// also take the grid's keyboard highlight back (`focus_menu`).
+    /// `change_account` runs `close_view`, which sets the grid's
+    /// `grid_has_keyboard`; leaving it set while `focus` returns to
+    /// `Menu` paints both panes with "pane.focused" while the outer ring
+    /// says the grid is unfocused.
+    #[test]
+    fn account_status_change_menu_focus_keeps_grid_dimmed() {
+        let mut ctx = mock_context();
+        let (account_hash, inbox_hash, _archive) = register_two_mailboxes(&mut ctx);
+        for mid in ["solo-a", "solo-b"] {
+            let bytes = format!(
+                "From: a@b.example\r\nTo: c@d.example\r\nSubject: {mid}\r\n\
+                 Message-ID: <{mid}@x.example>\r\n\
+                 Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\r\n{mid}\r\n"
+            );
+            let env = Envelope::from_bytes(bytes.as_bytes(), None).unwrap();
+            ctx.accounts[&account_hash].collection.insert(env, inbox_hash);
+        }
+        let mut listing = Listing::new(&mut ctx);
+        assert!(
+            matches!(listing.focus, ListingFocus::Menu),
+            "precondition: construction focuses the visible sidebar"
+        );
         let theme_default = crate::conf::value(&ctx, "theme_default");
         let mut screen = Screen::<Virtual>::new(theme_default);
         assert!(screen.resize(80, 24));
-        let area = screen.area();
-        listing.draw(screen.grid_mut(), area, &mut ctx);
-        let mut event = UIEvent::Input(Key::Char('\n'));
-        assert!(listing.process_event(&mut event, &mut ctx));
-        for _ in 0..8 {
-            let replies = ctx.replies();
-            if replies.is_empty() {
-                break;
-            }
-            for mut ev in replies {
-                let _ = listing.process_event(&mut ev, &mut ctx);
-            }
-        }
-        assert!(listing.view.is_some(), "open_entry must create the view");
-        listing.draw(screen.grid_mut(), area, &mut ctx);
-        assert_entry_state_frames(&ctx, screen.grid(), "after open");
+        // Baseline: with the invariant intact at construction, the grid
+        // paints dim while the sidebar is focused.
+        assert_grid_painted_dimmed(&mut screen, &mut listing, &mut ctx);
 
+        listing.process_event(
+            &mut UIEvent::AccountStatusChange(account_hash, None),
+            &mut ctx,
+        );
+
+        assert!(
+            matches!(listing.focus, ListingFocus::Menu),
+            "the reconcile must not steal the keyboard from the sidebar"
+        );
+        assert_grid_painted_dimmed(&mut screen, &mut listing, &mut ctx);
+    }
+
+    /// Pin the pane-chain keys so a `MELI_CONFIG` template drift cannot
+    /// change what the keys mean in the chain tests below.
+    fn pin_pane_chain_keys(ctx: &mut Context) {
+        ctx.settings.shortcuts.listing.focus_left = Key::Left.into();
+        ctx.settings.shortcuts.listing.focus_right = Key::Right.into();
+        ctx.settings.shortcuts.listing.exit_entry = Key::Esc.into();
+    }
+
+    fn make_drawn_listing(ctx: &mut Context) -> Listing {
+        let mut listing = Listing::new(ctx);
+        // `Listing::new` lands on a visible sidebar now; the pane-chain and
+        // mailbox-scroll tests below exercise the grid-focused layout1, so
+        // hand the focus to the mail list explicitly (the launch-time state
+        // when the sidebar is hidden).
+        listing.focus = ListingFocus::MailList;
+        let theme_default = crate::conf::value(ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, ctx);
         listing
-            .component
-            .set_focus(Focus::EntryFullscreen, &mut ctx);
-        for _ in 0..8 {
-            let replies = ctx.replies();
-            if replies.is_empty() {
-                break;
-            }
-            for mut ev in replies {
-                let _ = listing.process_event(&mut ev, &mut ctx);
-            }
-        }
-        listing.draw(screen.grid_mut(), area, &mut ctx);
-        {
-            let grid = screen.grid();
-            let tab_focused = crate::conf::value(&ctx, "tab.focused");
-            // Fullscreen hides the sidebar (`is_menu_visible` is false
-            // for `Focus::EntryFullscreen`), so the pane is the whole
-            // width and the ThreadView frames it alone.
-            assert_eq!(
-                grid[(0, 0)].ch(),
-                '╭',
-                "fullscreen: pane top-left ring corner"
-            );
-            assert_eq!(
-                grid[(79, 0)].ch(),
-                '╮',
-                "fullscreen: pane top-right ring corner"
-            );
-            assert_eq!(
-                grid[(79, 23)].ch(),
-                '╯',
-                "fullscreen: pane bottom-right ring corner"
-            );
-            assert_eq!(
-                grid[(0, 0)].fg(),
-                tab_focused.fg,
-                "fullscreen: ring must use the focused attr"
-            );
+    }
+
+    /// Draw `listing` on the test screen and assert the invariant commit
+    /// 444b17a5 established: `grid_has_keyboard` mirrors
+    /// `focus == ListingFocus::MailList`, so while the sidebar holds the
+    /// keyboard (`focus == Menu`) the grid pane must paint the dim
+    /// "pane.unfocused" fill, never "pane.focused". The screen persists
+    /// across calls (like the real terminal) so incremental repaints
+    /// compose; the flags are forced so the assertion observes the
+    /// current focus state, not a stale frame.
+    ///
+    /// Layout1 geometry (`Listing::draw`): the sidebar keeps 30% of the
+    /// 80-column screen, a 1-column divider follows, and the grid pane
+    /// fills the rest inside its rounded frame — inner cells are
+    /// x in 26..79, y in 1..23.
+    fn assert_grid_painted_dimmed(
+        screen: &mut Screen<Virtual>,
+        listing: &mut Listing,
+        ctx: &mut Context,
+    ) {
+        assert!(
+            matches!(listing.focus, ListingFocus::Menu),
+            "precondition: this assertion applies to a sidebar-focused listing"
+        );
+        listing.set_dirty(true);
+        listing.component.set_dirty(true);
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, ctx);
+
+        let pane_focused_bg = crate::conf::value(ctx, "pane.focused").bg;
+        let pane_unfocused_bg = crate::conf::value(ctx, "pane.unfocused").bg;
+        let theme_default_bg = crate::conf::value(ctx, "theme_default").bg;
+        let grid = screen.grid();
+        // Entry rows and the empty-mailbox hint keep `theme_default` bg,
+        // which the default theme shares with "pane.focused"; flag the
+        // focused fill only where the theme distinguishes the two.
+        if pane_focused_bg != theme_default_bg {
             for y in 1..23 {
-                for x in [31, 32] {
-                    assert!(
-                        !matches!(grid[(x, y)].ch(), '─' | '│' | '╭' | '╮' | '╰' | '╯'),
-                        "fullscreen: subpane ring residue at ({x},{y})"
+                for x in 26..79 {
+                    assert_ne!(
+                        grid[(x, y)].bg(),
+                        pane_focused_bg,
+                        "grid cell ({x}, {y}) paints the focused pane fill \
+                         while the sidebar holds the keyboard"
                     );
                 }
             }
         }
+        // The strip below the entry rows is pure pane fill: it must carry
+        // the dim fill exactly (a leaked grid_has_keyboard repaints it
+        // with "pane.focused" and fails this check).
+        for y in 18..23 {
+            for x in 26..79 {
+                assert_eq!(
+                    grid[(x, y)].bg(),
+                    pane_unfocused_bg,
+                    "grid cell ({x}, {y}) in the blank strip must paint the \
+                     dim pane fill while the sidebar holds the keyboard"
+                );
+            }
+        }
+    }
 
-        listing.component.set_focus(Focus::Entry, &mut ctx);
+    /// Build a listing over a two-mail thread (root + reply via
+    /// `In-Reply-To`), after a first draw so the grid rows exist.
+    fn pane_chain_setup(ctx: &mut Context) -> Listing {
+        let (_a, inbox_hash, _arch) = register_two_mailboxes(ctx);
+        let root_bytes = b"From: a@b.example\r\nTo: c@d.example\r\nSubject: chain\r\nMessage-ID: <chain-root@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\r\nroot\r\n";
+        let reply_bytes = b"From: c@d.example\r\nTo: a@b.example\r\nSubject: Re: chain\r\nMessage-ID: <chain-reply@x.example>\r\nIn-Reply-To: <chain-root@x.example>\r\nDate: Thu, 1 Jan 2026 00:01:00 +0000\r\n\r\nreply\r\n";
+        let solo_bytes = b"From: s@x.example\r\nTo: y@x.example\r\nSubject: chain solo\r\nMessage-ID: <chain-solo@x.example>\r\nDate: Thu, 1 Jan 2026 00:02:00 +0000\r\n\r\nsolo\r\n";
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        for bytes in [
+            root_bytes.as_slice(),
+            reply_bytes.as_slice(),
+            solo_bytes.as_slice(),
+        ] {
+            let env = Envelope::from_bytes(bytes, None).unwrap();
+            ctx.accounts[&account_hash]
+                .collection
+                .insert(env, inbox_hash);
+        }
+        pin_pane_chain_keys(ctx);
+        make_drawn_listing(ctx)
+    }
+
+    /// Send one key and pump the queued replies (the view is created by the
+    /// `OpenEntryUnderCursor` reply).
+    fn pane_step(listing: &mut Listing, ctx: &mut Context, key: Key) -> bool {
+        let consumed = listing.process_event(&mut UIEvent::Input(key), ctx);
+        // Apply pending grid movements (the scroll arms defer them to
+        // draw) and let the cursor-following view refresh queue up.
+        {
+            let theme_default = crate::conf::value(ctx, "theme_default");
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            let _ = screen.resize(80, 24);
+            let area = screen.area();
+            listing.draw(screen.grid_mut(), area, ctx);
+        }
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, ctx);
+            }
+        }
+        consumed
+    }
+
+    /// Layout1 → layout2: a single-mail entry opens the mail view directly,
+    /// the focus stays on the grid, the mailbox list is hidden.
+    #[test]
+    fn layout1_open_single_mail_is_layout2() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        // The setup's cursor rests on the solo mail (the newest entry).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        let view = listing.view.as_ref().expect("view opened");
+        assert!(view.is_single_mail());
+        assert!(
+            matches!(view.thread_view_focus(), ThreadViewFocus::MailView),
+            "a single-mail view opens at the mail view (layout2)"
+        );
+        assert!(
+            matches!(listing.focus, ListingFocus::MailList),
+            "layout2 opens with the focus on the grid"
+        );
+        assert!(!listing.is_menu_visible(), "the mailbox list is hidden");
+    }
+
+    /// Layout1 → layout3: a thread entry opens the thread list, the focus
+    /// stays on the grid.
+    #[test]
+    fn layout1_open_thread_is_layout3() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        // Move onto the two-mail thread (the second row: the solo mail is
+        // the newest entry and rests on top).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Char('j')));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        let view = listing.view.as_ref().expect("view opened");
+        assert!(!view.is_single_mail());
+        assert!(
+            matches!(view.thread_view_focus(), ThreadViewFocus::Thread),
+            "a thread view opens at the whole thread list (layout3)"
+        );
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+        assert!(!listing.is_menu_visible());
+    }
+
+    /// layout2 + search: running `:search ollama` (the `/` shortcut) must
+    /// filter the grid to matching envelopes, with the focus on the first
+    /// result (the chain stays at layout2 — the view follows the new
+    /// cursor entry on subsequent j/k).
+    #[test]
+    fn layout2_search_filters_grid() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        // layout2: grid open, view single mail.
+        let sel = listing.component.cursor_selection();
+        let (_thread, _env) = sel.expect("cursor must point at a thread");
+        // Fire the search command directly (the parser does this after
+        // `:` or `/`).
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::Search {
+            term: "chain".to_string(),
+            raw_search: false,
+        }));
+        assert!(listing.process_event(&mut event, &mut ctx));
+        for _ in 0..8 {
+            for mut ev in ctx.replies() {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+        // Simulate the JobFinished reply: feed results straight into the
+        // component filter (the async job path is exercised in the
+        // integration search tests; here we just need the grid to update).
+        let all_envs: Vec<_> = listing
+            .component
+            .cursor_selection()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect();
+        listing
+            .component
+            .filter("chain".to_string(), all_envs, &ctx);
+        listing.set_dirty(true);
+        // Draw and assert the first row points at the cursor (filtered
+        // result, not the stale initial thread).
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        let row1: String = (0..30).map(|x| grid[(x, 1)].ch()).collect();
+        // The grid subpane is on the left (layout2).
+        assert!(
+            row1.starts_with("│0"),
+            "layout2 grid must render the filtered result, row1 was {row1:?}"
+        );
+        // The grid must still hold the focus (search does not steal it).
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+    }
+
+    /// Structured queries (`from:…`, `subject:…`) must go through melib's
+    /// `is_match`; only the unimplemented `Body`/`AllText` variants fall
+    /// back to `Account::search`'s header substring scan.
+    #[test]
+    fn search_structured_query_uses_melib_match() {
+        let mut ctx = mock_context();
+        let listing = pane_chain_setup(&mut ctx);
+        let (_account_hash, mailbox_hash) = listing.component.coordinates();
+        let account = ctx.accounts.values().next().unwrap();
+        let sort = (melib::SortField::Date, melib::SortOrder::Desc);
+        let results = futures::executor::block_on(
+            account
+                .search("from:s@x.example", false, sort, mailbox_hash)
+                .expect("structured query must parse"),
+        )
+        .expect("structured query must scan")
+        .envelopes;
+        // Only the solo mail is from s@x.example.
+        assert_eq!(results.len(), 1, "from: must match exactly solo");
+        let subject = account
+            .collection
+            .envelopes
+            .read()
+            .unwrap()
+            .get(&results[0])
+            .unwrap()
+            .subject()
+            .to_string();
+        assert_eq!(subject, "chain solo");
+        // A subject: query is structured too, and all three mails carry
+        // "chain" in the subject.
+        let results = futures::executor::block_on(
+            account
+                .search("subject:chain", false, sort, mailbox_hash)
+                .expect("subject query must parse"),
+        )
+        .expect("subject query must scan")
+        .envelopes;
+        assert_eq!(results.len(), 3, "subject:chain must match all three");
+        // A bare term stays on the substring fallback (melib's Body
+        // is_match is unimplemented) and still matches.
+        let results = futures::executor::block_on(
+            account
+                .search("solo", false, sort, mailbox_hash)
+                .expect("bare term must parse"),
+        )
+        .expect("bare term must scan")
+        .envelopes;
+        assert_eq!(results.len(), 1, "bare term must match the solo subject");
+    }
+
+    /// Layout2 grid ⇄ mail view with Left/Right; Left from the grid closes
+    /// the view back to layout1.
+    #[test]
+    fn layout2_focus_roundtrip_and_back_to_layout1() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        {
+            let theme_default = crate::conf::value(&ctx, "theme_default");
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            assert!(screen.resize(80, 24));
+            let area = screen.area();
+            listing.draw(screen.grid_mut(), area, &mut ctx);
+        }
+
+        // Right: focus the mail view (layout2 right pane).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+
+        assert!(matches!(
+            listing.view.as_ref().unwrap().thread_view_focus(),
+            ThreadViewFocus::MailView
+        ));
+
+        // Left: back to the grid (layout2 left pane), the view stays.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+        assert!(
+            listing.view.as_ref().is_some_and(|v| v.is_single_mail()),
+            "the view stays open (layout2)"
+        );
+
+        // Left from the grid: close the view → layout1, focus on the
+        // mailbox list (same landing as layout3's grid).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(listing.view.is_none());
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+        assert!(listing.is_menu_visible());
+    }
+
+    /// Regression: Left from layout2's grid (single-mail view open)
+    /// closes the view and lands the focus on the mailbox list, the
+    /// same landing as layout3's grid and layout1's grid.
+    #[test]
+    fn layout2_grid_left_closes_to_mailbox_list() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(
+            listing.view.as_ref().unwrap().is_single_mail(),
+            "precondition: layout2 (single-mail view open)"
+        );
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(listing.view.is_none(), "the view must close");
+        assert!(
+            matches!(listing.focus, ListingFocus::Menu),
+            "the focus must land on the mailbox list"
+        );
+        assert!(listing.is_menu_visible());
+    }
+
+    /// With the sidebar hidden (`menu_visibility == false`), Left from
+    /// layout2's grid still closes the view but cannot land on the
+    /// hidden mailbox list: the focus stays on the grid.
+    #[test]
+    fn layout2_grid_left_with_hidden_sidebar_stays_on_grid() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        listing.menu_visibility = false;
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(
+            listing.view.as_ref().unwrap().is_single_mail(),
+            "precondition: layout2 (single-mail view open)"
+        );
+
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(listing.view.is_none(), "the view must close");
+        assert!(
+            matches!(listing.focus, ListingFocus::MailList),
+            "with the sidebar hidden the focus must stay on the grid"
+        );
+        assert!(!listing.menu_visibility);
+    }
+
+    /// Layout4 renders exactly two panes: the thread list (30%) | mail
+    /// view (70%) inside the whole view area — the grid is hidden (no
+    /// grid subpane ring at its 30% boundary).
+    #[test]
+    fn layout4_renders_two_panes_without_grid() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        // Onto the thread, open (layout3), then Right → layout4.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Char('j')));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(matches!(listing.focus, ListingFocus::View));
+
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.set_dirty(true);
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        // The view's thread-list ring opens at column 0...
+        assert_eq!(grid[(0, 0)].ch(), '╭', "thread-list ring top-left");
+        // ...and spans the same 30% width as the listing grid in
+        // layout1-3: its right edge sits at column 23 (the grid's would
+        // too), then one gap column, then the mail pane.
+        assert_eq!(
+            grid[(23, 0)].ch(),
+            '╮',
+            "thread-list ring must span 30% like the layout1-3 grid"
+        );
+        assert_eq!(grid[(24, 0)].ch(), ' ', "single gap column at the split");
+        // The mail pane ring opens at the 30% boundary of the view.
+        assert_eq!(grid[(25, 0)].ch(), '╭', "mail-view ring top-left");
+        assert_eq!(grid[(79, 0)].ch(), '╮', "mail-view ring top-right");
+        // No grid row (index-prefixed "0  <date>") anywhere on screen.
+        for y in 0..area.height() {
+            let row: String = (0..area.width()).map(|x| grid[(x, y)].ch()).collect();
+            assert!(
+                !row.contains("0  2026-"),
+                "no grid row may render in layout4; row {y}: {row:.40?}"
+            );
+        }
+
+        // The same geometry holds on a wide terminal: the two rings stay
+        // separate 30/70 panes with one gap column (190 -> ring x0..56,
+        // gap x57, mail ring x58..189), never one merged full-width
+        // frame.
+        assert!(screen.resize(190, 40));
+        listing.set_dirty(true);
+        if let Some(view) = listing.view.as_mut() {
+            view.set_dirty(true);
+        }
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        assert_eq!(
+            grid[(56, 0)].ch(),
+            '╮',
+            "thread-list ring right edge at 30% of 190"
+        );
+        assert_eq!(grid[(57, 0)].ch(), ' ', "single gap column at 190 cols");
+        assert_eq!(
+            grid[(58, 0)].ch(),
+            '╭',
+            "mail-view ring top-left at 190 cols"
+        );
+        assert_eq!(
+            grid[(189, 0)].ch(),
+            '╮',
+            "mail-view ring top-right at 190 cols"
+        );
+
+        // The real UI renders the listing inside a `Tabbed` container:
+        // its outer body frame must not paint over the pinned listing's
+        // own pane rings (that merged the layout4 pane tops into one
+        // full-width border).
+        let mut tabbed = crate::utilities::Tabbed::new(vec![Box::new(listing)], &ctx);
+        tabbed.set_dirty(true);
+        let area = screen.area();
+        tabbed.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        assert_eq!(
+            grid[(56, 0)].ch(),
+            '╮',
+            "Tabbed must not overwrite the thread-list ring edge"
+        );
+        assert_eq!(
+            grid[(57, 0)].ch(),
+            ' ',
+            "gap column survives the Tabbed draw"
+        );
+        assert_eq!(
+            grid[(58, 0)].ch(),
+            '╭',
+            "Tabbed must not overwrite the mail-view ring edge"
+        );
+    }
+
+    /// Layout3 → layout4 (Right), layout4 roundtrips and returns to
+    /// layout3 (Left / quit from the thread list).
+    #[test]
+    fn layout3_layout4_transitions() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Char('j')));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(matches!(
+            listing.view.as_ref().unwrap().thread_view_focus(),
+            ThreadViewFocus::Thread
+        ));
+
+        // Right: layout4 — the thread list (30%) | mail view (70%), focus
+        // on the thread list.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(matches!(listing.focus, ListingFocus::View));
+        assert!(matches!(
+            listing.view.as_ref().unwrap().thread_view_focus(),
+            ThreadViewFocus::None
+        ));
+
+        // Right: focus the mail view (layout4 right pane).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(matches!(
+            listing.view.as_ref().unwrap().thread_view_focus(),
+            ThreadViewFocus::MailView
+        ));
+
+        // Left: back to the thread list.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(matches!(
+            listing.view.as_ref().unwrap().thread_view_focus(),
+            ThreadViewFocus::None
+        ));
+
+        // Left from the thread list: layout3 — the whole thread list
+        // (70%), focus on the grid.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+        assert!(matches!(
+            listing.view.as_ref().unwrap().thread_view_focus(),
+            ThreadViewFocus::Thread
+        ));
+    }
+
+    /// The full async search pipeline on layout2: the `search` command
+    /// spawns a job; its completion (`JobFinished`) reaches the component,
+    /// the filter applies and the grid shows only the matching rows with
+    /// the cursor on the first result.
+    #[test]
+    fn layout2_search_full_job_pipeline() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+
+        // `search solo` — only the solo mail matches (subject "chain
+        // solo"), the two-mail thread does not.
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::Search {
+            term: "solo".to_string(),
+            raw_search: false,
+        }));
+        assert!(listing.process_event(&mut event, &mut ctx));
+        for _ in 0..8 {
+            for mut ev in ctx.replies() {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+
+        // Drive the job executor like the main loop does: dispatch every
+        // JobFinished until the component's search job completes (other
+        // background jobs finish too — refresh/init — and are ignored by
+        // the component's search_job match).
+        let mut handled = false;
+        for _ in 0..100 {
+            match ctx.receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(crate::ThreadEvent::JobFinished(id)) => {
+                    ctx.main_loop_handler.job_executor.set_job_finished(id);
+                    let mut ev = UIEvent::StatusEvent(crate::types::StatusEvent::JobFinished(id));
+                    if listing.process_event(&mut ev, &mut ctx) {
+                        handled = true;
+                        break;
+                    }
+                }
+                Ok(crate::ThreadEvent::UIEvent(mut ev)) => {
+                    let _ = listing.process_event(&mut ev, &mut ctx);
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let _ = handled; // the JobFinished may also have been consumed in
+                         // the earlier reply drain — the draw assertions below are the
+                         // source of truth.
+        for _ in 0..8 {
+            for mut ev in ctx.replies() {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+
+        listing.set_dirty(true);
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        let rows: Vec<String> = (0..area.height())
+            .map(|y| (0..30).map(|x| grid[(x, y)].ch()).collect())
+            .collect();
+        // Exactly one matching row: the first grid row index is visible,
+        // the second is not (the filter dropped the non-matching thread).
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("│0")).count(),
+            1,
+            "exactly one row index visible: {rows:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("│1")).count(),
+            0,
+            "the non-matching row must be filtered out: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.chars().filter(|c| c.is_ascii_digit()).count() > 4),
+            "the matching row must still render content: {rows:?}"
+        );
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+    }
+
+    /// Regression: on a sync (local) backend the search must not run on
+    /// the UI thread — the fallback scan reads every mail file in the
+    /// mailbox, which would freeze the UI on large mailboxes. The Search
+    /// action therefore spawns a job for every backend: right after the
+    /// action the grid is still unfiltered (the filter can only be
+    /// applied by this thread processing the job's `JobFinished`), and
+    /// the filtered view appears only once the job completes.
+    #[test]
+    fn search_action_spawns_job_on_sync_backend() {
+        let mut ctx = mock_context();
+        // Precondition: the mock account is a local backend (no async
+        // driver, no remote search) — the path that used to run the scan
+        // inline under `futures::executor::block_on`.
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        assert!(matches!(
+            ctx.accounts[&account_hash].is_async(),
+            crate::jobs::IsAsync::Blocking
+        ));
+        assert!(
+            !ctx.accounts[&account_hash]
+                .backend_capabilities
+                .supports_search
+        );
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::Search {
+            term: "solo".to_string(),
+            raw_search: false,
+        }));
+        assert!(listing.process_event(&mut event, &mut ctx));
+
+        let draw_rows = |listing: &mut Listing, ctx: &mut Context| -> Vec<String> {
+            listing.set_dirty(true);
+            let theme_default = crate::conf::value(ctx, "theme_default");
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            assert!(screen.resize(80, 24));
+            let area = screen.area();
+            listing.draw(screen.grid_mut(), area, ctx);
+            (0..area.height())
+                .map(|y| (0..30).map(|x| screen.grid()[(x, y)].ch()).collect())
+                .collect()
+        };
+        // The UI thread must be free immediately: the filter cannot have
+        // been applied inline (only processing the job's `JobFinished`
+        // applies it), so both rows are still on screen.
+        let rows = draw_rows(&mut listing, &mut ctx);
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("│0")).count(),
+            1,
+            "precondition: the unfiltered grid shows the first row"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("│1")),
+            "the search must not apply its filter on the UI thread \
+             (the non-matching row is still visible)"
+        );
+
+        // Drive the job executor like the main loop does until the search
+        // job's completion arrives and applies the filter.
+        let mut filtered = false;
+        for _ in 0..100 {
+            match ctx.receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(crate::ThreadEvent::JobFinished(id)) => {
+                    ctx.main_loop_handler.job_executor.set_job_finished(id);
+                    let mut ev = UIEvent::StatusEvent(crate::types::StatusEvent::JobFinished(id));
+                    let _ = listing.process_event(&mut ev, &mut ctx);
+                    for _ in 0..8 {
+                        let replies = ctx.replies();
+                        if replies.is_empty() {
+                            break;
+                        }
+                        for mut ev in replies {
+                            let _ = listing.process_event(&mut ev, &mut ctx);
+                        }
+                    }
+                    let rows = draw_rows(&mut listing, &mut ctx);
+                    if rows.iter().filter(|r| r.contains("│0")).count() == 1
+                        && !rows.iter().any(|r| r.contains("│1"))
+                    {
+                        filtered = true;
+                        break;
+                    }
+                }
+                Ok(crate::ThreadEvent::UIEvent(mut ev)) => {
+                    let _ = listing.process_event(&mut ev, &mut ctx);
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(
+            filtered,
+            "the spawned search job must apply the filter once it completes"
+        );
+    }
+
+    /// Right from layout1 (with the focus on the mailbox list) switches
+    /// the layout directly: a single mail → layout2, a thread → layout3.
+    #[test]
+    fn layout1_menu_right_opens_directly() {
+        for case in [false, true] {
+            let mut ctx = mock_context();
+
+            let mut listing = pane_chain_setup(&mut ctx);
+            // Focus the mailbox list (from the grid with Left); for the
+            // thread case move the grid cursor onto the thread entry
+            // first (still in layout1).
+            if case {
+                assert!(pane_step(&mut listing, &mut ctx, Key::Char('j')));
+            }
+            assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+            assert!(matches!(listing.focus, ListingFocus::Menu));
+
+            assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+            let view = listing.view.as_ref().expect("Right must open the entry");
+            assert_eq!(
+                view.is_single_mail(),
+                !case,
+                "Right must land on layout2 for a single mail, layout3 for a thread"
+            );
+            assert!(
+                matches!(listing.focus, ListingFocus::MailList),
+                "the opened layout keeps the focus on the grid"
+            );
+            assert!(!listing.is_menu_visible());
+        }
+    }
+
+    /// Left from layout3's grid closes the view to layout1 with the focus
+    /// on the mailbox list; quit from layout4 lands on layout3's grid.
+    #[test]
+    fn layout3_left_goes_to_mailbox_list_and_l4_quit() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Char('j')));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+
+        // Left from layout3's grid: layout1, focus on the mailbox list.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(listing.view.is_none());
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+        assert!(listing.is_menu_visible());
+
+        // Reopen from layout1 (Right from the mailbox list opens the
+        // entry directly → layout3, Right → layout4's thread list,
+        // Right → layout4's mail view), quit → layout3.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(matches!(
+            listing.view.as_ref().unwrap().thread_view_focus(),
+            ThreadViewFocus::MailView
+        ));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Char('q')));
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+        assert!(
+            matches!(
+                listing.view.as_ref().unwrap().thread_view_focus(),
+                ThreadViewFocus::Thread
+            ),
+            "quit from layout4 must land on layout3"
+        );
+
+        // quit from layout3's grid: layout1, focus on the grid.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Char('q')));
+        assert!(listing.view.is_none());
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+    }
+
+    /// The grid cursor move refreshes the open view and the layout follows
+    /// the selection (single mail → layout2, thread → layout3).
+    #[test]
+    fn grid_cursor_moves_refresh_view_and_layout() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        // Cursor on the solo mail → layout2.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(listing.view.as_ref().unwrap().is_single_mail());
+
+        // Move down onto the thread → layout3 (grid focus kept).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Char('j')));
         for _ in 0..8 {
             let replies = ctx.replies();
             if replies.is_empty() {
@@ -4406,51 +5598,216 @@ mod listing_menu_tests {
                 let _ = listing.process_event(&mut ev, &mut ctx);
             }
         }
+        listing.set_dirty(true);
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
         listing.draw(screen.grid_mut(), area, &mut ctx);
-        assert_entry_state_frames(&ctx, screen.grid(), "after roundtrip");
-        println!("conversations_entry_fullscreen_roundtrip: three frames restored");
-    }
-
-    /// The Conversations Entry-state frame layout shared by
-    /// [`conversations_entry_fullscreen_roundtrip`]: sidebar frame
-    /// (x=0..=7), conversation-subpane frame (x=9..=31, unfocused) and
-    /// `ThreadView` frame (x=33..=79, focused), with no ring glyphs on
-    /// the columns inside the subpane ring or on the gap column next to
-    /// it (no doubled borders).
-    fn assert_entry_state_frames(ctx: &Context, grid: &CellBuffer, phase: &str) {
-        let tab_unfocused = crate::conf::value(ctx, "tab.unfocused");
-        let tab_focused = crate::conf::value(ctx, "tab.focused");
-        assert_eq!(grid[(9, 0)].ch(), '╭', "{phase}: subpane top-left ring");
-        assert_eq!(grid[(31, 0)].ch(), '╮', "{phase}: subpane top-right ring");
-        assert_eq!(grid[(9, 23)].ch(), '╰', "{phase}: subpane bottom-left ring");
-        assert_eq!(
-            grid[(31, 23)].ch(),
-            '╯',
-            "{phase}: subpane bottom-right ring"
-        );
-        assert_eq!(
-            grid[(31, 12)].ch(),
-            '│',
-            "{phase}: subpane right ring column"
-        );
-        assert_eq!(
-            grid[(31, 12)].fg(),
-            tab_unfocused.fg,
-            "{phase}: subpane ring must use the unfocused attr"
-        );
-        assert_eq!(grid[(33, 0)].ch(), '╭', "{phase}: ThreadView top-left ring");
-        assert_eq!(
-            grid[(33, 0)].fg(),
-            tab_focused.fg,
-            "{phase}: ThreadView ring keeps the focused attr"
-        );
-        for y in 1..23 {
-            for x in [10, 30, 32] {
-                assert!(
-                    !matches!(grid[(x, y)].ch(), '─' | '│' | '╭' | '╮' | '╰' | '╯'),
-                    "{phase}: ring glyph inside the subpane or on the gap column at ({x},{y})"
-                );
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, &mut ctx);
             }
         }
+        let view = listing.view.as_ref().expect("view refreshed");
+        assert!(
+            !view.is_single_mail(),
+            "the view must follow the cursor onto the thread (layout3)"
+        );
+        assert!(matches!(view.thread_view_focus(), ThreadViewFocus::Thread));
+        assert!(matches!(listing.focus, ListingFocus::MailList));
+
+        // Move back up onto the solo mail → layout2 again.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Char('k')));
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+        listing.set_dirty(true);
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+        assert!(
+            listing.view.as_ref().unwrap().is_single_mail(),
+            "the view must follow the cursor back onto the single mail (layout2)"
+        );
+    }
+
+    /// Layout1: moving the mailbox selection with the keyboard switches
+    /// the mailbox right away (the grid follows, the focus stays).
+    #[test]
+    fn layout1_menu_scroll_switches_mailbox() {
+        let mut ctx = mock_context();
+        let (_a, inbox_hash, archive_hash) = register_two_mailboxes(&mut ctx);
+        pin_pane_chain_keys(&mut ctx);
+        let mut listing = make_drawn_listing(&mut ctx);
+
+        // Focus the mailbox list (Left from the grid).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+
+        // Move down to Archive: the cursor applies, the grid follows, the
+        // focus stays on the mailbox list.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Down));
+        assert_eq!(listing.component.coordinates().1, archive_hash);
+        assert_eq!(listing.cursor_pos.menu, listing.menu_cursor_pos.menu);
+        assert!(
+            matches!(listing.focus, ListingFocus::Menu),
+            "the focus must stay on the mailbox list"
+        );
+
+        // Back up to INBOX.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Up));
+        assert_eq!(listing.component.coordinates().1, inbox_hash);
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+    }
+
+    /// Layout1: scrolling the sidebar across the account boundary runs
+    /// `change_account`, whose `close_view` sets the grid's
+    /// `grid_has_keyboard`; the sidebar focus must take that highlight
+    /// back (`focus_menu`), or both panes paint "pane.focused" at once
+    /// while the outer ring says the grid is unfocused.
+    #[test]
+    fn menu_scroll_across_accounts_keeps_grid_dimmed() {
+        let mut ctx = mock_context();
+        register_second_account(&mut ctx);
+        register_two_mailboxes(&mut ctx);
+        pin_pane_chain_keys(&mut ctx);
+        let mut listing = make_drawn_listing(&mut ctx);
+
+        // Focus the mailbox list (Left from the grid).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+
+        // Scroll down past the last mailbox: the cursor wraps onto the
+        // second account's status entry. (The status page covers the grid
+        // pane while the cursor rests on a status entry, so the fill is
+        // asserted after scrolling back to a mailbox below.)
+        assert!(pane_step(&mut listing, &mut ctx, Key::Down));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Down));
+        assert_eq!(
+            listing.menu_cursor_pos.account, 1,
+            "the cursor must have wrapped onto the second account"
+        );
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+
+        // Scroll back up: the previous account's last mailbox. The grid is
+        // visible again and must stay dim — the sidebar still holds the
+        // keyboard across both crossings.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Up));
+        assert_eq!(listing.menu_cursor_pos.account, 0);
+        assert!(
+            matches!(listing.focus, ListingFocus::Menu),
+            "the focus must stay on the mailbox list"
+        );
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        assert_grid_painted_dimmed(&mut screen, &mut listing, &mut ctx);
+    }
+
+    /// `search` must work with an open view (every pane-chain layout has
+    /// one): the `/` key opens the command line, and the executed
+    /// `Action::Listing(Search)` must reach the grid component instead of
+    /// being dropped by an unfocused guard.
+    #[test]
+    fn search_action_runs_with_open_view() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(
+            listing.component.unfocused(),
+            "sanity: the view is open (Entry state)"
+        );
+
+        assert!(listing.process_event(&mut UIEvent::Input(Key::Char('/')), &mut ctx));
+        assert!(
+            ctx.replies()
+                .iter()
+                .any(|r| matches!(r, UIEvent::CmdInput(_))),
+            "the search key must open the command line"
+        );
+
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::Search {
+            term: String::new(),
+            raw_search: false,
+        }));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "the search action must be handled with the view open"
+        );
+    }
+
+    /// With the mail view focused, `Action::Listing(Search)` is the pager's
+    /// in-body search, not a grid filter: the listing must route it to the
+    /// view instead of hijacking it for the grid component. The payload uses
+    /// a term the grid component rejects synchronously (it parses the query),
+    /// so an accidental delivery would queue a "Could not perform search"
+    /// error; the pager accepts any literal pattern.
+    #[test]
+    fn search_action_routes_to_pager_in_view_focus() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        // Right opens the single-mail view (focus stays on the grid), a
+        // second Right hands the keyboard to the view.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(
+            matches!(listing.focus, ListingFocus::View),
+            "precondition: the mail view owns the keyboard"
+        );
+        assert!(listing.view.is_some(), "precondition: the view is open");
+
+        // The pager only exists once the body is `Loaded`; drive the expanded
+        // entry to that state so the in-body search has somewhere to land.
+        let body = b"From: s@x.example\r\nTo: y@x.example\r\nSubject: chain solo\r\n\
+                     Message-ID: <chain-solo@x.example>\r\nDate: Thu, 1 Jan 2026 00:02:00 \
+                     +0000\r\n\r\nsolo\r\n"
+            .to_vec();
+        listing
+            .view
+            .as_mut()
+            .unwrap()
+            .load_expanded_entry_for_tests(body, &mut ctx);
+
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::Search {
+            term: "~invalid~ ((".to_string(),
+            raw_search: false,
+        }));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "the pager must consume the in-body search"
+        );
+        assert!(
+            !ctx.replies().iter().any(|r| matches!(
+                r,
+                UIEvent::Notification {
+                    title,
+                    kind: Some(crate::types::NotificationType::Error(_)),
+                    ..
+                } if title.as_deref() == Some("Could not perform search")
+            )),
+            "the grid component must not receive the pager's search action"
+        );
     }
 }

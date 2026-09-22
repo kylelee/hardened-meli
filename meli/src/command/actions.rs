@@ -156,6 +156,7 @@ pub enum Action {
     AccountAction(AccountName, AccountAction),
     PrintSetting(String),
     ReloadConfiguration,
+    ToggleTheme,
     ToggleMouse,
     Quit,
 }
