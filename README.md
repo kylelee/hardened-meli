@@ -2,6 +2,8 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
+https://github.com/user-attachments/assets/5cdbbc3e-9b49-46e4-ae37-be0a58cf300c
+
 **A security-hardened and UX-optimized version of meli — BSD/Linux/macos terminal email client with support for multiple accounts and Maildir / mbox / notmuch / IMAP / JMAP / NNTP (Usenet).**
 
 Hardened and based on <https://github.com/meli/meli>
