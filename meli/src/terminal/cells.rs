@@ -30,7 +30,9 @@ use std::{
 
 use melib::{
     log,
-    text::{is_emoji_presentation_base, search::KMP, wcwidth, TextPresentation},
+    text::{
+        is_east_asian_ambiguous, is_emoji_presentation_base, search::KMP, wcwidth, TextPresentation,
+    },
 };
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -622,13 +624,21 @@ impl CellBuffer {
         let mut src_y = get_y(src.upper_left());
 
         {
-            // Calculate x, y offsets for hyperlinks from `grid_src` and insert them to
-            // `self`.
+            // Calculate x, y offsets for hyperlinks from `grid_src` and
+            // insert them to `self`. The URI table is merged on demand -
+            // only ids actually referenced by the copied associations -
+            // instead of cloning the whole table per call: `copy_area`
+            // runs on every redraw (overlay compositing copies the full
+            // screen each frame a dialog is open), and a whole-map
+            // `clone()` there was per-frame allocation churn.
             let diff_x = get_x(dest.upper_left()) as isize - get_x(src.upper_left()) as isize;
             let diff_y = get_y(dest.upper_left()) as isize - get_y(src.upper_left()) as isize;
-            self.hyperlinks_table
-                .extend(grid_src.hyperlinks_table.clone());
             for (start, (uri, end)) in &grid_src.hyperlinks_associations {
+                if !self.hyperlinks_table.contains_key(uri) {
+                    if let Some(u) = grid_src.hyperlinks_table.get(uri) {
+                        self.hyperlinks_table.insert(*uri, u.clone());
+                    }
+                }
                 let new_start = (
                     (get_x(*start) as isize + diff_x) as usize,
                     (get_y(*start) as isize + diff_y) as usize,
@@ -830,18 +840,15 @@ impl CellBuffer {
                     // symbol is narrow (East Asian Ambiguous, e.g. `⌨`).
                     // Grow the cluster to a leading cell plus a
                     // continuation so the grid matches what the terminal
-                    // actually shows — otherwise everything after the
-                    // cluster drifts one column right (e.g. overrunning
-                    // the status bar's right frame border). The width
-                    // predicate is shared with `grapheme_width`, so
-                    // measurement and accounting stay in sync; the
-                    // continuation is only written when it lies inside
-                    // the requested `area` (the cell buffer itself is
-                    // larger than a sub-area, and writing past its right
-                    // edge would clobber the neighbouring pane's cells).
+                    // actually shows — unless the Ambiguous-width branch
+                    // below already allocated one for this same
+                    // character (both fire for non-ASCII narrow symbols;
+                    // double-allocating pushed the next glyph two cells
+                    // right and broke emoji clusters like `⌨\u{FE0F}`).
                     if is_emoji_presentation_base(self[prev_coords].ch())
                         && x <= get_x(bottom_right)
                         && y <= get_y(bottom_right)
+                        && !self[(x.saturating_sub(1), y)].empty()
                     {
                         if let Some(next) = self.get_mut(x, y) {
                             *next = Cell::default();
@@ -923,21 +930,40 @@ impl CellBuffer {
                     .set_bg(bg_color)
                     .set_attrs(attrs);
 
-                match wcwidth(c) {
-                    Some(0) | None => {
+                let display_w = {
+                    use unicode_width::UnicodeWidthChar;
+                    // Box-drawing/block elements are the terminal-UI
+                    // border vocabulary; they render one column even on
+                    // CJK terminals, so don't let width_cjk widen them.
+                    if matches!(c as u32, 0x2500..=0x259F) {
+                        1
+                    } else {
+                        c.width_cjk().unwrap_or(0)
+                    }
+                };
+                // The read side of these layout rules is
+                // `Cell::spans_two_columns`.
+                match display_w {
+                    0 => {
                         // Skip drawing zero width characters
                         self[(x, y)].empty = true;
                     }
-                    Some(2) => {
-                        // Grapheme takes more than one column, so the next cell will be drawn
-                        // over. Set it as empty to skip drawing it.
-                        if let Some(c) = self.get_mut(x + 1, y) {
-                            x += 1;
-                            *c = Cell::default();
-                            c.set_fg(fg_color)
-                                .set_bg(bg_color)
-                                .set_attrs(attrs)
-                                .set_empty(true);
+                    w if w >= 2 => {
+                        // Grapheme takes more than one column, so the next
+                        // cell will be drawn over. Set it as empty to skip
+                        // drawing it. Only when the continuation cell lies
+                        // inside the requested `area` — writing past its
+                        // right edge would clobber the neighbouring pane's
+                        // cells (e.g. the pager's scrollbar gutter).
+                        if x < get_x(bottom_right) && x + 1 < get_x(bounds) {
+                            if let Some(c) = self.get_mut(x + 1, y) {
+                                x += 1;
+                                *c = Cell::default();
+                                c.set_fg(fg_color)
+                                    .set_bg(bg_color)
+                                    .set_attrs(attrs)
+                                    .set_empty(true);
+                            }
                         }
                     }
                     _ => {}
@@ -1213,6 +1239,45 @@ impl Cell {
     pub fn set_empty(&mut self, new_val: bool) -> &mut Self {
         self.empty = new_val;
         self
+    }
+
+    /// Whether the glyph in this cell occupies two grid columns under
+    /// `CellBuffer::write_string`'s layout rules, i.e. whether the cell to
+    /// its right is a continuation cell the glyph overflows into.
+    ///
+    /// `write_string` lays out three kinds of glyphs two columns wide:
+    /// genuinely wide characters (`wcwidth` == `Some(2)`), East-Asian
+    /// Ambiguous characters (`width_cjk` reserves a continuation cell for
+    /// them even though terminals may render them one column wide), and
+    /// emoji-presentation clusters: `write_string` stamps
+    /// [`Attr::FORCE_EMOJI`] on any cell a VS16 selector follows, but only
+    /// grows a continuation cell when the glyph itself is an
+    /// emoji-presentation base (see `is_emoji_presentation_base`) — a
+    /// malformed sequence like `a\u{FE0F}` stays one column wide, so its
+    /// cell must not report two here. Box-drawing and block elements are
+    /// pinned to one column by `write_string` even though `width_cjk`
+    /// measures them as Ambiguous, so they are excluded as well.
+    ///
+    /// Treating Ambiguous characters as wide is conservative: on a
+    /// narrow-rendering terminal the glyph would have fit one column, but
+    /// consumers of this predicate must agree with the grid's two-column
+    /// accounting — deciding a torn wide glyph is actually narrow leaves
+    /// its orphan half rendered in place.
+    pub(super) fn spans_two_columns(&self) -> bool {
+        if self.empty() {
+            return false;
+        }
+        let ch = self.ch();
+        if wcwidth(ch) == Some(2) {
+            return true;
+        }
+        if matches!(ch as u32, 0x2500..=0x259F) {
+            // Box-drawing/block elements: write_string pins the terminal
+            // border vocabulary to one column even under `width_cjk`.
+            return false;
+        }
+        is_east_asian_ambiguous(ch)
+            || (self.attrs().intersects(Attr::FORCE_EMOJI) && is_emoji_presentation_base(ch))
     }
 
     /// Sets `keep_fg` field. If true, the foreground color will not be altered
@@ -2061,13 +2126,6 @@ impl From<ThemeAttribute> for FormatTag {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum WidgetWidth {
-    Unset,
-    Hold(usize),
-    Set(usize),
-}
-
 #[cfg(test)]
 mod tests {
     use melib::text::{Reflow, TextProcessing};
@@ -2115,6 +2173,98 @@ mod tests {
             "the next glyph starts after the cluster"
         );
         assert_eq!(cols, 4, "write_string must report the two-column cluster");
+    }
+
+    /// `Cell::spans_two_columns` must mirror `write_string`'s layout for
+    /// `FORCE_EMOJI` cells. `write_string` stamps the attribute on any cell
+    /// a VS16 selector follows, but only grows a continuation cell when the
+    /// glyph is an emoji-presentation base — so the malformed sequence
+    /// "a\u{FE0F}" occupies one column and must not report two, or
+    /// `draw_rounded_frame` blanks a gutter glyph that does not straddle
+    /// the border. A real presentation base like `❤` does grow the
+    /// continuation and must report two.
+    #[test]
+    fn spans_two_columns_force_emoji_requires_presentation_base() {
+        // Malformed: VS16 after a plain ASCII base.
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(screen.resize(10, 1));
+        let area = screen.area();
+        let (cols, _) = screen.grid_mut().write_string(
+            "a\u{FE0F}",
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            area,
+            None,
+            None,
+        );
+        let grid = screen.grid();
+        assert!(
+            grid[(0, 0)]
+                .attrs()
+                .intersects(crate::terminal::Attr::FORCE_EMOJI),
+            "VS16 must set FORCE_EMOJI on the preceding cell"
+        );
+        assert_eq!(cols, 1, "write_string occupies one column");
+        assert!(
+            !grid[(0, 0)].spans_two_columns(),
+            "FORCE_EMOJI without an emoji-presentation base is one column wide"
+        );
+        assert!(!grid[(1, 0)].empty(), "no continuation cell must be grown");
+
+        // Well-formed: '❤' is an emoji-presentation base, so the cluster
+        // grows a continuation cell and reports two columns.
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(screen.resize(10, 1));
+        let area = screen.area();
+        let (cols, _) = screen.grid_mut().write_string(
+            "❤\u{FE0F}",
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            area,
+            None,
+            None,
+        );
+        let grid = screen.grid();
+        assert!(
+            grid[(0, 0)].spans_two_columns(),
+            "emoji-presentation cluster must report two columns"
+        );
+        assert!(
+            grid[(1, 0)].empty(),
+            "cluster must consume a continuation cell"
+        );
+        assert_eq!(cols, 2, "write_string must report the two-column cluster");
+    }
+
+    /// A bare `❤` (no VS16) gets no `FORCE_EMOJI` and is not East Asian
+    /// Ambiguous: `write_string` lays it out one column wide with no
+    /// continuation, and `spans_two_columns` must agree.
+    #[test]
+    fn spans_two_columns_bare_heart_is_one_column() {
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(screen.resize(10, 1));
+        let area = screen.area();
+        let (cols, _) = screen.grid_mut().write_string(
+            "❤",
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            area,
+            None,
+            None,
+        );
+        let grid = screen.grid();
+        assert!(
+            !grid[(0, 0)]
+                .attrs()
+                .intersects(crate::terminal::Attr::FORCE_EMOJI),
+            "no VS16, no FORCE_EMOJI"
+        );
+        assert!(!grid[(1, 0)].empty(), "no continuation cell");
+        assert_eq!(cols, 1);
+        assert!(!grid[(0, 0)].spans_two_columns());
     }
 
     const _ALICE_CHAPTER_1: &str = "CHAPTER I. Down the Rabbit-Hole
@@ -2199,12 +2349,12 @@ of the house!’ (Which was very likely true.)";
             &positions,
             &[
                 (2, 0),
-                (5, 45),
+                (5, 47),
                 (14, 54),
                 (20, 0),
                 (26, 28),
                 (30, 39),
-                (46, 16)
+                (46, 18)
             ]
         );
         for (y, x) in positions {

@@ -122,6 +122,10 @@ pub struct MailView {
     unsubscribe_dialog: Option<Box<UIConfirmationDialog>>,
     pending_unsubscribe: Option<UnsubscribeAction>,
     theme_default: ThemeAttribute,
+    /// The hosting pane's background ("pane.focused"/"pane.unfocused"),
+    /// set by the parent [`ThreadView`] so empty regions of the mail view
+    /// follow the keyboard focus. `None` falls back to `theme_default`.
+    pane_fill: Option<ThemeAttribute>,
     active_jobs: HashSet<JobId>,
     initialized: bool,
     state: MailViewState,
@@ -160,6 +164,7 @@ impl MailView {
             unsubscribe_dialog: None,
             pending_unsubscribe: None,
             theme_default: crate::conf::value(context, "mail.view.body"),
+            pane_fill: None,
             active_jobs: Default::default(),
             initialized: false,
             state: MailViewState::default(),
@@ -171,6 +176,11 @@ impl MailView {
             ret.init_futures(context);
         }
         ret
+    }
+
+    /// Set the hosting pane's background fill; see the `pane_fill` field.
+    pub(crate) fn set_pane_fill(&mut self, fill: Option<ThemeAttribute>) {
+        self.pane_fill = fill;
     }
 
     pub(crate) fn has_active_modal(&self) -> bool {
@@ -541,9 +551,10 @@ impl Component for MailView {
                     }
                 }
             }
+            env_view.set_pane_fill(self.pane_fill);
             env_view.draw(grid, area, context);
         } else if let MailViewState::Error { ref err } = self.state {
-            grid.clear_area(area, self.theme_default);
+            grid.clear_area(area, self.pane_fill.unwrap_or(self.theme_default));
             context.dirty_areas.push_back(area);
             context.replies.push_back(UIEvent::Notification {
                 title: Some("Failed to open e-mail".into()),
@@ -557,7 +568,7 @@ impl Component for MailView {
             }
             return;
         } else {
-            grid.clear_area(area, self.theme_default);
+            grid.clear_area(area, self.pane_fill.unwrap_or(self.theme_default));
             context.dirty_areas.push_back(area);
             return;
         };
@@ -588,6 +599,26 @@ impl Component for MailView {
 
         if let Some(ref mut s) = self.unsubscribe_dialog {
             if s.process_event(event, context) {
+                return true;
+            }
+        }
+
+        // An embedded dialog that closes itself on the quit binding emits
+        // `ComponentUnrealize` as a reply; the main loop feeds it back here.
+        // Without this arm the dialog stays `Some` and keeps consuming the
+        // quit key, trapping `MailView` until `:quit`. Handle it before the
+        // `coordinates` early return so a dialog is always torn down.
+        if let Some(dialog_id) = self.contact_selector.as_ref().map(|s| s.id()) {
+            if matches!(event, UIEvent::ComponentUnrealize(id) if *id == dialog_id) {
+                self.contact_selector = None;
+                self.set_dirty(true);
+                return true;
+            }
+        }
+        if let Some(dialog_id) = self.forward_dialog.as_ref().map(|s| s.id()) {
+            if matches!(event, UIEvent::ComponentUnrealize(id) if *id == dialog_id) {
+                self.forward_dialog = None;
+                self.set_dirty(true);
                 return true;
             }
         }

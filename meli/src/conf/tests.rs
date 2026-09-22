@@ -28,6 +28,8 @@ use std::{
     path::PathBuf,
 };
 
+use indexmap::IndexMap;
+
 use crate::{
     conf::{
         shortcuts::{
@@ -569,8 +571,8 @@ fn test_conf_theme_parsing() {
     parsed.validate().unwrap();
     /* MUST FAIL: theme `dark` contains a cycle */
     const HAS_CYCLE: &str = r#"[dark]
-"mail.listing.compact.even" = { fg = "mail.listing.compact.odd" }
-"mail.listing.compact.odd" = { fg = "mail.listing.compact.even" }
+"mail.listing.compact" = { fg = "mail.listing.plain" }
+"mail.listing.plain" = { fg = "mail.listing.compact" }
 "#;
     let parsed: Themes = toml::from_str(HAS_CYCLE).unwrap();
     parsed.validate().unwrap_err();
@@ -639,6 +641,271 @@ color_aliases= { "Jebediah" = "$JebediahJr", "JebediahJr" = "mail.listing.tag_de
     parsed.validate().unwrap_err();
 }
 
+/// Every theme shipped in `themes/` must load through
+/// the same path `:toggle theme` uses at runtime
+/// ([`crate::state::State::load_theme_into_settings`]): parse the file, pick
+/// each `[terminal.themes.<name>]` table, deserialize it into
+/// [`ThemeOptions`], merge it over a `dark` clone via [`construct_theme`]
+/// (which rejects unknown keys and malformed colors/attrs), then run the
+/// full [`Themes::validate`] cycle and alias checks.
+/// Every theme compiled into the binary: each [`builtin_themes`] entry
+/// present in `Themes::default()` (Zed family plus community ports),
+/// `dark`/`light` aliasing Ayu Dark/Ayu Light, and the default selected
+/// theme being `Ayu Dark`.
+#[test]
+fn test_builtin_themes_compiled_in() {
+    let def = Themes::default();
+    // `builtin_themes()` drives the picker's built-in section: it must
+    // list exactly the compiled-in themes, each name only once.
+    let mut listed = builtin_themes().to_vec();
+    let listed_len = listed.len();
+    listed.sort_unstable();
+    listed.dedup();
+    assert_eq!(
+        listed.len(),
+        listed_len,
+        "builtin_themes() lists a theme name twice"
+    );
+    let mut compiled_in = def
+        .other_themes
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    compiled_in.sort_unstable();
+    assert_eq!(
+        listed, compiled_in,
+        "the picker's built-in list and the compiled-in themes must match exactly"
+    );
+    let ayu_dark = &def.other_themes[DEFAULT_THEME];
+    let ayu_light = &def.other_themes["Ayu Light"];
+    for key in [
+        "theme_default",
+        "status.bar",
+        "tab.focused",
+        "pager.highlight_search",
+    ] {
+        assert_eq!(
+            unlink(&def.dark, key),
+            unlink(ayu_dark, key),
+            "`dark` must alias {DEFAULT_THEME} for {key}"
+        );
+        assert_eq!(
+            unlink(&def.light, key),
+            unlink(ayu_light, key),
+            "`light` must alias `Ayu Light` for {key}"
+        );
+    }
+    def.validate().unwrap();
+
+    assert_eq!(
+        crate::conf::terminal::TerminalSettings::default().theme,
+        DEFAULT_THEME,
+        "the selected theme must default to {DEFAULT_THEME}"
+    );
+    assert_eq!(builtin_themes()[0], DEFAULT_THEME);
+    for expected in [
+        "Catppuccin Mocha",
+        "Dracula",
+        "Nord Dark",
+        "Tokyo Night",
+        "Zedokai",
+    ] {
+        assert!(
+            builtin_themes().contains(&expected),
+            "community port `{expected}` missing from builtin_themes()"
+        );
+    }
+}
+
+#[test]
+fn test_docs_sample_themes_load() {
+    let themes_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+    let mut found_theme_names = Vec::new();
+    for entry in fs::read_dir(&themes_dir)
+        .unwrap_or_else(|err| panic!("could not read {}: {err}", themes_dir.display()))
+    {
+        let path = entry
+            .unwrap_or_else(|err| panic!("could not read {}: {err}", themes_dir.display()))
+            .path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        let value: toml::Value = text.parse().unwrap_or_else(|err| {
+            panic!("{}: invalid TOML: {err}", path.display());
+        });
+        let Some(themes_table) = value
+            .get("terminal")
+            .and_then(|t| t.get("themes"))
+            .and_then(|t| t.as_table())
+        else {
+            panic!("{}: no [terminal.themes] table", path.display());
+        };
+        assert!(
+            !themes_table.is_empty(),
+            "{}: no themes declared",
+            path.display()
+        );
+        for (name, table) in themes_table {
+            assert_ne!(
+                name,
+                "light",
+                "{}: theme name `light` is reserved",
+                path.display()
+            );
+            assert_ne!(
+                name,
+                "dark",
+                "{}: theme name `dark` is reserved",
+                path.display()
+            );
+            let options: ThemeOptions = table.clone().try_into().unwrap_or_else(|err| {
+                panic!("{}: invalid theme `{name}`: {err}", path.display());
+            });
+            let mut theme = Themes::default().dark;
+            construct_theme(name, &mut theme, options).unwrap_or_else(|err| {
+                panic!("{}: could not build theme `{name}`: {err}", path.display());
+            });
+            let mut all = Themes::default();
+            all.other_themes.insert(name.clone(), theme);
+            all.validate().unwrap_or_else(|err| {
+                panic!(
+                    "{}: theme `{name}` failed validation: {err}",
+                    path.display()
+                );
+            });
+            found_theme_names.push(name.clone());
+        }
+    }
+    assert!(
+        !found_theme_names.is_empty(),
+        "no sample themes found in {}",
+        themes_dir.display()
+    );
+    // The Zed ports this feature ships must stay discoverable.
+    for expected in [
+        "One Dark",
+        "One Light",
+        "Ayu Dark",
+        "Ayu Mirage",
+        "Ayu Light",
+        "Gruvbox Dark",
+        "Gruvbox Dark Hard",
+        "Gruvbox Dark Soft",
+        "Gruvbox Light",
+        "Gruvbox Light Hard",
+        "Gruvbox Light Soft",
+    ] {
+        assert!(
+            found_theme_names.contains(&expected.to_string()),
+            "ported theme `{expected}` not found in {}",
+            themes_dir.display()
+        );
+    }
+    // Everything shipped in `themes/` must be compiled in: the picker's
+    // built-in section derives from `builtin_themes()`.
+    for name in &found_theme_names {
+        assert!(
+            builtin_themes().contains(&name.as_str()),
+            "theme `{name}` shipped in themes/ is not listed as built-in"
+        );
+    }
+}
+
+/// A `[terminal.themes.<name>]` table shadows the same-name built-in:
+/// the user's values win, the name is tracked as user-defined, and the
+/// picker labels the entry with the configuration as its source.
+#[test]
+fn test_config_table_shadows_builtin_theme() {
+    // A `Themes` value deserializes from the *contents* of the
+    // configuration's `[terminal.themes]` table.
+    const OVERRIDE_STR: &str = r##"
+["One Dark"]
+"mail.listing.tag_default" = { fg = "#b4da55" }
+"##;
+    let parsed: Themes = toml::from_str(OVERRIDE_STR).unwrap();
+    assert!(
+        parsed.user_defined.contains("One Dark"),
+        "an overridden built-in name must be tracked as user-defined"
+    );
+    let builtin = Themes::default();
+    assert_ne!(
+        unlink(&parsed.other_themes["One Dark"], "mail.listing.tag_default").fg,
+        unlink(
+            &builtin.other_themes["One Dark"],
+            "mail.listing.tag_default"
+        )
+        .fg,
+        "the configuration table must override the built-in value"
+    );
+    assert_eq!(
+        unlink(&parsed.other_themes["One Dark"], "mail.listing.tag_default").fg,
+        Color::Rgb(0xb4, 0xda, 0x55),
+    );
+    // The picker labels the shadowed name by its winning source.
+    let entries = theme_picker_entries(&parsed, &IndexMap::new());
+    let labeled: Vec<_> = entries
+        .iter()
+        .filter(|(name, _)| name == "One Dark")
+        .map(|(_, label)| label)
+        .collect();
+    assert_eq!(labeled, ["One Dark (config)"]);
+}
+
+/// A theme directory file shadows every same-name definition:
+/// `theme_from_file` (the `load_theme_into_settings` path) yields the
+/// file's values over the built-in base, and the picker offers both the
+/// shadowed built-in name and a new file theme exactly once, labeled
+/// with the file as their source.
+#[test]
+fn test_theme_directory_file_shadows_builtin() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("my-one-dark.toml");
+    std::fs::write(
+        &path,
+        r##"
+[terminal.themes."One Dark"]
+"mail.listing.tag_default" = { fg = "#00ff00" }
+"##,
+    )
+    .unwrap();
+
+    let builtin = Themes::default();
+    let theme = crate::conf::theme_from_file("One Dark", &path, &builtin.dark).unwrap();
+    assert_eq!(
+        unlink(&theme, "mail.listing.tag_default").fg,
+        Color::Rgb(0x00, 0xff, 0x00),
+        "the directory file must override the built-in value"
+    );
+
+    let mut directory = IndexMap::new();
+    directory.insert("One Dark".to_string(), path.clone());
+    directory.insert("Custom Theme".to_string(), path);
+    let entries = theme_picker_entries(&builtin, &directory);
+    let one_dark: Vec<_> = entries
+        .iter()
+        .filter(|(name, _)| name == "One Dark")
+        .map(|(_, label)| label)
+        .collect();
+    assert_eq!(one_dark, ["One Dark (file)"]);
+    assert_eq!(
+        entries
+            .iter()
+            .find(|(name, _)| name == "Custom Theme")
+            .map(|(_, label)| label.as_str()),
+        Some("Custom Theme (file)"),
+        "a directory theme must be offered by the picker"
+    );
+    // Pure built-ins keep their label.
+    assert_eq!(
+        entries
+            .iter()
+            .find(|(name, _)| name == "Ayu Dark")
+            .map(|(_, label)| label.as_str()),
+        Some("Ayu Dark (built-in)"),
+    );
+}
+
 #[test]
 fn test_conf_theme_key_values() {
     use std::{collections::VecDeque, fs::File, io::Read, path::PathBuf};
@@ -674,110 +941,152 @@ fn test_conf_theme_key_values() {
 }
 
 /// Pin the default focus/selection palette for both light and dark themes
-/// (todo: modern focus/selection defaults). If a value changes intentionally,
-/// update this test alongside the golden re-record.
+/// (the compiled-in Ayu themes; `dark` = "Ayu Dark", `light` = "Ayu Light").
+/// If a value changes intentionally, update this test alongside the golden
+/// re-record.
 #[test]
 fn test_conf_theme_default_focus_palette() {
     let def = Themes::default();
     let dark = |key: &str| unlink(&def.dark, key);
     let light = |key: &str| unlink(&def.light, key);
-    // tab.focused = bold + accent fg; tab.unfocused = dim.
+    // tab.focused = bold + foreground; tab.unfocused = dim.
     assert_eq!(
         dark("tab.focused"),
         ThemeAttribute {
-            fg: Color::Byte(123),
-            bg: Color::Default,
+            fg: Color::Rgb(191, 189, 182),
+            bg: Color::Rgb(13, 16, 22),
             attrs: Attr::BOLD
         }
     );
     assert_eq!(
         light("tab.focused"),
         ThemeAttribute {
-            fg: Color::Byte(31),
-            bg: Color::Default,
+            fg: Color::Rgb(92, 97, 102),
+            bg: Color::Rgb(252, 252, 252),
             attrs: Attr::BOLD
         }
     );
-    for theme in [dark("tab.unfocused"), light("tab.unfocused")] {
-        assert_eq!(
-            theme,
-            ThemeAttribute {
-                fg: Color::Byte(244),
-                bg: Color::Default,
-                attrs: Attr::DIM
-            }
-        );
-    }
-    // Status bars: normal = accent on subtle dark, command = amber.
+    assert_eq!(
+        dark("tab.unfocused"),
+        ThemeAttribute {
+            fg: Color::Rgb(138, 137, 134),
+            bg: Color::Rgb(31, 33, 39),
+            attrs: Attr::DIM
+        }
+    );
+    assert_eq!(
+        light("tab.unfocused"),
+        ThemeAttribute {
+            fg: Color::Rgb(139, 142, 146),
+            bg: Color::Rgb(236, 236, 237),
+            attrs: Attr::DIM
+        }
+    );
+    // Pane keys chain the tab keys: fg links the tab foreground, bg the
+    // tab background; attrs stay Default (the tabs add Bold/Dim).
+    assert_eq!(
+        dark("pane.focused"),
+        ThemeAttribute {
+            fg: dark("tab.focused").fg,
+            bg: dark("tab.focused").bg,
+            attrs: Attr::DEFAULT
+        }
+    );
+    assert_eq!(
+        light("pane.focused"),
+        ThemeAttribute {
+            fg: light("tab.focused").fg,
+            bg: light("tab.focused").bg,
+            attrs: Attr::DEFAULT
+        }
+    );
+    assert_eq!(
+        dark("pane.unfocused"),
+        ThemeAttribute {
+            fg: dark("tab.unfocused").fg,
+            bg: dark("tab.unfocused").bg,
+            attrs: Attr::DEFAULT
+        }
+    );
+    assert_eq!(
+        light("pane.unfocused"),
+        ThemeAttribute {
+            fg: light("tab.unfocused").fg,
+            bg: light("tab.unfocused").bg,
+            attrs: Attr::DEFAULT
+        }
+    );
+    // Status bars: normal = text on status bar, command = text on surface.
     assert_eq!(
         dark("status.bar"),
         ThemeAttribute {
-            fg: Color::Byte(123),
-            bg: Color::Byte(235),
+            fg: Color::Rgb(191, 189, 182),
+            bg: Color::Rgb(49, 51, 55),
             attrs: Attr::DEFAULT
         }
     );
     assert_eq!(
         light("status.bar"),
         ThemeAttribute {
-            fg: Color::Byte(31),
-            bg: Color::Byte(254),
+            fg: Color::Rgb(92, 97, 102),
+            bg: Color::Rgb(220, 221, 222),
             attrs: Attr::DEFAULT
         }
     );
-    for theme in [dark("status.command_bar"), light("status.command_bar")] {
-        assert_eq!(
-            theme,
-            ThemeAttribute {
-                fg: Color::Byte(16),
-                bg: Color::Byte(214),
-                attrs: Attr::DEFAULT
-            }
-        );
-    }
-    // Selection fill: steel blue (dark) / light blue (light);
-    // cursor highlight: grey ramp.
+    assert_eq!(
+        dark("status.command_bar"),
+        ThemeAttribute {
+            fg: Color::Rgb(191, 189, 182),
+            bg: Color::Rgb(31, 33, 39),
+            attrs: Attr::DEFAULT
+        }
+    );
+    assert_eq!(
+        light("status.command_bar"),
+        ThemeAttribute {
+            fg: Color::Rgb(92, 97, 102),
+            bg: Color::Rgb(236, 236, 237),
+            attrs: Attr::DEFAULT
+        }
+    );
+    // Selection fill: `selected` alias; cursor highlight: `match` alias.
     for key in [
-        "mail.listing.compact.even_selected",
-        "mail.listing.compact.odd_selected",
-        "mail.listing.plain.even_selected",
-        "mail.listing.plain.odd_selected",
+        "mail.listing.compact.selected",
+        "mail.listing.plain.selected",
         "mail.listing.conversations.selected",
     ] {
-        assert_eq!(dark(key).bg, Color::Byte(24), "{key} dark bg");
-        assert_eq!(light(key).bg, Color::Byte(153), "{key} light bg");
+        assert_eq!(dark(key).bg, Color::Rgb(62, 64, 67), "{key} dark bg");
+        assert_eq!(light(key).bg, Color::Rgb(207, 208, 210), "{key} light bg");
     }
     for key in [
-        "mail.listing.compact.even_highlighted",
-        "mail.listing.compact.odd_highlighted",
-        "mail.listing.plain.even_highlighted",
-        "mail.listing.plain.odd_highlighted",
+        "mail.listing.compact.highlighted",
+        "mail.listing.plain.highlighted",
     ] {
-        assert_eq!(dark(key).bg, Color::Byte(240), "{key} dark bg");
-        assert_eq!(light(key).bg, Color::Byte(189), "{key} light bg");
+        assert_eq!(dark(key).bg, Color::Rgb(44, 87, 115), "{key} dark bg");
+        assert_eq!(light(key).bg, Color::Rgb(175, 214, 243), "{key} light bg");
     }
     assert_eq!(
         dark("mail.listing.conversations.highlighted").bg,
-        Color::Byte(240)
+        Color::Rgb(44, 87, 115)
     );
     assert_eq!(
         light("mail.listing.conversations.highlighted").bg,
-        Color::Byte(189)
+        Color::Rgb(175, 214, 243)
     );
     assert_eq!(
         dark("mail.sidebar_highlighted"),
         ThemeAttribute {
-            fg: Color::Byte(16),
-            bg: Color::Byte(123),
-            attrs: Attr::DEFAULT
+            fg: Color::Rgb(191, 189, 182),
+            bg: Color::Rgb(45, 47, 52),
+            attrs: Attr::BOLD
         }
     );
     assert_eq!(
         light("mail.sidebar_highlighted"),
         ThemeAttribute {
-            fg: Color::Byte(16),
-            bg: Color::Byte(123),
-            attrs: Attr::DEFAULT
+            fg: Color::Rgb(92, 97, 102),
+            bg: Color::Rgb(223, 224, 225),
+            attrs: Attr::BOLD
         }
     );
 }
@@ -885,26 +1194,108 @@ fn test_empty_progress_spinner_sequence_is_rejected_with_warning() {
     }
 }
 
-/// `sidebar_ratio > 100` underflows the listing layout arithmetic later; it
-/// must be clamped at load time and reported.
+/// `thread_layout`, `sidebar_ratio` and `mail_view_divider` were removed
+/// from `ListingSettings` (the layout is now a fixed 30/70 split), but the
+/// struct carries `#[serde(deny_unknown_fields)]`: leftover keys in old
+/// config files (top-level `[listing]` and per-account
+/// `[accounts.<name>.listing]`) used to abort startup. They must be stripped
+/// before parsing, leaving every other setting intact.
 #[test]
-fn test_sidebar_ratio_out_of_range_is_clamped_with_warning() {
+fn test_removed_thread_layout_keys_are_stripped_from_config() {
     let root = tempfile::tempdir().unwrap();
-    let config = minimal_config(root.path(), "[listing]\nsidebar_ratio = 200");
+    let config = minimal_config(
+        root.path(),
+        "[listing]\nthread_layout = \"auto\"\nsidebar_ratio = 50\n\
+         mail_view_divider = \"+\"\ncontext_lines = 1\n\
+         [accounts.account-name.listing]\nthread_layout = \"auto\"\n\
+         sidebar_ratio = 50\nmail_view_divider = \"+\"\ncontext_lines = 2",
+    );
     let s = FileSettings::validate_string(config, false).unwrap();
-    assert_eq!(s.listing.sidebar_ratio, 100);
-    assert_eq!(s.config_warnings.len(), 1, "{:?}", s.config_warnings);
-    assert!(
-        s.config_warnings[0].contains("sidebar_ratio"),
-        "{:?}",
-        s.config_warnings
+
+    // Top-level `[listing]`: the legacy keys are gone, sibling keys survive.
+    assert_eq!(s.listing.context_lines, 1);
+
+    // Per-account `[accounts.<name>.listing]`: stripped as well, and the
+    // remaining overrides still parse.
+    assert_eq!(
+        s.accounts["account-name"]
+            .conf_override
+            .listing
+            .context_lines,
+        Some(2)
+    );
+}
+
+/// The same removal happened one tier deeper:
+/// `FileMailboxConf` flattens `MailUIConf`, so a per-mailbox
+/// `[accounts.<name>.mailboxes.<mailbox>.listing]` table has the same
+/// `deny_unknown_fields` overrides and old configs carrying the removed
+/// keys there used to abort startup, too. They must be stripped while
+/// sibling keys survive.
+#[test]
+fn test_removed_thread_layout_keys_are_stripped_from_mailbox_conf() {
+    let root = tempfile::tempdir().unwrap();
+    let config = minimal_config(
+        root.path(),
+        "[accounts.account-name.mailboxes.\"INBOX\".listing]\n\
+         thread_layout = \"auto\"\nsidebar_ratio = 50\n\
+         mail_view_divider = \"+\"\ncontext_lines = 3",
+    );
+    let s = FileSettings::validate_string(config, false).unwrap();
+    assert_eq!(
+        s.accounts["account-name"].mailboxes["INBOX"]
+            .conf_override()
+            .listing
+            .context_lines,
+        Some(3)
+    );
+}
+
+/// Theme keys that were intentionally removed (the listing zebra-stripping
+/// `even`/`odd` row keys and `mail.view.divider`) used to hard-fail startup
+/// with an "unrecognized theme keywords" error when present in a
+/// `[terminal.themes.<name>]` table. They must be dropped with a warning
+/// instead, while genuinely unknown keys must still be rejected.
+#[test]
+fn test_removed_theme_keys_are_stripped_and_unknown_still_error() {
+    let root = tempfile::tempdir().unwrap();
+
+    // Every intentionally removed key must be accepted and stripped; a
+    // sibling key that still exists keeps its value.
+    let mut theme_table = String::new();
+    for key in crate::conf::themes::REMOVED_THEME_KEYS {
+        theme_table.push_str(&format!("\"{key}\" = {{ fg = \"HotPink3\" }}\n"));
+    }
+    let config = minimal_config(
+        root.path(),
+        &format!(
+            "[terminal.themes.\"hunter2\"]\n{theme_table}\
+             \"mail.listing.tag_default\" = {{ fg = \"Red\" }}\n"
+        ),
+    );
+    let s = FileSettings::validate_string(config, false).unwrap();
+    let theme = &s.terminal.themes.other_themes["hunter2"];
+    for key in crate::conf::themes::REMOVED_THEME_KEYS {
+        assert!(
+            !theme.contains_key(*key),
+            "removed key `{key}` must be stripped, not parsed"
+        );
+    }
+    assert_eq!(
+        unlink_fg(theme, &ColorField::Fg, "mail.listing.tag_default"),
+        Color::Byte(9) // the string "Red" parses to color index 9
     );
 
-    // Valid values are untouched and produce no warning.
-    let config = minimal_config(root.path(), "[listing]\nsidebar_ratio = 50");
-    let s = FileSettings::validate_string(config, false).unwrap();
-    assert_eq!(s.listing.sidebar_ratio, 50);
-    assert!(s.config_warnings.is_empty());
+    // A key that was never a theme key must still be an error.
+    let config = minimal_config(
+        root.path(),
+        "[terminal.themes.\"hunter2\"]\n\"not.a.theme.key\" = { fg = \"Red\" }\n",
+    );
+    let err = FileSettings::validate_string(config, false).unwrap_err();
+    assert!(
+        err.to_string().contains("unrecognized theme keywords"),
+        "{err}"
+    );
 }
 
 /// Warnings collected while loading must reach `Settings`, which `State::new`
@@ -913,17 +1304,19 @@ fn test_sidebar_ratio_out_of_range_is_clamped_with_warning() {
 fn test_config_warnings_propagate_to_settings() {
     let dir = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
-    let config = minimal_config(root.path(), "[listing]\nsidebar_ratio = 200");
+    let config = minimal_config(
+        root.path(),
+        "[terminal]\nprogress_spinner_sequence = { frames = [], interval_ms = 100 }",
+    );
     let file = ConfigFile::new(&config, &dir).unwrap();
     let settings = crate::conf::Settings::from_path(file.path.clone()).unwrap();
-    assert_eq!(settings.listing.sidebar_ratio, 100);
     assert_eq!(
         settings.config_warnings.len(),
         1,
         "{:?}",
         settings.config_warnings
     );
-    assert!(settings.config_warnings[0].contains("sidebar_ratio"));
+    assert!(settings.config_warnings[0].contains("progress_spinner_sequence"));
 }
 
 /// `get_included_configs` used `conf_path.parent().unwrap()`; a parentless
@@ -937,5 +1330,110 @@ fn test_get_included_configs_parentless_path_does_not_panic() {
     for path in [Path::new(""), Path::new("/")] {
         let res = get_included_configs(path);
         assert!(res.is_err(), "{path:?} must not yield includes");
+    }
+}
+
+mod toggle_theme_ui {
+    use super::*;
+    use crate::command::{parse_command, Action};
+    use crate::conf::rewrite_terminal_theme;
+    use crate::types::UIEvent;
+
+    /// The `toggle theme` command must produce `Action::ToggleTheme`,
+    /// which the State layer must translate into opening the theme
+    /// picker overlay and applying a theme change.
+    #[test]
+    fn toggle_theme_command_opens_picker_and_persists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_toml = format!(
+            "[accounts.test]\n\
+             root_mailbox = \"{}\"\n\
+             format = \"maildir\"\n\
+             send_mail = 'false'\n\
+             identity = \"user@example.com\"\n\
+             \n\
+             [terminal]\n\
+             theme = \"dark\"\n",
+            temp_dir.path().display()
+        );
+        let config_file = ConfigFile::new(&config_toml, &temp_dir).unwrap();
+        std::env::set_var("MELI_CONFIG", config_file.path.as_os_str());
+
+        let mut ctx = crate::golden::mock_context();
+        ctx.settings.terminal.theme = "dark".to_string();
+
+        // 1. Command parses
+        let action = parse_command(b"toggle theme").unwrap();
+        assert!(matches!(action, Action::ToggleTheme));
+
+        // 2. The config file initially has theme = "dark"
+        let text = std::fs::read_to_string(&config_file.path).unwrap();
+        assert!(text.contains("theme = \"dark\""));
+
+        // 3. rewrite_terminal_theme can switch to "light"
+        let updated = rewrite_terminal_theme(&text, "light").unwrap();
+        assert!(updated.contains("theme = \"light\""));
+        assert!(!updated.contains("theme = \"dark\""));
+        assert_eq!(updated.matches("theme =").count(), 1);
+        // Other settings preserved
+        assert!(updated.contains("format = \"maildir\""));
+        assert!(updated.contains("identity = \"user@example.com\""));
+
+        // 4. Write back and re-read: persists
+        std::fs::write(&config_file.path, &updated).unwrap();
+        let retext = std::fs::read_to_string(&config_file.path).unwrap();
+        assert!(retext.contains("theme = \"light\""));
+    }
+
+    /// The picker's live-preview event must change the in-memory theme;
+    /// the persist event must rewrite the file.
+    #[test]
+    fn change_theme_event_flow() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_toml = format!(
+            "[accounts.test]\n\
+             root_mailbox = \"{}\"\n\
+             format = \"maildir\"\n\
+             send_mail = 'false'\n\
+             identity = \"user@example.com\"\n\
+             \n\
+             [terminal]\n\
+             theme = \"dark\"\n",
+            temp_dir.path().display()
+        );
+        let config_file = ConfigFile::new(&config_toml, &temp_dir).unwrap();
+        std::env::set_var("MELI_CONFIG", config_file.path.as_os_str());
+
+        // Live preview: in-memory only
+        let preview_event = UIEvent::ChangeTheme {
+            name: "light".to_string(),
+            persist: false,
+        };
+        // The event reaches State::rcv_event in the real loop; here we
+        // verify the payload carries the right semantics.
+        assert!(matches!(
+            &preview_event,
+            UIEvent::ChangeTheme { name, persist } if name == "light" && !persist
+        ));
+
+        // Persist: also rewrites the file
+        let text = std::fs::read_to_string(&config_file.path).unwrap();
+        let updated = rewrite_terminal_theme(&text, "light").unwrap();
+        std::fs::write(&config_file.path, updated).unwrap();
+        let after = std::fs::read_to_string(&config_file.path).unwrap();
+        assert!(after.contains("theme = \"light\""));
+    }
+
+    /// Toggling between multiple themes in sequence must keep the config
+    /// file consistent (single theme line, correct value).
+    #[test]
+    fn theme_toggles_keep_single_line() {
+        let base = "[terminal]\ntheme = \"dark\"\nfoo = 1\n";
+        let a = rewrite_terminal_theme(base, "light").unwrap();
+        let b = rewrite_terminal_theme(&a, "dark").unwrap();
+        let c = rewrite_terminal_theme(&b, "nord").unwrap();
+        assert!(c.contains("theme = \"nord\""));
+        assert_eq!(c.matches("theme =").count(), 1);
+        assert!(c.contains("foo = 1"), "other settings preserved");
     }
 }

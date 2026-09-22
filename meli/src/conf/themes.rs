@@ -29,6 +29,13 @@
 //! * `ThemeAttribute` is an attribute triplet with the links resolved.
 //!
 //! On startup a [DFS](https://en.wikipedia.org/wiki/Depth-first_search) is performed to see if there are any cycles in the link graph.
+//!
+//! Themes come from three sources, in descending priority: files in the
+//! user's theme directory (`$XDG_CONFIG_HOME/meli/themes/*.toml`), then
+//! `[terminal.themes.<name>]` tables in the configuration file, then the
+//! themes compiled into the binary from `meli/themes/*.toml`. A name
+//! defined by more than one source resolves to its highest-priority
+//! definition.
 
 use std::{
     borrow::Cow,
@@ -50,6 +57,123 @@ use crate::{
 
 pub const LIGHT: &str = "light";
 pub const DARK: &str = "dark";
+
+/// Name of the theme meli starts with when the user has not chosen one.
+pub const DEFAULT_THEME: &str = "Ayu Dark";
+
+/// The Zed editor theme family (One/Ayu/Gruvbox) meli starts with. The
+/// first entry is the default ([`DEFAULT_THEME`]); this order leads the
+/// built-in section of the `:toggle theme` picker.
+const ZED_THEME_FAMILY: &[&str] = &[
+    "Ayu Dark",
+    "Ayu Mirage",
+    "Ayu Light",
+    "One Dark",
+    "One Light",
+    "Gruvbox Dark",
+    "Gruvbox Dark Hard",
+    "Gruvbox Dark Soft",
+    "Gruvbox Light",
+    "Gruvbox Light Hard",
+    "Gruvbox Light Soft",
+];
+
+/// All theme files compiled into the binary: the Zed family plus the
+/// community ports (top zed-themes.com families), kept in `meli/themes/`
+/// so users can also install them as standalone theme files in
+/// `$XDG_CONFIG_HOME/meli/themes/`.
+const EMBEDDED_THEME_FILES: &[&str] = &[
+    include_str!("../../themes/zed-ayu.toml"),
+    include_str!("../../themes/zed-one.toml"),
+    include_str!("../../themes/zed-gruvbox.toml"),
+    include_str!("../../themes/community-catppuccin.toml"),
+    include_str!("../../themes/community-colorizer.toml"),
+    include_str!("../../themes/community-dracula.toml"),
+    include_str!("../../themes/community-fleet-themes.toml"),
+    include_str!("../../themes/community-github-dark-default.toml"),
+    include_str!("../../themes/community-github-theme.toml"),
+    include_str!("../../themes/community-intellij-newui-theme.toml"),
+    include_str!("../../themes/community-macos-classic.toml"),
+    include_str!("../../themes/community-material-dark.toml"),
+    include_str!("../../themes/community-new-darcula.toml"),
+    include_str!("../../themes/community-nord.toml"),
+    include_str!("../../themes/community-nvim-nightfox.toml"),
+    include_str!("../../themes/community-one-dark-pro.toml"),
+    include_str!("../../themes/community-smooth.toml"),
+    include_str!("../../themes/community-the-dark-side.toml"),
+    include_str!("../../themes/community-tokyo-night.toml"),
+    include_str!("../../themes/community-vscode-dark-modern.toml"),
+    include_str!("../../themes/community-vscode-dark-plus.toml"),
+    include_str!("../../themes/community-xy-zed.toml"),
+    include_str!("../../themes/community-zedokai.toml"),
+];
+
+/// Every theme compiled into the binary, in the order the `:toggle theme`
+/// picker lists them: the Zed family ([`ZED_THEME_FAMILY`], default
+/// leading), then every community port in alphabetical order.
+pub fn builtin_themes() -> &'static [&'static str] {
+    static NAMES: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+        let mut names = ZED_THEME_FAMILY.to_vec();
+        let mut community: Vec<&'static str> = embedded_themes()
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !ZED_THEME_FAMILY.contains(name))
+            .collect();
+        community.sort_unstable();
+        community.dedup();
+        names.extend(community);
+        names
+    });
+    NAMES.as_slice()
+}
+
+/// Entries for the `:toggle theme` picker.
+///
+/// Compiled-in themes first ([`DEFAULT_THEME`] leading), then every
+/// remaining name alphabetically. A name defined by more than one
+/// source appears once, labeled with its highest-priority source: a
+/// theme directory file shadows a `[terminal.themes.<name>]`
+/// configuration table, which shadows the compiled-in theme. Selecting
+/// an entry applies that winning definition.
+pub fn theme_picker_entries(
+    themes: &Themes,
+    directory: &IndexMap<String, std::path::PathBuf>,
+) -> Vec<(String, String)> {
+    let mut names: Vec<(String, String)> = Vec::new();
+    for builtin in builtin_themes() {
+        let source = if directory.contains_key(*builtin) {
+            "file"
+        } else if themes.user_defined.contains(*builtin) {
+            "config"
+        } else {
+            "built-in"
+        };
+        names.push(((*builtin).to_string(), format!("{builtin} ({source})")));
+    }
+    let mut others: Vec<String> = themes
+        .other_themes
+        .keys()
+        .filter(|n| !builtin_themes().contains(&n.as_str()))
+        .map(|n| n.to_string())
+        .collect();
+    others.extend(
+        directory
+            .keys()
+            .filter(|n| !builtin_themes().contains(&n.as_str()))
+            .cloned(),
+    );
+    others.sort();
+    others.dedup();
+    for name in others {
+        let source = if directory.contains_key(&name) {
+            "file"
+        } else {
+            "config"
+        };
+        names.push((name.clone(), format!("{name} ({source})")));
+    }
+    names
+}
 
 #[inline(always)]
 pub fn value(context: &Context, key: &'static str) -> ThemeAttribute {
@@ -272,6 +396,8 @@ pub const DEFAULT_KEYS: &[&str] = &[
     "tab.focused",
     "tab.unfocused",
     "tab.bar",
+    "pane.focused",
+    "pane.unfocused",
     "widgets.list.header",
     "widgets.form.label",
     "widgets.form.field",
@@ -289,6 +415,51 @@ pub const DEFAULT_KEYS: &[&str] = &[
     "mail.sidebar_highlighted_account",
     "mail.sidebar_highlighted_account_unread_count",
     "mail.sidebar_highlighted_account_index",
+    "mail.listing.compact",
+    "mail.listing.compact.unseen",
+    "mail.listing.compact.selected",
+    "mail.listing.compact.highlighted",
+    "mail.listing.compact.highlighted_selected",
+    "mail.listing.plain",
+    "mail.listing.plain.unseen",
+    "mail.listing.plain.selected",
+    "mail.listing.plain.highlighted",
+    "mail.listing.plain.highlighted_selected",
+    "mail.listing.conversations",
+    "mail.listing.conversations.subject",
+    "mail.listing.conversations.from",
+    "mail.listing.conversations.date",
+    "mail.listing.conversations.unseen",
+    "mail.listing.conversations.highlighted",
+    "mail.listing.conversations.selected",
+    "mail.listing.conversations.highlighted_selected",
+    "mail.view.headers",
+    "mail.view.headers_names",
+    "mail.view.body",
+    "mail.view.thread.indentation.a",
+    "mail.view.thread.indentation.b",
+    "mail.view.thread.indentation.c",
+    "mail.view.thread.indentation.d",
+    "mail.view.thread.indentation.e",
+    "mail.view.thread.indentation.f",
+    "mail.listing.attachment_flag",
+    "mail.listing.thread_snooze_flag",
+    "mail.listing.tag_default",
+    "mail.listing.highlight_self",
+    "pager.highlight_search",
+    "pager.highlight_search_current",
+];
+
+/// Theme keys that used to be accepted in `[terminal.themes.<name>]` tables
+/// but were later intentionally removed: the listing zebra-stripping
+/// `even`/`odd` row keys (replaced by the unified semantic keys) and the
+/// `mail.view.divider` key (the divider is no longer customisable).
+///
+/// Old configuration files and theme directory files carrying them would
+/// otherwise abort startup in [`construct_theme`] with an "unrecognized
+/// theme keywords" error; they are dropped with a warning instead. Keys
+/// that are not in this list keep the unknown-key error.
+pub(super) const REMOVED_THEME_KEYS: &[&str] = &[
     "mail.listing.compact.even",
     "mail.listing.compact.odd",
     "mail.listing.compact.even_unseen",
@@ -309,31 +480,7 @@ pub const DEFAULT_KEYS: &[&str] = &[
     "mail.listing.plain.odd_highlighted",
     "mail.listing.plain.even_highlighted_selected",
     "mail.listing.plain.odd_highlighted_selected",
-    "mail.listing.conversations",
-    "mail.listing.conversations.subject",
-    "mail.listing.conversations.from",
-    "mail.listing.conversations.date",
-    "mail.listing.conversations.unseen",
-    "mail.listing.conversations.highlighted",
-    "mail.listing.conversations.selected",
-    "mail.listing.conversations.highlighted_selected",
     "mail.view.divider",
-    "mail.view.headers",
-    "mail.view.headers_names",
-    "mail.view.headers_area",
-    "mail.view.body",
-    "mail.view.thread.indentation.a",
-    "mail.view.thread.indentation.b",
-    "mail.view.thread.indentation.c",
-    "mail.view.thread.indentation.d",
-    "mail.view.thread.indentation.e",
-    "mail.view.thread.indentation.f",
-    "mail.listing.attachment_flag",
-    "mail.listing.thread_snooze_flag",
-    "mail.listing.tag_default",
-    "mail.listing.highlight_self",
-    "pager.highlight_search",
-    "pager.highlight_search_current",
 ];
 
 /// `ThemeAttributeInner` but with the links resolved.
@@ -540,6 +687,12 @@ pub struct Themes {
     pub light: Theme,
     pub dark: Theme,
     pub other_themes: IndexMap<String, Theme>,
+    /// Names explicitly defined by the user's configuration
+    /// (`[terminal.themes.<name>]` tables), as opposed to compiled-in
+    /// built-ins. Theme directory files are not tracked here; consult
+    /// `get_user_themes()`. The `:toggle theme` picker uses it to
+    /// attribute same-name themes to their real source.
+    pub user_defined: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -691,53 +844,145 @@ impl DerefMut for Theme {
     }
 }
 
+/// Options of one theme as it appears in configuration
+/// (`[terminal.themes.<name>]` tables).
+///
+/// `pub(crate)` so the theme picker can build a `Theme` from a
+/// standalone theme file without going through a full `FileSettings`
+/// load.
+#[derive(Deserialize)]
+pub struct ThemesOptions {
+    #[serde(default)]
+    light: ThemeOptions,
+    #[serde(default)]
+    dark: ThemeOptions,
+    #[serde(flatten, default)]
+    other_themes: IndexMap<String, ThemeOptions>,
+}
+
+#[derive(Default, Deserialize)]
+pub struct ThemeOptions {
+    #[serde(default)]
+    color_aliases: IndexMap<Cow<'static, str>, ThemeValue<Color>>,
+    #[serde(default)]
+    attr_aliases: IndexMap<Cow<'static, str>, ThemeValue<Attr>>,
+    #[serde(default)]
+    text_format_regexps: IndexMap<Cow<'static, str>, IndexMap<String, RegexpOptions>>,
+    #[serde(flatten, default)]
+    keys: IndexMap<Cow<'static, str>, ThemeAttributeInnerOptions>,
+}
+
+#[derive(Default, Deserialize)]
+pub struct RegexpOptions {
+    #[serde(flatten)]
+    o: RegexOptions,
+    #[serde(default)]
+    priority: u8,
+    #[serde(flatten)]
+    rest: ThemeAttributeInnerOptions,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeAttributeInnerOptions {
+    #[serde(default)]
+    from: Option<Cow<'static, str>>,
+    #[serde(default)]
+    fg: Option<ThemeValue<Color>>,
+    #[serde(default)]
+    bg: Option<ThemeValue<Color>>,
+    #[serde(default)]
+    attrs: Option<ThemeValue<Attr>>,
+}
+
+/// Apply the options of one theme onto the `dark`-based `theme` in
+/// place.
+///
+/// The same construction `Themes`' deserializer performs for every
+/// configured theme, factored out so `apply_user_theme` can reuse it
+/// for standalone theme files.
+pub fn construct_theme(name: &str, theme: &mut Theme, mut s: ThemeOptions) -> Result<()> {
+    for (k, v) in theme.iter_mut() {
+        if let Some(ThemeAttributeInnerOptions {
+            from,
+            fg,
+            bg,
+            attrs,
+        }) = s.keys.shift_remove(k)
+        {
+            if let Some(att) = fg {
+                v.fg = att;
+            } else if let Some(ref parent) = from {
+                v.fg = ThemeValue::Link(parent.clone(), ColorField::LikeSelf);
+            }
+            if let Some(att) = bg {
+                v.bg = att;
+            } else if let Some(ref parent) = from {
+                v.bg = ThemeValue::Link(parent.clone(), ColorField::LikeSelf);
+            }
+            if let Some(att) = attrs {
+                v.attrs = att;
+            } else if let Some(parent) = from {
+                v.attrs = ThemeValue::Link(parent, ());
+            }
+        }
+    }
+    // Keys of intentionally removed theme keys are dropped with a warning
+    // instead of failing, so old configurations keep loading; everything
+    // else that is left over is still an error.
+    for key in REMOVED_THEME_KEYS {
+        if s.keys.shift_remove(*key).is_some() {
+            melib::log::warn!(
+                "`{key}` in theme `{name}` is no longer a valid theme key and was ignored."
+            );
+        }
+    }
+    if !s.keys.is_empty() {
+        return Err(Error::new(format!(
+            "{} theme contains unrecognized theme keywords: {}",
+            name,
+            s.keys
+                .keys()
+                .map(|k| k.as_ref())
+                .collect::<SmallVec<[_; 128]>>()
+                .join(", ")
+        )));
+    }
+    // Merge aliases instead of replacing them: the base theme (a built-in
+    // Zed theme for `dark`/`light`, or `dark` for new themes) carries its
+    // own aliases, and an absent/empty `[terminal.themes.<name>]` alias
+    // table must not strip the aliases the base theme's values reference.
+    // User entries with the same name win.
+    theme.color_aliases.extend(s.color_aliases);
+    theme.attr_aliases.extend(s.attr_aliases);
+    for (k, v) in s.text_format_regexps {
+        let mut acc = SmallVec::new();
+        for (rs, v) in v {
+            match RegexValue::new_with_options(&rs, v.o) {
+                Ok(regexp) => {
+                    acc.push(TextFormatterSetting {
+                        regexp,
+                        fg: v.rest.fg,
+                        bg: v.rest.bg,
+                        attrs: v.rest.attrs,
+                        priority: v.priority,
+                    });
+                }
+                Err(err) => {
+                    return Err(Error::new(err.to_string()));
+                }
+            }
+        }
+        theme.text_format_regexps.insert(k, acc);
+    }
+    Ok(())
+}
+
 impl<'de> Deserialize<'de> for Themes {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct ThemesOptions {
-            #[serde(default)]
-            light: ThemeOptions,
-            #[serde(default)]
-            dark: ThemeOptions,
-            #[serde(flatten, default)]
-            other_themes: IndexMap<String, ThemeOptions>,
-        }
-        #[derive(Default, Deserialize)]
-        struct ThemeOptions {
-            #[serde(default)]
-            color_aliases: IndexMap<Cow<'static, str>, ThemeValue<Color>>,
-            #[serde(default)]
-            attr_aliases: IndexMap<Cow<'static, str>, ThemeValue<Attr>>,
-            #[serde(default)]
-            text_format_regexps: IndexMap<Cow<'static, str>, IndexMap<String, RegexpOptions>>,
-            #[serde(flatten, default)]
-            keys: IndexMap<Cow<'static, str>, ThemeAttributeInnerOptions>,
-        }
-        #[derive(Default, Deserialize)]
-        struct RegexpOptions {
-            #[serde(flatten)]
-            o: RegexOptions,
-            #[serde(default)]
-            priority: u8,
-            #[serde(flatten)]
-            rest: ThemeAttributeInnerOptions,
-        }
-        #[derive(Default, Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct ThemeAttributeInnerOptions {
-            #[serde(default)]
-            from: Option<Cow<'static, str>>,
-            #[serde(default)]
-            fg: Option<ThemeValue<Color>>,
-            #[serde(default)]
-            bg: Option<ThemeValue<Color>>,
-            #[serde(default)]
-            attrs: Option<ThemeValue<Attr>>,
-        }
-
         let mut ret = Self::default();
         let ThemesOptions {
             light,
@@ -745,80 +990,16 @@ impl<'de> Deserialize<'de> for Themes {
             other_themes,
         } = <ThemesOptions>::deserialize(deserializer)?;
 
-        fn construct_theme<'de, D>(
-            name: Cow<'_, str>,
-            theme: &mut Theme,
-            mut s: ThemeOptions,
-        ) -> std::result::Result<(), D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            for (k, v) in theme.iter_mut() {
-                if let Some(ThemeAttributeInnerOptions {
-                    from,
-                    fg,
-                    bg,
-                    attrs,
-                }) = s.keys.shift_remove(k)
-                {
-                    if let Some(att) = fg {
-                        v.fg = att;
-                    } else if let Some(ref parent) = from {
-                        v.fg = ThemeValue::Link(parent.clone(), ColorField::LikeSelf);
-                    }
-                    if let Some(att) = bg {
-                        v.bg = att;
-                    } else if let Some(ref parent) = from {
-                        v.bg = ThemeValue::Link(parent.clone(), ColorField::LikeSelf);
-                    }
-                    if let Some(att) = attrs {
-                        v.attrs = att;
-                    } else if let Some(parent) = from {
-                        v.attrs = ThemeValue::Link(parent, ());
-                    }
-                }
-            }
-            if !s.keys.is_empty() {
-                return Err(de::Error::custom(format!(
-                    "{} theme contains unrecognized theme keywords: {}",
-                    name,
-                    s.keys
-                        .keys()
-                        .map(|k| k.as_ref())
-                        .collect::<SmallVec<[_; 128]>>()
-                        .join(", ")
-                )));
-            }
-            theme.color_aliases = s.color_aliases;
-            theme.attr_aliases = s.attr_aliases;
-            for (k, v) in s.text_format_regexps {
-                let mut acc = SmallVec::new();
-                for (rs, v) in v {
-                    match RegexValue::new_with_options(&rs, v.o) {
-                        Ok(regexp) => {
-                            acc.push(TextFormatterSetting {
-                                regexp,
-                                fg: v.rest.fg,
-                                bg: v.rest.bg,
-                                attrs: v.rest.attrs,
-                                priority: v.priority,
-                            });
-                        }
-                        Err(err) => {
-                            return Err(de::Error::custom(err.to_string()));
-                        }
-                    }
-                }
-                theme.text_format_regexps.insert(k, acc);
-            }
-            Ok(())
-        }
-
-        construct_theme::<D>(Cow::Borrowed(self::DARK), &mut ret.dark, dark)?;
-        construct_theme::<D>(Cow::Borrowed(self::LIGHT), &mut ret.light, light)?;
+        construct_theme(self::DARK, &mut ret.dark, dark).map_err(de::Error::custom)?;
+        construct_theme(self::LIGHT, &mut ret.light, light).map_err(de::Error::custom)?;
+        // Configuration tables shadow the same-name built-ins that
+        // `Self::default()` pre-populated `other_themes` with; remember
+        // the user-defined names so the `:toggle theme` picker can label
+        // each name with its real source.
+        ret.user_defined = other_themes.keys().cloned().collect();
         for (name, theme_opts) in other_themes {
             let mut theme = ret.dark.clone();
-            construct_theme::<D>(Cow::Borrowed(&name), &mut theme, theme_opts)?;
+            construct_theme(&name, &mut theme, theme_opts).map_err(de::Error::custom)?;
             ret.other_themes.insert(name, theme);
         }
         Ok(ret)
@@ -1106,508 +1287,74 @@ impl std::fmt::Display for Themes {
     }
 }
 
-impl Default for Themes {
-    #[allow(clippy::needless_update)]
-    fn default() -> Self {
-        let mut light = IndexMap::default();
-        let mut dark = IndexMap::default();
-        let other_themes = IndexMap::default();
+/// A [`Theme`] skeleton with every [`DEFAULT_KEYS`] entry set to its
+/// default value, used as the base the embedded Zed themes are applied
+/// onto by [`construct_theme`].
+fn empty_theme_shell() -> Theme {
+    Theme {
+        keys: DEFAULT_KEYS
+            .iter()
+            .map(|k| ((*k).into(), ThemeAttributeInner::default()))
+            .collect(),
+        color_aliases: Default::default(),
+        attr_aliases: Default::default(),
+        text_format_regexps: DEFAULT_TEXT_FORMATTER_KEYS
+            .iter()
+            .map(|&k| (k.into(), SmallVec::new()))
+            .collect(),
+    }
+}
 
-        macro_rules! add {
-            ($key:literal from $parent_key:literal, $($theme:ident={ $($name:ident : $val:expr),*$(,)? }),*$(,)?) => {
-                add!($key);
-                $($theme.insert($key.into(), ThemeAttributeInner {
-                    $($name: $val.into()),*
-                        ,..ThemeAttributeInner::inherited($parent_key) }));*
-            };
-            ($key:literal, $($theme:ident={ $($name:ident : $val:expr),*$(,)? }),*$(,)?) => {
-                add!($key);
-                $($theme.insert($key.into(), ThemeAttributeInner {
-                    $($name: $val.into()),*
-                        ,..ThemeAttributeInner::default() }));*
-            };
-            ($key:literal) => {
-                light.insert($key.into(), ThemeAttributeInner::default());
-                dark.insert($key.into(), ThemeAttributeInner::default());
-            };
-            ($key:literal, $copy_from:literal) => {
-                light.insert($key.into(), light[$copy_from].clone());
-                dark.insert($key.into(), dark[$copy_from].clone());
-            };
+/// Every theme parsed once from [`EMBEDDED_THEME_FILES`] (Zed family and
+/// community ports) and cached for every [`Themes::default`] call.
+fn embedded_themes() -> &'static IndexMap<String, Theme> {
+    static THEMES: std::sync::LazyLock<IndexMap<String, Theme>> = std::sync::LazyLock::new(|| {
+        let mut themes = IndexMap::new();
+        for text in EMBEDDED_THEME_FILES {
+            let value: toml::Value = text
+                .parse()
+                .unwrap_or_else(|err| panic!("embedded theme file is invalid TOML: {err}"));
+            let table = value
+                .get("terminal")
+                .and_then(|t| t.get("themes"))
+                .and_then(|t| t.as_table())
+                .expect("embedded theme file has no [terminal.themes] table");
+            for (name, entry) in table {
+                let options: ThemeOptions = entry
+                    .clone()
+                    .try_into()
+                    .unwrap_or_else(|err| panic!("embedded theme `{name}` is invalid: {err}"));
+                let mut theme = empty_theme_shell();
+                construct_theme(name, &mut theme, options)
+                    .unwrap_or_else(|err| panic!("could not build embedded theme `{name}`: {err}"));
+                themes.insert(name.clone(), theme);
+            }
         }
-        add!("theme_default", dark = { fg: Color::Default, bg: Color::Default, attrs: Attr::DEFAULT }, light = { fg: Color::Default, bg: Color::Default, attrs: Attr::DEFAULT });
+        themes
+    });
+    &THEMES
+}
 
-        add!("error_message", dark = { fg: Color::Red, bg: "theme_default", attrs: "theme_default" }, light = { fg: Color::Red, bg: "theme_default", attrs: "theme_default" });
-
-        /* text palettes */
-        add!("text.normal", "theme_default");
-        add!("text.unfocused", dark = { fg: Color::GREY, bg: "theme_default", attrs: Attr::DIM }, light = { fg: Color::GREY, bg: "theme_default", attrs: Attr::DIM });
-        add!("text.error", "error_message");
-        add!("text.highlight", dark = { fg: Color::Blue, bg: "theme_default", attrs: Attr::REVERSE }, light = { fg: Color::Blue, bg: "theme_default", attrs: Attr::REVERSE });
-
-        /* rest */
-        add!("highlight", dark = { fg: "theme_default.bg", bg: "theme_default.fg", attrs: Attr::BOLD }, light = { fg: Color::Byte(240), bg: Color::Byte(237), attrs: Attr::BOLD });
-
-        /* Mode colors: normal = subtle accent-on-dark, command = vivid amber. */
-        add!("status.bar", dark = { fg: Color::Byte(123), bg: Color::Byte(235) }, light = { fg: Color::Byte(31), bg: Color::Byte(254) });
-        add!("status.command_bar", dark = { fg: Color::Byte(16), bg: Color::Byte(214) }, light = { fg: Color::Byte(16), bg: Color::Byte(214) });
-        add!("status.history", dark = { fg: Color::Byte(197), bg: Color::Byte(174) }, light = { fg: Color::Byte(197), bg: Color::Byte(174) });
-        add!("status.history.hints", dark = { fg: Color::Black, bg: "status.command_bar" }, light = { fg: Color::Black, bg: "status.command_bar" });
-        /* Floating overlay surface: the OSD and dialogs share the raised
-         * panel background of the status bar so they read as a layer above
-         * the content instead of blending into it. */
-        add!("status.notification", dark = { fg: Color::Byte(219), bg: Color::Byte(235) }, light = { fg: Color::Byte(31), bg: Color::Byte(254) });
-
-        /* Focus convention: focused tab = bold + accent, unfocused = dim. */
-        add!("tab.focused", dark = { fg: Color::Byte(123), attrs: Attr::BOLD }, light = { fg: Color::Byte(31), attrs: Attr::BOLD });
-        add!("tab.unfocused", dark = { fg: Color::Byte(244), attrs: Attr::DIM }, light = { fg: Color::Byte(244), attrs: Attr::DIM });
-        add!("tab.bar");
-        add!(
-            "widgets.list.header",
-            dark = { fg: Color::Black, bg: Color::White, attrs: Attr::BOLD },
-            light = {fg: Color::White, bg: Color::Black, attrs: Attr::BOLD }
-        );
-        add!(
-            "widgets.form.label",
-            dark = { attrs: Attr::BOLD },
-            light = { attrs: Attr::BOLD }
-        );
-        add!("widgets.form.field");
-        add!("widgets.form.highlighted", light = { bg: Color::Byte(246) }, dark = { bg: Color::Byte(246) });
-        /* Options/dialog selection highlight: the same selection fill as the
-         * mail.listing *_selected family, so every selectable row in the UI
-         * highlights identically. */
-        add!("widgets.options.highlighted", light = { bg: Color::Byte(153) }, dark = { bg: Color::Byte(24) });
-
-        /* Mail Sidebar */
-
-        add!("mail.sidebar");
-        add!("mail.sidebar_divider");
-        add!(
-            "mail.sidebar_account_name",
-            dark = {
-                fg: "mail.sidebar",
-                bg: "mail.sidebar",
-                attrs: Attr::BOLD,
-            },
-            light = {
-                fg: "mail.sidebar",
-                bg: "mail.sidebar",
-                attrs: Attr::BOLD,
-            }
-        );
-        add!("mail.sidebar_unread_count" from "mail.sidebar", dark = { fg: Color::Byte(243) });
-        add!("mail.sidebar_index" from "mail.sidebar", dark = { fg: Color::Byte(243) });
-        add!("mail.sidebar_highlighted" from "mail.sidebar", dark = { fg: Color::Byte(16), bg: Color::Byte(123) }, light = { fg: Color::Byte(16), bg: Color::Byte(123) });
-        add!(
-            "mail.sidebar_highlighted_unread_count" from "mail.sidebar_highlighted",
-            light = {
-                fg: "mail.sidebar_highlighted",
-                bg: "mail.sidebar_highlighted"
-            },
-            dark = {
-                fg: "mail.sidebar_highlighted",
-                bg: "mail.sidebar_highlighted"
-            }
-        );
-        add!(
-            "mail.sidebar_highlighted_index" from "mail.sidebar_highlighted",
-            light = {
-                fg: "mail.sidebar_index",
-                bg: "mail.sidebar_highlighted",
-            },
-            dark = {
-                fg: "mail.sidebar_index",
-                bg: "mail.sidebar_highlighted",
-            },
-        );
-        add!(
-            "mail.sidebar_highlighted_account" from "mail.sidebar_highlighted",
-            dark = {
-                fg: Color::Byte(15),
-                bg: Color::Byte(233),
-            }
-        );
-        add!(
-            "mail.sidebar_highlighted_account_name" from "mail.sidebar_highlighted",
-            dark = {
-                fg: "mail.sidebar_highlighted_account",
-                bg: "mail.sidebar_highlighted_account",
-                attrs: Attr::BOLD,
-            },
-            light = {
-                fg: "mail.sidebar_highlighted_account",
-                bg: "mail.sidebar_highlighted_account",
-                attrs: Attr::BOLD,
-            }
-        );
-        add!(
-            "mail.sidebar_highlighted_account_unread_count" from "mail.sidebar_highlighted",
-            light = {
-                fg: "mail.sidebar_unread_count",
-                bg: "mail.sidebar_highlighted_account",
-            },
-            dark = {
-                fg: "mail.sidebar_unread_count",
-                bg: "mail.sidebar_highlighted_account"
-            }
-        );
-        add!(
-            "mail.sidebar_highlighted_account_index" from "mail.sidebar_highlighted",
-            light = {
-                fg: "mail.sidebar_index",
-                bg: "mail.sidebar_highlighted_account"
-            },
-            dark = {
-                fg: "mail.sidebar_index",
-                bg: "mail.sidebar_highlighted_account"
-            }
-        );
-        add!("mail.view.divider");
-
-        /* CompactListing */
-        add!("mail.listing.compact.even",
-            dark = {
-                bg: Color::Byte(236)
-            },
-            light = {
-                bg: Color::Byte(252)
-            }
-        );
-        add!("mail.listing.compact.odd");
-        add!(
-            "mail.listing.compact.even_unseen",
-            dark = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-            },
-            light = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-            }
-        );
-        add!(
-            "mail.listing.compact.odd_unseen",
-            dark = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-            },
-            light = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-            }
-        );
-        add!("mail.listing.compact.even_selected",
-            dark = {
-                bg: Color::Byte(24)
-            },
-            light = {
-                bg: Color::Byte(153)
-            }
-        );
-        add!("mail.listing.compact.odd_selected",
-            dark = {
-                bg: Color::Byte(24)
-            },
-            light = {
-                bg: Color::Byte(153)
-            }
-        );
-        add!(
-            "mail.listing.compact.even_highlighted",
-            dark = {
-                bg: Color::Byte(240)
-            },
-            light = {
-                bg: Color::Byte(189)
-            }
-        );
-        add!(
-            "mail.listing.compact.odd_highlighted",
-            dark = {
-                bg: Color::Byte(240)
-            },
-            light = {
-                bg: Color::Byte(189)
-            }
-        );
-        add!("mail.listing.compact.even_highlighted_selected",
-            dark = {
-                bg: Color::Byte(24),
-                attrs: Attr::REVERSE,
-            },
-            light = {
-                bg: Color::Byte(153),
-                attrs: Attr::REVERSE,
-            }
-        );
-        add!(
-            "mail.listing.compact.odd_highlighted_selected",
-            "mail.listing.compact.even_highlighted_selected"
-        );
-
-        /* ConversationsListing */
-
-        add!("mail.listing.conversations",
-            dark = {
-                /* Grey */
-                fg: Color::Byte(8),
-            },
-            light = {
-                /* Grey */
-                fg: Color::Byte(8),
-            }
-        );
-        add!("mail.listing.conversations.subject");
-        add!("mail.listing.conversations.from",
-            dark = {
-                /* Grey */
-                fg: Color::Byte(8),
-            },
-            light = {
-                /* Grey */
-                fg: Color::Byte(8),
-            }
-        );
-        add!("mail.listing.conversations.date",
-            dark = {
-                fg: Color::Magenta,
-            },
-            light = {
-                fg: Color::Magenta,
-            }
-        );
-        add!(
-            "mail.listing.conversations.unseen",
-            dark = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-            },
-            light = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-            }
-        );
-        add!(
-            "mail.listing.conversations.highlighted",
-            dark = {
-                bg: Color::Byte(240),
-                attrs: Attr::BOLD,
-            },
-            light = {
-                bg: Color::Byte(189),
-                attrs: Attr::BOLD,
-            }
-        );
-        add!("mail.listing.conversations.selected",
-            dark = {
-                bg: Color::Byte(24),
-            },
-            light = {
-                bg: Color::Byte(153)
-            }
-        );
-
-        add!("mail.listing.conversations.highlighted_selected",
-            dark = {
-                bg: Color::Byte(24),
-                attrs: Attr::REVERSE,
-            },
-            light = {
-                bg: Color::Byte(153),
-                attrs: Attr::REVERSE,
-            }
-        );
-
-        /* PlainListing */
-        add!("mail.listing.plain.even",
-            dark = {
-                bg: Color::Byte(236)
-            },
-            light = {
-                bg: Color::Byte(252)
-            }
-        );
-        add!("mail.listing.plain.odd");
-        add!(
-            "mail.listing.plain.even_unseen",
-            dark = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-
-            },
-            light = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-            }
-        );
-        add!(
-            "mail.listing.plain.odd_unseen",
-            dark = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-
-            },
-            light = {
-                fg: Color::Byte(0),
-                bg: Color::Byte(251),
-                attrs: Attr::BOLD
-            }
-        );
-        add!("mail.listing.plain.even_selected",
-            dark = {
-                bg: Color::Byte(24)
-            },
-            light = {
-                bg: Color::Byte(153)
-            }
-        );
-        add!("mail.listing.plain.odd_selected",
-            dark = {
-                bg: Color::Byte(24)
-            },
-            light = {
-                bg: Color::Byte(153)
-            }
-        );
-        add!(
-            "mail.listing.plain.even_highlighted",
-            dark = {
-                bg: Color::Byte(240)
-            },
-            light = {
-                bg: Color::Byte(189)
-            }
-        );
-        add!(
-            "mail.listing.plain.odd_highlighted",
-            dark = {
-                bg: Color::Byte(240)
-            },
-            light = {
-                bg: Color::Byte(189)
-            }
-        );
-        add!("mail.listing.plain.even_highlighted_selected",
-            dark = {
-                bg: Color::Byte(24),
-                attrs: Attr::REVERSE,
-            },
-            light = {
-                bg: Color::Byte(153),
-                attrs: Attr::REVERSE,
-            }
-        );
-        add!(
-            "mail.listing.plain.odd_highlighted_selected",
-            "mail.listing.plain.even_highlighted_selected"
-        );
-
-        add!(
-            "mail.view.headers",
-            dark = {
-                fg: Color::Byte(33),
-            },
-            light = {
-                fg: Color::Black,
-            }
-        );
-        add!(
-            "mail.view.headers_names",
-            light = {
-                fg: "mail.view.headers",
-                bg: "mail.view.headers",
-                attrs: "mail.view.headers",
-            },
-            dark = {
-                fg: "mail.view.headers",
-                bg: "mail.view.headers",
-                attrs: "mail.view.headers",
-            }
-        );
-        add!("mail.view.headers_area");
-        add!("mail.view.body");
-        add!("mail.view.thread.indentation.a", light = { bg: Color::Byte(69) }, dark = { bg: Color::Byte(69) }); // CornflowerBlue
-        add!("mail.view.thread.indentation.b", light = { bg: Color::Byte(196) }, dark = { bg: Color::Byte(196) }); // Red1
-        add!("mail.view.thread.indentation.c", light = { bg: Color::Byte(175) }, dark = { bg: Color::Byte(175) }); // Pink3
-        add!("mail.view.thread.indentation.d", light = { bg: Color::Byte(220) }, dark = { bg: Color::Byte(220) }); // Gold1
-        add!("mail.view.thread.indentation.e", light = { bg: Color::Byte(172) }, dark = { bg: Color::Byte(172) }); // Orange3
-        add!("mail.view.thread.indentation.f", light = { bg: Color::Byte(72) }, dark = { bg: Color::Byte(72) }); // CadetBlue
-
-        add!(
-            "mail.listing.attachment_flag",
-            light = {
-                fg: Color::Byte(103),
-            },
-            dark = {
-                fg: Color::Byte(103)
-            }
-        );
-
-        add!(
-            "mail.listing.thread_snooze_flag",
-            light = {
-                fg: Color::Red,
-            },
-            dark = {
-                fg: Color::Red,
-            }
-        );
-
-        add!(
-            "mail.listing.tag_default",
-            light = {
-                fg: Color::White,
-                bg: Color::Byte(250),
-                attrs: Attr::BOLD
-            },
-            dark = {
-                fg: Color::White,
-                bg: Color::Byte(8),
-                attrs: Attr::BOLD
-            }
-        );
-        add!(
-            "mail.listing.highlight_self",
-            light = {
-                fg: Color::BLUE,
-            },
-            dark = {
-                fg: Color::BLUE,
-            }
-        );
-
-        add!("pager.highlight_search", light = { fg: Color::White, bg: Color::Byte(6) /* Teal */, attrs: Attr::BOLD }, dark = { fg: Color::White, bg: Color::Byte(6) /* Teal */, attrs: Attr::BOLD });
-        add!("pager.highlight_search_current", light = { fg: Color::White, bg: Color::Byte(17) /* NavyBlue */, attrs: Attr::BOLD }, dark = { fg: Color::White, bg: Color::Byte(17) /* NavyBlue */, attrs: Attr::BOLD });
+impl Default for Themes {
+    /// The built-in themes are the Zed editor's theme family (One/Ayu/
+    /// Gruvbox) plus the community ports, embedded at compile time from
+    /// `meli/themes/*.toml` so they are available without any installation.
+    /// `dark` holds [`DEFAULT_THEME`] and `light` its Ayu Light
+    /// counterpart; the `light`/`dark` names remain valid (and
+    /// re-skinnable) in existing configurations.
+    fn default() -> Self {
+        let embedded = embedded_themes();
+        let get = |name: &str| {
+            embedded
+                .get(name)
+                .unwrap_or_else(|| panic!("embedded theme `{name}` is missing"))
+                .clone()
+        };
         Self {
-            light: Theme {
-                keys: light,
-                attr_aliases: Default::default(),
-                color_aliases: Default::default(),
-                text_format_regexps: DEFAULT_TEXT_FORMATTER_KEYS
-                    .iter()
-                    .map(|&k| (k.into(), SmallVec::new()))
-                    .collect(),
-            },
-            dark: Theme {
-                keys: dark,
-                attr_aliases: Default::default(),
-                color_aliases: Default::default(),
-                text_format_regexps: DEFAULT_TEXT_FORMATTER_KEYS
-                    .iter()
-                    .map(|&k| (k.into(), SmallVec::new()))
-                    .collect(),
-            },
-            other_themes,
+            dark: get(DEFAULT_THEME),
+            light: get("Ayu Light"),
+            other_themes: embedded.clone(),
+            user_defined: Default::default(),
         }
     }
 }

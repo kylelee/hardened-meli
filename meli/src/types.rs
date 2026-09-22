@@ -382,6 +382,15 @@ pub enum UIEvent {
     ConfigReload {
         old_settings: Box<crate::conf::Settings>,
     },
+    /// Switch the active UI theme. Emitted by the theme picker
+    /// (`:toggle_theme`) for every highlighted entry (`persist: false`,
+    /// live preview) and once more with `persist: true` when the
+    /// selection is confirmed, which also rewrites the configuration
+    /// file.
+    ChangeTheme {
+        name: String,
+        persist: bool,
+    },
     VisibilityChange(bool),
 }
 
@@ -569,6 +578,14 @@ pub struct RateLimit {
     pub timer: crate::jobs::Timer,
     rate: std::time::Duration,
     pub active: bool,
+    /// Set by [`Self::expire`]: unconditionally grant the next
+    /// [`Self::tick`]. A flag is used instead of backdating
+    /// `last_tick`, because `Instant` arithmetic cannot represent
+    /// instants before boot: right after process start,
+    /// `Instant::now() - rate` underflows and panics (uptime shorter
+    /// than `rate`), and saturating it would leave the next `tick`
+    /// inside the cooldown window.
+    expire_pending: bool,
 }
 
 impl RateLimit {
@@ -581,15 +598,31 @@ impl RateLimit {
             ),
             rate: std::time::Duration::from_millis(millis / reqs),
             active: false,
+            expire_pending: false,
         }
     }
 
     pub fn reset(&mut self) {
         self.last_tick = std::time::Instant::now();
         self.active = false;
+        self.expire_pending = false;
+    }
+
+    /// Mark the limiter as expired so the next `tick` succeeds
+    /// immediately (`reset` alone would put the next `tick` back inside
+    /// the cooldown window).
+    pub fn expire(&mut self) {
+        self.expire_pending = true;
+        self.active = true;
     }
 
     pub fn tick(&mut self) -> bool {
+        if std::mem::take(&mut self.expire_pending) {
+            self.timer.rearm();
+            self.last_tick = std::time::Instant::now();
+            self.active = true;
+            return true;
+        }
         let now = std::time::Instant::now();
         if self.last_tick + self.rate > now {
             self.active = false;
@@ -629,4 +662,21 @@ pub struct Link<'a> {
     pub end: usize,
     pub value: Cow<'a, str>,
     pub kind: LinkKind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rate_limit_expire_grants_next_tick_before_rate_elapses() {
+        let job_executor = Arc::new(JobExecutor::new(crossbeam::channel::unbounded().0));
+        // A rate far larger than the process uptime: the old
+        // `Instant::now() - rate` backdating underflowed and panicked
+        // in this situation.
+        let mut rate_limit = RateLimit::new(1, 365 * 24 * 60 * 60 * 1000, job_executor);
+        rate_limit.expire();
+        assert!(rate_limit.tick());
+        assert!(rate_limit.active);
+    }
 }

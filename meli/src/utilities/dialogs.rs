@@ -62,9 +62,18 @@ pub struct Selector<
     /// If `true`, user has finished their selection
     done: bool,
     done_fn: F,
+    /// Invoked whenever the highlighted entry changes (arrow-key
+    /// navigation), with the newly highlighted identifier. Used for live
+    /// previews: the theme picker applies each theme as the cursor moves,
+    /// so the whole UI reflects the selection without further keys.
+    cursor_callback: Option<SelectorCursorCallback<T>>,
     dirty: bool,
     id: ComponentId,
 }
+
+/// Live-preview hook type for [`Selector`]: receives the newly
+/// highlighted entry and the context to push preview events onto.
+pub type SelectorCursorCallback<T> = Box<dyn Fn(&T, &mut Context) + Send + Sync>;
 
 pub type UIConfirmationDialog = Selector<
     bool,
@@ -107,7 +116,15 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
 
     fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
         if let UIEvent::ConfigReload { old_settings: _ } = event {
-            self.initialise(context);
+            // Theme preview (toggle_theme) broadcasts ConfigReload on every
+            // arrow key. `set_dirty` resets `initialized`, so the next draw
+            // rebuilds the content grid with the new palette - that rebuild
+            // is what recolors the entry list, because entry colors are
+            // baked into the content grid at initialize() time. It is cheap
+            // for a single dialog; the preview flicker was fixed on the
+            // compositing side (state.rs flushes the overlay grid directly,
+            // never an intermediate dialog-less frame).
+            self.theme_default = crate::conf::value(context, "theme_default");
             self.set_dirty(true);
             return false;
         }
@@ -148,7 +165,14 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
                 }
                 return true;
             }
-            (UIEvent::Input(Key::Esc), _) => {
+            (UIEvent::Input(key), _)
+                if *key == Key::Esc || shortcut!(key == shortcuts[Shortcuts::GENERAL]["quit"]) =>
+            {
+                // Layered quit: the dialog is the focused surface, so the
+                // quit binding (`q`/`Esc` by default) closes the dialog
+                // and is consumed here. Returning `false` would leak the
+                // key to the components below and `StatusBar` would turn
+                // it into `UIEvent::Exit`, quitting the application.
                 for e in self.entries.iter_mut() {
                     e.1 = false;
                 }
@@ -159,7 +183,7 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
                 _ = self.done();
                 self.cancel(context);
                 self.set_dirty(true);
-                return false;
+                return true;
             }
             (UIEvent::Input(Key::Char('\n')), SelectorCursor::Cancel) if !self.single_only => {
                 for e in self.entries.iter_mut() {
@@ -180,6 +204,7 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
                     self.entries[0].1 = true;
                 }
                 self.cursor = SelectorCursor::Entry(0);
+                self.fire_cursor_callback(context);
                 self.dirty = true;
                 self.initialized = false;
                 return true;
@@ -193,6 +218,7 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
                     self.entries[c - 1].1 = true;
                 }
                 self.cursor = SelectorCursor::Entry(c - 1);
+                self.fire_cursor_callback(context);
                 self.dirty = true;
                 self.initialized = false;
                 return true;
@@ -204,6 +230,7 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
             {
                 let c = self.entries.len().saturating_sub(1);
                 self.cursor = SelectorCursor::Entry(c);
+                self.fire_cursor_callback(context);
                 self.dirty = true;
                 self.initialized = false;
                 return true;
@@ -218,6 +245,7 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
                     self.entries[c + 1].1 = true;
                 }
                 self.cursor = SelectorCursor::Entry(c + 1);
+                self.fire_cursor_callback(context);
                 self.dirty = true;
                 self.initialized = false;
                 return true;
@@ -382,7 +410,13 @@ impl Component for UIConfirmationDialog {
                 self.initialized = false;
                 return true;
             }
-            (UIEvent::Input(Key::Esc), _) => {
+            (UIEvent::Input(key), _)
+                if *key == Key::Esc || shortcut!(key == shortcuts[Shortcuts::GENERAL]["quit"]) =>
+            {
+                // Layered quit: same as `UIDialog` above - the quit
+                // binding (`q`/`Esc` by default) closes the dialog and is
+                // consumed, so it cannot leak to the application-level
+                // exit path.
                 for e in self.entries.iter_mut() {
                     e.1 = false;
                 }
@@ -394,7 +428,7 @@ impl Component for UIConfirmationDialog {
                 self.cancel(context);
                 self.set_dirty(true);
                 self.initialized = false;
-                return false;
+                return true;
             }
             (UIEvent::Input(Key::Char('\n')), SelectorCursor::Cancel) if !self.single_only => {
                 for e in self.entries.iter_mut() {
@@ -555,6 +589,7 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
             initialized: false,
             done: false,
             done_fn,
+            cursor_callback: None,
             dirty: true,
             theme_default,
             id: ComponentId::default(),
@@ -565,6 +600,59 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
 
     fn initialise(&mut self, context: &Context) {
         self.theme_default = crate::conf::value(context, "theme_default");
+    }
+
+    /// Set the live-preview hook: invoked with the newly highlighted
+    /// entry whenever arrow-key navigation moves the cursor. See
+    /// [`Selector::cursor_callback`].
+    pub fn set_cursor_callback(&mut self, cb: Option<SelectorCursorCallback<T>>) -> &mut Self {
+        self.cursor_callback = cb;
+        self
+    }
+
+    /// Replace the completion callback invoked when the selection is
+    /// finalised (`Enter`; the returned event is delivered). On cancel
+    /// (the quit binding, `q`/`Esc` by default) it is still invoked once
+    /// with the current selection (in single-selection mode that is the
+    /// entry under the cursor), but its result is discarded - cancel is
+    /// pure exit.
+    /// Mirrors [`Selector::set_cursor_callback`] for the `done_fn` field.
+    pub fn set_done_fn(&mut self, f: F) -> &mut Self {
+        self.done_fn = f;
+        self
+    }
+
+    /// Place the cursor on the entry identified by `id` (single-selection
+    /// mode also updates the rendering selection). No-op when `id` is not
+    /// in the list.
+    pub fn set_cursor_to(&mut self, id: &T) -> &mut Self {
+        if let Some(pos) = self.entries.iter().position(|(e, _)| e == id) {
+            if self.single_only {
+                for (i, e) in self.entries.iter_mut().enumerate() {
+                    e.1 = i == pos;
+                }
+            }
+            self.cursor = SelectorCursor::Entry(pos);
+            self.initialized = false;
+            self.dirty = true;
+        }
+        self
+    }
+
+    /// Invoke the live-preview hook (if any) with the currently
+    /// highlighted entry. The hook pushes any resulting events onto
+    /// `context.replies` itself - the theme picker uses this to apply
+    /// each highlighted theme for an immediate preview.
+    fn fire_cursor_callback(&self, context: &mut Context) {
+        if let (Some(cb), Some((id, _))) = (
+            self.cursor_callback.as_ref(),
+            self.entries.get(match self.cursor {
+                SelectorCursor::Entry(i) => i,
+                _ => 0,
+            }),
+        ) {
+            cb(id, context);
+        }
     }
 
     pub fn is_done(&self) -> bool {
@@ -596,15 +684,23 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
         };
         let shortcuts = context.settings.shortcuts.general.key_values();
         let navigate_help_string = format!(
-            "Navigate options with {} to go down, {} to go up, select with {}, cancel with {}",
+            "Navigate options with {} to go down, {} to go up, select with {}, quit with {}",
             shortcuts["scroll_down"],
             shortcuts["scroll_up"],
             Key::Char('\n'),
-            Key::Esc
+            shortcuts["quit"]
         );
         let width = std::cmp::max(
-            self.entry_titles.iter().map(|e| e.len()).max().unwrap_or(0) + 3,
-            std::cmp::max(self.title.len(), navigate_help_string.len()) + 3,
+            self.entry_titles
+                .iter()
+                .map(|e| melib::text::TextProcessing::grapheme_width(e.as_str()))
+                .max()
+                .unwrap_or(0)
+                + 3,
+            std::cmp::max(
+                melib::text::TextProcessing::grapheme_width(self.title.as_str()),
+                melib::text::TextProcessing::grapheme_width(navigate_help_string.as_str()),
+            ) + 3,
         ) + 3;
         let height = self.entries.len()
             // padding
@@ -720,7 +816,6 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
 
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
         if !self.initialized {
-            // [ref:FIXME]: don't re-initialize when the only change is highlight index.
             self.initialize(context);
         }
         let (width, height) = self.content.area().size();
@@ -740,6 +835,9 @@ impl<T: PartialEq + std::fmt::Debug + Clone + Sync + Send, F: 'static + Sync + S
         }
         let inner_area =
             crate::terminal::ratatui_bridge::draw_rounded_frame(grid, dialog_area, border_attrs);
+        for frame_area in crate::terminal::ratatui_bridge::frame_flush_areas(grid, dialog_area) {
+            context.dirty_areas.push_back(frame_area);
+        }
         let rows = inner_area.height();
         if let Some(mvm) = self.movement.take() {
             match mvm {
@@ -870,20 +968,31 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> UIDialog<T>
         let Self {
             ref mut done_fn,
             ref mut entries,
-            ref id,
             ..
         } = self;
+        let (cursor, single_only, id) = (self.cursor, self.single_only, self.id);
         done_fn.take().and_then(|done_fn| {
-            done_fn(
-                *id,
+            let selection: Vec<T> = if single_only {
+                // In single-selection mode the cursor *is* the selection;
+                // the `selected` flags are only a rendering aid and can
+                // lag the cursor when keys arrive between draws.
+                match cursor {
+                    SelectorCursor::Entry(i) => entries
+                        .get(i)
+                        .map(|(id, _)| id.clone())
+                        .into_iter()
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            } else {
                 entries
                     .iter()
                     .filter(|v| v.1)
                     .map(|(id, _)| id)
                     .cloned()
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            )
+                    .collect()
+            };
+            done_fn(id, selection.as_slice())
         })
     }
 
@@ -959,6 +1068,54 @@ mod tests {
         for key in [Key::Down, Key::Up, Key::Char('\n'), Key::Esc] {
             let mut event = UIEvent::Input(key);
             let _ = dialog.process_event(&mut event, &mut ctx);
+        }
+    }
+
+    /// Repro for the theme-picker left-edge bleed: after `Selector::draw`
+    // paints onto a grid that already contains underlying listing text
+    // (exactly what the state.rs overlay compositing does), every cell of
+    // the dialog area must be covered by the dialog - no listing text may
+    // remain inside dialog_area, in particular the left frame column.
+    #[test]
+    fn selector_draw_covers_dialog_area() {
+        let mut ctx = crate::golden::mock_context();
+        let entries: Vec<(String, String)> = (0..60)
+            .map(|i| (format!("theme-{i}"), format!("theme-{i} (built-in)")))
+            .collect();
+        let mut dialog: UIDialog<String> =
+            UIDialog::new("theme", entries.clone(), true, None, &ctx);
+        dialog.set_cursor_to(&entries[0].0);
+
+        for (cols, rows) in [(100usize, 30usize), (60, 20), (200, 50)] {
+            let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(
+                crate::conf::value(&ctx, "theme_default"),
+            );
+            assert!(screen.resize(cols, rows));
+            let area = screen.area();
+            // Fill the underlying grid with listing-like subject text.
+            for y in 0..rows {
+                for x in 0..cols {
+                    screen.grid_mut()[(x, y)].set_ch('S');
+                }
+            }
+            dialog.draw(screen.grid_mut(), area, &mut ctx);
+
+            // Locate the dialog: its content screen drives the centered
+            // box; recompute the same way draw() did.
+            let (w, h) = dialog.content.area().size();
+            let dialog_area =
+                crate::terminal::ratatui_bridge::center_inside_via_layout(area, (w + 2, h + 2));
+            let (x0, _y0) = dialog_area.upper_left();
+            let last_x = dialog_area.bottom_right().0;
+            for y in dialog_area.upper_left().1..=dialog_area.bottom_right().1 {
+                for x in x0..=last_x {
+                    let ch = screen.grid()[(x, y)].ch();
+                    assert_ne!(
+                        ch, 'S',
+                        "cell ({x},{y}) inside dialog_area still shows underlying text"
+                    );
+                }
+            }
         }
     }
 }

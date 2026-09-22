@@ -159,8 +159,18 @@ pub struct Pager {
     dirty: bool,
 
     colors: ThemeAttribute,
+    /// The hosting pane's background ("pane.focused"/"pane.unfocused"),
+    /// set by the parent (e.g. the envelope view) so the body text and the
+    /// blank cells around it follow the keyboard focus. `None` falls back
+    /// to `theme_default`.
+    pane_fill: Option<ThemeAttribute>,
     initialised: bool,
     show_scrollbar: bool,
+    /// Reserve the last column for a scrollbar drawn by a parent
+    /// component (e.g. the mail view's combined headers+body scrollbar),
+    /// without the pager drawing its own. Only affects the wrap width;
+    /// `show_scrollbar` still controls whether the pager draws one.
+    reserve_scrollbar_column: bool,
     /// At the last draw, were the visible columns plus horizontal cursor less
     /// than total width? Used to decide whether to accept `scroll_right`
     /// key events.
@@ -206,8 +216,10 @@ impl Clone for Pager {
             search: self.search.clone(),
             dirty: true,
             colors: self.colors,
+            pane_fill: self.pane_fill,
             initialised: false,
             show_scrollbar: self.show_scrollbar,
+            reserve_scrollbar_column: self.reserve_scrollbar_column,
             cols_lt_width: self.cols_lt_width,
             rows_lt_height: self.rows_lt_height,
             filtered_content: self.filtered_content.clone(),
@@ -246,6 +258,13 @@ impl Pager {
 
     pub fn set_show_scrollbar(&mut self, new_val: bool) -> &mut Self {
         self.show_scrollbar = new_val;
+        self
+    }
+
+    /// Reserve the last column for a parent-drawn scrollbar (wrap width
+    /// minus one) without the pager drawing its own scrollbar.
+    pub fn set_reserve_scrollbar_column(&mut self, new_val: bool) -> &mut Self {
+        self.reserve_scrollbar_column = new_val;
         self
     }
     pub fn set_colors(&mut self, new_val: ThemeAttribute) -> &mut Self {
@@ -361,6 +380,18 @@ impl Pager {
         ret
     }
 
+    /// Set the hosting pane's background fill; see the `pane_fill` field.
+    pub fn set_pane_fill(&mut self, fill: Option<ThemeAttribute>) {
+        self.pane_fill = fill;
+    }
+
+    /// The color the pager paints blank cells and plain body text with:
+    /// the hosting pane's fill when set, `theme_default` otherwise.
+    fn base_fill(&self, context: &Context) -> ThemeAttribute {
+        self.pane_fill
+            .unwrap_or_else(|| crate::conf::value(context, "theme_default"))
+    }
+
     pub fn filter(&mut self, cmd: &str, context: &Context) {
         // Do not spawn a duplicate filter process for the same command: if a
         // filter job for this exact command is already in flight, keep it.
@@ -461,9 +492,9 @@ impl Pager {
         // gutter (drawn over the last column when the text is taller than
         // the pane); the previous unconditional `area.width() - 4` slack
         // left up to four columns unused per line for no reason.
-        let width = area
-            .width()
-            .saturating_sub(usize::from(self.show_scrollbar));
+        let width = area.width().saturating_sub(usize::from(
+            self.show_scrollbar || self.reserve_scrollbar_column,
+        ));
         if self.filtered_content.is_none() {
             if self.line_breaker.width() != Some(width) {
                 let line_breaker = LineBreakText::new(self.text.clone(), self.reflow, Some(width));
@@ -569,6 +600,17 @@ impl Pager {
                 self.links = Some(Self::scan_links(&self.text));
             }
             let links = self.links.as_ref().expect("filled just above");
+            // Plain body text sits on the pane background when the pager
+            // is hosted by a focus-aware pane: fg stays `colors.fg`, the
+            // bg follows the pane fill.
+            let text_colors = ThemeAttribute {
+                bg: self
+                    .pane_fill
+                    .as_ref()
+                    .map(|fill| fill.bg)
+                    .unwrap_or(self.colors.bg),
+                ..self.colors
+            };
             let mut cur_link_idx = 0;
             for l in self
                 .text_lines
@@ -662,8 +704,8 @@ impl Pager {
                 }
                 grid.write_string(
                     &l.content,
-                    self.colors.fg,
-                    self.colors.bg,
+                    text_colors.fg,
+                    text_colors.bg,
                     Attr::DEFAULT,
                     area2,
                     None,
@@ -678,7 +720,7 @@ impl Pager {
             }
 
             if area2.height() <= 1 {
-                grid.clear_area(area2, crate::conf::value(context, "theme_default"));
+                grid.clear_area(area2, self.base_fill(context));
             }
         }
 
@@ -760,7 +802,7 @@ impl Component for Pager {
         self.dirty = false;
 
         if self.height == 0 || self.width == 0 {
-            grid.clear_area(area, crate::conf::value(context, "theme_default"));
+            grid.clear_area(area, self.base_fill(context));
             return;
         }
 
@@ -777,9 +819,11 @@ impl Component for Pager {
             return;
         }
 
-        if self.show_scrollbar && rows < height {
+        if (self.show_scrollbar || self.reserve_scrollbar_column) && rows < height {
             cols -= 1;
-            rows -= 1;
+            if self.show_scrollbar {
+                rows -= 1;
+            }
         } else if self.search.is_some() {
             rows -= 1;
         }
@@ -866,7 +910,7 @@ impl Component for Pager {
             }
         }
 
-        grid.clear_area(area, crate::conf::value(context, "theme_default"));
+        grid.clear_area(area, self.base_fill(context));
 
         self.cols_lt_width = cols + self.cursor.0 < width;
         self.rows_lt_height = rows + self.cursor.1 < height;

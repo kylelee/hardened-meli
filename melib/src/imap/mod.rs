@@ -1080,19 +1080,26 @@ impl MailBackend for ImapType {
                  * set. */
             }
 
+            /* RFC 3501 §5.1.3: non-ASCII mailbox names are transmitted in
+             * modified UTF-7 (`mUTF-7`). The user-supplied `path` is a UTF-8
+             * display name, but the server (and every hash derived from a
+             * subsequent LIST) speaks the wire encoding, so both the commands
+             * and the returned hash must use the encoded wire path. */
+            let wire_path = crate::backends::utf7::encode_utf7_imap(&path);
+
             let mut response = Vec::with_capacity(8 * 1024);
             {
                 let mut conn_lck = connection.lock().await?;
                 conn_lck.unselect().await?;
 
                 conn_lck
-                    .send_command(CommandBody::create(path.as_str())?)
+                    .send_command(CommandBody::create(wire_path.as_str())?)
                     .await?;
                 conn_lck
                     .read_response(&mut response, RequiredResponses::empty())
                     .await?;
                 conn_lck
-                    .send_command(CommandBody::subscribe(path.as_str())?)
+                    .send_command(CommandBody::subscribe(wire_path.as_str())?)
                     .await?;
                 conn_lck
                     .read_response(&mut response, RequiredResponses::empty())
@@ -1100,7 +1107,7 @@ impl MailBackend for ImapType {
             }
             let ret: Result<()> = ImapResponse::try_from(response.as_slice())?.into();
             ret?;
-            let new_hash = MailboxHash::from_bytes(path.as_bytes());
+            let new_hash = MailboxHash::from_bytes(wire_path.as_bytes());
             uid_store.mailboxes.lock().await.clear();
             Ok((
                 new_hash,
@@ -1235,6 +1242,7 @@ impl MailBackend for ImapType {
         let new_mailbox_fut = self.mailboxes();
         Ok(Box::pin(async move {
             let command: CommandBody;
+            let wire_path: String;
             let mut response = Vec::with_capacity(8 * 1024);
             {
                 let mailboxes = uid_store.mailboxes.lock().await;
@@ -1253,9 +1261,14 @@ impl MailBackend for ImapType {
                         (mailboxes[&mailbox_hash].separator as char).encode_utf8(&mut [0; 4]),
                     );
                 }
+                /* RFC 3501 §5.1.3: non-ASCII mailbox names are transmitted in
+                 * modified UTF-7 (`mUTF-7`). `from` is already `imap_path()`
+                 * (wire format); `to` and the resulting hash must be encoded
+                 * the same way so the hash matches the subsequent LIST. */
+                wire_path = crate::backends::utf7::encode_utf7_imap(&new_path);
                 let from =
                     ImapTypesMailbox::try_from(mailboxes[&mailbox_hash].imap_path().to_string())?;
-                let to = ImapTypesMailbox::try_from(new_path.to_string())?;
+                let to = ImapTypesMailbox::try_from(wire_path.clone())?;
                 command = CommandBody::Rename { from, to };
             }
             {
@@ -1265,7 +1278,7 @@ impl MailBackend for ImapType {
                     .read_response(&mut response, RequiredResponses::empty())
                     .await?;
             }
-            let new_hash = MailboxHash::from_bytes(new_path.as_bytes());
+            let new_hash = MailboxHash::from_bytes(wire_path.as_bytes());
             let ret: Result<()> = ImapResponse::try_from(response.as_slice())?.into();
             ret?;
             uid_store.mailboxes.lock().await.clear();
@@ -1882,5 +1895,99 @@ impl ImapType {
             .iter()
             .map(|c| String::from_utf8_lossy(c).into())
             .collect::<Vec<String>>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /* `create_mailbox` / `rename_mailbox` hand the server a UTF-8 display
+     * name and must transmit it in the RFC 3501 §5.1.3 wire encoding
+     * (modified UTF-7), then derive the returned `MailboxHash` from that
+     * same wire path. The mock integration server in
+     * `melib/tests/imap/main.rs` has no `CREATE`/`RENAME`/`SUBSCRIBE`
+     * handling (it panics with `Unexpected cmd`), so the command-assertion
+     * route is not reachable; these unit tests pin the pure transformation
+     * the two methods apply instead. */
+
+    use super::*;
+    use crate::backends::utf7::{decode_utf7_imap, encode_utf7_imap};
+
+    /// A pure-ASCII display name must be transmitted unchanged (including
+    /// separators); only a literal `&` is escaped, as RFC 3501 requires.
+    #[test]
+    fn encode_utf7_imap_is_identity_for_ascii_names() {
+        for name in [
+            "INBOX",
+            "Archive",
+            "Projects/2025",
+            "Sent.Items",
+            "a b c",
+            "",
+        ] {
+            assert_eq!(
+                encode_utf7_imap(name),
+                name,
+                "{name:?} is ASCII and must be transmitted unchanged"
+            );
+        }
+        assert_eq!(encode_utf7_imap("R&D"), "R&-D");
+    }
+
+    /// The wire path round-trips back to the display name: a `LIST` reply
+    /// decoded with `decode_utf7_imap` and re-encoded stays byte-identical,
+    /// which is what keeps hashes stable across a create/rename followed by
+    /// a re-LIST.
+    #[test]
+    fn encode_utf7_imap_round_trips_through_decode() {
+        for name in ["收件箱", "已发送/归档", "Šiukšliadėžė", "théâtre", "中文 folder"] {
+            let wire = encode_utf7_imap(name);
+            assert_eq!(decode_utf7_imap(&wire), name);
+            assert_eq!(encode_utf7_imap(&decode_utf7_imap(&wire)), wire);
+        }
+    }
+
+    /// Known-answer check against an independently computed mUTF-7 encoding,
+    /// so a regression in the encoder itself cannot slip through the
+    /// round-trip test.
+    #[test]
+    fn encode_utf7_imap_known_cjk_answers() {
+        assert_eq!(encode_utf7_imap("收件箱"), "&ZTZO9nux-");
+        assert_eq!(encode_utf7_imap("已发送"), "&XfJT0ZAB-");
+        assert_eq!(decode_utf7_imap("&ZTZO9nux-"), "收件箱");
+    }
+
+    /// Mirrors the `create_mailbox` invariant: the returned hash is derived
+    /// from the wire path, so it matches a `LIST`-derived
+    /// `MailboxHash::from_bytes(imap_path.as_bytes())` and differs from the
+    /// hash of the raw UTF-8 display name.
+    #[test]
+    fn create_mailbox_hash_matches_wire_path() {
+        let path = "收件箱/子文件夹".to_string();
+        let wire_path = encode_utf7_imap(&path);
+
+        assert_ne!(wire_path, path, "non-ASCII name must be encoded");
+        let new_hash = MailboxHash::from_bytes(wire_path.as_bytes());
+        // This is exactly how a subsequent LIST derives the hash from
+        // `imap_path()` (server wire format).
+        assert_eq!(new_hash, MailboxHash::from_bytes(wire_path.as_bytes()));
+        assert_ne!(new_hash, MailboxHash::from_bytes(path.as_bytes()));
+    }
+
+    /// Mirrors the `rename_mailbox` invariant: the separator swap happens on
+    /// the UTF-8 display path first, then both the `to` wire name and the
+    /// returned hash come from that encoded path.
+    #[test]
+    fn rename_mailbox_hash_matches_wire_path_after_separator_swap() {
+        let mut new_path = "已发送/归档".to_string();
+        // `rename_mailbox` rewrites '/' to the mailbox's hierarchy separator
+        // ('.' on servers such as this) before encoding.
+        new_path = new_path.replace('/', ".");
+        let wire_path = encode_utf7_imap(&new_path);
+
+        assert_eq!(
+            MailboxHash::from_bytes(wire_path.as_bytes()),
+            MailboxHash::from_bytes(encode_utf7_imap("已发送.归档").as_bytes())
+        );
+        assert_ne!(wire_path, new_path);
     }
 }

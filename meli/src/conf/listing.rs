@@ -21,11 +21,7 @@
 
 use melib::{search::Query, Error, Result, SortField, SortOrder, ToggleFlag};
 
-use crate::conf::{
-    data_types::{IndexStyle, ThreadLayout},
-    default_values::*,
-    DotAddressable,
-};
+use crate::conf::{data_types::IndexStyle, default_values::*, DotAddressable};
 
 /// Settings for mail listings
 ///
@@ -110,10 +106,6 @@ pub struct ListingSettings {
     #[serde(default = "default_divider")]
     pub sidebar_divider: char,
 
-    /// Default: 90
-    #[serde(default = "default_ratio")]
-    pub sidebar_ratio: usize,
-
     /// Flag to show if thread entry contains unseen mail.
     /// Default: "●"
     #[serde(default)]
@@ -172,14 +164,6 @@ pub struct ListingSettings {
     #[serde(default = "false_val", alias = "hide-sidebar-on-launch")]
     pub hide_sidebar_on_launch: bool,
 
-    /// Default: ' '
-    #[serde(default = "default_divider")]
-    pub mail_view_divider: char,
-
-    /// Default: "auto"
-    #[serde(default)]
-    pub thread_layout: ThreadLayout,
-
     /// Default: "date, desc"
     #[serde(default, alias = "order")]
     pub sort: (SortField, SortOrder),
@@ -187,10 +171,6 @@ pub struct ListingSettings {
 
 const fn default_divider() -> char {
     ' '
-}
-
-const fn default_ratio() -> usize {
-    90
 }
 
 impl Default for ListingSettings {
@@ -207,7 +187,6 @@ impl Default for ListingSettings {
             sidebar_mailbox_tree_has_sibling_leaf: None,
             sidebar_mailbox_tree_no_sibling_leaf: None,
             sidebar_divider: default_divider(),
-            sidebar_ratio: 90,
             unseen_flag: None,
             thread_snoozed_flag: None,
             selected_flag: None,
@@ -219,8 +198,6 @@ impl Default for ListingSettings {
             relative_menu_indices: true,
             relative_list_indices: true,
             hide_sidebar_on_launch: false,
-            mail_view_divider: default_divider(),
-            thread_layout: ThreadLayout::default(),
             sort: Default::default(),
         }
     }
@@ -251,7 +228,6 @@ impl DotAddressable for ListingSettings {
                         .sidebar_mailbox_tree_no_sibling_leaf
                         .lookup(field, tail),
                     "sidebar_divider" => self.sidebar_divider.lookup(field, tail),
-                    "sidebar_ratio" => self.sidebar_ratio.lookup(field, tail),
                     "unseen_flag" => self.unseen_flag.lookup(field, tail),
                     "thread_snoozed_flag" => self.thread_snoozed_flag.lookup(field, tail),
                     "selected_flag" => self.selected_flag.lookup(field, tail),
@@ -265,8 +241,6 @@ impl DotAddressable for ListingSettings {
                     "relative_menu_indices" => self.relative_menu_indices.lookup(field, tail),
                     "relative_list_indices" => self.relative_list_indices.lookup(field, tail),
                     "hide_sidebar_on_launch" => self.hide_sidebar_on_launch.lookup(field, tail),
-                    "mail_view_divider" => self.mail_view_divider.lookup(field, tail),
-                    "thread_layout" => self.thread_layout.lookup(field, tail),
                     "sort" | "order" => self.sort.lookup(field, tail),
                     other => Err(Error::new(format!(
                         "{parent_field} has no field named {other}"

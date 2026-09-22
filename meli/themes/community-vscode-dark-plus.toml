@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: EUPL-1.2
+# Ported from the Zed community theme "VScode Dark Plus" by d1y
+# Source: https://zed-themes.com/themes/vscode-dark-plus (upstream colours, verbatim; rgba composited over editor.background)
+#
+# Install: copy this file into $XDG_CONFIG_HOME/meli/themes/ (usually
+# ~/.config/meli/themes/) and pick a theme in meli with `:toggle theme`.
+
+# VScode Dark Plus (dark)
+[terminal.themes."VScode Dark Plus"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."VScode Dark Plus".color_aliases]
+fg = "#d4d4d4"
+bg = "#1e1e1e"
+line = "#1e1e1e"
+text = "#d4d4d4"
+muted = "#d4d4d4"
+accent = "#9cdcfe"
+line_number = "#d4d4d4"
+status = "#303030"
+surface = "#1e1e1e"
+panel = "#1e1e1e"
+tab_bar = "#1e1e1e"
+tab_active = "#1e1e1e"
+tab_inactive = "#1e1e1e"
+hover = "#1e1e1e"
+selected = "#1e1e1e"
+border = "#1e1e1e"
+border_variant = "#1e1e1e"
+error = "#d16969"
+warning = "#d7ba7d"
+hint = "#969696"
+match = "#9cdcfe"
+match_active = "#d7ba7d"
+string = "#ce9178"
+func = "#dcdcaa"
+keyword = "#569cd6"
+constant = "#569cd6"
+type = "#4ec9b0"
+tag = "#569cd6"
+enum = "#4ec9b0"
+attribute = "#9cdcfe"
+var_param = "#9cdcfe"

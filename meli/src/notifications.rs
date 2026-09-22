@@ -353,7 +353,9 @@ pub struct DisplayMessageBox {
     pub initialised: bool,
     /// Position of message from `messages` field to show.
     pub pos: usize,
-    /// The last [`Area`] this widget used to be drawn.
+    /// The last [`Area`] this widget used to be drawn, extended by the
+    /// leading gutter column blanked by `draw_rounded_frame` (if any):
+    /// callers flush exactly this area, so the blank must be covered by it.
     cached_area: Area,
     /// Identifier of component.
     id: ComponentId,
@@ -498,7 +500,7 @@ impl Component for DisplayMessageBox {
             /* OSD placement via ratatui Layout (bridge helper): identical
              * to the previous `place_inside(.., false, false)` bottom-right
              * anchoring for every size, clamps included. */
-            self.cached_area = crate::terminal::ratatui_bridge::place_inside_via_layout(
+            let box_area = crate::terminal::ratatui_bridge::place_inside_via_layout(
                 area,
                 (width, area.height().min(msg_lines.len() + 4)),
                 false,
@@ -510,9 +512,26 @@ impl Component for DisplayMessageBox {
              * (status.notification bg), distinct from the content below. */
             let box_displ_area = crate::terminal::ratatui_bridge::draw_rounded_frame(
                 grid,
-                self.cached_area,
+                box_area,
                 noto_colors,
             );
+            /* Register the frame's writes for flushing: the caller flushes
+             * exactly `cached_area` from this (overlay) grid, so it must
+             * cover the leading gutter column `draw_rounded_frame` blanked
+             * left of the frame (see `frame_flush_areas`, which reports the
+             * same region for main-grid frames) — otherwise incremental
+             * redraws keep rendering the stale half of a glyph straddling
+             * the panel's left edge. */
+            let (box_x0, box_y0) = box_area.upper_left();
+            self.cached_area = if box_x0 > 0 && box_area.width() >= 2 && box_area.height() >= 2 {
+                grid.area()
+                    .skip_cols(box_x0 - 1)
+                    .skip_rows(box_y0)
+                    .take_rows(box_area.height())
+                    .take_cols(box_area.width() + 1)
+            } else {
+                box_area
+            };
             for row in grid.bounds_iter(box_displ_area) {
                 for c in row {
                     grid[c]

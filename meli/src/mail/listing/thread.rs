@@ -24,102 +24,52 @@ use std::{convert::TryInto, iter::FromIterator};
 use melib::{Address, SortField, SortOrder, ThreadNode, Threads};
 
 use super::*;
-use crate::{components::PageMovement, jobs::JoinHandle, segment_tree::SegmentTree};
+use crate::{
+    components::PageMovement,
+    jobs::JoinHandle,
+    segment_tree::SegmentTree,
+    terminal::{draw_rounded_frame, frame_flush_areas},
+};
 
 macro_rules! row_attr {
-    ($color_cache:expr, even: $even:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
+    ($color_cache:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
         let color_cache = &$color_cache;
-        let even = $even;
         let unseen = $unseen;
         let highlighted = $highlighted;
         let selected = $selected;
         ThemeAttribute {
             fg: if highlighted && selected {
-                if even {
-                    color_cache.even_highlighted_selected.fg
-                } else {
-                    color_cache.odd_highlighted_selected.fg
-                }
+                color_cache.highlighted_selected.fg
             } else if highlighted {
-                if even {
-                    color_cache.even_highlighted.fg
-                } else {
-                    color_cache.odd_highlighted.fg
-                }
+                color_cache.highlighted.fg
             } else if selected {
-                if even {
-                    color_cache.even_selected.fg
-                } else {
-                    color_cache.odd_selected.fg
-                }
+                color_cache.selected.fg
             } else if unseen {
-                if even {
-                    color_cache.even_unseen.fg
-                } else {
-                    color_cache.odd_unseen.fg
-                }
-            } else if even {
-                color_cache.even.fg
+                color_cache.unseen.fg
             } else {
-                color_cache.odd.fg
+                color_cache.base.fg
             },
             bg: if highlighted && selected {
-                if even {
-                    color_cache.even_highlighted_selected.bg
-                } else {
-                    color_cache.odd_highlighted_selected.bg
-                }
+                color_cache.highlighted_selected.bg
             } else if highlighted {
-                if even {
-                    color_cache.even_highlighted.bg
-                } else {
-                    color_cache.odd_highlighted.bg
-                }
+                color_cache.highlighted.bg
             } else if selected {
-                if even {
-                    color_cache.even_selected.bg
-                } else {
-                    color_cache.odd_selected.bg
-                }
+                color_cache.selected.bg
             } else if unseen {
-                if even {
-                    color_cache.even_unseen.bg
-                } else {
-                    color_cache.odd_unseen.bg
-                }
-            } else if even {
-                color_cache.even.bg
+                color_cache.unseen.bg
             } else {
-                color_cache.odd.bg
+                color_cache.base.bg
             },
             attrs: if highlighted && selected {
-                if even {
-                    color_cache.even_highlighted_selected.attrs
-                } else {
-                    color_cache.odd_highlighted_selected.attrs
-                }
+                color_cache.highlighted_selected.attrs
             } else if highlighted {
-                if even {
-                    color_cache.even_highlighted.attrs
-                } else {
-                    color_cache.odd_highlighted.attrs
-                }
+                color_cache.highlighted.attrs
             } else if selected {
-                if even {
-                    color_cache.even_selected.attrs
-                } else {
-                    color_cache.odd_selected.attrs
-                }
+                color_cache.selected.attrs
             } else if unseen {
-                if even {
-                    color_cache.even_unseen.attrs
-                } else {
-                    color_cache.odd_unseen.attrs
-                }
-            } else if even {
-                color_cache.even.attrs
+                color_cache.unseen.attrs
             } else {
-                color_cache.odd.attrs
+                color_cache.base.attrs
             },
         }
     }};
@@ -139,9 +89,9 @@ pub struct ThreadListing {
     color_cache: ColorCache,
 
     #[allow(clippy::type_complexity)]
-    search_job: Option<(String, JoinHandle<Result<Vec<EnvelopeHash>>>)>,
+    search_job: Option<(String, MailboxHash, JoinHandle<Result<SearchResult>>)>,
     #[allow(clippy::type_complexity)]
-    select_job: Option<(String, JoinHandle<Result<Vec<EnvelopeHash>>>)>,
+    select_job: Option<(String, MailboxHash, JoinHandle<Result<SearchResult>>)>,
     filter_term: String,
     filtered_selection: Vec<ThreadHash>,
     filtered_order: HashMap<ThreadHash, usize>,
@@ -159,6 +109,9 @@ pub struct ThreadListing {
     modifier_command: Option<Modifier>,
     movement: Option<PageMovement>,
     view_area: Option<Area>,
+    /// Whether the grid (not the open view) holds the keyboard focus; the
+    /// Entry-state subpane ring then renders focused.
+    grid_has_keyboard: bool,
     parent: ComponentId,
     id: ComponentId,
 }
@@ -252,6 +205,10 @@ impl MailListingTrait for ThreadListing {
             Box::new(roots.into_iter()) as Box<dyn Iterator<Item = ThreadHash>>,
         );
         self.rows.restore_selection(previous_selection);
+        // The row set was rebuilt: force a full list repaint — the
+        // incremental `row_updates` path would leave stale rows on
+        // screen until the next keypress.
+        self.force_draw = true;
     }
 
     fn redraw_threads_list(
@@ -445,13 +402,10 @@ impl MailListingTrait for ThreadListing {
         self.data_columns
             .cursor_config
             .set_handle(true)
-            .set_even_odd_theme(
-                self.color_cache.even_highlighted,
-                self.color_cache.odd_highlighted,
-            );
+            .set_theme(self.color_cache.highlighted);
         self.data_columns
             .theme_config
-            .set_even_odd_theme(self.color_cache.even, self.color_cache.odd);
+            .set_theme(self.color_cache.base);
 
         // index column
         _ = self.data_columns.columns[0].resize_with_context(min_width.0, self.rows.len(), context);
@@ -537,14 +491,26 @@ impl ListingTrait for ThreadListing {
         {
             self.refresh_mailbox(context, false);
         }
+        // Pane background: the grid fills with "pane.focused" while it
+        // holds the keyboard, "pane.unfocused" otherwise; rows keep their
+        // own theme colors on top of it.
+        let pane_fill = crate::conf::value(
+            context,
+            if self.grid_has_keyboard {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        );
         if self.length == 0 {
-            grid.clear_area(area, self.color_cache.theme_default);
+            grid.clear_area(area, pane_fill);
             grid.copy_area(
                 self.data_columns.columns[0].grid(),
                 area,
                 self.data_columns.columns[0].area(),
             );
             context.dirty_areas.push_back(area);
+            self.force_draw = false;
             return;
         }
         let rows = area.height();
@@ -555,7 +521,7 @@ impl ListingTrait for ThreadListing {
         self.perform_movement(Some(rows));
 
         if self.force_draw {
-            grid.clear_area(area, self.color_cache.theme_default);
+            grid.clear_area(area, pane_fill);
         }
 
         let prev_page_no = (self.cursor_pos.2).wrapping_div(rows);
@@ -582,15 +548,29 @@ impl ListingTrait for ThreadListing {
                         .get_env_under_cursor(idx)
                         .map(|h| self.selection().get(&h).copied().unwrap_or(false))
                         .unwrap_or(false);
-                    let row_attr = row_attr!(self.color_cache, even: idx % 2 == 0, unseen: false, highlighted: true, selected: selected);
+                    let row_attr = row_attr!(self.color_cache, unseen: false, highlighted: true, selected: selected);
                     grid.change_theme(new_area, row_attr);
                 } else if let Some(row_attr) = self.rows.row_attr_cache.get(&idx) {
-                    grid.change_theme(new_area, *row_attr);
+                    // Un-highlighted row: bg returns to the pane fill
+                    // unless the row is selected.
+                    let selected = self
+                        .get_env_under_cursor(idx)
+                        .map(|h| self.selection().get(&h).copied().unwrap_or(false))
+                        .unwrap_or(false);
+                    let row_attr = if selected {
+                        *row_attr
+                    } else {
+                        ThemeAttribute {
+                            bg: pane_fill.bg,
+                            ..*row_attr
+                        }
+                    };
+                    grid.change_theme(new_area, row_attr);
                 }
                 context.dirty_areas.push_back(new_area);
             }
             if *account_settings!(context[self.cursor_pos.0].listing.relative_list_indices) {
-                self.draw_relative_numbers(grid, area, top_idx);
+                self.draw_relative_numbers(grid, area, top_idx, pane_fill.bg);
                 context.dirty_areas.push_back(area);
             }
             if !self.force_draw {
@@ -606,7 +586,7 @@ impl ListingTrait for ThreadListing {
         }
 
         if !self.force_draw {
-            grid.clear_area(area, self.color_cache.theme_default);
+            grid.clear_area(area, pane_fill);
         }
 
         // Page_no has changed, so draw new page
@@ -615,12 +595,31 @@ impl ListingTrait for ThreadListing {
         self.data_columns
             .draw(grid, top_idx, self.cursor_pos.2, grid.bounds_iter(area));
         if *account_settings!(context[self.cursor_pos.0].listing.relative_list_indices) {
-            self.draw_relative_numbers(grid, area, top_idx);
+            self.draw_relative_numbers(grid, area, top_idx, pane_fill.bg);
         }
         // apply each row colors separately
         for i in top_idx..(top_idx + area.height()) {
             if let Some(row_attr) = self.rows.row_attr_cache.get(&i) {
-                grid.change_theme(area.nth_row(i % rows), *row_attr);
+                // Base rows (not the cursor row, not selected) sit
+                // directly on the pane background: they keep their theme
+                // fg/attrs (unseen bold, zebra fg accents) but their bg
+                // follows the pane, so an unfocused grid dims as a whole.
+                // The cursor row is re-applied with its own highlight
+                // below and selected rows keep their own fill.
+                let highlighted = i == self.cursor_pos.2;
+                let selected = self
+                    .get_env_under_cursor(i)
+                    .map(|h| self.selection().get(&h).copied().unwrap_or(false))
+                    .unwrap_or(false);
+                let row_attr = if highlighted || selected {
+                    *row_attr
+                } else {
+                    ThemeAttribute {
+                        bg: pane_fill.bg,
+                        ..*row_attr
+                    }
+                };
+                grid.change_theme(area.nth_row(i % rows), row_attr);
             }
         }
 
@@ -631,19 +630,17 @@ impl ListingTrait for ThreadListing {
             .unwrap_or(false);
         let row_attr = row_attr!(
             self.color_cache,
-            even: self.cursor_pos.2.is_multiple_of(2),
             unseen: false,
             highlighted: true,
             selected: selected
         );
         grid.change_theme(area.nth_row(self.cursor_pos.2 % rows), row_attr);
 
-        // clear gap if available height is more than count of entries
+        /* Clear the gap below the last entry with the pane background:
+         * empty rows follow the keyboard focus like every other empty
+         * cell of the pane. */
         if top_idx + rows > self.length {
-            grid.change_theme(
-                area.skip_rows(self.length - top_idx),
-                self.color_cache.theme_default,
-            );
+            grid.change_theme(area.skip_rows(self.length - top_idx), pane_fill);
         }
 
         self.force_draw = false;
@@ -663,14 +660,33 @@ impl ListingTrait for ThreadListing {
             return;
         };
 
+        let highlighted = self.cursor_pos.2 == idx;
+        let selected = self.selection()[&env_hash];
         let row_attr = row_attr!(
             self.color_cache,
-            even: idx.is_multiple_of(2),
             unseen: !envelope.is_seen(),
-            highlighted: self.cursor_pos.2 == idx,
-            selected: self.selection()[&env_hash],
+            highlighted: highlighted,
+            selected: selected
         );
-
+        // A base row (not the cursor row, not selected) is repainted on
+        // the pane background so un-highlighting a row hands its bg back
+        // to the pane fill; highlighted and selected rows keep their own.
+        let pane_fill = crate::conf::value(
+            context,
+            if self.grid_has_keyboard {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        );
+        let row_attr = if highlighted || selected {
+            row_attr
+        } else {
+            ThemeAttribute {
+                bg: pane_fill.bg,
+                ..row_attr
+            }
+        };
         let x = self.data_columns.widths[0]
             + self.data_columns.widths[1]
             + self.data_columns.widths[2]
@@ -735,7 +751,7 @@ impl ListingTrait for ThreadListing {
                 self.sort,
                 &context.accounts[&self.cursor_pos.0].collection.envelopes,
             );
-            self.new_cursor_pos.2 = self.cursor_pos.2.min(self.filtered_selection.len() - 1);
+            self.new_cursor_pos.2 = 0;
         } else {
             _ = self.data_columns.columns[0].resize_with_context(0, 0, context);
         }
@@ -746,6 +762,10 @@ impl ListingTrait for ThreadListing {
                 as Box<dyn Iterator<Item = ThreadHash>>,
         );
         self.rows.restore_selection(previous_selection);
+        // The row set was rebuilt: force a full list repaint — the
+        // incremental `row_updates` path would leave stale rows on
+        // screen until the next keypress.
+        self.force_draw = true;
     }
 
     fn view_area(&self) -> Option<Area> {
@@ -787,29 +807,14 @@ impl ListingTrait for ThreadListing {
                 self.force_draw = true;
             }
             Focus::Entry => {
-                if let Some((thread_hash, env_hash)) = self
-                    .get_env_under_cursor(self.new_cursor_pos.2)
-                    .and_then(|env_hash| Some((*self.rows.env_to_thread.get(&env_hash)?, env_hash)))
-                {
+                if self.cursor_selection().is_some() {
                     self.force_draw = true;
                     self.dirty = true;
-                    self.kick_parent(
-                        self.parent,
-                        ListingMessage::OpenEntryUnderCursor {
-                            thread_hash,
-                            env_hash,
-                            show_thread: false,
-                            go_to_first_unread: false,
-                        },
-                        context,
-                    );
+                    self.kick_open_under_cursor(context);
                     self.cursor_pos.2 = self.new_cursor_pos.2;
                 } else {
                     return;
                 }
-            }
-            Focus::EntryFullscreen => {
-                self.dirty = true;
             }
         }
         self.focus = new_value;
@@ -832,6 +837,37 @@ impl std::fmt::Display for ThreadListing {
 }
 
 impl ThreadListing {
+    /// The (thread, envelope) under the cursor, if any.
+    pub(crate) fn cursor_selection(&self) -> Option<(ThreadHash, EnvelopeHash)> {
+        self.get_env_under_cursor(self.new_cursor_pos.2)
+            .and_then(|env_hash| Some((*self.rows.env_to_thread.get(&env_hash)?, env_hash)))
+    }
+
+    /// Queue an `OpenEntryUnderCursor` for the cursor entry: refreshes the
+    /// open view to the newly selected mail while the grid holds the
+    /// keyboard (the layout follows the selection).
+    pub(crate) fn kick_open_under_cursor(&self, context: &mut Context) {
+        if let Some((thread_hash, env_hash)) = self.cursor_selection() {
+            self.kick_parent(
+                self.parent,
+                ListingMessage::OpenEntryUnderCursor {
+                    thread_hash,
+                    env_hash,
+                    go_to_first_unread: false,
+                },
+                context,
+            );
+        }
+    }
+
+    /// Mark that the grid (not the open view) holds the keyboard focus;
+    /// the Entry-state subpane ring then renders focused.
+    pub(crate) fn set_grid_has_keyboard(&mut self, value: bool) {
+        self.grid_has_keyboard = value;
+        self.dirty = true;
+        self.force_draw = true;
+    }
+
     pub fn new(
         parent: ComponentId,
         coordinates: (AccountHash, MailboxHash),
@@ -863,6 +899,7 @@ impl ThreadListing {
             modifier_active: false,
             modifier_command: None,
             view_area: None,
+            grid_has_keyboard: false,
             parent,
             id: ComponentId::default(),
         })
@@ -1007,7 +1044,6 @@ impl ThreadListing {
             }
             let row_attr = row_attr!(
                 self.color_cache,
-                even: idx % 2 == 0,
                 unseen: !self.seen_cache[env_hash],
                 highlighted: false,
                 selected: false,
@@ -1198,7 +1234,6 @@ impl ThreadListing {
         let idx = self.rows.env_order[&env_hash];
         let row_attr = row_attr!(
             self.color_cache,
-            even: idx.is_multiple_of(2),
             unseen: !envelope.is_seen(),
             highlighted: false,
             selected: self.selection().get(&env_hash).copied().unwrap_or(false),
@@ -1241,17 +1276,13 @@ impl ThreadListing {
         self.draw_rows(context, idx, idx);
     }
 
-    fn select(
-        &mut self,
-        search_term: &str,
-        results: Result<Vec<EnvelopeHash>>,
-        context: &mut Context,
-    ) {
-        let account = &context.accounts[&self.cursor_pos.0];
+    fn select(&mut self, search_term: &str, results: Result<SearchResult>, context: &mut Context) {
         match results {
-            Ok(results) => {
+            Ok(result) => {
+                super::notify_if_search_degraded(context, &result);
+                let account = &context.accounts[&self.cursor_pos.0];
                 let threads = account.collection.get_threads(self.cursor_pos.1);
-                for env_hash in results {
+                for env_hash in result.envelopes {
                     if !account.collection.contains_key(&env_hash) {
                         continue;
                     }
@@ -1286,7 +1317,13 @@ impl ThreadListing {
         }
     }
 
-    fn draw_relative_numbers(&self, grid: &mut CellBuffer, area: Area, top_idx: usize) {
+    fn draw_relative_numbers(
+        &self,
+        grid: &mut CellBuffer,
+        area: Area,
+        top_idx: usize,
+        pane_bg: Color,
+    ) {
         let width = self.data_columns.widths[0];
         let area = area.take_cols(width);
         // Stack-formatted per row: `to_string()` allocated a `String` for
@@ -1297,15 +1334,24 @@ impl ThreadListing {
                 break;
             }
             let row_attr = if let Some(env_hash) = self.get_env_under_cursor(top_idx + i) {
-                row_attr!(
+                let highlighted = self.cursor_pos.2 == (top_idx + i);
+                let selected = self.selection()[&env_hash];
+                let row_attr = row_attr!(
                     self.color_cache,
-                    even: (top_idx + i).is_multiple_of(2),
                     unseen: !self.seen_cache[&env_hash],
-                    highlighted: self.cursor_pos.2 == (top_idx + i),
-                    selected: self.selection()[&env_hash]
-                )
+                    highlighted: highlighted,
+                    selected: selected
+                );
+                if highlighted || selected {
+                    row_attr
+                } else {
+                    ThemeAttribute {
+                        bg: pane_bg,
+                        ..row_attr
+                    }
+                }
             } else {
-                row_attr!(self.color_cache, even: (top_idx + i).is_multiple_of(2), unseen: false, highlighted: true, selected: false)
+                row_attr!(self.color_cache, unseen: false, highlighted: true, selected: false)
             };
 
             grid.clear_area(area.nth_row(i), row_attr);
@@ -1379,11 +1425,6 @@ impl ThreadListing {
 
 impl Component for ThreadListing {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        if matches!(self.focus, Focus::EntryFullscreen) {
-            self.view_area = area.into();
-            return;
-        }
-
         if !self.is_dirty() {
             return;
         }
@@ -1612,7 +1653,6 @@ impl Component for ThreadListing {
                     };
                     let row_attr = row_attr!(
                         self.color_cache,
-                        even: row.is_multiple_of(2),
                         unseen: !envelope.is_seen(),
                         highlighted: false,
                         selected: self.selection()[&env_hash]
@@ -1629,10 +1669,49 @@ impl Component for ThreadListing {
                 self.draw_list(grid, area, context);
             }
         } else {
-            self.view_area = area.into();
-            if self.length == 0 && self.dirty {
-                grid.clear_area(area, self.color_cache.theme_default);
-                context.dirty_areas.push_back(area);
+            // Split render: the grid keeps the left 30% column, the
+            // view the right 70%; the keyboard only toggles the ring
+            // highlight.
+            // Equal in height to the pane chain's thread list.
+            if self.length == 0 {
+                if self.dirty {
+                    let pane_fill = crate::conf::value(
+                        context,
+                        if self.grid_has_keyboard {
+                            "pane.focused"
+                        } else {
+                            "pane.unfocused"
+                        },
+                    );
+                    grid.clear_area(area, pane_fill);
+                    context.dirty_areas.push_back(area);
+                }
+                self.view_area = area.into();
+            } else {
+                let (list_area, view_area) = crate::mail::pane_split(area);
+                let ring = if self.grid_has_keyboard {
+                    crate::conf::value(context, "tab.focused")
+                } else {
+                    crate::conf::value(context, "tab.unfocused")
+                };
+                let list_inner = draw_rounded_frame(grid, list_area, ring);
+                for frame_area in frame_flush_areas(grid, list_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                let pane_fill = crate::conf::value(
+                    context,
+                    if self.grid_has_keyboard {
+                        "pane.focused"
+                    } else {
+                        "pane.unfocused"
+                    },
+                );
+                grid.clear_area(list_inner, pane_fill);
+                self.draw_list(grid, list_inner, context);
+                let gap_area = crate::mail::pane_gap(area);
+                grid.clear_area(gap_area, self.color_cache.theme_default);
+                context.dirty_areas.push_back(gap_area);
+                self.view_area = view_area.into();
             }
         }
         self.force_draw = false;
@@ -1650,72 +1729,10 @@ impl Component for ThreadListing {
             ShortcutMaps::default()
         };
 
-        match (&event, self.focus) {
-            (UIEvent::Input(ref k), Focus::Entry)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]) =>
-            {
-                self.set_focus(Focus::EntryFullscreen, context);
-                return true;
-            }
-            (UIEvent::Input(ref k), Focus::EntryFullscreen)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-            {
-                self.set_focus(Focus::Entry, context);
-                return true;
-            }
-            (UIEvent::Input(ref k), Focus::Entry)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-            {
-                self.set_focus(Focus::None, context);
-                return true;
-            }
-            _ => {}
-        }
-
         match *event {
             UIEvent::ConfigReload { old_settings: _ } => {
                 self.color_cache = ColorCache::new(context, IndexStyle::Threaded);
                 self.set_dirty(true);
-            }
-            UIEvent::Input(ref k)
-                if matches!(self.focus, Focus::None)
-                    && (shortcut!(k == shortcuts[Shortcuts::LISTING]["open_entry"])
-                        || shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"])) =>
-            {
-                self.set_focus(Focus::Entry, context);
-                return true;
-            }
-            UIEvent::Input(ref k)
-                if !matches!(self.focus, Focus::None)
-                    && (shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"])
-                        || context.settings.shortcuts.general.quit.contains(k)) =>
-            {
-                self.set_focus(Focus::None, context);
-                return true;
-            }
-            UIEvent::Input(ref k)
-                if !matches!(self.focus, Focus::Entry)
-                    && shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]) =>
-            {
-                self.set_focus(Focus::EntryFullscreen, context);
-                return true;
-            }
-            UIEvent::Input(ref k)
-                if !matches!(self.focus, Focus::None)
-                    && shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-            {
-                match self.focus {
-                    Focus::Entry => {
-                        self.set_focus(Focus::None, context);
-                    }
-                    Focus::EntryFullscreen => {
-                        self.set_focus(Focus::Entry, context);
-                    }
-                    Focus::None => {
-                        unreachable!();
-                    }
-                }
-                return true;
             }
             UIEvent::MailboxUpdate((ref idxa, ref idxf))
                 if (*idxa, *idxf) == (self.new_cursor_pos.0, self.new_cursor_pos.1) =>
@@ -1819,7 +1836,17 @@ impl Component for ThreadListing {
                 Action::Listing(Search {
                     term: ref filter_term,
                     raw_search,
-                }) if !self.unfocused() => {
+                }) => {
+                    // The search must work with an open view too (the grid
+                    // pane keeps rendering the filtered rows); it is a
+                    // listing-level operation, not a grid-focus one.
+                    //
+                    // Every backend runs the search as a job on the executor
+                    // thread pool: remote backends on the reactor thread,
+                    // local ones on the blocking pool. A local fallback scan
+                    // reads every mail file in the mailbox, so driving it on
+                    // this thread would freeze the UI on large mailboxes. The
+                    // completion (`JobFinished`) applies the filter.
                     match context.accounts[&self.new_cursor_pos.0].search(
                         filter_term,
                         *raw_search,
@@ -1835,14 +1862,15 @@ impl Component for ThreadListing {
                                     job,
                                     context.accounts[&self.new_cursor_pos.0].is_async(),
                                 );
-                            self.search_job = Some((filter_term.to_string(), handle));
+                            self.search_job =
+                                Some((filter_term.to_string(), self.new_cursor_pos.1, handle));
                         }
                         Err(err) => {
                             context.replies.push_back(UIEvent::Notification {
                                 title: Some("Could not perform search".into()),
+                                source: None,
                                 body: err.to_string().into(),
                                 kind: Some(crate::types::NotificationType::Error(err.kind)),
-                                source: Some(err),
                             });
                         }
                     };
@@ -1852,7 +1880,7 @@ impl Component for ThreadListing {
                 Action::Listing(Select {
                     term: ref search_term,
                     raw_search,
-                }) if !self.unfocused() => {
+                }) => {
                     match context.accounts[&self.cursor_pos.0].search(
                         search_term,
                         *raw_search,
@@ -1871,7 +1899,11 @@ impl Component for ThreadListing {
                             if let Ok(Some(search_result)) = try_recv_timeout!(&mut handle.chan) {
                                 self.select(search_term, search_result, context);
                             } else {
-                                self.select_job = Some((search_term.to_string(), handle));
+                                self.select_job = Some((
+                                    search_term.to_string(),
+                                    self.cursor_pos.1,
+                                    handle,
+                                ));
                             }
                         }
                         Err(err) => {
@@ -1892,14 +1924,34 @@ impl Component for ThreadListing {
                 if self
                     .search_job
                     .as_ref()
-                    .map(|(_, j)| j == job_id)
+                    .map(|(_, _, j)| j == job_id)
                     .unwrap_or(false) =>
             {
-                let (filter_term, mut handle) = self.search_job.take().unwrap();
+                let (filter_term, mailbox_hash, mut handle) = self.search_job.take().unwrap();
                 match handle.chan.try_recv() {
                     Err(_) => { /* search was canceled */ }
                     Ok(None) => { /* something happened, perhaps a worker thread panicked */ }
-                    Ok(Some(Ok(results))) => self.filter(filter_term, results, context),
+                    Ok(Some(Ok(results))) => {
+                        log::debug!(
+                            "search job finished: {} results for {:?}",
+                            results.envelopes.len(),
+                            filter_term
+                        );
+                        super::notify_if_search_degraded(context, &results);
+                        if self.new_cursor_pos.1 == mailbox_hash {
+                            self.filter(filter_term, results.envelopes, context)
+                        } else {
+                            // The user switched mailboxes while the scan
+                            // was running: applying the old mailbox's
+                            // hashes here would filter the new one with
+                            // stale results. Drop them.
+                            log::debug!(
+                                "dropping stale search results for mailbox {mailbox_hash:?}; \
+                                 the listing now shows mailbox {:?}",
+                                self.new_cursor_pos.1
+                            );
+                        }
+                    }
                     Ok(Some(Err(err))) => {
                         context.replies.push_back(UIEvent::Notification {
                             title: Some("Could not perform search".into()),
@@ -1915,14 +1967,27 @@ impl Component for ThreadListing {
                 if self
                     .select_job
                     .as_ref()
-                    .map(|(_, j)| j == job_id)
+                    .map(|(_, _, j)| j == job_id)
                     .unwrap_or(false) =>
             {
-                let (search_term, mut handle) = self.select_job.take().unwrap();
+                let (search_term, mailbox_hash, mut handle) = self.select_job.take().unwrap();
                 match handle.chan.try_recv() {
                     Err(_) => { /* search was canceled */ }
                     Ok(None) => { /* something happened, perhaps a worker thread panicked */ }
-                    Ok(Some(results)) => self.select(&search_term, results, context),
+                    Ok(Some(results)) => {
+                        if self.cursor_pos.1 == mailbox_hash {
+                            self.select(&search_term, results, context);
+                        } else {
+                            // The user switched mailboxes while the scan
+                            // was running: selecting stale envelopes
+                            // would corrupt the new mailbox's selection.
+                            log::debug!(
+                                "dropping stale select results for mailbox {mailbox_hash:?}; \
+                                 the listing now shows mailbox {:?}",
+                                self.cursor_pos.1
+                            );
+                        }
+                    }
                 }
                 self.set_dirty(true);
             }
@@ -1932,12 +1997,7 @@ impl Component for ThreadListing {
     }
 
     fn is_dirty(&self) -> bool {
-        match self.focus {
-            Focus::None | Focus::Entry => {
-                self.dirty || self.force_draw || !self.rows.row_updates.is_empty()
-            }
-            Focus::EntryFullscreen => false,
-        }
+        self.dirty || self.force_draw || !self.rows.row_updates.is_empty()
     }
 
     fn set_dirty(&mut self, value: bool) {

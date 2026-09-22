@@ -117,6 +117,32 @@ impl IsOnline {
     }
 }
 
+/// Outcome of an [`Account::search`] request.
+#[derive(Debug, Default)]
+pub struct SearchResult {
+    /// Envelope hashes that matched the query.
+    pub envelopes: Vec<EnvelopeHash>,
+    /// Set when the authoritative backend search (server or sqlite3 index)
+    /// failed and `envelopes` comes from the in-memory fallback scan instead.
+    /// The result may be incomplete and the UI should say so.
+    pub degraded: bool,
+}
+
+/// Attach a [`SearchResult::degraded`] flag to a plain envelope-hash future.
+fn wrap_search_result(
+    res: ResultFuture<Vec<EnvelopeHash>>,
+    degraded: bool,
+) -> ResultFuture<SearchResult> {
+    res.map(|fut| {
+        Box::pin(async move {
+            fut.await.map(|envelopes| SearchResult {
+                envelopes,
+                degraded,
+            })
+        }) as Pin<Box<dyn Future<Output = Result<SearchResult>> + Send + 'static>>
+    })
+}
+
 #[derive(Debug)]
 pub struct Account {
     pub name: Arc<str>,
@@ -1387,38 +1413,249 @@ impl Account {
         raw_search: bool,
         _sort: (SortField, SortOrder),
         mailbox_hash: MailboxHash,
-    ) -> ResultFuture<Vec<EnvelopeHash>> {
+    ) -> ResultFuture<SearchResult> {
+        use melib::search::QueryTrait;
+        melib::log::debug!(
+            "search: account `{}` term {search_term:?} raw {raw_search} \
+             backend {:?} (conf search_backend {:?})",
+            self.name,
+            self.backend_capabilities,
+            self.settings.conf.search_backend
+        );
+        let matches = |envelope: &melib::Envelope, query: &melib::search::Query| match query {
+            // melib's `is_match` leaves `Body`/`AllText` unimplemented
+            // (always false) — substring-scan the headers/addresses for
+            // those; every structured query (from:, subject:, before:,
+            // flags:, …) goes through melib.
+            melib::search::Query::Body(s) | melib::search::Query::AllText(s) => {
+                let term = s.to_ascii_lowercase();
+                if envelope.subject().to_ascii_lowercase().contains(&term) {
+                    return true;
+                }
+                for addr in envelope.from().iter().chain(envelope.to().iter()) {
+                    if addr.to_string().to_ascii_lowercase().contains(&term) {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => envelope.is_match(query),
+        };
+        // The fallback scan must stay lazy: the remote or sqlite3 search
+        // may well succeed, so neither the mailbox key set nor the header
+        // scan may run eagerly when this future is built. The `Arc`
+        // handles below let the scan execute inside the returned future —
+        // on a job worker thread, never on the caller's (UI) thread.
+        let envelopes = Arc::clone(&self.collection.envelopes);
+        let mailboxes = Arc::clone(&self.collection.mailboxes);
+        // `Body`/`AllText` must also scan the raw bytes of every mail in
+        // the mailbox (through the backend, i.e. the local cache for
+        // IMAP) — headers alone miss every body-only hit.
+        let scan_bodies = |backend: Arc<Mutex<Box<dyn MailBackend>>>,
+                           hashes: Vec<EnvelopeHash>,
+                           term: String| async move {
+            let mut out = Vec::new();
+            for h in &hashes {
+                let fut = match backend.lock().unwrap().envelope_bytes_by_hash(*h) {
+                    Ok(fut) => fut,
+                    Err(_) => continue,
+                };
+                if let Ok(bytes) = fut.await {
+                    if String::from_utf8_lossy(&bytes)
+                        .to_ascii_lowercase()
+                        .contains(&term)
+                    {
+                        out.push(*h);
+                    }
+                }
+            }
+            out
+        };
+        let is_remote = self.backend_capabilities.is_remote;
+        let fallback_scan = move |backend: Arc<Mutex<Box<dyn MailBackend>>>,
+                                  query: melib::search::Query,
+                                  log_name: &str|
+              -> Pin<
+            Box<dyn Future<Output = Vec<EnvelopeHash>> + Send + 'static>,
+        > {
+            let term = match &query {
+                melib::search::Query::Body(s) | melib::search::Query::AllText(s) => {
+                    Some(s.to_ascii_lowercase())
+                }
+                _ => None,
+            };
+            let log_name = log_name.to_string();
+            Box::pin(async move {
+                // Read the mailbox's envelope hashes once; the header
+                // scan and the body scan share the same key set.
+                let mailbox_keys: Vec<EnvelopeHash> = mailboxes
+                    .read()
+                    .unwrap()
+                    .get(&mailbox_hash)
+                    .map(|m| m.iter().copied().collect())
+                    .unwrap_or_default();
+                let mut hits: Vec<EnvelopeHash> = {
+                    let envelopes = envelopes.read().unwrap();
+                    mailbox_keys
+                        .iter()
+                        .filter_map(|h| envelopes.get(h).filter(|e| matches(e, &query)).map(|_| *h))
+                        .collect()
+                };
+                if let Some(term) = term {
+                    if is_remote {
+                        // Remote backends only cache envelope metadata —
+                        // a body scan would fetch every mail over the
+                        // network. Header hits only; the remote search is
+                        // the proper path for bodies and this scan is its
+                        // fallback, not its replacement.
+                        melib::log::debug!(
+                            "search fallback for account `{log_name}` (remote): {} header \
+                             hits; body scan skipped (remote backend)",
+                            hits.len()
+                        );
+                    } else {
+                        let body_hits = scan_bodies(backend, mailbox_keys, term.clone()).await;
+                        melib::log::debug!(
+                            "search fallback for account `{log_name}`: {} header hits + {} \
+                             body hits",
+                            hits.len(),
+                            body_hits.len()
+                        );
+                        hits.extend(body_hits);
+                        hits.sort_unstable();
+                        hits.dedup();
+                    }
+                }
+                hits
+            })
+        };
         match self.settings.conf.search_backend {
             #[cfg(feature = "sqlite3")]
-            SearchBackend::Sqlite3 => Ok(Box::pin(crate::sqlite3::AccountCache::search(
-                self.name.clone(),
-                melib::search::Query::try_from(search_term)?,
-                _sort,
-            ))),
-            SearchBackend::Auto | SearchBackend::None => {
-                if raw_search {
-                    self.backend
-                        .lock()
-                        .unwrap()
-                        .raw_search(search_term.into(), Some(mailbox_hash))
-                } else if self.backend_capabilities.supports_search {
-                    self.backend.lock().unwrap().search(
-                        melib::search::Query::try_from(search_term)?,
-                        Some(mailbox_hash),
-                    )
-                } else {
-                    use melib::search::QueryTrait;
-                    let query = melib::search::Query::try_from(search_term)?;
-                    let mut ret = Vec::with_capacity(512);
-                    let envelopes = self.collection.envelopes.read().unwrap();
-                    for &env_hash in self.collection.get_mailbox(mailbox_hash).iter() {
-                        if let Some(envelope) = envelopes.get(&env_hash) {
-                            if envelope.is_match(&query) {
-                                ret.push(env_hash);
-                            }
+            SearchBackend::Sqlite3 => {
+                let query = melib::search::Query::try_from(search_term)?;
+                // The sqlite3 index may answer the query; otherwise the
+                // in-memory scan below is used (the melib `Query::Body`
+                // branch is unimplemented, so we never rely on
+                // `is_match`).
+                let name = self.name.clone();
+                let log_name = self.name.clone();
+                let backend = self.backend.clone();
+                let fallback = fallback_scan(backend, query.clone(), &log_name);
+                Ok(Box::pin(async move {
+                    match crate::sqlite3::AccountCache::search(name, query, _sort).await {
+                        Ok(ret) => {
+                            melib::log::debug!("search: sqlite3 index returned {} hits", ret.len());
+                            Ok(SearchResult {
+                                envelopes: ret,
+                                degraded: false,
+                            })
+                        }
+                        Err(err) => {
+                            melib::log::debug!(
+                                "sqlite3 search failed for account `{log_name}` ({err}); \
+                                 falling back to the in-memory scan"
+                            );
+                            Ok(SearchResult {
+                                envelopes: fallback.await,
+                                degraded: true,
+                            })
                         }
                     }
-                    Ok(Box::pin(async { Ok(ret) }))
+                }))
+            }
+            SearchBackend::Auto | SearchBackend::None => {
+                if raw_search {
+                    // `try_lock` fast path keeps the synchronous failure
+                    // contract (unsupported backends return
+                    // `NotSupported` without a future); when a background
+                    // thread holds the lock, resolve inside the future
+                    // instead of freezing the UI thread.
+                    let backend = self.backend.clone();
+                    let term = search_term.to_string();
+                    let fast = match backend.try_lock() {
+                        Ok(mut backend_lck) => {
+                            Some(backend_lck.raw_search(term.clone(), Some(mailbox_hash)))
+                        }
+                        Err(_) => None,
+                    };
+                    match fast {
+                        Some(res) => wrap_search_result(res, false),
+                        None => {
+                            let fut: ResultFuture<Vec<EnvelopeHash>> = Ok(Box::pin(async move {
+                                let fut = {
+                                    let mut backend_lck = backend.lock().unwrap();
+                                    match backend_lck.raw_search(term, Some(mailbox_hash)) {
+                                        Ok(fut) => fut,
+                                        Err(err) => return Err(err),
+                                    }
+                                };
+                                fut.await
+                            }));
+                            wrap_search_result(fut, false)
+                        }
+                    }
+                } else if self.backend_capabilities.supports_search {
+                    // The remote search is the primary path; a server-side
+                    // error falls back to the in-memory scan (same
+                    // contract as the sqlite3 branch above). The backend
+                    // lock is taken inside the future: a background IMAP
+                    // thread may hold it for minutes, and taking it here
+                    // would freeze the UI thread on the keypress.
+                    let query = melib::search::Query::try_from(search_term)?;
+                    let log_name = self.name.clone();
+                    let backend = self.backend.clone();
+                    let fallback = fallback_scan(backend.clone(), query.clone(), &log_name);
+                    Ok(Box::pin(async move {
+                        let backend_res = backend.lock().unwrap().search(query, Some(mailbox_hash));
+                        match backend_res {
+                            Ok(fut) => match fut.await {
+                                Ok(ret) => {
+                                    melib::log::debug!(
+                                        "search: remote returned {} hits",
+                                        ret.len()
+                                    );
+                                    Ok(SearchResult {
+                                        envelopes: ret,
+                                        degraded: false,
+                                    })
+                                }
+                                Err(err) => {
+                                    melib::log::debug!(
+                                        "remote search failed for account `{log_name}` \
+                                         ({err}); falling back to the in-memory scan"
+                                    );
+                                    Ok(SearchResult {
+                                        envelopes: fallback.await,
+                                        degraded: true,
+                                    })
+                                }
+                            },
+                            Err(err) => {
+                                melib::log::debug!(
+                                    "remote search failed for account `{log_name}` \
+                                     ({err}); falling back to the in-memory scan"
+                                );
+                                Ok(SearchResult {
+                                    envelopes: fallback.await,
+                                    degraded: true,
+                                })
+                            }
+                        }
+                    }))
+                } else {
+                    // Parse-check the term even though the scan below is
+                    // a plain substring pass: a malformed query must fail
+                    // here, not silently return an empty result.
+                    let query = melib::search::Query::try_from(search_term)?;
+                    let backend = self.backend.clone();
+                    let log_name = self.name.clone();
+                    let fut = fallback_scan(backend, query, &log_name);
+                    Ok(Box::pin(async move {
+                        Ok(SearchResult {
+                            envelopes: fut.await,
+                            degraded: false,
+                        })
+                    }))
                 }
             }
         }

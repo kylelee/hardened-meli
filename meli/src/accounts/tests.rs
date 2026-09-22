@@ -1260,9 +1260,28 @@ fn test_listing_imap_offline_cold_start_shows_cached_mail() {
     listing.set_dirty(true);
     listing.draw(screen.grid_mut(), area, &mut ctx);
     let text = screen_text(screen.grid());
+    // Width-independent and timezone-independent: the two cached mails
+    // must render as listing rows. The row-leading date column is
+    // visible at any terminal width, unlike the (truncatable) subject
+    // column. It renders in the LOCAL timezone (see
+    // `MailListingTrait::format_date` → `timestamp_to_string`), so the
+    // expected wall-clock date has to be derived from the mail
+    // timestamps instead of hard-coding the UTC date: on a host west of
+    // UTC these mails render as 2025-12-31.
+    let expected_dates: Vec<String> = mails
+        .iter()
+        .map(|(_, env)| {
+            melib::utils::datetime::timestamp_to_string(env.date(), Some("%Y-%m-%d"), false)
+        })
+        .collect();
     assert!(
-        text.contains("cold start"),
-        "the cached mail subjects must be rendered after the offline cold start, got:\n{text}"
+        text.lines()
+            .filter(|line| expected_dates
+                .iter()
+                .any(|date| line.contains(date.as_str())))
+            .count()
+            >= 2,
+        "both cached mails must be rendered after the offline cold start, got:\n{text}"
     );
     assert!(
         !text.contains("offline: "),

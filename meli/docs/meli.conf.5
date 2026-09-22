@@ -1324,7 +1324,10 @@ Toggle help and shortcuts view.
 Enter
 .Em COMMAND
 mode.
-.Pq Em \&: \" default value
+Explicitly setting this shortcut completely overrides the default; use
+.Em \&:,M-x
+to keep both bindings.
+.Pq Em \&:/M-x \" default value
 .It Ic quit
 Quit meli.
 .Pq Em Esc/q \" default value
@@ -1445,12 +1448,6 @@ Select (or toggle) thread entry.
 .It Ic select_motion
 Perform select motion with a movement.
 .Pq Em v \" default value
-.It Ic increase_sidebar
-Increase sidebar width.
-.Pq Em C-f \" default value
-.It Ic decrease_sidebar
-Decrease sidebar width.
-.Pq Em C-d \" default value
 .It Ic next_entry
 When reading a mail item, change focus on next entry according to the current
 sorting.
@@ -1466,7 +1463,7 @@ Toggle visibility of side menu in mail list.
 Switch focus on the left.
 .Pq Em Left/h \" default value
 .It Ic focus_right
-Open the entry selected in the sidebar and switch focus on the right.
+Open the entry under the cursor; the focus stays on the mail list.
 .Pq Em Right/l \" default value
 .It Ic exit_entry
 Exit e-mail entry.
@@ -1657,25 +1654,16 @@ The mail view follows the selection.
 .It Ic reverse_thread_order
 reverse thread order.
 .Pq Em C-r \" default value
-.It Ic toggle_mailview
-toggle mail view visibility.
-.Pq Em p \" default value
-.It Ic toggle_threadview
-toggle thread view visibility.
-.Pq Em t \" default value
 .It Ic focus_left
 Focus or enlarge the thread list pane.
-At the mail detail state, return to the split layout; at the split or thread-list-only state, leave the thread view and refocus the mail listing.
-In a single-mail thread, leave the view directly from the mail detail state.
+At the mail detail state, return to the split layout; at the split or thread-list-only state, move the focus back to the mail listing (the thread view stays open).
+A single-mail thread has no split or thread-list state: the view is only the mail detail, and from the mail list grid the shortcut closes the view back to the single-pane layout.
 .Pq Em Left/h \" default value
 .It Ic focus_right
 Focus or enlarge the mail view pane.
 Move the focus rightward and open the entry currently selected in the thread list: from the thread-list state, show the split layout; from the split layout, focus the mail detail.
 The mail detail state is the terminal stop of the pane chain; the key stays consumed.
 .Pq Em Right/l \" default value
-.It Ic toggle_layout
-Toggle between horizontal and vertical layout.
-.Pq Em Space \" default value
 .El
 .sp
 .\"
@@ -1964,10 +1952,6 @@ has no sibling.
 .Pq Em optional
 Sets the character to print as the divider between the accounts list and the
 message list.
-.It Ic sidebar_ratio Ar Integer
-.Pq Em optional
-This is the width of the right container to the entire screen width.
-.Pq Em 90 \" default value
 .It Ic unseen_flag Ar Option<String>
 Flag to show if thread entry contains unseen mail.
 .Pq Em "●" \" default value
@@ -2007,15 +1991,6 @@ Show relative indices in listings to quickly help with jumping to them.
 .It Ic hide_sidebar_on_launch Ar boolean
 Start app with sidebar hidden.
 .Pq Em false \" default value
-.It Ic mail_view_divider Ar char
-Character to show in the divider space between mail view and listing.
-.Pq Em ' ' \" default value
-.It Ic thread_layout Ar "auto" | "vertical" | "horizontal"
-Force specific layout in thread view.
-The layout can also be toggled at runtime with the
-.Li thread_view.toggle_layout
-shortcut.
-.Pq Em "auto"
 .It Ic sort Ar ( SortField, SortOrder )
 Sort order.
 Sort field can take the values "date" and "subject", and sort order the values "asc" and "desc".

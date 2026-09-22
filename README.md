@@ -123,7 +123,7 @@ See a comprehensive tour of `meli` in the manual page [`meli(7)`](./meli/docs/me
 See also the [Quickstart tutorial](https://meli-email.org/documentation.html#quick-start) online.
 
 After installing `meli`, see `meli(1)`, `meli.conf(5)`, `meli(7)` and `meli-themes(5)` for documentation.
-Sample configuration and theme files can be found in the `meli/docs/samples/` subdirectory.
+Sample configuration files can be found in the `meli/docs/samples/` subdirectory; theme files in `meli/themes/`.
 Examples for configuration file settings can be found in `meli.conf.examples(5)`
 Manual pages are also [hosted online](https://meli-email.org/documentation.html "meli documentation").
 `meli` by default looks for a configuration file in this location: `${XDG_CONFIG_HOME}/meli/config.toml`.
@@ -175,7 +175,13 @@ See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)
 - contact list (+read-only vCard and mutt alias file support)
 - forced UTF-8 (other encodings are read-only)
 - configurable shortcuts
-- theming
+- theming: **dozens of themes built into the binary, ready out of the
+  box** — the Zed editor's official theme family (Ayu, One, Gruvbox, from
+  [zed.dev](https://zed.dev)) plus community-contributed theme packs
+  (Catppuccin, Dracula, GitHub, Nord, Tokyo Night, Nightfox, Fleet, …),
+  all compiled in; the `:toggle theme` picker live-previews the whole UI
+  with the arrow keys and Enter saves the choice to the configuration
+  file
 - `NO_COLOR` support
 - ascii-only drawing characters option
 - view text/html attachments through the built-in HTML renderer (or an external command via `pager.html_filter`)
@@ -202,7 +208,7 @@ See a comprehensive tour of `meli` in the manual page [`meli(7)`](./meli/docs/me
 See also the [Quickstart tutorial](https://meli-email.org/documentation.html#quick-start) online.
 
 After installing `meli`, see `meli(1)`, `meli.conf(5)`, `meli(7)` and `meli-themes(5)` for documentation.
-Sample configuration and theme files can be found in the `meli/docs/samples/` subdirectory.
+Sample configuration files can be found in the `meli/docs/samples/` subdirectory; theme files in `meli/themes/`.
 Manual pages are also [hosted online](https://meli-email.org/documentation.html "meli documentation").
 
 `meli` by default looks for a configuration file in this location: `${XDG_CONFIG_HOME}/meli/config.toml`

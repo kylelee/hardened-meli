@@ -42,6 +42,30 @@ fn test_imap_response() {
     );
 }
 
+/// `LIST`/`LSUB` wire names are mUTF-7 (RFC 3501 §5.1.3). The parser must
+/// keep `imap_path`/`hash`/`parent` in wire form while exposing decoded
+/// UTF-8 `path`/`name` to the rest of the application.
+#[test]
+fn test_imap_list_mailbox_result_decodes_mutf7() {
+    // `已发送` in mUTF-7 is `&XfJT0ZAB-`: UTF-16BE bytes `5d f2 53 d1 90 01`
+    // -> base64 `XfJT0ZAB` (`/` mapped to `,`), computed independently with
+    // python3. The full wire path uses `.` as the hierarchy separator.
+    let wire = "INBOX.&XfJT0ZAB-";
+    for verb in ["LIST", "LSUB"] {
+        let input = format!("* {verb} (\\HasNoChildren) \".\" {wire}\r\n");
+        let (rest, f) = list_mailbox_result(input.as_bytes()).unwrap();
+        assert!(rest.is_empty(), "{verb}: unparsed trailing bytes: {rest:?}");
+        // Wire-format fields are untouched: the sqlite3 cache keys and every
+        // command sent to the server depend on `imap_path`/`hash`/`parent`.
+        assert_eq!(f.imap_path, wire);
+        assert_eq!(f.hash, MailboxHash::from_bytes(wire.as_bytes()));
+        assert_eq!(f.parent, Some(MailboxHash::from_bytes(b"INBOX")));
+        // Display fields are decoded UTF-8.
+        assert_eq!(f.path, "INBOX/已发送");
+        assert_eq!(f.name, "已发送");
+    }
+}
+
 #[test]
 fn test_imap_required_responses() {
     assert!(RequiredResponses::NO.check(b"M12 NO [CANNOT] Invalid something\r\n"));
@@ -152,6 +176,32 @@ fn test_imap_required_responses() {
         }
         assert_eq!(to_str!(fetch), to_str!(&ret));
     }
+}
+
+/// Regression test for the `RequiredResponses::NO` zero-valued bit-flag
+/// bug: `NO` must be a real bit, otherwise `intersects` is always `false`
+/// for it and the expected-`NO` paths (the `read_response` guard and
+/// `Connection::unselect`'s RFC 3691 fallback) silently never match.
+#[test]
+fn test_imap_required_responses_no_is_nonzero_bit() {
+    assert_ne!(
+        RequiredResponses::NO.bits(),
+        0,
+        "NO must be a real bit; a zero-valued flag makes intersects() always false"
+    );
+    assert!(RequiredResponses::NO.intersects(RequiredResponses::NO));
+    assert!(
+        !RequiredResponses::empty().intersects(RequiredResponses::NO),
+        "empty() must not imply the expected-NO flag"
+    );
+    assert!(!RequiredResponses::CAPABILITY.intersects(RequiredResponses::NO));
+    // A bare `NO` still matches a tagged `NO` line and nothing else.
+    assert!(RequiredResponses::NO.check(b"M12 NO [CANNOT] Invalid something\r\n"));
+    assert!(!RequiredResponses::NO.check(b"M12 OK done\r\n"));
+    assert!(
+        !RequiredResponses::empty().check(b"M12 NO [CANNOT] Invalid something\r\n"),
+        "empty() must not treat a tagged NO as an expected response"
+    );
 }
 
 #[test]

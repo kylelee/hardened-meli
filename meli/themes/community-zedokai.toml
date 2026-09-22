@@ -1,0 +1,1406 @@
+# SPDX-License-Identifier: EUPL-1.2
+# Ported from the Zed community theme "Zedokai" by slymax
+# Source: https://zed-themes.com/themes/zedokai (upstream colours, verbatim; rgba composited over editor.background)
+#
+# Install: copy this file into $XDG_CONFIG_HOME/meli/themes/ (usually
+# ~/.config/meli/themes/) and pick a theme in meli with `:toggle theme`.
+
+# Zedokai (dark)
+[terminal.themes."Zedokai"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai".color_aliases]
+fg = "#fcfcfa"
+bg = "#2d2a2e"
+line = "#373438"
+text = "#fcfcfa"
+muted = "#939293"
+accent = "#ffd866"
+line_number = "#5b595c"
+status = "#333034"
+surface = "#403e41"
+panel = "#333034"
+tab_bar = "#333034"
+tab_active = "#2d2a2e"
+tab_inactive = "#333034"
+hover = "#333034"
+selected = "#373438"
+border = "#474448"
+border_variant = "#474448"
+error = "#ff6188"
+warning = "#fc9867"
+hint = "#939293"
+match = "#434044"
+match_active = "#fc9867"
+string = "#ffd866"
+func = "#a9dc76"
+keyword = "#ff6188"
+constant = "#ab9df2"
+type = "#78dce8"
+tag = "#ff6188"
+enum = "#78dce8"
+attribute = "#78dce8"
+var_param = "#ab9df2"
+
+# Zedokai (Filter Octagon) (dark)
+[terminal.themes."Zedokai (Filter Octagon)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai (Filter Octagon)".color_aliases]
+fg = "#eaf2f1"
+bg = "#282a3a"
+line = "#313343"
+text = "#eaf2f1"
+muted = "#888d94"
+accent = "#ffd76d"
+line_number = "#535763"
+status = "#2e3040"
+surface = "#3a3d4b"
+panel = "#2e3040"
+tab_bar = "#2e3040"
+tab_active = "#282a3a"
+tab_inactive = "#2e3040"
+hover = "#2e3040"
+selected = "#313343"
+border = "#424454"
+border_variant = "#424454"
+error = "#ff657a"
+warning = "#ff9b5e"
+hint = "#888d94"
+match = "#3e4050"
+match_active = "#ff9b5e"
+string = "#ffd76d"
+func = "#bad761"
+keyword = "#ff657a"
+constant = "#c39ac9"
+type = "#9cd1bb"
+tag = "#ff657a"
+enum = "#9cd1bb"
+attribute = "#9cd1bb"
+var_param = "#c39ac9"
+
+# Zedokai (Filter Ristretto) (dark)
+[terminal.themes."Zedokai (Filter Ristretto)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai (Filter Ristretto)".color_aliases]
+fg = "#fff1f3"
+bg = "#2c2525"
+line = "#362f2f"
+text = "#fff1f3"
+muted = "#948a8b"
+accent = "#f9cc6c"
+line_number = "#5b5353"
+status = "#322b2b"
+surface = "#403838"
+panel = "#322b2b"
+tab_bar = "#322b2b"
+tab_active = "#2c2525"
+tab_inactive = "#322b2b"
+hover = "#322b2b"
+selected = "#362f2f"
+border = "#463f3f"
+border_variant = "#463f3f"
+error = "#fd6883"
+warning = "#f38d70"
+hint = "#948a8b"
+match = "#423b3b"
+match_active = "#f38d70"
+string = "#f9cc6c"
+func = "#adda78"
+keyword = "#fd6883"
+constant = "#a8a9eb"
+type = "#85dacc"
+tag = "#fd6883"
+enum = "#85dacc"
+attribute = "#85dacc"
+var_param = "#a8a9eb"
+
+# Zedokai (Filter Spectrum) (dark)
+[terminal.themes."Zedokai (Filter Spectrum)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai (Filter Spectrum)".color_aliases]
+fg = "#f7f1ff"
+bg = "#222222"
+line = "#2c2c2c"
+text = "#f7f1ff"
+muted = "#8b888f"
+accent = "#fce566"
+line_number = "#525053"
+status = "#282828"
+surface = "#363537"
+panel = "#282828"
+tab_bar = "#282828"
+tab_active = "#222222"
+tab_inactive = "#282828"
+hover = "#282828"
+selected = "#2c2c2c"
+border = "#3c3c3c"
+border_variant = "#3c3c3c"
+error = "#fc618d"
+warning = "#fd9353"
+hint = "#8b888f"
+match = "#383838"
+match_active = "#fd9353"
+string = "#fce566"
+func = "#7bd88f"
+keyword = "#fc618d"
+constant = "#948ae3"
+type = "#5ad4e6"
+tag = "#fc618d"
+enum = "#5ad4e6"
+attribute = "#5ad4e6"
+var_param = "#948ae3"
+
+# Zedokai (Filter Machine) (dark)
+[terminal.themes."Zedokai (Filter Machine)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai (Filter Machine)".color_aliases]
+fg = "#f2fffc"
+bg = "#273136"
+line = "#313b3f"
+text = "#f2fffc"
+muted = "#8b9798"
+accent = "#ffed72"
+line_number = "#545f62"
+status = "#2d373c"
+surface = "#3a4449"
+panel = "#2d373c"
+tab_bar = "#2d373c"
+tab_active = "#273136"
+tab_inactive = "#2d373c"
+hover = "#2d373c"
+selected = "#313b3f"
+border = "#414b50"
+border_variant = "#414b50"
+error = "#ff6d7e"
+warning = "#ffb270"
+hint = "#8b9798"
+match = "#3d474c"
+match_active = "#ffb270"
+string = "#ffed72"
+func = "#a2e57b"
+keyword = "#ff6d7e"
+constant = "#baa0f8"
+type = "#7cd5f1"
+tag = "#ff6d7e"
+enum = "#7cd5f1"
+attribute = "#7cd5f1"
+var_param = "#baa0f8"
+
+# Zedokai Classic (dark)
+[terminal.themes."Zedokai Classic"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Classic".color_aliases]
+fg = "#fdfff1"
+bg = "#272822"
+line = "#31322c"
+text = "#fdfff1"
+muted = "#919288"
+accent = "#e6db74"
+line_number = "#57584f"
+status = "#2d2e28"
+surface = "#3b3c35"
+panel = "#2d2e28"
+tab_bar = "#2d2e28"
+tab_active = "#272822"
+tab_inactive = "#2d2e28"
+hover = "#2d2e28"
+selected = "#31322c"
+border = "#41423c"
+border_variant = "#41423c"
+error = "#f92672"
+warning = "#fd971f"
+hint = "#919288"
+match = "#3d3e38"
+match_active = "#fd971f"
+string = "#e6db74"
+func = "#a6e22e"
+keyword = "#f92672"
+constant = "#ae81ff"
+type = "#66d9ef"
+tag = "#f92672"
+enum = "#66d9ef"
+attribute = "#66d9ef"
+var_param = "#ae81ff"
+
+# Zedokai Darker (dark)
+[terminal.themes."Zedokai Darker"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Darker".color_aliases]
+fg = "#fcfcfa"
+bg = "#2d2a2e"
+line = "#373438"
+text = "#fcfcfa"
+muted = "#939293"
+accent = "#ffd866"
+line_number = "#5b595c"
+status = "#262427"
+surface = "#403e41"
+panel = "#262427"
+tab_bar = "#262427"
+tab_active = "#2d2a2e"
+tab_inactive = "#262427"
+hover = "#262427"
+selected = "#373438"
+border = "#19181a"
+border_variant = "#19181a"
+error = "#ff6188"
+warning = "#fc9867"
+hint = "#939293"
+match = "#434044"
+match_active = "#fc9867"
+string = "#ffd866"
+func = "#a9dc76"
+keyword = "#ff6188"
+constant = "#ab9df2"
+type = "#78dce8"
+tag = "#ff6188"
+enum = "#78dce8"
+attribute = "#78dce8"
+var_param = "#ab9df2"
+
+# Zedokai Darker (Filter Octagon) (dark)
+[terminal.themes."Zedokai Darker (Filter Octagon)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Darker (Filter Octagon)".color_aliases]
+fg = "#eaf2f1"
+bg = "#282a3a"
+line = "#313343"
+text = "#eaf2f1"
+muted = "#888d94"
+accent = "#ffd76d"
+line_number = "#535763"
+status = "#232532"
+surface = "#3a3d4b"
+panel = "#232532"
+tab_bar = "#232532"
+tab_active = "#282a3a"
+tab_inactive = "#232532"
+hover = "#232532"
+selected = "#313343"
+border = "#181a23"
+border_variant = "#181a23"
+error = "#ff657a"
+warning = "#ff9b5e"
+hint = "#888d94"
+match = "#3e4050"
+match_active = "#ff9b5e"
+string = "#ffd76d"
+func = "#bad761"
+keyword = "#ff657a"
+constant = "#c39ac9"
+type = "#9cd1bb"
+tag = "#ff657a"
+enum = "#9cd1bb"
+attribute = "#9cd1bb"
+var_param = "#c39ac9"
+
+# Zedokai Darker (Filter Ristretto) (dark)
+[terminal.themes."Zedokai Darker (Filter Ristretto)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Darker (Filter Ristretto)".color_aliases]
+fg = "#fff1f3"
+bg = "#2c2525"
+line = "#362f2f"
+text = "#fff1f3"
+muted = "#948a8b"
+accent = "#f9cc6c"
+line_number = "#5b5353"
+status = "#251f1f"
+surface = "#403838"
+panel = "#251f1f"
+tab_bar = "#251f1f"
+tab_active = "#2c2525"
+tab_inactive = "#251f1f"
+hover = "#251f1f"
+selected = "#362f2f"
+border = "#171414"
+border_variant = "#171414"
+error = "#fd6883"
+warning = "#f38d70"
+hint = "#948a8b"
+match = "#423b3b"
+match_active = "#f38d70"
+string = "#f9cc6c"
+func = "#adda78"
+keyword = "#fd6883"
+constant = "#a8a9eb"
+type = "#85dacc"
+tag = "#fd6883"
+enum = "#85dacc"
+attribute = "#85dacc"
+var_param = "#a8a9eb"
+
+# Zedokai Darker (Filter Spectrum) (dark)
+[terminal.themes."Zedokai Darker (Filter Spectrum)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Darker (Filter Spectrum)".color_aliases]
+fg = "#f7f1ff"
+bg = "#222222"
+line = "#2c2c2c"
+text = "#f7f1ff"
+muted = "#8b888f"
+accent = "#fce566"
+line_number = "#525053"
+status = "#1c1c1c"
+surface = "#363537"
+panel = "#1c1c1c"
+tab_bar = "#1c1c1c"
+tab_active = "#222222"
+tab_inactive = "#1c1c1c"
+hover = "#1c1c1c"
+selected = "#2c2c2c"
+border = "#0f0f0f"
+border_variant = "#0f0f0f"
+error = "#fc618d"
+warning = "#fd9353"
+hint = "#8b888f"
+match = "#383838"
+match_active = "#fd9353"
+string = "#fce566"
+func = "#7bd88f"
+keyword = "#fc618d"
+constant = "#948ae3"
+type = "#5ad4e6"
+tag = "#fc618d"
+enum = "#5ad4e6"
+attribute = "#5ad4e6"
+var_param = "#948ae3"
+
+# Zedokai Darker (Filter Machine) (dark)
+[terminal.themes."Zedokai Darker (Filter Machine)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Darker (Filter Machine)".color_aliases]
+fg = "#f2fffc"
+bg = "#273136"
+line = "#313b3f"
+text = "#f2fffc"
+muted = "#8b9798"
+accent = "#ffed72"
+line_number = "#545f62"
+status = "#222a2f"
+surface = "#3a4449"
+panel = "#222a2f"
+tab_bar = "#222a2f"
+tab_active = "#273136"
+tab_inactive = "#222a2f"
+hover = "#222a2f"
+selected = "#313b3f"
+border = "#171d20"
+border_variant = "#171d20"
+error = "#ff6d7e"
+warning = "#ffb270"
+hint = "#8b9798"
+match = "#3d474c"
+match_active = "#ffb270"
+string = "#ffed72"
+func = "#a2e57b"
+keyword = "#ff6d7e"
+constant = "#baa0f8"
+type = "#7cd5f1"
+tag = "#ff6d7e"
+enum = "#7cd5f1"
+attribute = "#7cd5f1"
+var_param = "#baa0f8"
+
+# Zedokai Darker Classic (dark)
+[terminal.themes."Zedokai Darker Classic"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Darker Classic".color_aliases]
+fg = "#fdfff1"
+bg = "#272822"
+line = "#31322c"
+text = "#fdfff1"
+muted = "#919288"
+accent = "#e6db74"
+line_number = "#57584f"
+status = "#20211c"
+surface = "#3b3c35"
+panel = "#20211c"
+tab_bar = "#20211c"
+tab_active = "#272822"
+tab_inactive = "#20211c"
+hover = "#20211c"
+selected = "#31322c"
+border = "#131310"
+border_variant = "#131310"
+error = "#f92672"
+warning = "#fd971f"
+hint = "#919288"
+match = "#3d3e38"
+match_active = "#fd971f"
+string = "#e6db74"
+func = "#a6e22e"
+keyword = "#f92672"
+constant = "#ae81ff"
+type = "#66d9ef"
+tag = "#f92672"
+enum = "#66d9ef"
+attribute = "#66d9ef"
+var_param = "#ae81ff"
+
+# Zedokai Light (light)
+[terminal.themes."Zedokai Light"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Light".color_aliases]
+fg = "#29242a"
+bg = "#faf4f2"
+line = "#f0eae9"
+text = "#29242a"
+muted = "#918c8e"
+accent = "#cc7a0a"
+line_number = "#bfb9ba"
+status = "#f2edeb"
+surface = "#fefaf9"
+panel = "#f2edeb"
+tab_bar = "#f2edeb"
+tab_active = "#faf4f2"
+tab_inactive = "#f2edeb"
+hover = "#f2edeb"
+selected = "#f0eae9"
+border = "#d2cdcb"
+border_variant = "#d2cdcb"
+error = "#e14775"
+warning = "#e16032"
+hint = "#918c8e"
+match = "#eed9d2"
+match_active = "#e16032"
+string = "#cc7a0a"
+func = "#269d69"
+keyword = "#e14775"
+constant = "#7058be"
+type = "#1c8ca8"
+tag = "#e14775"
+enum = "#1c8ca8"
+attribute = "#1c8ca8"
+var_param = "#7058be"
+
+# Zedokai Light (Filter Sun) (light)
+[terminal.themes."Zedokai Light (Filter Sun)"]
+"theme_default" = { fg = "$fg", bg = "$bg", attrs = "Default" }
+"text.normal" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"text.unfocused" = { fg = "$muted", bg = "theme_default", attrs = "Dim" }
+"text.error" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"text.highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"error_message" = { fg = "$error", bg = "theme_default", attrs = "Bold" }
+"highlight" = { fg = "$bg", bg = "$warning", attrs = "Bold" }
+"status.bar" = { fg = "$text", bg = "$status", attrs = "theme_default" }
+"status.command_bar" = { fg = "$text", bg = "$surface", attrs = "theme_default" }
+"status.history" = { fg = "$muted", bg = "$surface", attrs = "theme_default" }
+"status.history.hints" = { fg = "$hint", bg = "$surface", attrs = "theme_default" }
+"status.notification" = { fg = "$text", bg = "$status", attrs = "Bold" }
+"tab.focused" = { fg = "$fg", bg = "$tab_active", attrs = "Bold" }
+"tab.unfocused" = { fg = "$muted", bg = "$tab_inactive", attrs = "Dim" }
+"tab.bar" = { fg = "$muted", bg = "$tab_bar", attrs = "theme_default" }
+"widgets.list.header" = { fg = "$accent", bg = "theme_default", attrs = "Bold" }
+"widgets.form.label" = { fg = "$func", bg = "theme_default", attrs = "Bold" }
+"widgets.form.field" = { fg = "theme_default", bg = "$hover", attrs = "theme_default" }
+"widgets.form.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"widgets.options.highlighted" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.sidebar" = { fg = "$muted", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_divider" = { fg = "$border_variant", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_account_name" = { fg = "$accent", bg = "$panel", attrs = "Bold" }
+"mail.sidebar_unread_count" = { fg = "$accent", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_index" = { fg = "$line_number", bg = "$panel", attrs = "theme_default" }
+"mail.sidebar_highlighted" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_name" = { fg = "mail.sidebar_highlighted_account", bg = "mail.sidebar_highlighted_account", attrs = "Bold" }
+"mail.sidebar_highlighted_account_unread_count" = { fg = "$accent", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account_index" = { fg = "$text", bg = "$hover", attrs = "Bold" }
+"mail.sidebar_highlighted_account" = { fg = "$text", bg = "$hover", attrs = "theme_default" }
+"mail.listing.compact" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.compact.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.compact.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.compact.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.compact.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.plain" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.plain.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.plain.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.plain.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.plain.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.conversations" = { fg = "theme_default", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.subject" = { fg = "theme_default", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.from" = { fg = "$func", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.date" = { fg = "$muted", bg = "$bg", attrs = "theme_default" }
+"mail.listing.conversations.unseen" = { fg = "$string", bg = "$bg", attrs = "Bold" }
+"mail.listing.conversations.highlighted" = { fg = "$fg", bg = "$match", attrs = "Bold" }
+"mail.listing.conversations.selected" = { fg = "$fg", bg = "$selected", attrs = "Bold" }
+"mail.listing.conversations.highlighted_selected" = { fg = "$bg", bg = "$accent", attrs = "Bold" }
+"mail.listing.attachment_flag" = { fg = "$tag", bg = "theme_default", attrs = "Bold" }
+"mail.listing.thread_snooze_flag" = { fg = "$hint", bg = "theme_default", attrs = "theme_default" }
+"mail.listing.tag_default" = { fg = "$bg", bg = "$attribute", attrs = "Bold" }
+"mail.listing.highlight_self" = { fg = "$error", bg = "$match", attrs = "Underline" }
+"mail.view.headers" = { fg = "$var_param", bg = "theme_default", attrs = "Bold" }
+"mail.view.headers_names" = { fg = "$attribute", bg = "theme_default", attrs = "theme_default" }
+"mail.view.body" = { fg = "theme_default", bg = "theme_default", attrs = "theme_default" }
+"mail.view.thread.indentation.a" = { fg = "theme_default", bg = "$keyword", attrs = "theme_default" }
+"mail.view.thread.indentation.b" = { fg = "theme_default", bg = "$func", attrs = "theme_default" }
+"mail.view.thread.indentation.c" = { fg = "theme_default", bg = "$constant", attrs = "theme_default" }
+"mail.view.thread.indentation.d" = { fg = "theme_default", bg = "$type", attrs = "theme_default" }
+"mail.view.thread.indentation.e" = { fg = "theme_default", bg = "$tag", attrs = "theme_default" }
+"mail.view.thread.indentation.f" = { fg = "theme_default", bg = "$enum", attrs = "theme_default" }
+"pager.highlight_search" = { fg = "$bg", bg = "$match", attrs = "Bold" }
+"pager.highlight_search_current" = { fg = "$bg", bg = "$match_active", attrs = "Bold" }
+[terminal.themes."Zedokai Light (Filter Sun)".color_aliases]
+fg = "#2c232e"
+bg = "#f8efe7"
+line = "#eee5de"
+text = "#2c232e"
+muted = "#92898a"
+accent = "#b16803"
+line_number = "#beb5b3"
+status = "#ece5df"
+surface = "#fdf7f3"
+panel = "#ece5df"
+tab_bar = "#ece5df"
+tab_active = "#f8efe7"
+tab_inactive = "#ece5df"
+hover = "#ece5df"
+selected = "#eee5de"
+border = "#ccc5bf"
+border_variant = "#ccc5bf"
+error = "#ce4770"
+warning = "#d4572b"
+hint = "#92898a"
+match = "#eed8c4"
+match_active = "#d4572b"
+string = "#b16803"
+func = "#218871"
+keyword = "#ce4770"
+constant = "#6851a2"
+type = "#2473b6"
+tag = "#ce4770"
+enum = "#2473b6"
+attribute = "#2473b6"
+var_param = "#6851a2"

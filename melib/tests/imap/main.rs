@@ -119,6 +119,17 @@ rusty_fork_test! {
         tests::run_imap_watch_startup_unselect();
     }
 
+    /// Regression pin for the `RequiredResponses::NO` zero-valued bit-flag
+    /// bug on a server that does not advertise `UNSELECT`: the RFC 3691
+    /// fallback (`SELECT` a nonexistent mailbox, expect a tagged `NO`) must
+    /// clear the main connection's selection without emitting an
+    /// ERROR-level `BackendEvent`, and the watch must reach `IDLE`. See
+    /// `tests::run_imap_watch_startup_unselect_fallback_no`.
+    #[test]
+    fn test_imap_watch_startup_unselect_fallback_no() {
+        tests::run_imap_watch_startup_unselect_fallback_no();
+    }
+
     #[test]
     fn test_imap_watch_id_gated_push() {
         tests::run_imap_watch_id_gated_push();
@@ -309,7 +320,6 @@ pub mod server {
     }
 
     /// Server state with only one mailbox (INBOX).
-    #[derive(Default)]
     pub struct ServerState {
         pub envelopes: IndexMap<UID, Mail>,
         pub next_uid: UID,
@@ -408,10 +418,47 @@ pub mod server {
         /// and the connection loop gains a `UID SEARCH X-GM-RAW {N}`
         /// literal continuation arm.
         pub advertise_x_gm_ext_1: bool,
+        /// When `true` (the default), the post-auth `M3 CAPABILITY` reply
+        /// advertises `UNSELECT`, and the client uses the RFC 4315
+        /// `UNSELECT` command to drop a selection. When `false`, the mock
+        /// emulates servers that omit `UNSELECT` (e.g. QQ Mail): the
+        /// capability list drops it, and a `SELECT` of a nonexistent
+        /// mailbox is answered with a tagged `NO` while the session is
+        /// treated as unselected, exercising the client's RFC 3691
+        /// fallback.
+        pub advertise_unselect: bool,
         /// The raw literal bytes (query string, without the trailing
         /// CRLF) received by each `UID SEARCH X-GM-RAW {N}` continuation
         /// exchange, for assertions.
         pub x_gm_raw_literals: Vec<Vec<u8>>,
+    }
+
+    impl Default for ServerState {
+        fn default() -> Self {
+            Self {
+                envelopes: IndexMap::new(),
+                next_uid: 0,
+                uidvalidity: 0,
+                stale_status_when_selected: false,
+                replay_real_push_bytes: false,
+                idle_no_push: false,
+                push_glued_at_idle_start: false,
+                ignore_done: false,
+                suppress_push_when_multi_selected: false,
+                id_gated_push: false,
+                glue_exists_after_done: false,
+                push_before_continuation: false,
+                selected_sessions: std::collections::HashMap::new(),
+                extra_mailbox: None,
+                uid_fetch_flags_drop_uid: false,
+                uid_fetch_drop_uid_all: false,
+                advertise_x_gm_ext_1: false,
+                // Most tests need the historical behavior: `UNSELECT` is
+                // advertised, so the client takes the RFC 4315 path.
+                advertise_unselect: true,
+                x_gm_raw_literals: Vec::new(),
+            }
+        }
     }
 
     impl ServerState {
@@ -688,13 +735,23 @@ pub mod server {
                     };
                     // Gmail emulation (see `ServerState::advertise_x_gm_ext_1`):
                     // append `X-GM-EXT-1` to the post-auth capability list.
-                    let advertise_x_gm_ext_1 = state.lock().unwrap().advertise_x_gm_ext_1;
-                    let m3_reply: &[u8] = if advertise_x_gm_ext_1 {
-                        b"* CAPABILITY IMAP4rev1 ID IDLE UNSELECT ENABLE X-GM-EXT-1\r\nM3 OK Success\r\n"
-                    } else {
-                        b"* CAPABILITY IMAP4rev1 ID IDLE UNSELECT ENABLE\r\nM3 OK Success\r\n"
+                    // `UNSELECT` is only advertised when
+                    // `ServerState::advertise_unselect` is set (the default),
+                    // preserving the historical capability bytes exactly.
+                    let (advertise_x_gm_ext_1, advertise_unselect) = {
+                        let state_lck = state.lock().unwrap();
+                        (state_lck.advertise_x_gm_ext_1, state_lck.advertise_unselect)
                     };
-                    block_on(tcp_stream.write_all(m3_reply)).unwrap();
+                    let mut m3_reply = String::from("* CAPABILITY IMAP4rev1 ID IDLE");
+                    if advertise_unselect {
+                        m3_reply.push_str(" UNSELECT");
+                    }
+                    m3_reply.push_str(" ENABLE");
+                    if advertise_x_gm_ext_1 {
+                        m3_reply.push_str(" X-GM-EXT-1");
+                    }
+                    m3_reply.push_str("\r\nM3 OK Success\r\n");
+                    block_on(tcp_stream.write_all(m3_reply.as_bytes())).unwrap();
                     // The capability list above advertises `ID`, so a
                     // client with `use_id` enabled (melib's default) sends
                     // `M4 ID NIL` and waits for its reply before the connect
@@ -1133,6 +1190,38 @@ pub mod server {
                             tcp_stream.flush().await.unwrap();
                         }
                         select if select.starts_with("SELECT ") => {
+                            // Servers without `UNSELECT` (see
+                            // `ServerState::advertise_unselect`) answer a
+                            // `SELECT` of a nonexistent mailbox with a tagged
+                            // `NO`; the client relies on that as its RFC 3691
+                            // fallback to drop a selection (this is what QQ
+                            // Mail does). Emulate it here: reply `NO` and
+                            // treat the session as unselected.
+                            let (advertise_unselect, extra_mailbox) = {
+                                let state_lck = state.lock().unwrap();
+                                (state_lck.advertise_unselect, state_lck.extra_mailbox.clone())
+                            };
+                            let requested = select
+                                .trim_end_matches("\r\n")
+                                .strip_prefix("SELECT ")
+                                .unwrap_or_default()
+                                .trim_matches('"');
+                            let mailbox_exists = requested.eq_ignore_ascii_case("inbox")
+                                || extra_mailbox.as_deref().is_some_and(|extra| extra == requested);
+                            if !advertise_unselect && !mailbox_exists {
+                                if matches!(session_state, SessionState::SelectedMailbox) {
+                                    state.lock().unwrap().session_unselected("INBOX");
+                                }
+                                session_state = SessionState::Authenticated;
+                                status_snapshot = None;
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" NO Folder not exist!\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
                             // A non-INBOX mailbox (see
                             // `ServerState::extra_mailbox`): the mailbox is
                             // always empty. INBOX-only session counting
@@ -5625,6 +5714,7 @@ hello new world b.
             uid_fetch_flags_drop_uid: false,
             uid_fetch_drop_uid_all: false,
             advertise_x_gm_ext_1: false,
+            advertise_unselect: true,
             x_gm_raw_literals: vec![],
         }));
         {
@@ -7994,6 +8084,240 @@ hello new world.
         watch_loops_handle.join().unwrap();
         loops_handle.join().unwrap();
     }
+    /// Regression pin for the `RequiredResponses::NO` zero-valued bit-flag
+    /// bug. The mock does not advertise `UNSELECT` (see
+    /// `ServerState::advertise_unselect`), so `Connection::unselect` must
+    /// take the RFC 3691 fallback: `SELECT` a nonexistent mailbox and
+    /// expect a tagged `NO`. Before the fix `RequiredResponses::NO` was `0`,
+    /// so the `read_response` expected-`NO` guard
+    /// (`required_responses.intersects(RequiredResponses::NO)`) never
+    /// matched: the tagged `NO` fell through to the BAD/`NO` error path,
+    /// emitted an ERROR-level `BackendEvent::Notice` and failed
+    /// `ImapType::watch` at startup (the `imap.watch().unwrap()` below
+    /// would panic). With a real bit the fallback succeeds: the main
+    /// connection drops INBOX, the watch connection EXAMINEs it and reaches
+    /// `IDLE`, and no ERROR notice is emitted.
+    pub(crate) fn run_imap_watch_startup_unselect_fallback_no() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+        let (seed_mail_1, seed_mail_2, _new_mail) = gated_push_test_mails();
+
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            advertise_unselect: false,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        // Long heartbeat and default sweep interval: within the bounded
+        // observation window only the watch startup runs, which is the
+        // code path under test.
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // Precondition: the warm start left the main connection holding
+        // INBOX selected (the transient selection the fallback must clear
+        // at watch startup).
+        assert!(
+            main_commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("SELECT INBOX")),
+            "warm start must have selected INBOX on the main connection"
+        );
+        assert_eq!(
+            server_state.lock().unwrap().selected_session_count("INBOX"),
+            1,
+            "before the watch starts, exactly the main connection holds INBOX selected"
+        );
+        let snapshot_len = main_commands.lock().unwrap().len();
+        // Events emitted before the watch starts are unrelated to the path
+        // under test.
+        let event_snapshot_len = backend_event_queue.lock().unwrap().len();
+
+        // The fallback path must not fail: `watch()` returning `Err` here is
+        // the pre-fix failure mode and would panic.
+        let mut watch_fut = Box::pin(imap.watch().unwrap().into_future());
+        let (watch_conn_sender, watch_conn_receiver) = unbounded();
+        let watch_conn = ImapServerStream::new(
+            &listener,
+            &mut watch_fut,
+            (watch_conn_sender.clone(), watch_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let watch_commands = Arc::clone(&watch_conn.received_commands);
+        let watch_conn_loop = watch_conn.loop_handler("watch");
+        let watch_loops_handle = std::thread::spawn(move || {
+            block_on(watch_conn_loop);
+        });
+
+        block_on(async {
+            let deadline = std::time::Instant::now() + WATCH_TEST_DEADLINE;
+            // First wait until the main connection has sent the RFC 3691
+            // fallback `SELECT` of the nonexistent mailbox.
+            loop {
+                if main_commands.lock().unwrap()[snapshot_len..]
+                    .iter()
+                    .any(|l| l.contains("SELECT blurdybloop"))
+                {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "the main connection did not fall back to selecting a nonexistent \
+                         mailbox within {WATCH_TEST_DEADLINE:?}; post-snapshot main log: {:?}",
+                        main_commands.lock().unwrap()[snapshot_len..].to_vec()
+                    );
+                }
+                match future::select(watch_fut.as_mut(), smol::Timer::after(WATCH_TEST_POLL_TICK))
+                    .await
+                {
+                    Either::Left(((item, rest), _tick)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        if let Some(ev) = item {
+                            let _ = ev.unwrap();
+                        }
+                    }
+                    Either::Right((_tick, _pending)) => {}
+                }
+            }
+            // Then wait until the watch connection has reached IDLE: the
+            // tagged NO must have been accepted as the expected response,
+            // so the watch startup sequence continued past the selection
+            // cleanup.
+            loop {
+                if watch_commands
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.contains("IDLE"))
+                {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "the watch connection did not reach IDLE within {WATCH_TEST_DEADLINE:?}; \
+                         watch command log: {:?}",
+                        watch_commands.lock().unwrap()
+                    );
+                }
+                match future::select(watch_fut.as_mut(), smol::Timer::after(WATCH_TEST_POLL_TICK))
+                    .await
+                {
+                    Either::Left(((item, rest), _tick)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        if let Some(ev) = item {
+                            let _ = ev.unwrap();
+                        }
+                    }
+                    Either::Right((_tick, _pending)) => {}
+                }
+            }
+            // Terminal state of the invariant: exactly one session (the
+            // watch connection) holds INBOX selected. The mock updates
+            // `selected_sessions` while handling the commands, so the
+            // bounded wait lets the fallback's decrement settle.
+            loop {
+                if server_state.lock().unwrap().selected_session_count("INBOX") == 1 {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "exactly the watch connection must hold INBOX selected after the \
+                         fallback, but {} sessions do; main log: {:?}",
+                        server_state.lock().unwrap().selected_session_count("INBOX"),
+                        main_commands.lock().unwrap()[snapshot_len..].to_vec()
+                    );
+                }
+                match future::select(watch_fut.as_mut(), smol::Timer::after(WATCH_TEST_POLL_TICK))
+                    .await
+                {
+                    Either::Left(((item, rest), _tick)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        if let Some(ev) = item {
+                            let _ = ev.unwrap();
+                        }
+                    }
+                    Either::Right((_tick, _pending)) => {}
+                }
+            }
+        });
+
+        // The expected tagged NO must have been handled as expected, not as
+        // an error: no ERROR-level `BackendEvent::Notice` may have been
+        // emitted while the watch started.
+        let error_notices: Vec<String> = backend_event_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(event_snapshot_len)
+            .filter(|(_, be)| {
+                matches!(
+                    be,
+                    BackendEvent::Notice {
+                        level: LogLevel::ERROR,
+                        ..
+                    }
+                )
+            })
+            .map(|(_, be)| format!("{be:?}"))
+            .collect();
+        assert!(
+            error_notices.is_empty(),
+            "the expected NO from the RFC 3691 fallback must not produce ERROR notices, got: \
+             {error_notices:?}"
+        );
+
+        watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        watch_loops_handle.join().unwrap();
+        loops_handle.join().unwrap();
+    }
+
     ///
     /// Test for the `id_gated_push` mock mode: a server that only pushes
     /// new-mail `* EXISTS` during IDLE to sessions that identified

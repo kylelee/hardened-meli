@@ -625,6 +625,13 @@ pub fn border_set_for(ascii_drawing: bool) -> RatatuiBorderSet<'static> {
 /// pre-existing boundary glyphs (a `Block` cannot render joints); interior
 /// dividers that must join keep using `create_box`.
 ///
+/// One column *outside* `area` can be written: when a glyph spanning two
+/// grid columns (see `Cell::spans_two_columns`) sits immediately left of
+/// the frame, the ring blit overwrites its continuation cell, so the torn
+/// first half at `x0 - 1` is blanked. Callers must register that column
+/// for flushing along with the frame ring — [`frame_flush_areas`] returns
+/// exactly the areas to push.
+///
 /// Areas narrower than two columns or shorter than two rows cannot hold a
 /// frame; they are returned unchanged and nothing is drawn.
 pub fn draw_rounded_frame(grid: &mut CellBuffer, area: Area, border_attr: ThemeAttribute) -> Area {
@@ -661,21 +668,65 @@ pub fn draw_rounded_frame(grid: &mut CellBuffer, area: Area, border_attr: ThemeA
         blit_ring_cell(grid, 0, y);
         blit_ring_cell(grid, last_col, y);
     }
+    // A glyph spanning two grid columns — genuinely wide, East-Asian
+    // Ambiguous (the grid reserves a continuation cell for those even
+    // though terminals may render them one column wide), or the leading
+    // cell of a `FORCE_EMOJI` cluster; see `Cell::spans_two_columns` —
+    // sitting immediately left of the frame straddles the border: its
+    // second half (the frame's left column) was just overwritten by the
+    // ring, leaving a torn first half outside. Blanked here, the edge is
+    // clean; leaving it, terminals render the orphan half inconsistently
+    // (half-width glyph or tofu), which reads as underlying text bleeding
+    // into the dialog's left edge. The Ambiguous case is deliberately
+    // conservative: on a narrow-rendering terminal the blanked column
+    // could have shown the glyph, but the grid must keep matching
+    // `write_string`'s two-column accounting.
+    if x0 > 0 {
+        for y in y0..=area.bottom_right().1 {
+            if let Some(cell) = grid.get_mut(x0 - 1, y) {
+                if cell.spans_two_columns() {
+                    cell.set_ch(' ');
+                }
+            }
+        }
+    }
     area.skip(1, 1).skip_rows_from_end(1).skip_cols_from_end(1)
 }
 
-/// The four border strips (top/bottom rows, left/right columns) of `area`.
+/// The areas [`draw_rounded_frame`] writes over `area`, for flushing.
 ///
-/// For callers that blit a frame and must push the touched cells for
-/// flushing. Degenerate areas clamp: every strip stays within `area`,
-/// never out of bounds.
-pub fn frame_ring_areas(area: Area) -> [Area; 4] {
-    [
-        area.nth_row(0),
-        area.nth_row(area.height().saturating_sub(1)),
-        area.nth_col(0),
-        area.nth_col(area.width().saturating_sub(1)),
-    ]
+/// The four border strips (top/bottom rows, left/right columns), plus —
+/// when the frame has a column to its left — that leading gutter column,
+/// where a straddling two-column glyph's torn first half is blanked (see
+/// `Cell::spans_two_columns`).
+///
+/// Callers that blit a frame must push the returned areas. Omitting the
+/// gutter column leaves the blanked cells unemitted on incremental
+/// redraws: the grid is clean, but the terminal keeps rendering the stale
+/// half glyph. Degenerate areas (too small for a frame) and frames flush
+/// with the screen's left edge report only the ring strips, mirroring
+/// what `draw_rounded_frame` can have written; every strip stays within
+/// `area` or the grid canvas, never out of bounds.
+pub fn frame_flush_areas(grid: &CellBuffer, area: Area) -> smallvec::SmallVec<[Area; 5]> {
+    let mut areas = smallvec::SmallVec::<[Area; 5]>::new();
+    areas.push(area.nth_row(0));
+    areas.push(area.nth_row(area.height().saturating_sub(1)));
+    areas.push(area.nth_col(0));
+    areas.push(area.nth_col(area.width().saturating_sub(1)));
+    let (x0, y0) = area.upper_left();
+    // Mirror `draw_rounded_frame`'s no-op guard: a frame that was not
+    // drawn cannot have blanked a gutter column. `area` itself cannot
+    // extend leftward, so the gutter is carved from the grid canvas.
+    if x0 > 0 && area.width() >= 2 && area.height() >= 2 {
+        areas.push(
+            grid.area()
+                .skip_cols(x0 - 1)
+                .nth_col(0)
+                .skip_rows(y0)
+                .take_rows(area.height()),
+        );
+    }
+    areas
 }
 
 /// Convert a meli [`Area`] into a ratatui [`Rect`], keeping the absolute
@@ -2260,6 +2311,44 @@ mod tests {
         println!("draw_rounded_frame_rounded_ring_and_inner: ring + inner pinned");
     }
 
+    /// A wide character straddling the frame's left border (first half
+    /// outside at `x0 - 1`, second half under the ring at `x0`) is torn by
+    /// the ring blit. The first half must be blanked so terminals do not
+    /// render an orphan half glyph at the dialog's edge; narrow neighbors
+    /// and non-straddling rows are left alone.
+    #[test]
+    fn draw_rounded_frame_blanks_straddling_wide_char() {
+        let mut screen = Screen::<Virtual>::new(ThemeAttribute::default());
+        assert!(screen.resize(12, 8));
+        let grid = screen.grid_mut();
+        // Subject row 3: 中 at x=2 straddles a frame starting at x=3;
+        // row 4: narrow 'x' at x=2 must survive.
+        grid[(2, 3)].set_ch('\u{4e2d}');
+        grid[(2, 4)].set_ch('x');
+        // Row 5: wide char NOT adjacent to the frame (x=0) stays.
+        grid[(0, 5)].set_ch('\u{6587}');
+        let _ = grid;
+        let area = screen.area().skip(3, 1).take(6, 6);
+        let _inner = draw_rounded_frame(screen.grid_mut(), area, ThemeAttribute::default());
+        let grid = screen.grid();
+        assert_eq!(
+            grid[(2, 3)].ch(),
+            ' ',
+            "straddling first half must be blanked"
+        );
+        assert_eq!(
+            grid[(3, 3)].ch(),
+            '│',
+            "ring cell over the wide char's second half"
+        );
+        assert_eq!(grid[(2, 4)].ch(), 'x', "narrow neighbor untouched");
+        assert_eq!(
+            grid[(0, 5)].ch(),
+            '\u{6587}',
+            "non-adjacent wide char untouched"
+        );
+    }
+
     /// With `ascii_drawing` enabled the frame uses meli's ASCII boundary
     /// glyphs (`+`/`-`/`|`), matching `create_box`'s ASCII mode.
     #[test]
@@ -2281,8 +2370,10 @@ mod tests {
         println!("draw_rounded_frame_ascii_set: ascii glyphs pinned");
     }
 
-    /// Areas too small to hold a frame are no-ops, and
-    /// `frame_ring_areas` degenerates to empty strips without panicking.
+    /// Areas too small to hold a frame are no-ops, and `frame_flush_areas`
+    /// degenerates to the ring strips without panicking: every strip stays
+    /// within the area and no gutter column is reported for a frame that
+    /// could not have been drawn.
     #[test]
     fn draw_rounded_frame_tiny_area_noop() {
         let mut screen = Screen::<Virtual>::new(ThemeAttribute::default());
@@ -2293,12 +2384,108 @@ mod tests {
         assert_eq!(ret, area, "tiny area returned unchanged");
         assert_eq!(screen.grid(), &before, "tiny area draw must not write");
 
-        for strip in frame_ring_areas(area) {
+        let strips = frame_flush_areas(screen.grid(), area);
+        assert_eq!(strips.len(), 4, "no gutter for a frame that was not drawn");
+        for strip in strips {
             assert!(
                 area.contains(strip) || strip.is_empty(),
                 "ring strips must stay within the area"
             );
         }
         println!("draw_rounded_frame_tiny_area_noop: guards pinned");
+    }
+
+    /// The tear guard also covers the grid-wide glyph classes plain
+    /// `wcwidth` misses: East-Asian Ambiguous characters (`’`, laid out two
+    /// columns by `width_cjk` while `wcwidth` reports one) and
+    /// emoji-presentation clusters (`FORCE_EMOJI` on a narrow base). Both
+    /// straddling glyphs blank; box-drawing glyphs — Ambiguous per
+    /// `width_cjk` but pinned to one column by `write_string` — and plain
+    /// narrow neighbors survive.
+    #[test]
+    fn draw_rounded_frame_blanks_straddling_ambiguous_and_emoji_glyphs() {
+        let mut screen = Screen::<Virtual>::new(ThemeAttribute::default());
+        assert!(screen.resize(12, 9));
+        let grid = screen.grid_mut();
+        // Row 3: Ambiguous `’` at x=2 straddles a frame starting at x=3;
+        // its continuation cell sits at x=3.
+        grid[(2, 3)].set_ch('\u{2019}');
+        grid[(3, 3)].set_ch(' ').set_empty(true);
+        // Row 4: narrow `❤` carrying `FORCE_EMOJI` (the leading cell of an
+        // emoji-presentation cluster) straddles the same frame.
+        grid[(2, 4)].set_ch('\u{2764}');
+        grid[(2, 4)].set_attrs(Attr::FORCE_EMOJI);
+        grid[(3, 4)].set_ch(' ').set_empty(true);
+        // Row 5: box-drawing `│` — Ambiguous per `width_cjk` but pinned to
+        // one column — must survive the guard.
+        grid[(2, 5)].set_ch('\u{2502}');
+        // Row 6: plain narrow 'x' must survive.
+        grid[(2, 6)].set_ch('x');
+        let area = screen.area().skip(3, 1).take(6, 7);
+        let _inner = draw_rounded_frame(screen.grid_mut(), area, ThemeAttribute::default());
+        let grid = screen.grid();
+        assert_eq!(
+            grid[(2, 3)].ch(),
+            ' ',
+            "straddling Ambiguous char must be blanked"
+        );
+        assert_eq!(
+            grid[(2, 4)].ch(),
+            ' ',
+            "straddling FORCE_EMOJI glyph must be blanked"
+        );
+        assert_eq!(
+            grid[(2, 5)].ch(),
+            '\u{2502}',
+            "box-drawing neighbor survives"
+        );
+        assert_eq!(grid[(2, 6)].ch(), 'x', "narrow neighbor survives");
+        assert_eq!(
+            grid[(3, 3)].ch(),
+            '\u{2502}',
+            "ring cell over the Ambiguous char's continuation"
+        );
+        println!(
+            "draw_rounded_frame_blanks_straddling_ambiguous_and_emoji_glyphs: \
+             ambiguous + FORCE_EMOJI blanked, pinned-column glyphs survive"
+        );
+    }
+
+    /// `frame_flush_areas` reports the ring strips plus the leading gutter
+    /// column exactly when `draw_rounded_frame` may have blanked torn wide
+    /// glyphs there: five areas for a frame with a column to its left, four
+    /// for a frame flush with the screen edge or for a degenerate area.
+    #[test]
+    fn frame_flush_areas_include_gutter_column() {
+        let mut screen = Screen::<Virtual>::new(ThemeAttribute::default());
+        assert!(screen.resize(12, 8));
+        let area = screen.area().skip(3, 1).take(6, 6);
+        let areas = frame_flush_areas(screen.grid(), area);
+        assert_eq!(areas.len(), 5, "four ring strips + one gutter column");
+        for strip in &areas[..4] {
+            assert!(area.contains(*strip), "ring strip outside area: {strip:?}");
+        }
+        // The gutter is column x0 - 1 over exactly the frame's rows.
+        let gutter = areas[4];
+        assert_eq!(gutter.upper_left(), (2, 1), "gutter column and top row");
+        assert_eq!(gutter.width(), 1);
+        assert_eq!(gutter.height(), 6, "gutter spans the frame's rows");
+
+        // Flush with the left edge there is no gutter column to report.
+        let areas = frame_flush_areas(screen.grid(), screen.area());
+        assert_eq!(areas.len(), 4, "no gutter for an area at x0 == 0");
+
+        // A degenerate area cannot hold a frame, so nothing outside it is
+        // reported.
+        let tiny = screen.area().skip(2, 2).take(1, 1);
+        let areas = frame_flush_areas(screen.grid(), tiny);
+        assert_eq!(areas.len(), 4, "no gutter for a frame that was not drawn");
+        for strip in &areas {
+            assert!(
+                tiny.contains(*strip) || strip.is_empty(),
+                "ring strips must stay within the tiny area"
+            );
+        }
+        println!("frame_flush_areas_include_gutter_column: gutter pinned");
     }
 }

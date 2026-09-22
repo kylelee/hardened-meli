@@ -1638,6 +1638,24 @@ impl Component for Composer {
                 self.mode = ViewMode::Edit;
                 self.set_dirty(true);
             }
+            (
+                ViewMode::WaitingForSendResult(ref dialog, _),
+                UIEvent::ComponentUnrealize(ref id),
+            ) if *id == dialog.id() => {
+                // The quit binding closes the waiting dialog. Hand the
+                // in-flight send over to the account's background jobs (as
+                // the `n` choice does) instead of dropping the handle, whose
+                // `Drop` would cancel the job.
+                if let ViewMode::WaitingForSendResult(_, handle) =
+                    std::mem::replace(&mut self.mode, ViewMode::Edit)
+                {
+                    context.accounts[&self.account_hash]
+                        .active_jobs
+                        .insert(handle.job_id, JobRequest::SendMessageBackground { handle });
+                }
+                self.set_dirty(true);
+                return true;
+            }
             #[cfg(feature = "gpgme")]
             (ViewMode::SelectKey(_, ref mut selector), UIEvent::ComponentUnrealize(ref id))
                 if *id == selector.id() =>
@@ -3361,6 +3379,71 @@ mod tests {
         );
         let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
         assert!(!replies_contain_kill(&replies, composer.id()));
+    }
+
+    /// Quitting the "waiting for confirmation" dialog must return the
+    /// composer to edit mode; before the fix the `WaitingForSendResult`
+    /// catch-all arm kept the dialog and swallowed every subsequent key. The
+    /// in-flight send is handed to the account's background jobs (as the `n`
+    /// choice does), so the handle must not be dropped.
+    #[test]
+    fn composer_esc_in_waiting_for_send_result_returns_to_edit() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        let handle: JoinHandle<Result<()>> = ctx.main_loop_handler.job_executor.spawn(
+            "test::waiting_for_send_result".into(),
+            async { Ok(()) },
+            IsAsync::Async,
+        );
+        composer.mode = ViewMode::WaitingForSendResult(
+            UIDialog::new(
+                "waiting",
+                vec![
+                    ('c', "force close tab".to_string()),
+                    ('n', "return to edit mode".to_string()),
+                ],
+                true,
+                Some(Box::new(|id: ComponentId, results: &[char]| {
+                    Some(UIEvent::FinishedUIDialog(
+                        id,
+                        Box::new(results.first().cloned().unwrap_or('c')),
+                    ))
+                })),
+                &ctx,
+            ),
+            handle,
+        );
+        let dialog_id = match &composer.mode {
+            ViewMode::WaitingForSendResult(dialog, _) => dialog.id(),
+            _ => unreachable!("test installed a WaitingForSendResult mode"),
+        };
+
+        let mut ev = UIEvent::Input(Key::Esc);
+        assert!(
+            composer.process_event(&mut ev, &mut ctx),
+            "the waiting dialog must consume the quit key"
+        );
+        assert!(
+            matches!(composer.mode, ViewMode::WaitingForSendResult(..)),
+            "before the reply is re-fed the mode must still be WaitingForSendResult"
+        );
+
+        // The main loop feeds component replies (ComponentUnrealize) back in.
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies
+                .iter()
+                .any(|ev| matches!(ev, UIEvent::ComponentUnrealize(id) if *id == dialog_id)),
+            "quit must emit ComponentUnrealize for the waiting dialog, got: {replies:?}"
+        );
+        for mut ev in replies {
+            _ = composer.process_event(&mut ev, &mut ctx);
+        }
+        assert!(
+            matches!(composer.mode, ViewMode::Edit),
+            "quitting the waiting dialog must return to edit mode"
+        );
     }
 
     #[test]

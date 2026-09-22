@@ -39,6 +39,7 @@ use nom::{
 
 use super::*;
 use crate::{
+    backends::utf7::decode_utf7_imap,
     email::{
         address::Address,
         parser::{
@@ -57,7 +58,18 @@ bitflags! {
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct RequiredResponses: u32 {
         /// Require a **tagged** `NO` response.
-        const NO                  = 0;
+        ///
+        /// This must be a real, non-zero bit. It used to be `0`, which made
+        /// the flag a silent no-op: [`bitflags`]' `intersects` is
+        /// `self & other != 0`, so it is always `false` for a zero-valued
+        /// flag. The expected-`NO` guard in `Connection::read_response`
+        /// (`required_responses.intersects(Self::NO)`) therefore never
+        /// matched and an expected tagged `NO` fell through to the BAD/`NO`
+        /// error path, which emits an ERROR-level `BackendEvent::Notice`
+        /// and returns an error. That in turn broke
+        /// `Connection::unselect`'s RFC 3691 fallback (selecting a
+        /// nonexistent mailbox) on servers that do not advertise `UNSELECT`.
+        const NO                  = 1 << 0;
         /// Require an *untagged* `CAPABILITY` response.
         const CAPABILITY          = 1 << 1;
         /// Require an *untagged* `BYE` response.
@@ -543,11 +555,19 @@ pub fn list_mailbox_result(input: &[u8]) -> IResult<&[u8], ImapMailbox> {
             }
             f.imap_path = path.to_string();
             f.hash = MailboxHash::from_bytes(f.imap_path.as_bytes());
-            f.path = if separator == b'/' {
+            // The wire path is mUTF-7 (RFC 3501 §5.1.3). Normalize the
+            // hierarchy separator to `/` *before* decoding: a decoded CJK
+            // mailbox name can itself contain a literal `.` (or whatever the
+            // wire separator is), and replacing separators after decoding
+            // would corrupt such names. A separator byte cannot occur inside
+            // the base64 payload of a mUTF-7 run, since only ASCII
+            // alphanumerics and `+,` are used there.
+            let wire_path = if separator == b'/' {
                 f.imap_path.clone()
             } else {
                 f.imap_path.replace(separator as char, "/")
             };
+            f.path = decode_utf7_imap(&wire_path);
             f.name = if let Some(pos) = f.imap_path.as_bytes().iter().rposition(|&c| c == separator)
             {
                 // `separator` is an arbitrary wire byte; when it matches a
@@ -556,12 +576,12 @@ pub fn list_mailbox_result(input: &[u8]) -> IResult<&[u8], ImapMailbox> {
                 // path instead of panicking on the slice.
                 if let Some(name) = f.imap_path.get(pos + 1..) {
                     f.parent = Some(MailboxHash::from_bytes(&f.imap_path.as_bytes()[..pos]));
-                    name.to_string()
+                    decode_utf7_imap(name)
                 } else {
-                    f.imap_path.clone()
+                    f.path.clone()
                 }
             } else {
-                f.imap_path.clone()
+                f.path.clone()
             };
             f.separator = separator;
 

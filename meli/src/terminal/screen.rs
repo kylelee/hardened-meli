@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use melib::{log, uuid};
 
 use crossterm::{
-    cursor::{Hide, MoveTo, Show},
+    cursor::{Hide, MoveTo, MoveToColumn, Show},
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     queue,
     style::{
@@ -331,6 +331,22 @@ fn write_attr_delta(next: Attr, prev: Attr, stdout: &mut StateStdout) {
     transition!(Attr::HIDDEN, Attribute::Hidden, Attribute::NoHidden);
 }
 
+/// What a horizontal segment emitter must do before writing the next cell to
+/// keep it on its grid column. See
+/// [`Screen::segment_needs_reanchor`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reanchor {
+    /// The natural cursor advance already matches the grid; write the cell as
+    /// is.
+    None,
+    /// Pin the cursor to the grid column with `MoveToColumn(x)`; the walk
+    /// back crossed no `empty` cell, so there is no skipped column to cover.
+    PinOnly,
+    /// Cover the skipped continuation column with a space, then pin the
+    /// cursor with `MoveToColumn(x)`.
+    PinAndCover,
+}
+
 impl Screen<Tty> {
     #[inline]
     pub fn new(theme_default: ThemeAttribute) -> Self {
@@ -473,6 +489,64 @@ impl Screen<Tty> {
         }
     }
 
+    /// Classify how a horizontal segment emitter must fix the cursor before
+    /// writing the cell at `(x, y)` so that it lands on its grid column.
+    ///
+    /// The emitters write cells consecutively and rely on the terminal cursor
+    /// advancing naturally. Any multi-byte glyph can break that assumption,
+    /// because the grid lays text out with `width_cjk` (East-Asian Ambiguous
+    /// characters take two columns, with an `empty` continuation cell) while
+    /// each terminal renders them as one OR two columns:
+    ///
+    /// - An Ambiguous character (`’`, `·`, `→` …) laid out two columns
+    ///   wide: a terminal rendering it narrow advances the cursor one
+    ///   column less than the grid expects, shifting every later glyph of
+    ///   the row - including dialog borders - one column left, which
+    ///   reads as underlying text inserted into the dialog.
+    /// - A wide character whose continuation cell an overlay painted over
+    ///   (dialog border over a CJK listing row): the wide char advances
+    ///   the cursor by two, so the border glyph lands one column right.
+    ///
+    /// An explicit `MoveToColumn(x)` before each cell that follows a
+    /// multi-byte glyph pins it to its grid column under either rendering.
+    ///
+    /// The cell at `xs_start` is never re-anchored, so a segment whose first
+    /// cell lands on a continuation cell gets no pin. `empty` cells never
+    /// trigger a re-anchor either, and they are the only cells the walk back
+    /// skips. The walk returns [`Reanchor::PinAndCover`] only when it actually
+    /// crossed at least one of them (`px < x - 1`): the terminal cursor may
+    /// still sit on that skipped column, so it is covered with a space before
+    /// the jump. When the multi-byte glyph sits immediately before `x`
+    /// (`px == x - 1`) there is no skipped column, so only
+    /// [`Reanchor::PinOnly`] is needed - a space written there would land one
+    /// column past `x` and, when `x` is the segment's last cell, bleed into
+    /// the neighbouring area.
+    fn segment_needs_reanchor(grid: &CellBuffer, x: usize, y: usize, xs_start: usize) -> Reanchor {
+        if x <= xs_start || grid[(x, y)].empty() {
+            return Reanchor::None;
+        }
+        // The emitter never writes `empty` cells, so the terminal cursor
+        // does not advance over them either; look past continuation cells
+        // to the glyph that last moved the cursor. Multi-byte glyphs are
+        // re-anchored unconditionally: East-Asian Ambiguous characters are
+        // laid out two columns wide in the grid (`width_cjk` in
+        // `CellBuffer::write_string`) but terminals render them as either
+        // one or two columns, and either choice must leave every following
+        // glyph on its grid column.
+        let mut px = x - 1;
+        while px > xs_start && grid[(px, y)].empty() {
+            px -= 1;
+        }
+        if grid[(px, y)].empty() || grid[(px, y)].ch().len_utf8() <= 1 {
+            return Reanchor::None;
+        }
+        if px < x - 1 {
+            Reanchor::PinAndCover
+        } else {
+            Reanchor::PinOnly
+        }
+    }
+
     /// Draw only a specific `area` on the screen.
     pub fn draw_horizontal_segment(
         grid: &mut CellBuffer,
@@ -486,9 +560,31 @@ impl Screen<Tty> {
         let mut current_attrs = Attr::DEFAULT;
         let mut current_uri = None;
         let draw_hyperlinks = grid.draw_hyperlinks;
+        let xs_start = xs.start;
         write!(stdout, "\x1B[m").unwrap();
         for x in xs {
             let c = &grid[(x, y)];
+            // A multi-byte glyph before this cell may have advanced the
+            // terminal cursor differently than the grid expects; see
+            // [`Screen::segment_needs_reanchor`].
+            match Self::segment_needs_reanchor(grid, x, y, xs_start) {
+                Reanchor::None => {}
+                Reanchor::PinOnly => {
+                    // The row never changes within a segment write, so a
+                    // column-only jump is enough - and shorter than a full
+                    // MoveTo on CJK-dense rows where this fires per glyph.
+                    queue!(stdout, MoveToColumn(x as u16)).unwrap();
+                }
+                Reanchor::PinAndCover => {
+                    // Cover the column the terminal cursor may still sit on
+                    // (an Ambiguous glyph's continuation on narrow-rendering
+                    // terminals) before jumping: on wide-rendering terminals
+                    // the space lands under the next glyph and is immediately
+                    // overwritten.
+                    write!(stdout, " ").unwrap();
+                    queue!(stdout, MoveToColumn(x as u16)).unwrap();
+                }
+            }
             if draw_hyperlinks {
                 if let Some((uri, end)) = grid.hyperlinks_associations.get(&(x, y)) {
                     if current_uri.take().is_some() {
@@ -538,9 +634,20 @@ impl Screen<Tty> {
     ) {
         queue!(stdout, MoveTo(xs.start as u16, y as u16)).unwrap();
         let mut current_attrs = Attr::DEFAULT;
+        let xs_start = xs.start;
         write!(stdout, "\x1B[m").unwrap();
         for x in xs {
             let c = &grid[(x, y)];
+            match Self::segment_needs_reanchor(grid, x, y, xs_start) {
+                Reanchor::None => {}
+                Reanchor::PinOnly => {
+                    queue!(stdout, MoveToColumn(x as u16)).unwrap();
+                }
+                Reanchor::PinAndCover => {
+                    write!(stdout, " ").unwrap();
+                    queue!(stdout, MoveToColumn(x as u16)).unwrap();
+                }
+            }
             if c.attrs() != current_attrs {
                 write_attr_delta(c.attrs(), current_attrs, stdout);
                 current_attrs = c.attrs();

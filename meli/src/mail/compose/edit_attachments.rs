@@ -176,6 +176,9 @@ impl Component for EditAttachmentsRefMut<'_, '_> {
             );
             let inner_area =
                 crate::terminal::ratatui_bridge::draw_rounded_frame(grid, area, border_attrs);
+            for frame_area in crate::terminal::ratatui_bridge::frame_flush_areas(grid, area) {
+                context.dirty_areas.push_back(frame_area);
+            }
             if attachments_no == 0 {
                 grid.write_string(
                     "No attachments",

@@ -55,7 +55,7 @@ use melib::{
     backends::{
         AccountHash, BackendMailbox, Mailbox, MailboxHash, MailboxPermissions, SpecialUsageMailbox,
     },
-    Result, ToggleFlag,
+    Card, Result, ToggleFlag,
 };
 
 use crate::{
@@ -69,7 +69,7 @@ use crate::{
     mail::Composer,
     terminal::{Area, Attr, CellBuffer, Color, Screen, Virtual},
     types::UIEvent,
-    utilities::{Pager, Selector, StatusBar, Tabbed, UIConfirmationDialog},
+    utilities::{Pager, Selector, StatusBar, Tabbed, UIConfirmationDialog, UIDialog},
     Context, Envelope, Flag, IndexStyle, Key, Mail, ThemeAttribute,
 };
 
@@ -567,6 +567,79 @@ fn golden_tabbed_statusbar_full_frame() {
     record_or_assert("tabbed_statusbar_full_frame", screen.grid());
 }
 
+/// Regression: the contacts tab is a pinned `Tabbed` child, so `Tabbed`
+/// draws no body frame over it. `ContactList` must therefore paint its own
+/// rounded pane ring flush to the tab body. It used to inset its content to
+/// dodge a frame that is only drawn for inset children, which left the
+/// Contacts tab borderless once that frame was scoped to inset children.
+/// Switching to the Contacts tab with `Alt-2` must yield a full-body ring
+/// under the focused tab attribute, with the contact table header on the
+/// first inner row.
+#[test]
+fn golden_tabbed_contacts_full_frame() {
+    let mut ctx = mock_context();
+    let (account_hash, _inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    let mut card = Card::new();
+    card.set_name("Golden Contact".to_string())
+        .set_email("golden@example.com".to_string())
+        .set_url("https://example.com/golden".to_string());
+    ctx.accounts[&account_hash].contacts.add_card(card);
+
+    let mut tabbed = Tabbed::new(
+        vec![
+            Box::new(Listing::new(&mut ctx)),
+            Box::new(ContactList::new(&ctx)),
+        ],
+        &ctx,
+    );
+    tabbed.realize(None, &mut ctx);
+    pump_replies(&mut tabbed, &mut ctx);
+
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    tabbed.draw(screen.grid_mut(), area, &mut ctx);
+
+    let mut event = UIEvent::Input(Key::Alt('2'));
+    assert!(
+        tabbed.process_event(&mut event, &mut ctx),
+        "Alt-2 must switch to the Contacts tab"
+    );
+    pump_replies(&mut tabbed, &mut ctx);
+    tabbed.draw(screen.grid_mut(), area, &mut ctx);
+
+    let grid = screen.grid();
+    let tab_focused = conf::value(&ctx, "tab.focused");
+    /* The tab bar owns row 0, so the contact body spans rows 1..=23 and its
+     * ring corners sit on the body's outermost cells. */
+    assert_eq!(grid[(0, 1)].ch(), '╭', "contacts tab top-left ring corner");
+    assert_eq!(
+        grid[(0, 1)].fg(),
+        tab_focused.fg,
+        "contacts tab ring must use the focused tab attribute"
+    );
+    assert_eq!(
+        grid[(79, 1)].ch(),
+        '╮',
+        "contacts tab top-right ring corner"
+    );
+    assert_eq!(
+        grid[(0, 23)].ch(),
+        '╰',
+        "contacts tab bottom-left ring corner"
+    );
+    assert_eq!(
+        grid[(79, 23)].ch(),
+        '╯',
+        "contacts tab bottom-right ring corner"
+    );
+    let header_row = grid_row_text(grid, 2);
+    assert!(
+        header_row.contains("NAME") && header_row.contains("E-MAIL"),
+        "contact table header must render on the first inner row; row 2 was {header_row:?}"
+    );
+    record_or_assert("tabbed_contacts_full_frame", grid);
+}
+
 /// Insert only [`GOLDEN_SOLO_MAIL`] (seen) so the listing cursor rests on
 /// the single standalone mail deterministically.
 fn insert_solo_mail(context: &Context, mailbox_hash: MailboxHash) {
@@ -595,16 +668,37 @@ fn insert_thread_mails(context: &Context, mailbox_hash: MailboxHash) {
     }
 }
 
+/// Hand the keyboard from the launch-time sidebar focus to the mail list
+/// grid without opening an entry. At `Menu` focus the `open_mailbox`
+/// shortcut only adopts the sidebar-selected mailbox and moves the focus
+/// to the grid; the entry is opened by the separate `open_entry` shortcut
+/// once the grid owns the keyboard.
+fn focus_mail_list_grid(listing: &mut Listing, context: &mut Context) {
+    context.settings.shortcuts.listing.open_mailbox = Key::Char('\n').into();
+    let mut event = UIEvent::Input(Key::Char('\n'));
+    assert!(
+        listing.process_event(&mut event, context),
+        "open_mailbox must move the focus from the sidebar to the grid"
+    );
+    pump_replies(listing, context);
+}
+
 /// Drive `listing` to open the entry under the cursor via the pinned
 /// `open_entry` shortcut, routing the `OpenEntryUnderCursor` `IntraComm`
 /// back in like the main loop does so `Listing.view` is created, then
 /// redraw.
+///
+/// A fresh `Listing` now starts with the keyboard on the visible sidebar,
+/// so the grid focus is established first — otherwise the `open_entry`
+/// key would be consumed by the sidebar's `open_mailbox` arm and only
+/// switch mailboxes.
 fn open_entry_under_cursor(
     listing: &mut Listing,
     context: &mut Context,
     grid: &mut CellBuffer,
     area: Area,
 ) {
+    focus_mail_list_grid(listing, context);
     context.settings.shortcuts.listing.open_entry = Key::Char('\n').into();
     listing.draw(grid, area, context);
     let mut event = UIEvent::Input(Key::Char('\n'));
@@ -650,14 +744,10 @@ fn golden_listing_open_thread() {
     record_or_assert("listing_open_thread", screen.grid());
 }
 
-/// Conversations style with the entry open (Right/Enter): while a view is
-/// open the listing skips its own list-pane frame, and the conversation
-/// list keeps rendering as a subpane in the left third — so that subpane
-/// must draw its own rounded frame, unfocused-styled because the keyboard
-/// focus sits in the `ThreadView` (the convention `ThreadView`'s internal
-/// panes follow). This case pins the three-frame layout: sidebar frame,
-/// conversation-subpane frame, solo-mail `ThreadView` frame, plus the
-/// subject rendering inside the subpane's inner area.
+/// Conversations style, a single-mail entry opened: layout2 — the grid
+/// keeps 30% of the width (focused ring: the keyboard stays on the grid
+/// after opening) and the mail view takes 70% (dimmed), equal in height
+/// (rows 0..=23); the mailbox list is hidden.
 #[test]
 fn golden_conversations_entry_split_frame() {
     let mut ctx = mock_context();
@@ -672,47 +762,46 @@ fn golden_conversations_entry_split_frame() {
     let grid = screen.grid();
     let tab_unfocused = conf::value(&ctx, "tab.unfocused");
     let tab_focused = conf::value(&ctx, "tab.focused");
-    // Sidebar (8 cols) + divider at x=8, so the list pane starts at x=9
-    // (71 cols). The conversation subpane takes the left third
-    // (x=9..=31): its ring owns columns 9 and 31 and rows 0 and 23.
-    assert_eq!(grid[(9, 0)].ch(), '╭', "subpane top-left ring corner");
-    assert_eq!(grid[(31, 0)].ch(), '╮', "subpane top-right ring corner");
-    assert_eq!(grid[(9, 23)].ch(), '╰', "subpane bottom-left ring corner");
-    assert_eq!(grid[(31, 23)].ch(), '╯', "subpane bottom-right ring corner");
-    assert_eq!(grid[(31, 5)].ch(), '│', "subpane right ring column");
+    // The grid subpane keeps 30% (x=0..=23, ring focused — the grid holds
+    // the keyboard), the mail view frames the rest (x=25..=79, ring
+    // dimmed), both full height.
+    assert_eq!(grid[(0, 0)].ch(), '╭', "subpane top-left ring corner");
     assert_eq!(
-        grid[(31, 5)].fg(),
-        tab_unfocused.fg,
-        "subpane ring must use the unfocused attr (focus is in the ThreadView)"
-    );
-    // The solo-mail ThreadView frames the remaining columns (x=33..=79).
-    assert_eq!(grid[(33, 0)].ch(), '╭', "ThreadView top-left ring corner");
-    assert_eq!(grid[(79, 0)].ch(), '╮', "ThreadView top-right ring corner");
-    assert_eq!(
-        grid[(33, 0)].fg(),
+        grid[(0, 0)].fg(),
         tab_focused.fg,
-        "ThreadView ring keeps the focused attr"
+        "subpane ring must use the focused attr (the grid holds the keyboard)"
     );
-    // The first conversation row renders inside the subpane's inner
-    // area, one row below the ring and one column right of it.
+    assert_eq!(grid[(23, 0)].ch(), '╮', "subpane top-right ring corner");
+    assert_eq!(grid[(0, 23)].ch(), '╰', "subpane bottom-left ring corner");
+    assert_eq!(grid[(23, 23)].ch(), '╯', "subpane bottom-right ring corner");
+    let view_left = (24..area.width())
+        .find(|&x| grid[(x, 0)].ch() == '╭')
+        .expect("the view frame must open on row 0");
+    assert_eq!(view_left, 25, "the view takes 70% of the width");
+    assert_eq!(
+        grid[(view_left, 0)].fg(),
+        tab_unfocused.fg,
+        "mail-view frame must use the dimmed attr"
+    );
+    assert_eq!(grid[(79, 0)].ch(), '╮', "mail-view frame top-right corner");
+    assert_eq!(
+        grid[(79, 23)].ch(),
+        '╯',
+        "mail-view frame bottom-right corner"
+    );
+    // The conversation row renders inside the subpane's inner area.
     let first_row = grid_row_text(grid, 1);
     assert!(
         first_row.contains("golden standalone"),
         "first conversation row must render inside the subpane frame; row 1 was {first_row:?}"
     );
-    assert!(
-        !RING_GLYPHS.contains(&grid[(10, 1)].ch()),
-        "subpane inner first column must be content, not ring"
-    );
     record_or_assert("conversations_entry_split_frame", grid);
 }
 
-/// Conversations style, a two-mail thread opened: same three panes, but
-/// the split `ThreadView` draws two frames of its own inside the view
-/// area (at 80 columns the Auto layout takes the horizontal split:
-/// thread list above, mail view below), so the screen carries four
-/// frames — sidebar, conversation subpane, thread list (focused) and
-/// mail view (unfocused).
+/// Conversations style, a two-mail thread opened: layout3 — the grid
+/// keeps 30% (focused ring: the keyboard stays on the grid) and the
+/// thread list takes 70% (dimmed, whole-list render); the mailbox list is
+/// hidden.
 #[test]
 fn golden_conversations_entry_thread_split() {
     let mut ctx = mock_context();
@@ -727,72 +816,48 @@ fn golden_conversations_entry_thread_split() {
     let grid = screen.grid();
     let tab_unfocused = conf::value(&ctx, "tab.unfocused");
     let tab_focused = conf::value(&ctx, "tab.focused");
-    assert_eq!(grid[(9, 0)].ch(), '╭', "subpane top-left ring corner");
-    assert_eq!(grid[(31, 0)].ch(), '╮', "subpane top-right ring corner");
-    assert_eq!(grid[(9, 23)].ch(), '╰', "subpane bottom-left ring corner");
-    assert_eq!(grid[(31, 23)].ch(), '╯', "subpane bottom-right ring corner");
-    assert_eq!(grid[(31, 5)].ch(), '│', "subpane right ring column");
+    assert_eq!(grid[(0, 0)].ch(), '╭', "subpane top-left ring corner");
     assert_eq!(
-        grid[(31, 5)].fg(),
-        tab_unfocused.fg,
-        "subpane ring must use the unfocused attr"
+        grid[(0, 0)].fg(),
+        tab_focused.fg,
+        "subpane ring must use the focused attr (the grid holds the keyboard)"
     );
+    assert_eq!(grid[(23, 0)].ch(), '╮', "subpane top-right ring corner");
+    assert_eq!(grid[(23, 23)].ch(), '╯', "subpane bottom-right ring corner");
     let first_row = grid_row_text(grid, 1);
     assert!(
         first_row.contains("golden thread root"),
         "first conversation row must render inside the subpane frame; row 1 was {first_row:?}"
     );
-    // The ThreadView's two stacked frames in x=33..=79: it reserves the
-    // two top rows before its first frame (the same offset the Compact
-    // `listing_open_thread` golden pins), so the thread-list frame
-    // opens at row 2 with the focused attr and the mail-view frame
-    // below it with the unfocused attr.
-    assert_eq!(grid[(33, 2)].ch(), '╭', "thread-list frame top-left corner");
+    // The thread-list frame in x=25..=79, full height, dimmed.
+    assert_eq!(grid[(25, 0)].ch(), '╭', "thread-list frame top-left corner");
     assert_eq!(
-        grid[(33, 2)].fg(),
-        tab_focused.fg,
-        "thread-list frame must use the focused attr"
+        grid[(25, 0)].fg(),
+        tab_unfocused.fg,
+        "thread-list frame must use the dimmed attr (the grid holds the keyboard)"
     );
     assert_eq!(
-        grid[(79, 2)].ch(),
+        grid[(79, 0)].ch(),
         '╮',
         "thread-list frame top-right corner"
     );
-    let split_row = (1..23)
-        .find(|&y| grid[(33, y)].ch() == '╰')
-        .unwrap_or_else(|| {
-            panic!(
-                "thread-list frame bottom corner missing; column 33 is {}",
-                (0..24).map(|y| grid[(33, y)].ch()).collect::<String>()
-            )
-        });
     assert_eq!(
-        grid[(79, split_row)].ch(),
-        '╯',
-        "thread-list frame bottom-right corner"
-    );
-    let mail_top_row = (split_row + 1..23)
-        .find(|&y| grid[(33, y)].ch() == '╭')
-        .unwrap_or_else(|| {
-            panic!(
-                "mail-view frame top corner missing; column 33 is {}",
-                (0..24).map(|y| grid[(33, y)].ch()).collect::<String>()
-            )
-        });
-    assert_eq!(
-        grid[(33, mail_top_row)].fg(),
-        tab_unfocused.fg,
-        "mail-view frame must use the unfocused attr"
-    );
-    assert_eq!(
-        grid[(33, 23)].ch(),
+        grid[(25, 23)].ch(),
         '╰',
-        "mail-view frame bottom-left corner"
+        "thread-list frame bottom-left corner"
     );
     assert_eq!(
         grid[(79, 23)].ch(),
         '╯',
-        "mail-view frame bottom-right corner"
+        "thread-list frame bottom-right corner"
+    );
+    assert!(
+        (1..23).any(|y| grid_row_text(grid, y).contains("golden thread root")),
+        "the thread-list rows must render inside the view frame"
+    );
+    assert!(
+        (1..23).any(|y| grid_row_text(grid, y).contains("Bob")),
+        "the reply row must render inside the view frame"
     );
     record_or_assert("conversations_entry_thread_split", grid);
 }
@@ -821,12 +886,15 @@ fn golden_conversations_entry_close_no_residue() {
     listing.draw(screen.grid_mut(), area, &mut ctx);
     let grid = screen.grid();
 
-    // The pane is back to the full-width listing frame (ring at columns
-    // 9 and 79); only list content may appear inside it.
-    assert_eq!(grid[(9, 0)].ch(), '╭', "pane ring top-left");
-    assert_eq!(grid[(79, 0)].ch(), '╮', "pane ring top-right");
-    assert_eq!(grid[(9, 23)].ch(), '╰', "pane ring bottom-left");
-    assert_eq!(grid[(79, 23)].ch(), '╯', "pane ring bottom-right");
+    // Back to layout1: mailbox list (30%, ring at columns 0 and 23) |
+    // divider | grid (70%, ring at columns 25 and 79); only list content
+    // may appear inside.
+    assert_eq!(grid[(0, 0)].ch(), '╭', "mailbox ring top-left");
+    assert_eq!(grid[(23, 0)].ch(), '╮', "mailbox ring top-right");
+    assert_eq!(grid[(25, 0)].ch(), '╭', "grid ring top-left");
+    assert_eq!(grid[(79, 0)].ch(), '╮', "grid ring top-right");
+    assert_eq!(grid[(25, 23)].ch(), '╰', "grid ring bottom-left");
+    assert_eq!(grid[(79, 23)].ch(), '╯', "grid ring bottom-right");
     for y in 1..23 {
         for x in [31, 32, 33] {
             assert!(
@@ -1122,7 +1190,11 @@ fn golden_shortcuts_help_overlay() {
     let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
     insert_golden_mails(&ctx, inbox_hash);
 
-    let listing = Listing::new(&mut ctx);
+    let mut listing = Listing::new(&mut ctx);
+    // The help overlay lists the focused pane's shortcuts; a fresh listing
+    // now starts on the sidebar, whose `open_mailbox` binding would change
+    // the rendered text. Keep the original grid-focused capture.
+    focus_mail_list_grid(&mut listing, &mut ctx);
     let mut tabbed = Tabbed::new(
         vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
         &ctx,
@@ -1142,8 +1214,8 @@ fn golden_shortcuts_help_overlay() {
 }
 
 /// Listing with the sidebar pane focused (`focus_left`): the sidebar frame
-/// uses "tab.focused" and the list frame "tab.unfocused" — the mirror of
-/// [`golden_tabbed_statusbar_full_frame`] (list focused) for the focus
+/// uses "tab.focused" and the list frame "tab.unfocused" — the counterpart
+/// of the list-focused capture the other listing goldens pin, for the focus
 /// highlight machine check.
 ///
 /// The focus flip itself is asserted by requiring this render to differ
@@ -1160,7 +1232,11 @@ fn golden_listing_sidebar_focus_frame() {
         let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
         insert_golden_mails(&ctx, inbox_hash);
 
-        let listing = Listing::new(&mut ctx);
+        let mut listing = Listing::new(&mut ctx);
+        // A fresh listing now starts with the keyboard on the visible
+        // sidebar; start both captures from the grid so `focus_left` (not
+        // the launch default) is what selects the sidebar-focused frame.
+        focus_mail_list_grid(&mut listing, &mut ctx);
         let mut tabbed = Tabbed::new(
             vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
             &ctx,
@@ -1198,8 +1274,7 @@ fn grid_row_text(grid: &CellBuffer, y: usize) -> String {
 /// Locate the top-left corner glyph of the rightmost pane ring on the top
 /// screen row — with the sidebar visible this is the list pane's frame, so
 /// its inner area starts one row below and one column right of it. Scanning
-/// instead of hardcoding the column keeps this robust to `sidebar_ratio`
-/// changes.
+/// instead of hardcoding the column keeps this robust to layout changes.
 fn list_pane_ring_x(grid: &CellBuffer) -> usize {
     (0..grid.cols)
         .rev()
@@ -1239,6 +1314,10 @@ fn golden_listing_frame_inner_content() {
         insert_golden_mails(&ctx, inbox_hash);
 
         let mut listing = Listing::new(&mut ctx);
+        // The index-style switch action is handled by the grid-focused
+        // listing only (a fresh listing now starts on the sidebar), so hand
+        // the keyboard to the grid before driving the styles.
+        focus_mail_list_grid(&mut listing, &mut ctx);
         listing.realize(None, &mut ctx);
         pump_replies(&mut listing, &mut ctx);
         let is_compact = matches!(style, ListingAction::SetCompact);
@@ -1374,8 +1453,9 @@ fn golden_threadview_split_frames() {
     record_or_assert("threadview_split_frames", screen.grid());
 }
 
-/// `ThreadView` with the mail pane focused: the full-area frame uses
-/// "tab.focused" — the border rows must differ from the split capture.
+/// `ThreadView` with the mail pane focused: the split stays, and the
+/// rings swap — the mail pane frame uses "tab.focused" and the thread
+/// list frame "tab.unfocused" — the mirror of the split capture.
 #[test]
 fn golden_threadview_mailview_focus_frame() {
     let mut ctx = mock_context();
@@ -1419,6 +1499,347 @@ fn golden_two_mail_thread_view(
         Some(focus),
         context,
     )
+}
+
+// ----------------------------------------------------------------------------
+// Pane background focus tests (no golden files): every pane's empty
+// background follows the keyboard — the keyboard-holding pane fills with
+// "pane.focused", the others with "pane.unfocused". Ring colors are covered
+// by the frame goldens above; these pin the background fills.
+// ----------------------------------------------------------------------------
+
+/// Assert the background of an empty cell inside `pane`'s area.
+fn assert_pane_bg(
+    grid: &CellBuffer,
+    (x, y): (usize, usize),
+    expected: &ThemeAttribute,
+    what: &str,
+) {
+    assert_eq!(
+        grid[(x, y)].bg(),
+        expected.bg,
+        "{what}: cell ({x},{y}) background must be {expected:?}, got {:?} (row: {:?})",
+        grid[(x, y)].bg(),
+        grid_row_text(grid, y),
+    );
+}
+
+/// Assert the background of a *text* cell (a non-blank glyph): the row and
+/// heading layer that must ride the pane background while keeping its own
+/// fg/attrs.
+fn assert_text_cell_bg(grid: &CellBuffer, (x, y): (usize, usize), expected_bg: Color, what: &str) {
+    assert_ne!(
+        grid[(x, y)].ch(),
+        ' ',
+        "{what}: cell ({x},{y}) must hold a glyph (row: {:?})",
+        grid_row_text(grid, y),
+    );
+    assert_eq!(
+        grid[(x, y)].bg(),
+        expected_bg,
+        "{what}: text cell ({x},{y}) background must be {expected_bg:?}, got {:?} (row: {:?})",
+        grid[(x, y)].bg(),
+        grid_row_text(grid, y),
+    );
+}
+
+/// Layout1: the sidebar owns the keyboard on startup, so the sidebar pane
+/// background is the highlight and the mail-list grid background the dimmed
+/// one; handing the keyboard to the grid swaps both.
+#[test]
+fn pane_background_layout1_sidebar_and_grid() {
+    let mut ctx = mock_context();
+    let (_account_hash, _inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, _inbox_hash);
+    let pane_focused = conf::value(&ctx, "pane.focused");
+    let pane_unfocused = conf::value(&ctx, "pane.unfocused");
+    let sidebar_highlighted = conf::value(&ctx, "mail.sidebar_highlighted");
+    let cursor_row_highlighted = conf::value(&ctx, "mail.listing.compact.highlighted");
+
+    let mut listing = Listing::new(&mut ctx);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    listing.draw(screen.grid_mut(), area, &mut ctx);
+    let grid = screen.grid();
+    // Startup focus is the sidebar (b8f74d69): sidebar bright, grid dim.
+    // The tail cells sit below/right of the menu entries and the (empty)
+    // grid rows, inside the pane rings.
+    assert_pane_bg(grid, (20, 21), &pane_focused, "focused sidebar pane");
+    assert_pane_bg(grid, (70, 21), &pane_unfocused, "unfocused grid pane");
+    // Text layer: base rows ride the pane background; the sidebar cursor
+    // entry and the grid cursor row keep their own highlight fills.
+    assert_text_cell_bg(
+        grid,
+        (1, 1),
+        pane_focused.bg,
+        "active-account name rides the focused sidebar pane",
+    );
+    assert_eq!(
+        grid[(2, 2)].bg(),
+        sidebar_highlighted.bg,
+        "sidebar cursor entry keeps its highlight background"
+    );
+    assert_text_cell_bg(
+        grid,
+        (3, 3),
+        pane_focused.bg,
+        "base sidebar entry rides the focused sidebar pane",
+    );
+    assert_eq!(
+        grid[(26, 1)].bg(),
+        cursor_row_highlighted.bg,
+        "grid cursor row keeps its highlight background"
+    );
+    assert_text_cell_bg(
+        grid,
+        (26, 2),
+        pane_unfocused.bg,
+        "grid base row rides the unfocused grid pane",
+    );
+
+    // Hand the keyboard to the grid: both backgrounds swap.
+    focus_mail_list_grid(&mut listing, &mut ctx);
+    listing.set_dirty(true);
+    listing.draw(screen.grid_mut(), area, &mut ctx);
+    let grid = screen.grid();
+    assert_pane_bg(grid, (20, 21), &pane_unfocused, "unfocused sidebar pane");
+    assert_pane_bg(grid, (70, 21), &pane_focused, "focused grid pane");
+    assert_text_cell_bg(
+        grid,
+        (1, 1),
+        pane_unfocused.bg,
+        "active-account name rides the unfocused sidebar pane",
+    );
+    assert_eq!(
+        grid[(2, 2)].bg(),
+        sidebar_highlighted.bg,
+        "sidebar cursor entry keeps its highlight background"
+    );
+    assert_text_cell_bg(
+        grid,
+        (3, 3),
+        pane_unfocused.bg,
+        "base sidebar entry rides the unfocused sidebar pane",
+    );
+    assert_eq!(
+        grid[(26, 1)].bg(),
+        cursor_row_highlighted.bg,
+        "grid cursor row keeps its highlight background"
+    );
+    assert_text_cell_bg(
+        grid,
+        (26, 2),
+        pane_focused.bg,
+        "grid base row rides the focused grid pane",
+    );
+}
+
+/// Layout2 (single mail open): with the keyboard on the grid the mail
+/// content pane background is dimmed; moving the keyboard onto the view
+/// dims the grid instead.
+#[test]
+fn pane_background_layout2_grid_and_mailview() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_solo_mail(&ctx, inbox_hash);
+    let pane_focused = conf::value(&ctx, "pane.focused");
+    let pane_unfocused = conf::value(&ctx, "pane.unfocused");
+
+    let cursor_row_highlighted = conf::value(&ctx, "mail.listing.compact.highlighted");
+    let mut listing = Listing::new(&mut ctx);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    // Opening lands the keyboard on the grid (layout2): the grid subpane
+    // (x0..=23) is bright, the mail view pane (x25..=79) dimmed.
+    open_entry_under_cursor(&mut listing, &mut ctx, screen.grid_mut(), area);
+    let grid = screen.grid();
+    assert_pane_bg(grid, (10, 21), &pane_focused, "focused grid subpane");
+    assert_pane_bg(grid, (70, 21), &pane_unfocused, "dimmed mail view pane");
+    // The grid's cursor row keeps its highlight fill; the mail pane has no
+    // text cells yet (the view is still loading), its text layer is pinned
+    // by `pane_background_envelope_text_follows_pane_fill` below.
+    assert_eq!(
+        grid[(2, 1)].bg(),
+        cursor_row_highlighted.bg,
+        "grid cursor row keeps its highlight background"
+    );
+
+    // Move the keyboard onto the view (Right): the grid dims, the mail
+    // view lights up.
+    let mut event = UIEvent::Input(Key::Right);
+    assert!(
+        listing.process_event(&mut event, &mut ctx),
+        "focus_right must move the keyboard onto the open view"
+    );
+    pump_replies(&mut listing, &mut ctx);
+    listing.set_dirty(true);
+    listing.draw(screen.grid_mut(), area, &mut ctx);
+    let grid = screen.grid();
+    assert_pane_bg(grid, (10, 21), &pane_unfocused, "dimmed grid subpane");
+    assert_pane_bg(grid, (70, 21), &pane_focused, "focused mail view pane");
+    assert_eq!(
+        grid[(2, 1)].bg(),
+        cursor_row_highlighted.bg,
+        "grid cursor row keeps its highlight background"
+    );
+}
+
+/// Layout3 (thread open): the thread-list pane (the conversations/thread
+/// list of the view) stays dimmed while the grid holds the keyboard.
+#[test]
+fn pane_background_layout3_thread_list() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    // A two-mail thread so the opened entry is a thread (layout3): the
+    // view splits into [thread list | mail view] like
+    // `golden_listing_open_thread`.
+    insert_thread_mails(&ctx, inbox_hash);
+    let pane_focused = conf::value(&ctx, "pane.focused");
+    let pane_unfocused = conf::value(&ctx, "pane.unfocused");
+
+    let mut listing = Listing::new(&mut ctx);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    open_entry_under_cursor(&mut listing, &mut ctx, screen.grid_mut(), area);
+    let grid = screen.grid();
+    // Keyboard on the grid (x0..=23): bright grid, dimmed thread list
+    // (x25..=79).
+    assert_pane_bg(grid, (10, 21), &pane_focused, "focused grid subpane");
+    assert_pane_bg(grid, (70, 21), &pane_unfocused, "dimmed thread-list pane");
+    // Text layer: the grid cursor row and the thread-list cursor entry
+    // keep their highlight fills; a base thread entry rides the dimmed
+    // thread-list pane background.
+    let cursor_row_highlighted = conf::value(&ctx, "mail.listing.compact.highlighted");
+    let highlight = conf::value(&ctx, "highlight");
+    assert_eq!(
+        grid[(10, 1)].bg(),
+        cursor_row_highlighted.bg,
+        "grid cursor row keeps its highlight background"
+    );
+    assert_eq!(
+        grid[(30, 1)].bg(),
+        highlight.bg,
+        "thread-list cursor entry keeps its highlight background"
+    );
+    assert_text_cell_bg(
+        grid,
+        (30, 2),
+        pane_unfocused.bg,
+        "base thread entry rides the dimmed thread-list pane",
+    );
+}
+
+/// Mail view text (headers + body) rides the hosting pane's fill: with
+/// `pane.unfocused` handed to the view, header and body *text* cells take
+/// the dim fill and keep their theme fg, and blank filler takes the fill.
+#[test]
+fn pane_background_envelope_text_follows_pane_fill() {
+    let mut ctx = mock_context();
+    let pane_unfocused = conf::value(&ctx, "pane.unfocused");
+    // Even a stale user config that still defines `mail.view.headers_area`
+    // must not leak into the band: every cell rides the pane fill. Install a
+    // sentinel fill so the blank-cell assertions below cannot pass vacuously
+    // (the shipped theme's headers_area bg may happen to equal the pane fill).
+    let sentinel: crate::conf::ThemeAttributeInner =
+        toml::from_str("fg = \"theme_default\"\nbg = \"#ff00ff\"\nattrs = \"theme_default\"\n")
+            .expect("valid sentinel theme attribute");
+    ctx.settings
+        .terminal
+        .themes
+        .other_themes
+        .get_mut(crate::conf::DEFAULT_THEME)
+        .unwrap()
+        .keys
+        .insert("mail.view.headers_area".into(), sentinel);
+
+    let mail = Mail::new(GOLDEN_ROOT_MAIL.to_vec(), None).expect("could not parse test mail");
+    let mut view =
+        crate::mail::view::EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+    view.set_pane_fill(Some(pane_unfocused));
+
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    view.draw(screen.grid_mut(), area, &mut ctx);
+    let grid = screen.grid();
+    assert_text_cell_bg(
+        grid,
+        (0, 0),
+        pane_unfocused.bg,
+        "header text rides the pane fill",
+    );
+    assert_text_cell_bg(
+        grid,
+        (0, 6),
+        pane_unfocused.bg,
+        "body text rides the pane fill",
+    );
+    assert_pane_bg(
+        grid,
+        (60, 6),
+        &pane_unfocused,
+        "body blank cells take the pane fill",
+    );
+    assert_text_cell_bg(
+        grid,
+        (6, 0),
+        pane_unfocused.bg,
+        "header value text rides the pane fill",
+    );
+    assert_pane_bg(
+        grid,
+        (5, 0),
+        &pane_unfocused,
+        "gap between header name and value takes the pane fill",
+    );
+    assert_pane_bg(
+        grid,
+        (79, 0),
+        &pane_unfocused,
+        "trailing blank after the header value takes the pane fill",
+    );
+    assert_pane_bg(
+        grid,
+        (79, 4),
+        &pane_unfocused,
+        "trailing blank on the last header row takes the pane fill",
+    );
+}
+
+/// Selected and highlighted rows keep their own fills while base rows ride
+/// the pane background (plain style; the selection goldens pin the same
+/// split for every index style).
+#[test]
+fn pane_background_selection_rows_keep_own_fill() {
+    let mut ctx = mock_context();
+    let (account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let pane_unfocused = conf::value(&ctx, "pane.unfocused");
+    let highlighted_selected = conf::value(&ctx, "mail.listing.plain.highlighted_selected");
+
+    let mut listing = PlainListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    draw_selection_row_batch(&mut *listing, screen.grid_mut(), area, &mut ctx);
+    let grid = screen.grid();
+    // Row 1 is the cursor row with the selection toggled: its highlighted +
+    // selected fill stays; rows 0 and 2 are base rows on the pane fill.
+    assert_eq!(
+        grid[(5, 1)].bg(),
+        highlighted_selected.bg,
+        "selected+highlighted row keeps its own background"
+    );
+    assert_text_cell_bg(
+        grid,
+        (5, 0),
+        pane_unfocused.bg,
+        "base row rides the pane fill",
+    );
+    assert_text_cell_bg(
+        grid,
+        (5, 2),
+        pane_unfocused.bg,
+        "base row rides the pane fill",
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -1884,10 +2305,12 @@ fn statusbar_hints_follow_keybinding() {
     let area = screen.area();
     status_bar.draw(screen.grid_mut(), area, &mut ctx);
     let row = statusbar_row_text(screen.grid());
-    // The key glyph must render green: scan the content row's cells for
-    // the `?` of `(?:Help)` (the only `?` in the strip) — cell scanning
-    // avoids char-index/column drift from wide glyphs and the frame's
-    // border columns.
+    // The key glyph must render in the theme's highlight-selected
+    // accent color (`mail.listing.compact.highlighted_selected`
+    // bg; with the default Ayu Dark theme that is `#5ac1fe`): scan the
+    // content row's cells for the `?` of `(?:Help)` (the only `?` in the
+    // strip) — cell scanning avoids char-index/column drift from wide
+    // glyphs and the frame's border columns.
     let y = screen.grid().rows.saturating_sub(2);
     let help_col = screen
         .grid()
@@ -1898,8 +2321,8 @@ fn statusbar_hints_follow_keybinding() {
         .expect("help key glyph '?' must be on the status row");
     assert_eq!(
         screen.grid()[(help_col, y)].fg(),
-        Color::Green,
-        "hint key glyphs must render green, got row {row:?}"
+        crate::conf::value(&ctx, "mail.listing.compact.highlighted_selected").bg,
+        "hint key glyphs must render in the theme highlight-selected color, got row {row:?}"
     );
     assert!(
         row.contains("?:Help") && row.contains("(<Up>/k:Scroll Up)"),
@@ -2108,6 +2531,80 @@ fn quit_key_closes_help_overlay() {
         assert!(
             !ctx.replies().iter().any(|r| matches!(r, UIEvent::Exit)),
             "{key:?} with the help overlay open must not request app exit"
+        );
+    }
+}
+
+/// Layered quit for the theme picker overlay (`:toggle theme`): the picker
+/// is a `UIDialog` built like `State::open_theme_picker` does. Every
+/// quit-group key (`q`/`Esc` by default) must close the picker and be
+/// consumed by it — `State::rcv_event` dispatches to overlays first, so a
+/// consumed key never reaches the components below, where `StatusBar` would
+/// turn it into a `UIEvent::Exit` app-exit request. Closing is pure exit:
+/// no theme event may fire (selection takes effect only via the arrow-key
+/// live preview and `Enter`'s persist).
+#[test]
+fn quit_key_closes_theme_picker() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let tabbed = Tabbed::new(vec![Box::new(Listing::new(&mut ctx))], &ctx);
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+
+    for key in [Key::Char('q'), Key::Esc] {
+        let current = ctx.settings.terminal.theme.clone();
+        let mut picker: UIDialog<String> = UIDialog::new(
+            "theme",
+            vec![
+                ("Ayu Dark".to_string(), "Ayu Dark (built-in)".to_string()),
+                ("light".to_string(), "light (config)".to_string()),
+            ],
+            /* single_only */ true,
+            /* done_fn */ None,
+            &ctx,
+        );
+        // Build the picker the way `State::open_theme_picker` does.
+        picker.set_cursor_to(&current);
+        let restore = current.clone();
+        picker.set_done_fn(Some(Box::new(
+            move |_id, selection: &[String]| match selection.first() {
+                Some(name) => Some(UIEvent::ChangeTheme {
+                    name: name.clone(),
+                    persist: true,
+                }),
+                None => Some(UIEvent::ChangeTheme {
+                    name: restore,
+                    persist: false,
+                }),
+            },
+        )));
+        picker.realize(None, &mut ctx);
+
+        // The overlay consumes the quit key (`rcv_event` stops at the
+        // first component returning true, so the StatusBar never sees it
+        // and no `UIEvent::Exit` may appear).
+        let mut event = UIEvent::Input(key.clone());
+        assert!(
+            picker.process_event(&mut event, &mut ctx),
+            "{key:?} must be consumed by the theme picker"
+        );
+        assert!(picker.is_done(), "{key:?} must close the theme picker");
+        // `Context::replies` drains, so snapshot once for the check
+        // below. An `Exit` assertion would be vacuous here: the picker
+        // alone never emits `UIEvent::Exit` - that would take the
+        // `StatusBar` dispatch this test bypasses. The effective
+        // assertions are the two above (the picker consumes the quit
+        // key and closes) and the one below (closing is pure exit, no
+        // theme event fires).
+        let replies = ctx.replies();
+        // Design: closing is pure exit - no persist/apply event fires.
+        assert!(
+            !replies
+                .iter()
+                .any(|r| matches!(r, UIEvent::ChangeTheme { .. })),
+            "{key:?} must not fire any theme event on close"
         );
     }
 }

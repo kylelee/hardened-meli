@@ -590,6 +590,12 @@ mod flush_equivalence {
                             assert!(row >= 1 && col >= 1, "CUP is 1-based");
                             st.col = col - 1;
                         }
+                        b'G' => {
+                            // CHA (cursor horizontal absolute): 1-based column.
+                            let col: usize = body.parse().unwrap_or(1);
+                            assert!(col >= 1, "CHA is 1-based");
+                            st.col = col - 1;
+                        }
                         b'm' => apply_sgr(&mut st, &body),
                         _ => {}
                     }
@@ -911,6 +917,163 @@ mod flush_equivalence {
         assert_eq!(cells[&0].ch, '\u{4e2d}');
         assert!(!cells.contains_key(&1));
         assert_eq!(cells[&2].ch, 'z');
+    }
+
+    /// Regression (theme-picker left-edge bleed): an overlay paints a
+    /// non-empty cell (a dialog's left frame border) over what the
+    /// underlying grid had marked as a wide char's continuation cell. The
+    /// emitter must re-anchor the cursor before that cell - the preceding
+    /// wide char advances the terminal cursor by two, so without an
+    /// explicit `MoveTo` the border glyph lands one column right and the
+    /// wide char's right half stays visible at the dialog's edge.
+    #[test]
+    fn overlay_cell_after_wide_char_reanchors() {
+        let mut grid = plain_grid();
+        grid[(0, 0)] = styled('A', Color::Default, Color::Default, Attr::DEFAULT);
+        grid[(1, 0)] = styled('\u{4e2d}', Color::Red, Color::Default, Attr::DEFAULT);
+        // The dialog border painted over 中's continuation cell.
+        grid[(2, 0)] = styled('|', Color::Green, Color::Default, Attr::DEFAULT);
+        grid[(3, 0)] = styled('B', Color::Default, Color::Default, Attr::DEFAULT);
+
+        for no_color in [false, true] {
+            let sink = SharedBuf::default();
+            let mut stdout: StateStdout =
+                BufWriter::with_capacity(1024, Box::new(sink.clone()) as Box<dyn std::io::Write>);
+            if no_color {
+                Screen::<Tty>::draw_horizontal_segment_no_color(&mut grid, &mut stdout, 0..4, 0);
+            } else {
+                Screen::<Tty>::draw_horizontal_segment(&mut grid, &mut stdout, 0..4, 0);
+            }
+            drop(stdout);
+            let cells = decode(&sink.into_inner());
+            assert_eq!(cells[&0].ch, 'A');
+            assert_eq!(cells[&1].ch, '\u{4e2d}');
+            assert_eq!(
+                cells[&2].ch, '|',
+                "overlay cell must land on its grid column (no_color={no_color})"
+            );
+            assert_eq!(cells[&3].ch, 'B', "(no_color={no_color})");
+        }
+    }
+
+    /// East-Asian Ambiguous characters (here `’`, U+2019) are laid out
+    /// two columns wide by `CellBuffer::write_string` (`width_cjk`) with
+    /// an `empty` continuation cell, but terminals render them as one OR
+    /// two columns. The emitter must pin every glyph following such a
+    /// cluster to its grid column: on a narrow-rendering terminal the
+    /// natural cursor advance comes up one short and the rest of the row -
+    /// dialog borders included - shifts one column left, which reads as
+    /// underlying text inserted into the dialog.
+    #[test]
+    fn glyph_after_ambiguous_cluster_reanchors() {
+        let mut grid = plain_grid();
+        grid[(0, 0)] = styled('A', Color::Default, Color::Default, Attr::DEFAULT);
+        // `’` plus the continuation cell write_string would produce.
+        grid[(1, 0)] = styled('\u{2019}', Color::Red, Color::Default, Attr::DEFAULT);
+        grid[(2, 0)] = continuation(Color::Red, Color::Default, Attr::DEFAULT);
+        grid[(3, 0)] = styled('r', Color::Default, Color::Default, Attr::DEFAULT);
+        // The dialog border painted over the cluster's continuation.
+        grid[(4, 0)] = styled('|', Color::Green, Color::Default, Attr::DEFAULT);
+
+        for no_color in [false, true] {
+            let sink = SharedBuf::default();
+            let mut stdout: StateStdout =
+                BufWriter::with_capacity(1024, Box::new(sink.clone()) as Box<dyn std::io::Write>);
+            if no_color {
+                Screen::<Tty>::draw_horizontal_segment_no_color(&mut grid, &mut stdout, 0..5, 0);
+            } else {
+                Screen::<Tty>::draw_horizontal_segment(&mut grid, &mut stdout, 0..5, 0);
+            }
+            stdout.flush().unwrap();
+            drop(stdout);
+            let cells = decode(&sink.into_inner());
+
+            assert_eq!(cells[&0].ch, 'A');
+            assert_eq!(cells[&1].ch, '\u{2019}');
+            // The continuation column is explicitly covered with a space
+            // (no stale glyph can persist there on narrow terminals).
+            assert_eq!(cells[&2].ch, ' ', "(no_color={no_color})");
+            // `r` and the border must sit on their grid columns even when
+            // the terminal rendered `’` one column narrow.
+            assert_eq!(cells[&3].ch, 'r', "(no_color={no_color})");
+            assert_eq!(cells[&4].ch, '|', "(no_color={no_color})");
+        }
+    }
+
+    /// Regression: a wide char whose continuation cell an overlay painted
+    /// over, with that overlay cell as the *last* cell of the segment. The
+    /// walk back does not cross any `empty` cell (`px == x - 1`), so the
+    /// emitter must only `MoveToColumn` to pin the overlay. Writing the
+    /// covering space would land one column *past* the segment, leaving a
+    /// space in the wide char's color over the neighbouring pane and eating
+    /// one of its columns.
+    #[test]
+    fn overlay_last_cell_after_wide_char_does_not_spill_past_segment() {
+        let mut grid = plain_grid();
+        grid[(0, 0)] = styled('A', Color::Default, Color::Default, Attr::DEFAULT);
+        grid[(1, 0)] = styled('\u{4e2d}', Color::Red, Color::Default, Attr::DEFAULT);
+        // The dialog border painted directly over 中's continuation cell.
+        grid[(2, 0)] = styled('|', Color::Red, Color::Default, Attr::DEFAULT);
+
+        for no_color in [false, true] {
+            let sink = SharedBuf::default();
+            let mut stdout: StateStdout =
+                BufWriter::with_capacity(1024, Box::new(sink.clone()) as Box<dyn std::io::Write>);
+            if no_color {
+                Screen::<Tty>::draw_horizontal_segment_no_color(&mut grid, &mut stdout, 0..3, 0);
+            } else {
+                Screen::<Tty>::draw_horizontal_segment(&mut grid, &mut stdout, 0..3, 0);
+            }
+            stdout.flush().unwrap();
+            drop(stdout);
+            let cells = decode(&sink.into_inner());
+            assert_eq!(cells[&0].ch, 'A', "(no_color={no_color})");
+            assert_eq!(cells[&1].ch, '\u{4e2d}', "(no_color={no_color})");
+            assert_eq!(cells[&2].ch, '|', "(no_color={no_color})");
+            // The column just past the segment (the wide char's second half
+            // as the terminal cursor sees it) must not receive a covering
+            // space.
+            assert!(
+                !cells.contains_key(&3),
+                "covering space spilled past the segment (no_color={no_color}): {cells:?}"
+            );
+        }
+    }
+
+    /// Regression guard for the original fix: when the walk back really does
+    /// cross a skipped `empty` continuation cell, the covering space must
+    /// still be written before the overlay border is pinned.
+    #[test]
+    fn overlay_after_skipped_continuation_still_covers() {
+        let mut grid = plain_grid();
+        grid[(0, 0)] = styled('A', Color::Default, Color::Default, Attr::DEFAULT);
+        // East-Asian Ambiguous `’` plus the continuation cell
+        // `write_string` would produce.
+        grid[(1, 0)] = styled('\u{2019}', Color::Red, Color::Default, Attr::DEFAULT);
+        grid[(2, 0)] = continuation(Color::Red, Color::Default, Attr::DEFAULT);
+        // The dialog border painted after the skipped continuation.
+        grid[(3, 0)] = styled('|', Color::Green, Color::Default, Attr::DEFAULT);
+        grid[(4, 0)] = styled('B', Color::Default, Color::Default, Attr::DEFAULT);
+
+        for no_color in [false, true] {
+            let sink = SharedBuf::default();
+            let mut stdout: StateStdout =
+                BufWriter::with_capacity(1024, Box::new(sink.clone()) as Box<dyn std::io::Write>);
+            if no_color {
+                Screen::<Tty>::draw_horizontal_segment_no_color(&mut grid, &mut stdout, 0..5, 0);
+            } else {
+                Screen::<Tty>::draw_horizontal_segment(&mut grid, &mut stdout, 0..5, 0);
+            }
+            stdout.flush().unwrap();
+            drop(stdout);
+            let cells = decode(&sink.into_inner());
+            assert_eq!(cells[&0].ch, 'A', "(no_color={no_color})");
+            assert_eq!(cells[&1].ch, '\u{2019}', "(no_color={no_color})");
+            // The skipped continuation column is explicitly covered.
+            assert_eq!(cells[&2].ch, ' ', "(no_color={no_color})");
+            assert_eq!(cells[&3].ch, '|', "(no_color={no_color})");
+            assert_eq!(cells[&4].ch, 'B', "(no_color={no_color})");
+        }
     }
 
     /// Compare the CURRENT emitter's decode against the pins recorded from

@@ -287,15 +287,6 @@ impl FileSettings {
             self.config_warnings.push(msg.to_string());
             self.terminal.progress_spinner_sequence = None;
         }
-        if self.listing.sidebar_ratio > 100 {
-            let ratio = self.listing.sidebar_ratio;
-            let msg = format!(
-                "listing.sidebar_ratio: {ratio} is out of the valid range 0..=100; clamped to 100."
-            );
-            melib::log::error!("{msg}");
-            self.config_warnings.push(msg);
-            self.listing.sidebar_ratio = 100;
-        }
     }
 }
 
@@ -384,6 +375,194 @@ pub fn get_config_file() -> Result<PathBuf> {
         .chain_err_kind(ErrorKind::Platform)
 }
 
+/// Read-only view of the user's theme directory
+/// (`$XDG_CONFIG_HOME/meli/themes/`).
+///
+/// Consumed by the `toggle_theme` picker: every `*.toml` file
+/// contributes the themes declared inside it
+/// (`[terminal.themes.<name>]` tables). Files that fail to parse are
+/// reported through the notification and skipped, so one bad file
+/// cannot take the picker down. Returns `(themes, errors)` where
+/// `themes` maps a theme name to the file that declares it (validated
+/// lazily when the theme is actually applied).
+pub fn get_user_themes() -> (IndexMap<String, PathBuf>, Vec<String>) {
+    let mut themes = IndexMap::new();
+    let mut errors = Vec::new();
+    let Some(dir) = (|| {
+        let xdg_dirs = xdg::BaseDirectories::with_prefix("meli").ok()?;
+        let dir = xdg_dirs.get_config_home().join("themes");
+        dir.is_dir().then_some(dir)
+    })() else {
+        return (themes, errors);
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return (themes, errors);
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
+        match std::fs::read_to_string(&path)
+            .map_err(|err| err.to_string())
+            .and_then(|text| toml::from_str::<toml::Value>(&text).map_err(|err| err.to_string()))
+        {
+            Ok(value) => {
+                let Some(themes_table) = value
+                    .get("terminal")
+                    .and_then(|t| t.get("themes"))
+                    .and_then(|t| t.as_table())
+                else {
+                    errors.push(format!("{}: no [terminal.themes] table", path.display()));
+                    continue;
+                };
+                for (name, _) in themes_table.iter() {
+                    if name == self::LIGHT || name == self::DARK {
+                        errors.push(format!(
+                            "{}: theme name `{name}` is reserved",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                    themes.insert(name.clone(), path.clone());
+                }
+            }
+            Err(err) => errors.push(format!("{}: {err}", path.display())),
+        }
+    }
+    (themes, errors)
+}
+
+/// Load the theme `name` from a theme directory file.
+///
+/// The file is parsed through the same path `:toggle theme` uses at
+/// runtime: pick its `[terminal.themes.<name>]` table, deserialize it
+/// into [`ThemeOptions`] and merge it over `base` with
+/// [`construct_theme`]. A theme directory file shadows every same-name
+/// definition, compiled-in or from the configuration (theme directory >
+/// configuration > built-in), so callers insert the result over any
+/// existing entry.
+pub fn theme_from_file(name: &str, path: &Path, base: &themes::Theme) -> Result<themes::Theme> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| Error::new(format!("could not read {}: {err}", path.display())))?;
+    let value: toml::Value = text.parse().map_err(|err: toml::de::Error| {
+        Error::new(format!("could not parse {}: {err}", path.display()))
+    })?;
+    let table = value
+        .get("terminal")
+        .and_then(|t| t.get("themes"))
+        .and_then(|t| t.get(name))
+        .cloned()
+        .ok_or_else(|| {
+            Error::new(format!(
+                "{} has no [terminal.themes.{name}] table",
+                path.display()
+            ))
+        })?;
+    let options: ThemeOptions = table
+        .try_into()
+        .map_err(|err| Error::new(format!("{}: invalid theme `{name}`: {err}", path.display())))?;
+    let mut theme = base.clone();
+    construct_theme(name, &mut theme, options)?;
+    Ok(theme)
+}
+
+/// Configuration keys that used to be accepted in `[listing]` and
+/// `[accounts.<name>.listing]` but were later removed from
+/// [`ListingSettings`](crate::conf::listing::ListingSettings) (the listing
+/// layout is now a fixed 30/70 split and cannot be customised).
+///
+/// Both `ListingSettings` and `ListingSettingsOverride` carry
+/// `#[serde(deny_unknown_fields)]`, so leftover keys in old configuration
+/// files would abort startup; they must be stripped before parsing (see
+/// [`strip_legacy_listing_keys`]).
+const LEGACY_LISTING_KEYS: [&str; 3] = ["thread_layout", "sidebar_ratio", "mail_view_divider"];
+
+/// Remove the keys in [`LEGACY_LISTING_KEYS`] from `table` (a `listing`
+/// table), logging a warning per removal; returns `true` if any was removed.
+fn remove_legacy_listing_keys(table: &mut toml::value::Table, location: &str) -> bool {
+    let mut removed = false;
+    for key in LEGACY_LISTING_KEYS {
+        if table.remove(key).is_some() {
+            removed = true;
+            melib::log::warn!(
+                "`{key}` in `{location}` is no longer a valid setting and was ignored."
+            );
+        }
+    }
+    removed
+}
+
+/// Strip removed listing keys from the pp-expanded configuration text `s`:
+/// the top-level `listing` table, every `accounts.<name>.listing` table and
+/// every `accounts.<name>.mailboxes.<mailbox>.listing` table
+/// ([`FileMailboxConf`](crate::conf::FileMailboxConf) flattens
+/// [`MailUIConf`](crate::conf::MailUIConf), so the same
+/// `deny_unknown_fields` override applies there).
+///
+/// If `s` is not valid TOML, return it untouched so the existing error path
+/// reports the real parse error; likewise when no legacy key matched, to
+/// avoid a needless re-serialization.
+fn strip_legacy_listing_keys(s: String) -> String {
+    let Ok(mut value) = toml::from_str::<toml::Value>(&s) else {
+        return s;
+    };
+    let mut removed = false;
+    if let Some(listing) = value.get_mut("listing").and_then(toml::Value::as_table_mut) {
+        removed |= remove_legacy_listing_keys(listing, "listing");
+    }
+    if let Some(accounts) = value
+        .get_mut("accounts")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (name, account) in accounts.iter_mut() {
+            let Some(account) = account.as_table_mut() else {
+                continue;
+            };
+            if let Some(listing) = account
+                .get_mut("listing")
+                .and_then(toml::Value::as_table_mut)
+            {
+                removed |=
+                    remove_legacy_listing_keys(listing, &format!("accounts.{name}.listing"));
+            }
+            let Some(mailboxes) = account
+                .get_mut("mailboxes")
+                .and_then(toml::Value::as_table_mut)
+            else {
+                continue;
+            };
+            for (mailbox, mailbox_conf) in mailboxes.iter_mut() {
+                let Some(mailbox_conf) = mailbox_conf.as_table_mut() else {
+                    continue;
+                };
+                let Some(listing) = mailbox_conf
+                    .get_mut("listing")
+                    .and_then(toml::Value::as_table_mut)
+                else {
+                    continue;
+                };
+                removed |= remove_legacy_listing_keys(
+                    listing,
+                    &format!("accounts.{name}.mailboxes.{mailbox}.listing"),
+                );
+            }
+        }
+    }
+    if removed {
+        // Fall back to the original text if serialization fails; that is no
+        // worse than not stripping at all.
+        toml::to_string(&value).unwrap_or(s)
+    } else {
+        s
+    }
+}
+
 impl FileSettings {
     pub const EXAMPLE_CONFIG: &'static str = include_str!("../docs/samples/sample-config.toml");
 
@@ -440,6 +619,7 @@ impl FileSettings {
 
     /// Validate configuration from `input` string.
     pub fn validate_string(s: String, clear_extras: bool) -> Result<Self> {
+        let s = strip_legacy_listing_keys(s);
         let _: toml::value::Table = melib::serde_path_to_error::deserialize(
             toml::Deserializer::new(&s),
         )
@@ -545,6 +725,7 @@ impl FileSettings {
     /// Validate `path` and print errors.
     pub fn validate(path: PathBuf, clear_extras: bool) -> Result<Self> {
         let s = pp::pp(&path)?;
+        let s = strip_legacy_listing_keys(s);
         let _: toml::value::Table = toml::from_str(&s).map_err(|err| {
             Error::new(format!(
                 "{}: Config file is invalid TOML; {}",
@@ -900,4 +1081,152 @@ fn apply_debug_default_logging(logger: &Logger, log: &LogSettings) {
     let path = dir.join(format!("meli-debug-{ts}.log"));
     logger.change_log_dest(path.clone());
     melib::log::info!("debug build: logging to {}", path.display());
+}
+
+/// Rewrite `theme = "<name>"` inside the `[terminal]` table of a
+/// configuration file's text, preserving every other line verbatim.
+///
+/// - If `[terminal]` already contains a `theme = ...` entry (bare or
+///   quoted, with optional trailing comment), it is replaced in place.
+/// - If `[terminal]` exists but has no `theme`, the assignment is
+///   inserted right after the table header.
+/// - If no `[terminal]` table exists, one is appended with the
+///   assignment.
+///
+/// The input is treated as text, not parsed as TOML and re-serialized:
+/// user comments, key ordering and formatting of every other setting
+/// survive untouched.
+pub fn rewrite_terminal_theme(text: &str, name: &str) -> Result<String> {
+    let name_escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let new_line = format!("theme = \"{name_escaped}\"");
+
+    // Strategy: find the `[terminal]` table and whether it already has a
+    // `theme = ...` key. If yes, replace that key's line in place; if the
+    // table exists without one, insert right after the table header; if
+    // there is no table at all, append one. Everything else is copied
+    // verbatim.
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Locate the `[terminal]` table boundaries (exclusive end = next
+    // top-level table header or EOF).
+    let mut terminal_start: Option<usize> = None;
+    let mut terminal_end = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if let Some(header) = trimmed.strip_prefix('[') {
+            let is_terminal = header
+                .split(']')
+                .next()
+                .is_some_and(|rest| rest.trim().eq_ignore_ascii_case("terminal"));
+            if is_terminal && terminal_start.is_none() {
+                terminal_start = Some(i);
+            } else if terminal_start.is_some() {
+                terminal_end = i;
+                break;
+            }
+        }
+    }
+
+    let mut out = String::with_capacity(text.len() + new_line.len() + 16);
+    match terminal_start {
+        Some(ts) => {
+            let mut replaced = false;
+            for (i, line) in lines.iter().enumerate() {
+                if i > ts && i < terminal_end && !replaced {
+                    let trimmed = line.trim_start();
+                    let is_theme_key = trimmed
+                        .split_once('=')
+                        .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("theme"));
+                    if is_theme_key {
+                        out.push_str(&new_line);
+                        out.push('\n');
+                        replaced = true;
+                        continue;
+                    }
+                }
+                out.push_str(line);
+                out.push('\n');
+                // Right after the table header: if the table has no theme
+                // key at all, insert it here.
+                if i == ts
+                    && lines[ts + 1..terminal_end].iter().all(|l| {
+                        !l.trim_start()
+                            .split_once('=')
+                            .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("theme"))
+                    })
+                {
+                    out.push_str(&new_line);
+                    out.push('\n');
+                    replaced = true;
+                }
+            }
+            if !replaced {
+                // terminal table was the last table and empty; the header
+                // path above already inserted.
+            }
+        }
+        None => {
+            out.push_str(text);
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("\n[terminal]\n");
+            out.push_str(&new_line);
+            out.push('\n');
+        }
+    }
+    // Normalize trailing blank lines to exactly one newline.
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod rewrite_theme_tests {
+    use super::rewrite_terminal_theme;
+
+    #[test]
+    fn insert_into_existing_terminal_table() {
+        let input = "[terminal]\nfoo = 1\n";
+        let out = rewrite_terminal_theme(input, "nord").unwrap();
+        assert_eq!(out, "[terminal]\ntheme = \"nord\"\nfoo = 1\n");
+    }
+
+    #[test]
+    fn replace_existing_theme_line() {
+        let input = "[terminal]\ntheme = \"dark\"\nfoo = 1\n";
+        let out = rewrite_terminal_theme(input, "nord").unwrap();
+        assert_eq!(out, "[terminal]\ntheme = \"nord\"\nfoo = 1\n");
+    }
+
+    #[test]
+    fn append_terminal_table_when_missing() {
+        let input = "[accounts.md]\nroot_mailbox = \"x\"\n";
+        let out = rewrite_terminal_theme(input, "nord").unwrap();
+        assert!(out.contains("[accounts.md]"), "other tables untouched");
+        assert!(
+            out.trim_end().ends_with("[terminal]\ntheme = \"nord\"")
+                || out.contains("[terminal]\ntheme = \"nord\"")
+        );
+    }
+
+    #[test]
+    fn rewrite_twice_keeps_single_theme_line() {
+        let input = "[terminal]\nfoo = 1\n";
+        let once = rewrite_terminal_theme(input, "nord").unwrap();
+        let twice = rewrite_terminal_theme(&once, "dark").unwrap();
+        assert_eq!(twice.matches("theme =").count(), 1);
+        assert!(twice.contains("theme = \"dark\""));
+    }
+
+    #[test]
+    fn quoted_and_bare_existing_values_are_replaced() {
+        for existing in ["theme = \"dark\"", "theme = 'dark'", "theme = dark"] {
+            let input = format!("[terminal]\n{existing}\n");
+            let out = rewrite_terminal_theme(&input, "nord").unwrap();
+            assert_eq!(out.matches("theme").count(), 1, "for {existing}");
+            assert!(out.contains("theme = \"nord\""), "for {existing}");
+        }
+    }
 }

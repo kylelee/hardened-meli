@@ -729,11 +729,219 @@ impl State {
         self.context.dirty_areas.clear();
     }
 
+    /// Build and overlay the theme picker dialog (`:toggle_theme`).
+    ///
+    /// The picker lists the themes compiled into the binary (the Zed
+    /// editor's One/Ayu/Gruvbox family and the community ports, see
+    /// [`builtin_themes`](crate::conf::builtin_themes)), every
+    /// additional theme declared in the user's theme directory
+    /// (`$XDG_CONFIG_HOME/meli/themes/*.toml`, tables
+    /// `[terminal.themes.<name>]`) and every theme already embedded in the
+    /// configuration. Arrow keys live-preview each entry (the preview is
+    /// applied immediately, see [`State::apply_theme`]); `Enter` persists
+    /// the highlighted theme to the configuration file; the quit binding
+    /// (`q`/`Esc` by default) closes the picker without any theme action -
+    /// the last previewed theme simply stays applied in memory.
+    fn open_theme_picker(&mut self) {
+        use crate::utilities::UIDialog;
+
+        let (user_themes, errors) = crate::conf::get_user_themes();
+        for err in errors {
+            self.context.replies.push_back(UIEvent::Notification {
+                title: Some("theme directory".into()),
+                source: None,
+                body: err.into(),
+                kind: Some(NotificationType::Info),
+            });
+        }
+
+        // Each name appears once, labeled with its highest-priority
+        // source: a theme directory file shadows a configuration table,
+        // which shadows the compiled-in theme.
+        let names =
+            crate::conf::theme_picker_entries(&self.context.settings.terminal.themes, &user_themes);
+
+        let current = self.context.settings.terminal.theme.clone();
+        let mut dialog: crate::utilities::UIDialog<String> = UIDialog::new(
+            "theme",
+            names,
+            /* single_only */ true,
+            /* done_fn */ None,
+            &self.context,
+        );
+        dialog.set_cursor_to(&current);
+        dialog.set_cursor_callback(Some(Box::new(|name: &String, context: &mut Context| {
+            // Handled in `rcv_event`: applies the theme in-memory for
+            // an immediate live preview of the whole UI.
+            context.replies.push_back(UIEvent::ChangeTheme {
+                name: name.clone(),
+                persist: false,
+            });
+        })));
+        // `Enter` finalises with the highlighted theme; the quit binding
+        // (`q`/`Esc`) only closes the picker - theme selection takes
+        // effect exclusively through the arrow-key live preview above and
+        // `Enter`'s persist. Closing therefore leaves the last previewed
+        // theme applied in memory, without touching the configuration.
+        let restore = current;
+        dialog.set_done_fn(Some(Box::new(
+            move |_id, selection: &[String]| match selection.first() {
+                Some(name) => Some(crate::types::UIEvent::ChangeTheme {
+                    name: name.clone(),
+                    persist: true,
+                }),
+                None => Some(crate::types::UIEvent::ChangeTheme {
+                    name: restore,
+                    persist: false,
+                }),
+            },
+        )));
+        let id = dialog.id();
+        dialog.realize(None, &mut self.context);
+        self.overlay.insert(id, Box::new(dialog));
+        self.rcv_event(UIEvent::Resize);
+    }
+
+    /// Switch `settings.terminal.theme` to `name` and refresh every
+    /// component (`UIEvent::ConfigReload`). When `name` names a theme from
+    /// the user's theme directory, its definition is re-read from the file
+    /// on every apply, so edits to it take effect between switches. With
+    /// `persist`, also rewrite the `theme` value in the configuration file.
+    fn apply_theme(&mut self, name: String, persist: bool) {
+        let result = self.load_theme_into_settings(&name).and_then(|()| {
+            if persist {
+                self.persist_theme_to_config(&name)
+            } else {
+                Ok(())
+            }
+        });
+        match result {
+            Ok(()) => {
+                self.context.settings.terminal.theme = name;
+                let old_settings = self.context.settings.clone();
+                self.context
+                    .replies
+                    .push_back(UIEvent::ConfigReload { old_settings });
+                // No Resize here: ConfigReload already refreshes every
+                // component's colors; a Resize forces an extra full-screen
+                // pass per preview step, which the theme picker triggers on
+                // every arrow key - the visible effect is flickering.
+                self.context
+                    .replies
+                    .push_back(UIEvent::StatusEvent(StatusEvent::UpdateSubStatus(
+                        String::new(),
+                    )));
+            }
+            Err(err) => {
+                self.context.replies.push_back(UIEvent::Notification {
+                    title: Some("Could not switch theme".into()),
+                    source: None,
+                    body: err.to_string().into(),
+                    kind: Some(NotificationType::Error(err.kind)),
+                });
+            }
+        }
+    }
+
+    /// Ensure the theme `name` is present in
+    /// `settings.terminal.themes`: built-ins and configuration themes
+    /// already are; a theme from the user's theme directory is parsed
+    /// from its file and inserted over any same-name definition, since a
+    /// directory file shadows both built-ins and configuration tables
+    /// (theme directory > configuration > built-in).
+    fn load_theme_into_settings(&mut self, name: &str) -> melib::Result<()> {
+        if name == crate::conf::LIGHT || name == crate::conf::DARK {
+            return Ok(());
+        }
+        let (user_themes, _errors) = crate::conf::get_user_themes();
+        if let Some(path) = user_themes.get(name) {
+            // Re-reading the file on every apply keeps edits to it
+            // effective between switches; applies are user-paced and the
+            // parse cost is negligible next to the `get_user_themes()`
+            // scan above.
+            let theme = crate::conf::theme_from_file(
+                name,
+                path,
+                &self.context.settings.terminal.themes.dark,
+            )?;
+            self.context
+                .settings
+                .terminal
+                .themes
+                .other_themes
+                .insert(name.to_string(), theme);
+            return Ok(());
+        }
+        if self
+            .context
+            .settings
+            .terminal
+            .themes
+            .other_themes
+            .contains_key(name)
+        {
+            return Ok(());
+        }
+        Err(melib::Error::new(format!(
+            "theme `{name}` is not defined in the configuration or the themes directory"
+        )))
+    }
+
+    /// Rewrite `theme = "<name>"` inside the `[terminal]` table of the
+    /// configuration file, preserving every other value verbatim. When no
+    /// `[terminal]` table exists, one is appended. The write is atomic
+    /// (temp file + rename) so a crash cannot truncate the configuration.
+    fn persist_theme_to_config(&mut self, name: &str) -> melib::Result<()> {
+        let config_path = crate::conf::get_config_file()?;
+        let text = std::fs::read_to_string(&config_path).map_err(|err| {
+            melib::Error::new(format!("could not read {}: {err}", config_path.display()))
+        })?;
+        let updated = crate::conf::rewrite_terminal_theme(&text, name)?;
+        let tmp = config_path.with_extension("toml.tmp");
+        std::fs::write(&tmp, updated).map_err(|err| {
+            melib::Error::new(format!("could not write {}: {err}", tmp.display()))
+        })?;
+        std::fs::rename(&tmp, &config_path).map_err(|err| {
+            melib::Error::new(format!(
+                "could not replace {}: {err}",
+                config_path.display()
+            ))
+        })?;
+        self.context
+            .replies
+            .push_back(UIEvent::StatusEvent(StatusEvent::UpdateStatus(format!(
+                "theme saved: {name}"
+            ))));
+        Ok(())
+    }
+
+    /// Whether any component has pending visual changes. The main loop
+    /// uses this after a finished job to tell real user-visible updates
+    /// (e.g. an applied search filter) apart from housekeeping job
+    /// completions that must not force a repaint.
+    pub fn any_component_dirty(&self) -> bool {
+        self.components
+            .values()
+            .chain(self.overlay.values())
+            .any(|c| c.is_dirty())
+    }
+
+    /// Redraw bypassing the draw-rate limit. For one-shot events that
+    /// apply state outside the timer chain (e.g. a finished search job
+    /// applying its filter): the plain [`Self::redraw`] may fall inside
+    /// the limiter's cooldown right after the keypress that started
+    /// the job, and nothing repaints until the next keypress.
+    pub fn redraw_force(&mut self) {
+        self.draw_rate_limit.expire();
+        self.redraw();
+    }
+
     /// Force a redraw for all dirty components.
     pub fn redraw(&mut self) {
         if !self.draw_rate_limit.tick() {
             return;
         }
+
         log::debug!("redraw: begin");
         #[cfg(debug_assertions)]
         let __redraw_span = DrawSpan::enter("redraw total");
@@ -777,6 +985,52 @@ impl State {
             }
             self.message_box.set_dirty(is_dirty);
         }
+        // Overlay compositing: when a dialog overlay is present, the
+        // dirty-area flush below must write from the overlay grid (which
+        // contains the underlying content WITH the dialog composited on
+        // top), not from the main grid. Writing from the main grid first
+        // and compositing the overlay later produced a one-frame flash
+        // of the underlying content on every timer tick (spinner,
+        // listing refresh) - the flicker the user saw.
+        let overlay_present = !self.overlay.is_empty() && can_draw_above_screen;
+        if overlay_present {
+            let area: Area = self.screen.area();
+            if let Some((_, overlay_widget)) = self.overlay.get_index_mut(0) {
+                let overlay_is_dirty = overlay_widget.is_dirty();
+                let underlying_changed = !areas.is_empty();
+                if overlay_is_dirty || underlying_changed {
+                    {
+                        let (grid, overlay_grid) = self.screen.grid_and_overlay_grid_mut();
+                        overlay_grid.copy_area(grid, area, area);
+                        overlay_widget.draw(overlay_grid, area, &mut self.context);
+                    }
+                    // Flush dirty rows from the composited overlay grid
+                    // instead of the main grid: the overlay content is
+                    // already in place, so there is no intermediate frame
+                    // without the dialog.
+                    let dirty_rows: Vec<usize> = if overlay_is_dirty {
+                        (0..area.height()).collect()
+                    } else {
+                        let mut r: Vec<usize> = areas
+                            .iter()
+                            .flat_map(|a| a.upper_left().1..=a.bottom_right().1)
+                            .collect();
+                        r.sort_unstable();
+                        r.dedup();
+                        r
+                    };
+                    for y in dirty_rows {
+                        if y < area.height() {
+                            self.screen.draw_overlay(0..area.width(), y);
+                        }
+                    }
+                    // Dirty areas were already flushed via the overlay
+                    // grid; suppress the main-grid flush below.
+                    areas.clear();
+                }
+            }
+        }
+
         /* draw each dirty area */
         let rows = self.screen.area().height();
         for y in 0..rows {
@@ -856,19 +1110,6 @@ impl State {
             self.message_box.set_dirty(false);
         }
 
-        if let (Some((_, overlay_widget)), true) =
-            (self.overlay.get_index_mut(0), can_draw_above_screen)
-        {
-            let area: Area = self.screen.area();
-            {
-                let (grid, overlay_grid) = self.screen.grid_and_overlay_grid_mut();
-                overlay_grid.copy_area(grid, area, area);
-                overlay_widget.draw(overlay_grid, area, &mut self.context);
-            }
-            for row in self.screen.overlay_grid().bounds_iter(area) {
-                self.screen.draw_overlay(row.cols(), row.row_index());
-            }
-        }
         self.flush();
     }
 
@@ -1065,6 +1306,9 @@ impl State {
                 self.screen.tty_mut().set_mouse(new_val);
                 self.rcv_event(UIEvent::StatusEvent(StatusEvent::SetMouse(new_val)));
             }
+            ToggleTheme => {
+                self.open_theme_picker();
+            }
             Quit => {
                 self.context.replies.push_back(UIEvent::Exit);
             }
@@ -1102,6 +1346,14 @@ impl State {
             "rcv_event {}",
             format!("{event:?}").chars().take(120).collect::<String>()
         ));
+        // The theme picker's live-preview / persistence requests are
+        // State-level concerns: apply (and optionally persist) the theme,
+        // then let the ConfigReload-style refresh below reach every
+        // component.
+        if let UIEvent::ChangeTheme { name, persist } = event {
+            self.apply_theme(name, persist);
+            return;
+        }
         if let UIEvent::Input(_) = event {
             if self.message_box.expiration_start.is_none() {
                 self.message_box.expiration_start = Some(datetime::now());

@@ -19,108 +19,62 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::{collections::BTreeMap, convert::TryInto, iter::FromIterator};
+use std::{
+    collections::{BTreeMap, HashMap},
+    convert::TryInto,
+    iter::FromIterator,
+};
 
 use indexmap::IndexSet;
 use melib::{Address, SortField, SortOrder, TagHash, Threads};
 
 use super::*;
-use crate::{components::PageMovement, jobs::JoinHandle, segment_tree::SegmentTree};
+use crate::{
+    components::PageMovement,
+    jobs::JoinHandle,
+    segment_tree::SegmentTree,
+    terminal::{draw_rounded_frame, frame_flush_areas},
+};
 
 macro_rules! row_attr {
-    ($color_cache:expr, even: $even:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
+    ($color_cache:expr, unseen: $unseen:expr, highlighted: $highlighted:expr, selected: $selected:expr  $(,)*) => {{
         let color_cache = &$color_cache;
-        let even = $even;
         let unseen = $unseen;
         let highlighted = $highlighted;
         let selected = $selected;
         ThemeAttribute {
             fg: if highlighted && selected {
-                if even {
-                    color_cache.even_highlighted_selected.fg
-                } else {
-                    color_cache.odd_highlighted_selected.fg
-                }
+                color_cache.highlighted_selected.fg
             } else if highlighted {
-                if even {
-                    color_cache.even_highlighted.fg
-                } else {
-                    color_cache.odd_highlighted.fg
-                }
+                color_cache.highlighted.fg
             } else if selected {
-                if even {
-                    color_cache.even_selected.fg
-                } else {
-                    color_cache.odd_selected.fg
-                }
+                color_cache.selected.fg
             } else if unseen {
-                if even {
-                    color_cache.even_unseen.fg
-                } else {
-                    color_cache.odd_unseen.fg
-                }
-            } else if even {
-                color_cache.even.fg
+                color_cache.unseen.fg
             } else {
-                color_cache.odd.fg
+                color_cache.base.fg
             },
             bg: if highlighted && selected {
-                if even {
-                    color_cache.even_highlighted_selected.bg
-                } else {
-                    color_cache.odd_highlighted_selected.bg
-                }
+                color_cache.highlighted_selected.bg
             } else if highlighted {
-                if even {
-                    color_cache.even_highlighted.bg
-                } else {
-                    color_cache.odd_highlighted.bg
-                }
+                color_cache.highlighted.bg
             } else if selected {
-                if even {
-                    color_cache.even_selected.bg
-                } else {
-                    color_cache.odd_selected.bg
-                }
+                color_cache.selected.bg
             } else if unseen {
-                if even {
-                    color_cache.even_unseen.bg
-                } else {
-                    color_cache.odd_unseen.bg
-                }
-            } else if even {
-                color_cache.even.bg
+                color_cache.unseen.bg
             } else {
-                color_cache.odd.bg
+                color_cache.base.bg
             },
             attrs: if highlighted && selected {
-                if even {
-                    color_cache.even_highlighted_selected.attrs
-                } else {
-                    color_cache.odd_highlighted_selected.attrs
-                }
+                color_cache.highlighted_selected.attrs
             } else if highlighted {
-                if even {
-                    color_cache.even_highlighted.attrs
-                } else {
-                    color_cache.odd_highlighted.attrs
-                }
+                color_cache.highlighted.attrs
             } else if selected {
-                if even {
-                    color_cache.even_selected.attrs
-                } else {
-                    color_cache.odd_selected.attrs
-                }
+                color_cache.selected.attrs
             } else if unseen {
-                if even {
-                    color_cache.even_unseen.attrs
-                } else {
-                    color_cache.odd_unseen.attrs
-                }
-            } else if even {
-                color_cache.even.attrs
+                color_cache.unseen.attrs
             } else {
-                color_cache.odd.attrs
+                color_cache.base.attrs
             },
         }
     }};
@@ -142,9 +96,9 @@ pub struct CompactListing {
     rows: RowsState<(ThreadHash, EnvelopeHash)>,
 
     #[allow(clippy::type_complexity)]
-    search_job: Option<(String, JoinHandle<Result<Vec<EnvelopeHash>>>)>,
+    search_job: Option<(String, MailboxHash, JoinHandle<Result<SearchResult>>)>,
     #[allow(clippy::type_complexity)]
-    select_job: Option<(String, JoinHandle<Result<Vec<EnvelopeHash>>>)>,
+    select_job: Option<(String, MailboxHash, JoinHandle<Result<SearchResult>>)>,
     filter_term: String,
     filtered_selection: Vec<ThreadHash>,
     filtered_order: HashMap<ThreadHash, usize>,
@@ -159,6 +113,9 @@ pub struct CompactListing {
     modifier_active: bool,
     modifier_command: Option<Modifier>,
     view_area: Option<Area>,
+    /// Whether the grid (not the open view) holds the keyboard focus; the
+    /// Entry-state subpane ring then renders focused.
+    grid_has_keyboard: bool,
     parent: ComponentId,
     id: ComponentId,
 }
@@ -313,6 +270,10 @@ impl MailListingTrait for CompactListing {
         );
 
         let tags_lck = account.collection.tag_index.read().unwrap();
+        // Hold one envelope read guard for the whole rebuild: `make_entry_string`
+        // needs the envelope map for the deterministic attachment check, and a
+        // per-row `get_env` would both churn the lock and nest read locks.
+        let envelopes = account.collection.envelopes.read().unwrap();
 
         let mut other_subjects = IndexSet::new();
         let mut tags = IndexSet::new();
@@ -359,7 +320,7 @@ impl MailListingTrait for CompactListing {
             } else {
                 continue 'items_for_loop;
             };
-            if !context.accounts[&self.cursor_pos.0].contains_key(root_env_hash) {
+            if !envelopes.contains_key(&root_env_hash) {
                 //log::debug!("key = {}", root_env_hash);
                 //log::debug!(
                 //    "name = {} {}",
@@ -370,10 +331,7 @@ impl MailListingTrait for CompactListing {
 
                 continue;
             }
-            let Some(root_envelope) = context.accounts[&self.cursor_pos.0]
-                .collection
-                .get_env(root_env_hash)
-            else {
+            let Some(root_envelope) = envelopes.get(&root_env_hash) else {
                 // Stale thread root: skip the row instead of drawing a bogus one.
                 continue 'items_for_loop;
             };
@@ -403,12 +361,7 @@ impl MailListingTrait for CompactListing {
                     ))
                 })
                 .filter_map(|(env_hash, show_subject)| {
-                    Some((
-                        context.accounts[&self.cursor_pos.0]
-                            .collection
-                            .get_env(env_hash)?,
-                        show_subject,
-                    ))
+                    Some((envelopes.get(&env_hash)?, show_subject))
                 })
             {
                 if show_subject {
@@ -433,7 +386,6 @@ impl MailListingTrait for CompactListing {
 
             let row_attr = row_attr!(
                 self.color_cache,
-                even: self.length.is_multiple_of(2),
                 unseen: threads.thread_ref(thread).unseen() > 0,
                 highlighted: false,
                 selected: false
@@ -441,11 +393,12 @@ impl MailListingTrait for CompactListing {
             self.rows.row_attr_cache.insert(self.length, row_attr);
 
             let entry_strings = self.make_entry_string(
-                &root_envelope,
+                root_envelope,
                 context,
                 &tags_lck,
                 &from_address_list,
                 &threads,
+                &envelopes,
                 &other_subjects,
                 &tags,
                 highlight_self,
@@ -518,13 +471,10 @@ impl MailListingTrait for CompactListing {
         self.data_columns
             .cursor_config
             .set_handle(true)
-            .set_even_odd_theme(
-                self.color_cache.even_highlighted,
-                self.color_cache.odd_highlighted,
-            );
+            .set_theme(self.color_cache.highlighted);
         self.data_columns
             .theme_config
-            .set_even_odd_theme(self.color_cache.even, self.color_cache.odd);
+            .set_theme(self.color_cache.base);
 
         /* index column */
         _ = self.data_columns.columns[0].resize_with_context(min_width.0, self.rows.len(), context);
@@ -622,13 +572,33 @@ impl ListingTrait for CompactListing {
         let threads = account.collection.get_threads(self.cursor_pos.1);
         let thread = threads.thread_ref(thread_hash);
 
+        let highlighted = self.cursor_pos.2 == idx;
+        let selected = self.rows.is_thread_selected(thread_hash);
         let row_attr = row_attr!(
             self.color_cache,
-            even: idx.is_multiple_of(2),
             unseen: thread.unseen() > 0,
-            highlighted: self.cursor_pos.2 == idx,
-            selected: self.rows.is_thread_selected(thread_hash)
+            highlighted: highlighted,
+            selected: selected
         );
+        // A base row (not the cursor row, not selected) is repainted on
+        // the pane background so un-highlighting a row hands its bg back
+        // to the pane fill; highlighted and selected rows keep their own.
+        let pane_fill = crate::conf::value(
+            context,
+            if self.grid_has_keyboard {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        );
+        let row_attr = if highlighted || selected {
+            row_attr
+        } else {
+            ThemeAttribute {
+                bg: pane_fill.bg,
+                ..row_attr
+            }
+        };
         let x = self.data_columns.widths[0]
             + self.data_columns.widths[1]
             + self.data_columns.widths[2]
@@ -657,8 +627,19 @@ impl ListingTrait for CompactListing {
         {
             self.refresh_mailbox(context, false);
         }
+        // Pane background: the grid fills with "pane.focused" while it
+        // holds the keyboard, "pane.unfocused" otherwise; rows keep their
+        // own theme colors on top of it.
+        let pane_fill = crate::conf::value(
+            context,
+            if self.grid_has_keyboard {
+                "pane.focused"
+            } else {
+                "pane.unfocused"
+            },
+        );
         if self.length == 0 {
-            grid.clear_area(area, self.color_cache.theme_default);
+            grid.clear_area(area, pane_fill);
 
             grid.copy_area(
                 self.data_columns.columns[0].grid(),
@@ -666,6 +647,7 @@ impl ListingTrait for CompactListing {
                 self.data_columns.columns[0].area(),
             );
             context.dirty_areas.push_back(area);
+            self.force_draw = false;
             return;
         }
         let rows = area.height();
@@ -676,7 +658,7 @@ impl ListingTrait for CompactListing {
         self.perform_movement(Some(rows));
 
         if self.force_draw {
-            grid.clear_area(area, self.color_cache.theme_default);
+            grid.clear_area(area, pane_fill);
         }
 
         let prev_page_no = (self.cursor_pos.2).wrapping_div(rows);
@@ -703,15 +685,29 @@ impl ListingTrait for CompactListing {
                         .get_thread_under_cursor(idx)
                         .map(|h| self.rows.is_thread_selected(h))
                         .unwrap_or(false);
-                    let row_attr = row_attr!(self.color_cache, even: idx % 2 == 0, unseen: false, highlighted: true, selected: selected);
+                    let row_attr = row_attr!(self.color_cache, unseen: false, highlighted: true, selected: selected);
                     grid.change_theme(new_area, row_attr);
                 } else if let Some(row_attr) = self.rows.row_attr_cache.get(&idx) {
-                    grid.change_theme(new_area, *row_attr);
+                    // Un-highlighted row: bg returns to the pane fill
+                    // unless the row is selected.
+                    let selected = self
+                        .get_thread_under_cursor(idx)
+                        .map(|h| self.rows.is_thread_selected(h))
+                        .unwrap_or(false);
+                    let row_attr = if selected {
+                        *row_attr
+                    } else {
+                        ThemeAttribute {
+                            bg: pane_fill.bg,
+                            ..*row_attr
+                        }
+                    };
+                    grid.change_theme(new_area, row_attr);
                 }
                 context.dirty_areas.push_back(new_area);
             }
             if *account_settings!(context[self.cursor_pos.0].listing.relative_list_indices) {
-                self.draw_relative_numbers(grid, area, top_idx, context);
+                self.draw_relative_numbers(grid, area, top_idx, pane_fill.bg, context);
                 context.dirty_areas.push_back(area);
             }
             if !self.force_draw {
@@ -725,19 +721,38 @@ impl ListingTrait for CompactListing {
             self.cursor_pos.2 = self.new_cursor_pos.2;
         }
 
-        grid.clear_area(area, self.color_cache.theme_default);
+        grid.clear_area(area, pane_fill);
         /* Page_no has changed, so draw new page */
         _ = self.data_columns.recalc_widths(area.size(), top_idx);
         /* copy table columns */
         self.data_columns
             .draw(grid, top_idx, self.cursor_pos.2, grid.bounds_iter(area));
         if *account_settings!(context[self.cursor_pos.0].listing.relative_list_indices) {
-            self.draw_relative_numbers(grid, area, top_idx, context);
+            self.draw_relative_numbers(grid, area, top_idx, pane_fill.bg, context);
         }
         /* apply each row colors separately */
         for i in top_idx..(top_idx + area.height()) {
             if let Some(row_attr) = self.rows.row_attr_cache.get(&i) {
-                grid.change_theme(area.nth_row(i % rows), *row_attr);
+                // Base rows (not the cursor row, not selected) sit
+                // directly on the pane background: they keep their theme
+                // fg/attrs (unseen bold, zebra fg accents) but their bg
+                // follows the pane, so an unfocused grid dims as a whole.
+                // The cursor row is re-applied with its own highlight
+                // below and selected rows keep their own fill.
+                let highlighted = i == self.cursor_pos.2;
+                let selected = self
+                    .get_thread_under_cursor(i)
+                    .map(|h| self.rows.is_thread_selected(h))
+                    .unwrap_or(false);
+                let row_attr = if highlighted || selected {
+                    *row_attr
+                } else {
+                    ThemeAttribute {
+                        bg: pane_fill.bg,
+                        ..*row_attr
+                    }
+                };
+                grid.change_theme(area.nth_row(i % rows), row_attr);
             }
         }
 
@@ -748,19 +763,17 @@ impl ListingTrait for CompactListing {
             .unwrap_or(false);
         let row_attr = row_attr!(
             self.color_cache,
-            even: self.cursor_pos.2.is_multiple_of(2),
             unseen: false,
             highlighted: true,
             selected: selected
         );
         grid.change_theme(area.nth_row(self.cursor_pos.2 % rows), row_attr);
 
-        /* clear gap if available height is more than count of entries */
+        /* Clear the gap below the last entry with the pane background:
+         * empty rows follow the keyboard focus like every other empty
+         * cell of the pane. */
         if top_idx + rows > self.length {
-            grid.change_theme(
-                area.skip_rows(self.length - top_idx),
-                self.color_cache.theme_default,
-            );
+            grid.change_theme(area.skip_rows(self.length - top_idx), pane_fill);
         }
 
         self.force_draw = false;
@@ -809,7 +822,7 @@ impl ListingTrait for CompactListing {
                 self.sort,
                 &context.accounts[&self.cursor_pos.0].collection.envelopes,
             );
-            self.new_cursor_pos.2 = self.cursor_pos.2.min(self.filtered_selection.len() - 1);
+            self.new_cursor_pos.2 = 0;
         } else {
             _ = self.data_columns.columns[0].resize_with_context(0, 0, context);
         }
@@ -820,6 +833,10 @@ impl ListingTrait for CompactListing {
                 as Box<dyn Iterator<Item = ThreadHash>>,
         );
         self.rows.restore_selection(previous_selection);
+        // The row set was rebuilt: force a full list repaint — the
+        // incremental `row_updates` path would leave stale rows on
+        // screen until the next keypress.
+        self.force_draw = true;
     }
 
     fn view_area(&self) -> Option<Area> {
@@ -862,29 +879,14 @@ impl ListingTrait for CompactListing {
                 self.force_draw = true;
             }
             Focus::Entry => {
-                if let Some((thread_hash, env_hash)) = self
-                    .get_thread_under_cursor(self.new_cursor_pos.2)
-                    .and_then(|thread| self.rows.thread_to_env.get(&thread).map(|e| (thread, e[0])))
-                {
+                if self.cursor_selection().is_some() {
                     self.force_draw = true;
                     self.dirty = true;
-                    self.kick_parent(
-                        self.parent,
-                        ListingMessage::OpenEntryUnderCursor {
-                            thread_hash,
-                            env_hash,
-                            show_thread: true,
-                            go_to_first_unread: true,
-                        },
-                        context,
-                    );
+                    self.kick_open_under_cursor(context);
                     self.cursor_pos.2 = self.new_cursor_pos.2;
                 } else {
                     return;
                 }
-            }
-            Focus::EntryFullscreen => {
-                self.dirty = true;
             }
         }
         self.focus = new_value;
@@ -907,6 +909,42 @@ impl std::fmt::Display for CompactListing {
 }
 
 impl CompactListing {
+    /// The (thread, envelope) under the cursor, if any.
+    pub(crate) fn cursor_selection(&self) -> Option<(ThreadHash, EnvelopeHash)> {
+        self.get_thread_under_cursor(self.new_cursor_pos.2)
+            .and_then(|thread| {
+                self.rows
+                    .thread_to_env
+                    .get(&thread)
+                    .and_then(|e| Some((thread, *e.first()?)))
+            })
+    }
+
+    /// Queue an `OpenEntryUnderCursor` for the cursor entry: refreshes the
+    /// open view to the newly selected mail while the grid holds the
+    /// keyboard (the layout follows the selection).
+    pub(crate) fn kick_open_under_cursor(&self, context: &mut Context) {
+        if let Some((thread_hash, env_hash)) = self.cursor_selection() {
+            self.kick_parent(
+                self.parent,
+                ListingMessage::OpenEntryUnderCursor {
+                    thread_hash,
+                    env_hash,
+                    go_to_first_unread: true,
+                },
+                context,
+            );
+        }
+    }
+
+    /// Mark that the grid (not the open view) holds the keyboard focus;
+    /// the Entry-state subpane ring then renders focused.
+    pub(crate) fn set_grid_has_keyboard(&mut self, value: bool) {
+        self.grid_has_keyboard = value;
+        self.dirty = true;
+        self.force_draw = true;
+    }
+
     pub fn new(
         parent: ComponentId,
         coordinates: (AccountHash, MailboxHash),
@@ -936,6 +974,7 @@ impl CompactListing {
             modifier_active: false,
             modifier_command: None,
             view_area: None,
+            grid_has_keyboard: false,
             parent,
             id: ComponentId::default(),
         })
@@ -949,6 +988,7 @@ impl CompactListing {
         tags_lck: &BTreeMap<TagHash, String>,
         from: &[Address],
         threads: &Threads,
+        envelopes: &HashMap<EnvelopeHash, Envelope>,
         other_subjects: &IndexSet<String>,
         tags_set: &IndexSet<TagHash>,
         highlight_self: bool,
@@ -1012,7 +1052,10 @@ impl CompactListing {
                     .unwrap_or(false),
                 thread.snoozed(),
                 thread.unseen() > 0,
-                thread.has_attachments(),
+                // Deterministic envelope-level check: `Thread::has_attachments`
+                // is a counter aggregated once at thread insertion and goes
+                // stale after refresh/rebuild (see `thread_has_attachments`).
+                thread_has_attachments(threads, envelopes, hash),
                 context,
                 (self.cursor_pos.0, self.cursor_pos.1),
             ),
@@ -1045,7 +1088,10 @@ impl CompactListing {
             return;
         }
         let tags_lck = account.collection.tag_index.read().unwrap();
-        let Some(envelope) = account.collection.get_env(env_hash) else {
+        // One envelope read guard for the row: `make_entry_string` needs the
+        // map for the deterministic attachment check.
+        let envelopes = account.collection.envelopes.read().unwrap();
+        let Some(envelope) = envelopes.get(&env_hash) else {
             /* The envelope has been renamed or removed, so wait for the appropriate
              * event to arrive */
             log::error!(
@@ -1060,7 +1106,6 @@ impl CompactListing {
         let idx = self.rows.thread_order[&thread_hash];
         let row_attr = row_attr!(
             self.color_cache,
-            even: idx.is_multiple_of(2),
             unseen: thread.unseen() > 0,
             highlighted: false,
             selected: self.rows.is_thread_selected(thread_hash)
@@ -1090,14 +1135,7 @@ impl CompactListing {
                     .message()
                     .map(|env_hash| (env_hash, threads.thread_nodes()[&h].show_subject()))
             })
-            .filter_map(|(env_hash, show_subject)| {
-                Some((
-                    context.accounts[&self.cursor_pos.0]
-                        .collection
-                        .get_env(env_hash)?,
-                    show_subject,
-                ))
-            })
+            .filter_map(|(env_hash, show_subject)| Some((envelopes.get(&env_hash)?, show_subject)))
         {
             if show_subject {
                 other_subjects.insert(envelope.subject().to_string());
@@ -1119,11 +1157,12 @@ impl CompactListing {
         }
 
         let mut entry_strings = self.make_entry_string(
-            &envelope,
+            envelope,
             context,
             &tags_lck,
             &from_address_list,
             &threads,
+            &envelopes,
             &other_subjects,
             &tags,
             highlight_self,
@@ -1136,7 +1175,6 @@ impl CompactListing {
                 .main_identity_address();
             envelope.recipient_any(&my_address) || envelope.sender_any(&my_address)
         };
-        drop(envelope);
         let columns = &mut self.data_columns.columns;
         for n in 0..=4 {
             let area = columns[n].area().nth_row(idx);
@@ -1380,17 +1418,13 @@ impl CompactListing {
         }
     }
 
-    fn select(
-        &mut self,
-        search_term: &str,
-        results: Result<Vec<EnvelopeHash>>,
-        context: &mut Context,
-    ) {
-        let account = &context.accounts[&self.cursor_pos.0];
+    fn select(&mut self, search_term: &str, results: Result<SearchResult>, context: &mut Context) {
         match results {
-            Ok(results) => {
+            Ok(result) => {
+                super::notify_if_search_degraded(context, &result);
+                let account = &context.accounts[&self.cursor_pos.0];
                 let threads = account.collection.get_threads(self.cursor_pos.1);
-                for env_hash in results {
+                for env_hash in result.envelopes {
                     if !account.collection.contains_key(&env_hash) {
                         continue;
                     }
@@ -1430,6 +1464,7 @@ impl CompactListing {
         grid: &mut CellBuffer,
         area: Area,
         top_idx: usize,
+        pane_bg: Color,
         context: &Context,
     ) {
         let width = self.data_columns.widths[0];
@@ -1446,15 +1481,24 @@ impl CompactListing {
             }
             let row_attr = if let Some(thread_hash) = self.get_thread_under_cursor(idx) {
                 let thread = threads.thread_ref(thread_hash);
-                row_attr!(
+                let highlighted = self.new_cursor_pos.2 == idx;
+                let selected = self.rows.is_thread_selected(thread_hash);
+                let row_attr = row_attr!(
                     self.color_cache,
-                    even: idx.is_multiple_of(2),
                     unseen: thread.unseen() > 0,
-                    highlighted: self.new_cursor_pos.2 == idx,
-                    selected: self.rows.is_thread_selected(thread_hash)
-                )
+                    highlighted: highlighted,
+                    selected: selected
+                );
+                if highlighted || selected {
+                    row_attr
+                } else {
+                    ThemeAttribute {
+                        bg: pane_bg,
+                        ..row_attr
+                    }
+                }
             } else {
-                row_attr!(self.color_cache, even: (top_idx + i).is_multiple_of(2), unseen: false, highlighted: true, selected: false)
+                row_attr!(self.color_cache, unseen: false, highlighted: true, selected: false)
             };
 
             grid.clear_area(area.nth_row(i), row_attr);
@@ -1528,11 +1572,6 @@ impl CompactListing {
 
 impl Component for CompactListing {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        if matches!(self.focus, Focus::EntryFullscreen) {
-            self.view_area = area.into();
-            return;
-        }
-
         if !self.is_dirty() {
             return;
         }
@@ -1763,10 +1802,49 @@ impl Component for CompactListing {
                 self.draw_list(grid, area, context);
             }
         } else {
-            self.view_area = area.into();
-            if self.length == 0 && self.dirty {
-                grid.clear_area(area, self.color_cache.theme_default);
-                context.dirty_areas.push_back(area);
+            // Split render: the grid keeps the left 30% column, the
+            // view the right 70%; the keyboard only toggles the ring
+            // highlight.
+            // Equal in height to the pane chain's thread list.
+            if self.length == 0 {
+                if self.dirty {
+                    let pane_fill = crate::conf::value(
+                        context,
+                        if self.grid_has_keyboard {
+                            "pane.focused"
+                        } else {
+                            "pane.unfocused"
+                        },
+                    );
+                    grid.clear_area(area, pane_fill);
+                    context.dirty_areas.push_back(area);
+                }
+                self.view_area = area.into();
+            } else {
+                let (list_area, view_area) = crate::mail::pane_split(area);
+                let ring = if self.grid_has_keyboard {
+                    crate::conf::value(context, "tab.focused")
+                } else {
+                    crate::conf::value(context, "tab.unfocused")
+                };
+                let list_inner = draw_rounded_frame(grid, list_area, ring);
+                for frame_area in frame_flush_areas(grid, list_area) {
+                    context.dirty_areas.push_back(frame_area);
+                }
+                let pane_fill = crate::conf::value(
+                    context,
+                    if self.grid_has_keyboard {
+                        "pane.focused"
+                    } else {
+                        "pane.unfocused"
+                    },
+                );
+                grid.clear_area(list_inner, pane_fill);
+                self.draw_list(grid, list_inner, context);
+                let gap_area = crate::mail::pane_gap(area);
+                grid.clear_area(gap_area, self.color_cache.theme_default);
+                context.dirty_areas.push_back(gap_area);
+                self.view_area = view_area.into();
             }
         }
         self.dirty = false;
@@ -1783,76 +1861,14 @@ impl Component for CompactListing {
             ShortcutMaps::default()
         };
 
-        match (&event, self.focus) {
-            (UIEvent::VisibilityChange(true), _) => {
-                self.force_draw = true;
-                self.set_dirty(true);
-                return true;
-            }
-            (UIEvent::Input(ref k), Focus::Entry)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]) =>
-            {
-                self.set_focus(Focus::EntryFullscreen, context);
-                return true;
-            }
-            (UIEvent::Input(ref k), Focus::EntryFullscreen)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-            {
-                self.set_focus(Focus::Entry, context);
-                return true;
-            }
-            (UIEvent::Input(ref k), Focus::Entry)
-                if shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-            {
-                self.set_focus(Focus::None, context);
-                return true;
-            }
-            _ => {}
+        if let (UIEvent::VisibilityChange(true), _) = (&*event, self.focus) {
+            self.force_draw = true;
+            self.set_dirty(true);
+            return true;
         }
 
         if self.length > 0 {
             match *event {
-                UIEvent::Input(ref k)
-                    if matches!(self.focus, Focus::None)
-                        && (shortcut!(k == shortcuts[Shortcuts::LISTING]["open_entry"])
-                            || shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"])) =>
-                {
-                    self.set_focus(Focus::Entry, context);
-
-                    return true;
-                }
-                UIEvent::Input(ref k)
-                    if !matches!(self.focus, Focus::None)
-                        && (shortcut!(k == shortcuts[Shortcuts::LISTING]["exit_entry"])
-                            || context.settings.shortcuts.general.quit.contains(k)) =>
-                {
-                    self.set_focus(Focus::None, context);
-                    return true;
-                }
-                UIEvent::Input(ref k)
-                    if matches!(self.focus, Focus::None)
-                        && shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_right"]) =>
-                {
-                    self.set_focus(Focus::Entry, context);
-                    return true;
-                }
-                UIEvent::Input(ref k)
-                    if !matches!(self.focus, Focus::None)
-                        && shortcut!(k == shortcuts[Shortcuts::LISTING]["focus_left"]) =>
-                {
-                    match self.focus {
-                        Focus::Entry => {
-                            self.set_focus(Focus::None, context);
-                        }
-                        Focus::EntryFullscreen => {
-                            self.set_focus(Focus::Entry, context);
-                        }
-                        Focus::None => {
-                            unreachable!();
-                        }
-                    }
-                    return true;
-                }
                 UIEvent::Input(ref key)
                     if !self.unfocused()
                         && shortcut!(key == shortcuts[Shortcuts::LISTING]["select_entry"]) =>
@@ -2010,7 +2026,17 @@ impl Component for CompactListing {
             UIEvent::Action(Action::Listing(Search {
                 term: ref filter_term,
                 raw_search,
-            })) if !self.unfocused() => {
+            })) => {
+                // The search must work with an open view too (the grid
+                // pane keeps rendering the filtered rows); it is a
+                // listing-level operation, not a grid-focus one.
+                //
+                // Every backend runs the search as a job on the executor
+                // thread pool: remote backends on the reactor thread,
+                // local ones on the blocking pool. A local fallback scan
+                // reads every mail file in the mailbox, so driving it on
+                // this thread would freeze the UI on large mailboxes. The
+                // completion (`JobFinished`) applies the filter.
                 match context.accounts[&self.cursor_pos.0].search(
                     filter_term,
                     raw_search,
@@ -2026,7 +2052,8 @@ impl Component for CompactListing {
                                 job,
                                 context.accounts[&self.cursor_pos.0].is_async(),
                             );
-                        self.search_job = Some((filter_term.to_string(), handle));
+                        self.search_job =
+                            Some((filter_term.to_string(), self.cursor_pos.1, handle));
                     }
                     Err(err) => {
                         context.replies.push_back(UIEvent::Notification {
@@ -2043,7 +2070,7 @@ impl Component for CompactListing {
             UIEvent::Action(Action::Listing(Select {
                 term: ref search_term,
                 raw_search,
-            })) if !self.unfocused() => {
+            })) => {
                 match context.accounts[&self.cursor_pos.0].search(
                     search_term,
                     raw_search,
@@ -2062,7 +2089,8 @@ impl Component for CompactListing {
                         if let Ok(Some(search_result)) = try_recv_timeout!(&mut handle.chan) {
                             self.select(search_term, search_result, context);
                         } else {
-                            self.select_job = Some((search_term.to_string(), handle));
+                            self.select_job =
+                                Some((search_term.to_string(), self.cursor_pos.1, handle));
                         }
                     }
                     Err(err) => {
@@ -2081,14 +2109,34 @@ impl Component for CompactListing {
                 if self
                     .search_job
                     .as_ref()
-                    .map(|(_, j)| j == job_id)
+                    .map(|(_, _, j)| j == job_id)
                     .unwrap_or(false) =>
             {
-                let (filter_term, mut handle) = self.search_job.take().unwrap();
+                let (filter_term, mailbox_hash, mut handle) = self.search_job.take().unwrap();
                 match handle.chan.try_recv() {
                     Err(_) => { /* search was canceled */ }
                     Ok(None) => { /* something happened, perhaps a worker thread panicked */ }
-                    Ok(Some(Ok(results))) => self.filter(filter_term, results, context),
+                    Ok(Some(Ok(results))) => {
+                        log::debug!(
+                            "search job finished: {} results for {:?}",
+                            results.envelopes.len(),
+                            filter_term
+                        );
+                        super::notify_if_search_degraded(context, &results);
+                        if self.cursor_pos.1 == mailbox_hash {
+                            self.filter(filter_term, results.envelopes, context)
+                        } else {
+                            // The user switched mailboxes while the scan
+                            // was running: applying the old mailbox's
+                            // hashes here would filter the new one with
+                            // stale results. Drop them.
+                            log::debug!(
+                                "dropping stale search results for mailbox {mailbox_hash:?}; \
+                                 the listing now shows mailbox {:?}",
+                                self.cursor_pos.1
+                            );
+                        }
+                    }
                     Ok(Some(Err(err))) => {
                         context.replies.push_back(UIEvent::Notification {
                             title: Some("Could not perform search".into()),
@@ -2104,14 +2152,27 @@ impl Component for CompactListing {
                 if self
                     .select_job
                     .as_ref()
-                    .map(|(_, j)| j == job_id)
+                    .map(|(_, _, j)| j == job_id)
                     .unwrap_or(false) =>
             {
-                let (search_term, mut handle) = self.select_job.take().unwrap();
+                let (search_term, mailbox_hash, mut handle) = self.select_job.take().unwrap();
                 match handle.chan.try_recv() {
                     Err(_) => { /* search was canceled */ }
                     Ok(None) => { /* something happened, perhaps a worker thread panicked */ }
-                    Ok(Some(results)) => self.select(&search_term, results, context),
+                    Ok(Some(results)) => {
+                        if self.cursor_pos.1 == mailbox_hash {
+                            self.select(&search_term, results, context);
+                        } else {
+                            // The user switched mailboxes while the scan
+                            // was running: selecting stale envelopes
+                            // would corrupt the new mailbox's selection.
+                            log::debug!(
+                                "dropping stale select results for mailbox {mailbox_hash:?}; \
+                                 the listing now shows mailbox {:?}",
+                                self.cursor_pos.1
+                            );
+                        }
+                    }
                 }
                 self.set_dirty(true);
             }
@@ -2121,12 +2182,7 @@ impl Component for CompactListing {
     }
 
     fn is_dirty(&self) -> bool {
-        match self.focus {
-            Focus::None | Focus::Entry => {
-                self.dirty || self.force_draw || !self.rows.row_updates.is_empty()
-            }
-            Focus::EntryFullscreen => false,
-        }
+        self.dirty || self.force_draw || !self.rows.row_updates.is_empty()
     }
 
     fn set_dirty(&mut self, value: bool) {
@@ -2146,5 +2202,279 @@ impl Component for CompactListing {
 
     fn id(&self) -> ComponentId {
         self.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use melib::backends::{
+        BackendMailbox, Mailbox, MailboxPermissions, SpecialUsageMailbox,
+    };
+
+    use super::*;
+    use crate::{
+        accounts::{build_mailboxes_order, MailboxEntry, MailboxStatus},
+        conf::FileMailboxConf,
+        terminal::{Screen, Virtual},
+    };
+
+    #[derive(Debug)]
+    struct TestMailbox {
+        hash: MailboxHash,
+        name: String,
+    }
+
+    impl BackendMailbox for TestMailbox {
+        fn hash(&self) -> MailboxHash {
+            self.hash
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn path(&self) -> &str {
+            &self.name
+        }
+
+        fn children(&self) -> &[MailboxHash] {
+            &[]
+        }
+
+        fn clone(&self) -> Mailbox {
+            Box::new(Self {
+                hash: self.hash,
+                name: self.name.clone(),
+            })
+        }
+
+        fn special_usage(&self) -> SpecialUsageMailbox {
+            SpecialUsageMailbox::Normal
+        }
+
+        fn parent(&self) -> Option<MailboxHash> {
+            None
+        }
+
+        fn permissions(&self) -> MailboxPermissions {
+            MailboxPermissions::default()
+        }
+
+        fn is_subscribed(&self) -> bool {
+            true
+        }
+
+        fn set_is_subscribed(&mut self, _: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_special_usage(&mut self, _: SpecialUsageMailbox) -> Result<()> {
+            Ok(())
+        }
+
+        fn count(&self) -> Result<(usize, usize)> {
+            Ok((0, 0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Register an `INBOX` and an `Archive` mailbox on the mock account,
+    /// modeled on the `register_two_mailboxes` helper in
+    /// `meli/src/golden.rs` and the `listing_menu_tests` precedent.
+    fn register_mailboxes(context: &mut Context) -> (AccountHash, MailboxHash, MailboxHash) {
+        let account_hash = *context.accounts.iter().next().unwrap().0;
+        let inbox_hash = MailboxHash::from_bytes(b"INBOX");
+        let archive_hash = MailboxHash::from_bytes(b"Archive");
+        let account = context.accounts.get_mut(&account_hash).unwrap();
+        for (hash, name) in [(inbox_hash, "INBOX"), (archive_hash, "Archive")] {
+            account.mailbox_entries.insert(
+                hash,
+                MailboxEntry::new(
+                    MailboxStatus::Available,
+                    name.to_string(),
+                    Box::new(TestMailbox {
+                        hash,
+                        name: name.to_string(),
+                    }),
+                    FileMailboxConf::default(),
+                ),
+            );
+        }
+        build_mailboxes_order(
+            &mut account.tree,
+            &account.mailbox_entries,
+            &mut account.mailboxes_order,
+        );
+        (account_hash, inbox_hash, archive_hash)
+    }
+
+    /// Insert two INBOX mails, build a drawn listing over them, and fire
+    /// `search findme` (the job spawns; the filter applies only when its
+    /// `JobFinished` is processed). Returns the pieces needed to drive
+    /// the job's completion manually.
+    fn setup_listing_with_pending_search(
+        ctx: &mut Context,
+    ) -> (
+        Box<CompactListing>,
+        AccountHash,
+        MailboxHash,
+        MailboxHash,
+        crate::jobs::JobId,
+    ) {
+        let mails: [&[u8]; 2] = [
+            b"From: a@b.example\r\nTo: c@d.example\r\nSubject: findme alpha\r\nMessage-ID: <findme-alpha@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\r\nfindme alpha body\r\n",
+            b"From: a@b.example\r\nTo: c@d.example\r\nSubject: beta\r\nMessage-ID: <beta@x.example>\r\nDate: Thu, 1 Jan 2026 00:01:00 +0000\r\n\r\nbeta body\r\n",
+        ];
+        let (account_hash, inbox_hash, archive_hash) = register_mailboxes(ctx);
+        for bytes in mails {
+            let env = Envelope::from_bytes(bytes, None).unwrap();
+            ctx.accounts[&account_hash]
+                .collection
+                .insert(env, inbox_hash);
+        }
+
+        let mut listing =
+            CompactListing::new(ComponentId::default(), (account_hash, inbox_hash), ctx);
+        let theme_default = crate::conf::value(ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        // First draw populates the rows for INBOX.
+        listing.draw(screen.grid_mut(), area, ctx);
+        assert_eq!(listing.length, 2, "precondition: both mails are listed");
+
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::Search {
+            term: "findme".to_string(),
+            raw_search: false,
+        }));
+        assert!(listing.process_event(&mut event, ctx));
+        let job_id = listing
+            .search_job
+            .as_ref()
+            .expect("the search must spawn a background job")
+            .2
+            .job_id;
+        (listing, account_hash, inbox_hash, archive_hash, job_id)
+    }
+
+    /// Wait until the executor signals the search job's completion
+    /// (without delivering it to the listing) so the test controls when
+    /// the `JobFinished` event is processed.
+    fn wait_for_job_completion(ctx: &Context, job_id: crate::jobs::JobId) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match ctx.receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(crate::ThreadEvent::JobFinished(id)) if id == job_id => return,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        panic!("the search job did not finish within five seconds");
+    }
+
+    /// Deliver a finished job like the main loop does.
+    fn deliver_job_finished(
+        listing: &mut CompactListing,
+        ctx: &mut Context,
+        job_id: crate::jobs::JobId,
+    ) {
+        ctx.main_loop_handler.job_executor.set_job_finished(job_id);
+        let mut ev = UIEvent::StatusEvent(StatusEvent::JobFinished(job_id));
+        let _ = listing.process_event(&mut ev, ctx);
+    }
+
+    fn draw_grid_text(listing: &mut CompactListing, ctx: &mut Context) -> String {
+        listing.set_dirty(true);
+        let theme_default = crate::conf::value(ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, ctx);
+        let grid = screen.grid();
+        (0..grid.rows)
+            .map(|y| (0..grid.cols).map(|x| grid[(x, y)].ch()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Regression: a search job that completes after the user switched
+    /// mailboxes must not apply the originating mailbox's hashes as a
+    /// filter on the now-current mailbox. The stale result is dropped:
+    /// the filter term stays unset and the old mailbox's rows all stay
+    /// visible when the user switches back.
+    #[test]
+    fn stale_search_job_after_mailbox_switch_does_not_filter() {
+        let mut ctx = crate::golden::mock_context();
+        let (mut listing, account_hash, inbox_hash, archive_hash, job_id) =
+            setup_listing_with_pending_search(&mut ctx);
+        wait_for_job_completion(&ctx, job_id);
+
+        // The user switches mailboxes while the scan runs, like the real
+        // transition does.
+        listing.set_coordinates((account_hash, archive_hash));
+        listing.refresh_mailbox(&mut ctx, false);
+        assert_eq!(listing.cursor_pos.1, archive_hash);
+
+        deliver_job_finished(&mut listing, &mut ctx, job_id);
+
+        // The stale result was dropped: no filter was applied.
+        assert!(
+            listing.filter_term.is_empty(),
+            "the stale search result must not set the filter term, got {:?}",
+            listing.filter_term
+        );
+        assert!(
+            listing.filtered_selection.is_empty(),
+            "the stale search result must not feed the filtered selection"
+        );
+
+        // Switching back to the searched mailbox must show every row
+        // again: no stale filter is in effect.
+        listing.set_coordinates((account_hash, inbox_hash));
+        listing.refresh_mailbox(&mut ctx, false);
+        let text = draw_grid_text(&mut listing, &mut ctx);
+        assert!(
+            text.contains("findme alpha") && text.contains("beta"),
+            "all INBOX rows must remain visible after the stale completion, got:\n{text}"
+        );
+    }
+
+    /// Positive control for the stale-completion guard: when the listing
+    /// still shows the mailbox the search was issued on, the completed
+    /// job's filter must apply.
+    #[test]
+    fn search_job_on_current_mailbox_still_filters() {
+        let mut ctx = crate::golden::mock_context();
+        let (mut listing, _account_hash, _inbox_hash, _archive_hash, job_id) =
+            setup_listing_with_pending_search(&mut ctx);
+        wait_for_job_completion(&ctx, job_id);
+
+        deliver_job_finished(&mut listing, &mut ctx, job_id);
+
+        assert_eq!(
+            listing.filter_term, "findme",
+            "the search filter must be applied on completion"
+        );
+        assert_eq!(
+            listing.filtered_selection.len(),
+            1,
+            "only the matching thread must be in the filtered selection"
+        );
+        let text = draw_grid_text(&mut listing, &mut ctx);
+        assert!(
+            text.contains("findme alpha"),
+            "the matching row must be visible, got:\n{text}"
+        );
+        assert!(
+            !text.contains("beta"),
+            "the non-matching row must be filtered out, got:\n{text}"
+        );
     }
 }

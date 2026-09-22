@@ -276,7 +276,10 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
                         }),
                     ));
                 };
-                Ok((input, Ok(Listing(Flag(FlagAction::Set(flag))))))
+                Ok((
+                    input,
+                    Ok(Listing(ListingAction::Flag(FlagAction::Set(flag)))),
+                ))
             },
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
                 let mut check = arg_init! { min_arg:1, max_arg: 1, flag};
@@ -296,7 +299,10 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
                         }),
                     ));
                 };
-                Ok((input, Ok(Listing(Flag(FlagAction::Unset(flag))))))
+                Ok((
+                    input,
+                    Ok(Listing(ListingAction::Flag(FlagAction::Unset(flag)))),
+                ))
             },
         )),
     )(input.trim())
@@ -1159,6 +1165,7 @@ pub fn toggle(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     for (tok, action) in [
         ("thread_snooze", Listing(ToggleThreadSnooze)),
         ("mouse", ToggleMouse),
+        ("theme", ToggleTheme),
         #[cfg(feature = "gpgme")]
         ("sign", Tab(ComposerAction(ComposerTabAction::ToggleSign))),
         #[cfg(feature = "gpgme")]
@@ -1179,7 +1186,7 @@ pub fn toggle(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
                 input,
                 Err(CommandError::BadValue {
                     inner: String::from_utf8_lossy(input).to_string().into(),
-                    suggestions: Some(&["thread_snooze", "mouse", "sign", "encrypt"]),
+                    suggestions: Some(&["thread_snooze", "mouse", "theme", "sign", "encrypt"]),
                 }),
             ));
         }
@@ -1256,6 +1263,14 @@ pub fn reload_config(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
     Ok((input, Ok(ReloadConfiguration)))
+}
+pub fn toggle_theme(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, toggle_theme};
+    let (input, _) = tag("toggle_theme")(input.trim())?;
+    arg_chk!(start check, input);
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(ToggleTheme)))
 }
 pub fn import(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg: 2, import};

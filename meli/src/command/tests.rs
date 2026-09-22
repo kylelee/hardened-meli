@@ -59,6 +59,14 @@ fn test_command_parser() {
         &match_input!(input),
         &IntoIterator::into_iter(["toggle".to_string()]).collect(),
     );
+    input = "toggle t".to_string();
+    {
+        let matches = match_input!(input);
+        assert!(
+            matches.iter().any(|m| m.contains("theme")),
+            "toggle t should complete to theme: {matches:?}"
+        );
+    }
     input = "toggle ".to_string();
     assert_eq!(
         &match_input!(input),
@@ -66,6 +74,7 @@ fn test_command_parser() {
             "toggle mouse".to_string(),
             "toggle sign".to_string(),
             "toggle encrypt".to_string(),
+            "toggle theme".to_string(),
             "toggle thread_snooze".to_string()
         ])
         .collect(),
@@ -344,5 +353,50 @@ fn test_remove_attachment_index_overflow_is_rejected() {
         } else {
             assert!(res.is_ok(), "valid index must still parse: {res:?}");
         }
+    }
+}
+
+mod toggle_theme_command {
+    use super::parser;
+    use crate::command::Action;
+
+    /// `toggle theme` must parse to `Action::ToggleTheme`.
+    #[test]
+    fn parse_toggle_theme() {
+        let (rest, parsed) = parser::toggle(b"toggle theme").unwrap();
+        assert!(rest.is_empty());
+        assert!(matches!(parsed, Ok(Action::ToggleTheme)));
+    }
+
+    /// `toggle_theme` (underscore) must NOT be a valid command - the
+    /// canonical name is `toggle theme` with a space.
+    #[test]
+    fn underscore_form_is_invalid() {
+        parser::toggle(b"toggle_theme").unwrap_err();
+    }
+
+    /// The full `parse_command` chain must route `toggle theme`.
+    #[test]
+    fn parse_command_routes_toggle_theme() {
+        assert!(matches!(
+            parser::parse_command(b"toggle theme"),
+            Ok(Action::ToggleTheme)
+        ));
+    }
+
+    /// Bad subcommand still reports with suggestions including `theme`.
+    #[test]
+    fn bad_subcommand_suggests_theme() {
+        let err = parser::parse_command(b"toggle zzz").unwrap_err();
+        let suggestions = match &err {
+            crate::command::error::CommandError::BadValue { suggestions, .. } => {
+                suggestions.unwrap_or(&[])
+            }
+            _ => panic!("expected BadValue error, got: {err:?}"),
+        };
+        assert!(
+            suggestions.iter().any(|s| s.contains("theme")),
+            "suggestions should include 'theme': {suggestions:?}"
+        );
     }
 }
