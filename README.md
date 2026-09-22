@@ -136,10 +136,6 @@ MELI_CONFIG=./test_config cargo run
 
 See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)`](./meli/docs/meli.conf.5) for all configuration values.
 
-| Main view | Compact main view | Compose with embed terminal editor |
-|-----------|-------------------|------------------------------------|
-| ![Main view screenshot](./meli/docs/screenshots/main.webp "mail meli view screenshot") | ![Compact main view screenshot](./meli/docs/screenshots/compact.webp "compact main view screenshot") | ![Compose with embed terminal editor screenshot](./meli/docs/screenshots/compose.webp "composing view screenshot") |
-
 ### Supported E-mail backends
 
 | Protocol      | Support    |

@@ -136,10 +136,6 @@ MELI_CONFIG=./test_config cargo run
 
 详见 [`meli(7)`](./meli/docs/meli.7)（完整教程）与 [`meli.conf(5)`](./meli/docs/meli.conf.5)（全部配置项）。
 
-| 主视图 | 紧凑主视图 | 内嵌终端编辑器撰写 |
-|--------|-----------|--------------------|
-| ![主视图截图](./meli/docs/screenshots/main.webp "mail meli view screenshot") | ![紧凑主视图截图](./meli/docs/screenshots/compact.webp "compact main view screenshot") | ![撰写视图截图](./meli/docs/screenshots/compose.webp "composing view screenshot") |
-
 ### 支持的邮件后端
 
 | 协议          | 支持程度   |
