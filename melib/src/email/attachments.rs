@@ -2,6 +2,7 @@
  * meli - attachments module
  *
  * Copyright 2017 Manos Pitsidianakis
+ * Copyright 2026 Kyle Lee
  *
  * This file is part of meli.
  *

@@ -1,7 +1,7 @@
 //
 // meli
 //
-// Copyright 2025 PoC engineers (security audit scratch harness)
+// Copyright 2026 Kyle Lee
 //
 // This file is part of meli.
 //

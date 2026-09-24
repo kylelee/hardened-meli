@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2023 by Kim Minh Kaplan <kaplan+git@kim-minh.com>
+ * Copyright 2026 Kyle Lee
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted.

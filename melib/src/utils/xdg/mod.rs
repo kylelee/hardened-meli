@@ -1,6 +1,7 @@
 /* xdg-utils library
  *
  * Copyright 2019-2020 Manos Pitsidianakis
+ * Copyright 2026 Kyle Lee
  *
  * xdg-utils is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

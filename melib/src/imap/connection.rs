@@ -2,6 +2,7 @@
  * meli - imap module.
  *
  * Copyright 2017 - 2019 Manos Pitsidianakis
+ * Copyright 2026 Kyle Lee
  *
  * This file is part of meli.
  *

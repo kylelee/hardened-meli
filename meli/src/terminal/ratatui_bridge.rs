@@ -1,7 +1,7 @@
 //
 // meli
 //
-// Copyright 2026 meli authors
+// Copyright 2026 Kyle Lee
 //
 // This file is part of meli.
 //

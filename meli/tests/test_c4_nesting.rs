@@ -1,7 +1,7 @@
 //
 // meli
 //
-// Copyright 2025 meli security audit (C4 regression)
+// Copyright 2026 Kyle Lee
 //
 // This file is part of meli.
 //

@@ -2,6 +2,7 @@
 // meli
 //
 // Copyright 2024 Emmanouil Pitsidianakis <manos@pitsidianak.is>
+// Copyright 2026 Kyle Lee
 //
 // This file is part of meli.
 //

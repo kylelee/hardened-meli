@@ -2,6 +2,7 @@
  * MIT License
  *
  * Copyright (c) 2021 Ilya Medvedev
+ * Copyright 2026 Kyle Lee
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),

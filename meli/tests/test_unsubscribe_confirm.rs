@@ -1,7 +1,7 @@
 //
 // meli
 //
-// Copyright 2026 W1-T3 security hardening (List-Unsubscribe confirmation gate)
+// Copyright 2026 Kyle Lee
 //
 // This file is part of meli.
 //

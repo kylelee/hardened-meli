@@ -1,4 +1,5 @@
 // Copyright (c) 2014-2018 Markus Unterwaditzer & contributors
+// Copyright 2026 Kyle Lee
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
