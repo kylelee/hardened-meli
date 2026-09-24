@@ -2,6 +2,7 @@
  * melib - IMAP
  *
  * Copyright 2020 Manos Pitsidianakis
+ * Copyright 2026 Kyle Lee
  *
  * This file is part of meli.
  *

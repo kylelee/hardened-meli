@@ -2,6 +2,7 @@
  * meli - lib.rs
  *
  * Copyright 2017-2022 Manos Pitsidianakis
+ * Copyright 2026 Kyle Lee
  *
  * This file is part of meli.
  *
