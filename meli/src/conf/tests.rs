@@ -78,11 +78,11 @@ fn sample_config_shortcuts_roundtrip() {
     // Spot-check round-trips.
     assert_eq!(
         override_.listing.as_ref().unwrap().scroll_up.to_string(),
-        "Up/k"
+        "Up,k"
     );
     assert_eq!(
         override_.general.as_ref().unwrap().quit.to_string(),
-        "Esc/q"
+        "Esc,q"
     );
 }
 
@@ -340,12 +340,12 @@ fn test_conf_navigation_keygroup_conflicts_resolved() {
     assert_eq!(
         general.get("scroll_left"),
         Some(&ShortcutKeys::double(Key::Left, Key::Char('h'))),
-        "general.scroll_left must default to Left/h"
+        "general.scroll_left must default to Left,h"
     );
     assert_eq!(
         general.get("scroll_right"),
         Some(&ShortcutKeys::double(Key::Right, Key::Char('l'))),
-        "general.scroll_right must default to Right/l"
+        "general.scroll_right must default to Right,l"
     );
 
     let thread_view = ThreadViewShortcuts::default().key_values();
@@ -360,6 +360,34 @@ fn test_conf_navigation_keygroup_conflicts_resolved() {
         env_view.get("toggle_expand_headers"),
         Some(&ShortcutKeys::single(Key::Char('x'))),
         "toggle_expand_headers must not claim the navigation key h"
+    );
+
+    // The envelope-view `reply` key moved off `R` onto the navigation key
+    // `r`, and the vacated `R` now returns to the normal view; assert both
+    // sides so a partial rebind cannot leave the two sharing `r`.
+    assert_eq!(
+        env_view.get("reply"),
+        Some(&ShortcutKeys::single(Key::Char('r'))),
+        "envelope-view.reply must default to r"
+    );
+    assert_eq!(
+        env_view.get("return_to_normal_view"),
+        Some(&ShortcutKeys::single(Key::Char('R'))),
+        "envelope-view.return_to_normal_view must default to R"
+    );
+
+    // Listing refresh is a two-key group (`F5` first); the config/Display
+    // form must stay round-trippable.
+    let listing = ListingShortcuts::default().key_values();
+    assert_eq!(
+        listing.get("refresh").map(|keys| keys.to_string()),
+        Some("F5,C-r".to_string()),
+        "listing.refresh must render as F5,C-r"
+    );
+    assert_eq!(
+        listing.get("refresh"),
+        Some(&ShortcutKeys::double(Key::F(5), Key::Ctrl('r'))),
+        "listing.refresh must bind both F5 and C-r"
     );
 }
 
@@ -476,12 +504,12 @@ fn test_conf_arrow_navigation_defaults() {
         assert_eq!(
             values.get("scroll_up"),
             Some(&ShortcutKeys::double(Key::Up, Key::Char('k'))),
-            "{section}.scroll_up must default to Up/k"
+            "{section}.scroll_up must default to Up,k"
         );
         assert_eq!(
             values.get("scroll_down"),
             Some(&ShortcutKeys::double(Key::Down, Key::Char('j'))),
-            "{section}.scroll_down must default to Down/j"
+            "{section}.scroll_down must default to Down,j"
         );
     }
 }

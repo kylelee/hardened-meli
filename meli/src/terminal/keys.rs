@@ -141,8 +141,22 @@ impl Key {
     /// brackets (`<Up>`, `<Esc>`, `<C-c>`) so they read as key *descriptions*
     /// rather than literal text, while plain character keys (`j`, `k`, `q`,
     /// …) stay bare exactly as they are typed.
-    pub fn hint_display(&self) -> String {
+    ///
+    /// When `emoji_icons` is true the four arrow keys render as emoji icons
+    /// (`⬆️`, `⬇️`, `⬅️`, `➡️`) instead. Each icon is the base glyph followed
+    /// by the `U+FE0F` variation selector, which the cell grid lays out as a
+    /// two-column `FORCE_EMOJI` cluster (leading glyph cell plus a
+    /// continuation cell; see `CellBuffer::write_string`). Every other
+    /// placeholder key keeps the angle-bracket text form because the golden
+    /// test `statusbar_ascii_drawing_is_all_ascii` requires the status row to
+    /// stay pure ASCII when `ascii_drawing` is on and non-emoji terminals must
+    /// keep the `<Up>` text form.
+    pub fn hint_display(&self, emoji_icons: bool) -> String {
         match self {
+            Self::Up if emoji_icons => "\u{2B06}\u{FE0F}".to_string(),
+            Self::Down if emoji_icons => "\u{2B07}\u{FE0F}".to_string(),
+            Self::Left if emoji_icons => "\u{2B05}\u{FE0F}".to_string(),
+            Self::Right if emoji_icons => "\u{27A1}\u{FE0F}".to_string(),
             Self::Char(' ') => "<Space>".to_string(),
             Self::Char('\t') => "<Tab>".to_string(),
             Self::Char('\n') => "<Enter>".to_string(),
@@ -337,6 +351,12 @@ impl From<Key> for ShortcutKeys {
 }
 
 impl std::fmt::Display for ShortcutKeys {
+    /// Renders the binding group in the same comma-separated syntax the
+    /// config file and the serde wire form use, so a rendered group such
+    /// as `/,F3` can be pasted straight back into a config. It shares
+    /// the wire form's limitation: a binding to the literal `,` key is
+    /// only representable on its own, since a comma inside a multi-key
+    /// group would be read back as a separator.
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // The joined text has to go through `Formatter::pad`: width and
         // alignment specs (e.g. the help overlay's right-aligned binding
@@ -349,7 +369,7 @@ impl std::fmt::Display for ShortcutKeys {
         let mut joined = String::with_capacity(self.0.len() * 4);
         for (i, k) in self.0.iter().enumerate() {
             if i > 0 {
-                joined.push('/');
+                joined.push(',');
             }
             std::fmt::Write::write_fmt(&mut joined, format_args!("{k}"))?;
         }
@@ -358,18 +378,14 @@ impl std::fmt::Display for ShortcutKeys {
 }
 
 impl ShortcutKeys {
-    /// [`Self`] in status-bar hint form: each key via [`Key::hint_display`]
-    /// (placeholder keys in angle brackets, plain characters bare), joined
-    /// with `/` — e.g. `<Up>/k`, `<Esc>/q`.
-    pub fn hint_display(&self) -> String {
-        let mut joined = String::with_capacity(self.0.len() * 4);
-        for (i, k) in self.0.iter().enumerate() {
-            if i > 0 {
-                joined.push('/');
-            }
-            joined.push_str(&k.hint_display());
-        }
-        joined
+    /// [`Self`] in status-bar hint form, per bound key: each key via
+    /// [`Key::hint_display`] (placeholder keys in angle brackets, plain
+    /// characters bare, arrow keys as emoji icons when `emoji_icons` is
+    /// true). The caller joins consecutive parts with a plain-styled `|`
+    /// separator — e.g. `<Up>|k`, `<Esc>|q` — so the key glyphs alone carry
+    /// the highlight styling.
+    pub fn hint_display_iter(&self, emoji_icons: bool) -> impl Iterator<Item = String> + '_ {
+        self.0.iter().map(move |k| k.hint_display(emoji_icons))
     }
 }
 
@@ -559,43 +575,89 @@ fn test_shortcut_keys_serde() {
     );
 }
 
-/// `Key::hint_display` / `ShortcutKeys::hint_display`: the status-bar hint
-/// form wraps placeholder keys in angle brackets so they read as key
+/// `Key::hint_display` / `ShortcutKeys::hint_display_iter`: the status-bar
+/// hint form wraps placeholder keys in angle brackets so they read as key
 /// descriptions (`<Up>`, `<Esc>`, `<C-c>`), while plain character keys stay
 /// bare exactly as they are typed (`j`, `k`, `q`, `?`).
+///
+/// With `emoji_icons = true` the four arrow keys instead render as the
+/// emoji icons `⬆️`/`⬇️`/`⬅️`/`➡️` (base glyph plus the `U+FE0F` variation
+/// selector, asserted here as escape literals so stripping VS16 from the
+/// source cannot silently pass); every other key keeps the text form.
 #[test]
 fn test_hint_display() {
-    assert_eq!(Key::Up.hint_display(), "<Up>");
-    assert_eq!(Key::Down.hint_display(), "<Down>");
-    assert_eq!(Key::Left.hint_display(), "<Left>");
-    assert_eq!(Key::Right.hint_display(), "<Right>");
-    assert_eq!(Key::Esc.hint_display(), "<Esc>");
-    assert_eq!(Key::Home.hint_display(), "<Home>");
-    assert_eq!(Key::End.hint_display(), "<End>");
-    assert_eq!(Key::PageUp.hint_display(), "<PageUp>");
-    assert_eq!(Key::PageDown.hint_display(), "<PageDown>");
-    assert_eq!(Key::Backspace.hint_display(), "<Backspace>");
-    assert_eq!(Key::Delete.hint_display(), "<Delete>");
-    assert_eq!(Key::Insert.hint_display(), "<Insert>");
-    assert_eq!(Key::F(5).hint_display(), "<F5>");
-    assert_eq!(Key::Ctrl('c').hint_display(), "<C-c>");
-    assert_eq!(Key::Alt('x').hint_display(), "<M-x>");
+    assert_eq!(Key::Up.hint_display(false), "<Up>");
+    assert_eq!(Key::Down.hint_display(false), "<Down>");
+    assert_eq!(Key::Left.hint_display(false), "<Left>");
+    assert_eq!(Key::Right.hint_display(false), "<Right>");
+    assert_eq!(Key::Esc.hint_display(false), "<Esc>");
+    assert_eq!(Key::Home.hint_display(false), "<Home>");
+    assert_eq!(Key::End.hint_display(false), "<End>");
+    assert_eq!(Key::PageUp.hint_display(false), "<PageUp>");
+    assert_eq!(Key::PageDown.hint_display(false), "<PageDown>");
+    assert_eq!(Key::Backspace.hint_display(false), "<Backspace>");
+    assert_eq!(Key::Delete.hint_display(false), "<Delete>");
+    assert_eq!(Key::Insert.hint_display(false), "<Insert>");
+    assert_eq!(Key::F(5).hint_display(false), "<F5>");
+    assert_eq!(Key::Ctrl('c').hint_display(false), "<C-c>");
+    assert_eq!(Key::Alt('x').hint_display(false), "<M-x>");
     // Whitespace control keys have word forms and count as placeholders.
-    assert_eq!(Key::Char(' ').hint_display(), "<Space>");
-    assert_eq!(Key::Char('\t').hint_display(), "<Tab>");
-    assert_eq!(Key::Char('\n').hint_display(), "<Enter>");
+    assert_eq!(Key::Char(' ').hint_display(false), "<Space>");
+    assert_eq!(Key::Char('\t').hint_display(false), "<Tab>");
+    assert_eq!(Key::Char('\n').hint_display(false), "<Enter>");
     // Plain character keys stay bare.
     for c in ['j', 'k', 'h', 'l', 'q', '?', 'g'] {
-        assert_eq!(Key::Char(c).hint_display(), c.to_string());
+        assert_eq!(Key::Char(c).hint_display(false), c.to_string());
     }
-    // Joined bindings keep the `/` separator.
+    // Joined bindings are joined by the caller with a plain `|`.
     assert_eq!(
-        ShortcutKeys::double(Key::Up, Key::Char('k')).hint_display(),
-        "<Up>/k"
+        ShortcutKeys::double(Key::Up, Key::Char('k'))
+            .hint_display_iter(false)
+            .collect::<Vec<_>>(),
+        ["<Up>", "k"]
     );
     assert_eq!(
-        ShortcutKeys::double(Key::Esc, Key::Char('q')).hint_display(),
-        "<Esc>/q"
+        ShortcutKeys::double(Key::Esc, Key::Char('q'))
+            .hint_display_iter(false)
+            .collect::<Vec<_>>(),
+        ["<Esc>", "q"]
     );
-    assert_eq!(ShortcutKeys::single(Key::Char('j')).hint_display(), "j");
+    assert_eq!(
+        ShortcutKeys::single(Key::Char('j'))
+            .hint_display_iter(false)
+            .collect::<Vec<_>>(),
+        ["j"]
+    );
+
+    // Emoji-icon form: the arrow keys become the base glyph plus the
+    // `U+FE0F` variation selector (escape literals so a stripped VS16 in
+    // the source cannot pass).
+    assert_eq!(Key::Up.hint_display(true), "\u{2B06}\u{FE0F}");
+    assert_eq!(Key::Down.hint_display(true), "\u{2B07}\u{FE0F}");
+    assert_eq!(Key::Left.hint_display(true), "\u{2B05}\u{FE0F}");
+    assert_eq!(Key::Right.hint_display(true), "\u{27A1}\u{FE0F}");
+    // The flag changes only the arrows; all other keys are unchanged.
+    assert_eq!(Key::Esc.hint_display(true), "<Esc>");
+    assert_eq!(Key::Char('k').hint_display(true), "k");
+    assert_eq!(Key::Char(' ').hint_display(true), "<Space>");
+    assert_eq!(Key::Char('\t').hint_display(true), "<Tab>");
+    assert_eq!(Key::Char('\n').hint_display(true), "<Enter>");
+    assert_eq!(Key::F(5).hint_display(true), "<F5>");
+    assert_eq!(Key::Ctrl('c').hint_display(true), "<C-c>");
+    assert_eq!(Key::Alt('x').hint_display(true), "<M-x>");
+    assert_eq!(Key::Home.hint_display(true), "<Home>");
+    assert_eq!(Key::PageUp.hint_display(true), "<PageUp>");
+    // The flag is threaded through the iterator to each bound key.
+    assert_eq!(
+        ShortcutKeys::double(Key::Up, Key::Char('k'))
+            .hint_display_iter(true)
+            .collect::<Vec<_>>(),
+        ["\u{2B06}\u{FE0F}", "k"]
+    );
+    assert_eq!(
+        ShortcutKeys::double(Key::Esc, Key::Char('q'))
+            .hint_display_iter(true)
+            .collect::<Vec<_>>(),
+        ["<Esc>", "q"]
+    );
 }

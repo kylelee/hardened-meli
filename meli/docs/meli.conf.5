@@ -1237,7 +1237,7 @@ scroll_up = "Up,k"
 .sp
 Either key then triggers the action; more than two keys are rejected. The
 status bar renders both keys, e.g.
-.Em (Up/k:Scroll Up) Ns
+.Em (Up|k:Scroll Up) Ns
 .
 .Pp
 The navigation key group — the arrow keys and their vim counterparts
@@ -1327,10 +1327,10 @@ mode.
 Explicitly setting this shortcut completely overrides the default; use
 .Em \&:,M-x
 to keep both bindings.
-.Pq Em \&:/M-x \" default value
+.Pq Em \&:,M-x \" default value
 .It Ic quit
 Quit meli.
-.Pq Em Esc/q \" default value
+.Pq Em Esc,q \" default value
 .It Ic go_to_tab
 Go to the
 .Em n Ns
@@ -1341,16 +1341,16 @@ Go to the next tab.
 .Pq Em T \" default value
 .It Ic scroll_right
 Generic scroll right (catch-all setting)
-.Pq Em Right/l \" default value
+.Pq Em Right,l \" default value
 .It Ic scroll_left
 Generic scroll left (catch-all setting)
-.Pq Em Left/h \" default value
+.Pq Em Left,h \" default value
 .It Ic scroll_up
 Generic scroll up (catch-all setting)
-.Pq Em Up/k \" default value
+.Pq Em Up,k \" default value
 .It Ic scroll_down
 Generic scroll down (catch-all setting)
-.Pq Em Down/j \" default value
+.Pq Em Down,j \" default value
 .It Ic next_page
 Go to next page.
 (catch-all setting)
@@ -1390,10 +1390,10 @@ Scroll to previous search result.
 .Bl -tag -width 36n
 .It Ic scroll_up
 Scroll up list.
-.Pq Em Up/k \" default value
+.Pq Em Up,k \" default value
 .It Ic scroll_down
 Scroll down list.
-.Pq Em Down/j \" default value
+.Pq Em Down,j \" default value
 .It Ic next_page
 Go to next page.
 .Pq Em PageDown \" default value
@@ -1423,10 +1423,10 @@ Toggle mailbox visibility in menu.
 .Pq Em Space \" default value
 .It Ic search
 Search within list of e-mails.
-.Pq Em / \" default value
+.Pq Em /,F3 \" default value
 .It Ic refresh
 Manually request a mailbox refresh.
-.Pq Em F5 \" default value
+.Pq Em F5,C-r \" default value
 .It Ic set_seen
 Set thread as seen.
 .Pq Em n \" default value
@@ -1461,10 +1461,10 @@ Toggle visibility of side menu in mail list.
 .Pq Em \(ga \" default value
 .It Ic focus_left
 Switch focus on the left.
-.Pq Em Left/h \" default value
+.Pq Em Left,h \" default value
 .It Ic focus_right
 Open the entry under the cursor; the focus stays on the mail list.
-.Pq Em Right/l \" default value
+.Pq Em Right,l \" default value
 .It Ic exit_entry
 Exit e-mail entry.
 .Pq Em i \" default value
@@ -1483,10 +1483,10 @@ Go to previous page.
 .Pq Em PageUp \" default value
 .It Ic scroll_down
 Scroll down pager.
-.Pq Em Down/j \" default value
+.Pq Em Down,j \" default value
 .It Ic scroll_up
 Scroll up pager.
-.Pq Em Up/k \" default value
+.Pq Em Up,k \" default value
 .It Ic select_filter
 Select content filter.
 .Pq Em f \" default value
@@ -1500,10 +1500,10 @@ setting.
 .Bl -tag -width 36n
 .It Ic scroll_up
 Scroll up list.
-.Pq Em Up/k \" default value
+.Pq Em Up,k \" default value
 .It Ic scroll_down
 Scroll down list.
-.Pq Em Down/j \" default value
+.Pq Em Down,j \" default value
 .It Ic create_contact
 Create new contact.
 .Pq Em c \" default value
@@ -1544,10 +1544,10 @@ Close composer tab.
 .Pq Em Esc \" default value
 .It Ic scroll_up
 Change field focus.
-.Pq Em Up/k \" default value
+.Pq Em Up,k \" default value
 .It Ic scroll_down
 Change field focus.
-.Pq Em Down/j \" default value
+.Pq Em Down,j \" default value
 .It Ic reset_date
 Reset date to current time.
 .Pq Em F1 \" default value
@@ -1592,7 +1592,7 @@ Opens html attachment in the default browser.
 .Pq Em v \" default value
 .It Ic reply
 Reply to envelope.
-.Pq Em R \" default value
+.Pq Em r \" default value
 .It Ic reply_to_author
 Reply to author.
 .Pq Em C-r \" default value
@@ -1604,7 +1604,7 @@ Forward email.
 .Pq Em C-f \" default value
 .It Ic return_to_normal_view
 Return to envelope if viewing raw source or attachment.
-.Pq Em r \" default value
+.Pq Em R \" default value
 .It Ic save_all_attachments
 Save all attachments of the currently viewed mail with the
 .Ic save\-all\-attachment
@@ -1634,12 +1634,12 @@ Scroll up list.
 The mail view follows the selection.
 While the thread view is in the split layout, thread-view navigation keys and the general home_page, end_page and open_entry shortcuts act on the thread list before the embedded mail view; when a dialog is open in the mail view (charset selector, URL prompt, contact selector), the mail view keeps its keys.
 When the mail view is focused, scrolling stops at the top of the message body instead of switching to the previous message.
-.Pq Em Up/k \" default value
+.Pq Em Up,k \" default value
 .It Ic scroll_down
 Scroll down list.
 The mail view follows the selection.
 When the mail view is focused, scrolling stops at the bottom of the message body instead of switching to the next message.
-.Pq Em Down/j \" default value
+.Pq Em Down,j \" default value
 .It Ic collapse_subtree
 collapse thread branches.
 .Pq Em H \" default value
@@ -1658,12 +1658,12 @@ reverse thread order.
 Focus or enlarge the thread list pane.
 At the mail detail state, return to the split layout; at the split or thread-list-only state, move the focus back to the mail listing (the thread view stays open).
 A single-mail thread has no split or thread-list state: the view is only the mail detail, and from the mail list grid the shortcut closes the view back to the single-pane layout.
-.Pq Em Left/h \" default value
+.Pq Em Left,h \" default value
 .It Ic focus_right
 Focus or enlarge the mail view pane.
 Move the focus rightward and open the entry currently selected in the thread list: from the thread-list state, show the split layout; from the split layout, focus the mail detail.
 The mail detail state is the terminal stop of the pane chain; the key stays consumed.
-.Pq Em Right/l \" default value
+.Pq Em Right,l \" default value
 .El
 .sp
 .\"

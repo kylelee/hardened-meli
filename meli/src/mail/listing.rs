@@ -4791,7 +4791,9 @@ mod listing_menu_tests {
                  Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\r\n{mid}\r\n"
             );
             let env = Envelope::from_bytes(bytes.as_bytes(), None).unwrap();
-            ctx.accounts[&account_hash].collection.insert(env, inbox_hash);
+            ctx.accounts[&account_hash]
+                .collection
+                .insert(env, inbox_hash);
         }
         let mut listing = Listing::new(&mut ctx);
         assert!(
@@ -5741,13 +5743,23 @@ mod listing_menu_tests {
             "sanity: the view is open (Entry state)"
         );
 
-        assert!(listing.process_event(&mut UIEvent::Input(Key::Char('/')), &mut ctx));
-        assert!(
-            ctx.replies()
-                .iter()
-                .any(|r| matches!(r, UIEvent::CmdInput(_))),
-            "the search key must open the command line"
-        );
+        // `search` is a two-key group by default (`/` and `F3`); both
+        // bound keys must open the command line with the same
+        // `CmdInput("search ")` reply.
+        for key in [Key::Char('/'), Key::F(3)] {
+            let label = format!("{key:?}");
+            let mut event = UIEvent::Input(key);
+            assert!(
+                listing.process_event(&mut event, &mut ctx),
+                "the search key {label} must be consumed with the view open"
+            );
+            assert!(
+                ctx.replies()
+                    .iter()
+                    .any(|r| matches!(r, UIEvent::CmdInput(_))),
+                "the search key {label} must open the command line"
+            );
+        }
 
         let mut event = UIEvent::Action(Action::Listing(ListingAction::Search {
             term: String::new(),
@@ -5756,6 +5768,35 @@ mod listing_menu_tests {
         assert!(
             listing.process_event(&mut event, &mut ctx),
             "the search action must be handled with the view open"
+        );
+    }
+
+    /// `refresh` is a two-key group by default (`F5` and `C-r`); both bound
+    /// keys must reach the same listing handler. The handler has no state
+    /// guard, so either key is consumed even with an open view. The mock
+    /// account's backend rejects the synthetic mailbox hash and
+    /// `Account::refresh` folds that error into `Ok(())`, leaving no reply to
+    /// observe, so consumption is the observable asserted here (the shortcuts
+    /// map itself is pinned in `conf::tests`).
+    #[test]
+    fn refresh_dual_key_is_consumed_by_listing() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+
+        for key in [Key::F(5), Key::Ctrl('r')] {
+            let label = format!("{key:?}");
+            let mut event = UIEvent::Input(key);
+            assert!(
+                listing.process_event(&mut event, &mut ctx),
+                "the refresh key {label} must be consumed by a focused listing"
+            );
+        }
+
+        // A key outside the group must not be swallowed as a refresh.
+        let mut event = UIEvent::Input(Key::F(9));
+        assert!(
+            !listing.process_event(&mut event, &mut ctx),
+            "an unbound key must not be consumed as refresh"
         );
     }
 
