@@ -198,7 +198,7 @@ You can find all valid shortcuts for the current UI state you are in.
 │              u  toggle_url_mode                            │
 │              a  open_attachment                            │
 │              m  open_mailcap                               │
-│              R  reply                                      │
+│              r  reply                                      │
 │            C-r  reply_to_author                            │
 │            C-g  reply_to_all                               │
 │            C-f  forward                                    │
@@ -576,7 +576,7 @@ command:
 .Shortcut Ctrl\-s envelope_view save_all_attachments
 .It
 Reply to envelope:
-.Shortcut R envelope_view reply
+.Shortcut r envelope_view reply
 .It
 Reply to author:
 .Shortcut Ctrl\-r envelope_view reply_to_author
@@ -594,7 +594,7 @@ View envelope source in a pager: (toggles between raw and decoded source)
 .Shortcut M\-r envelope_view view_raw_source
 .It
 Return to envelope_view if viewing raw source or attachment:
-.Shortcut r envelope_view return_to_normal_view
+.Shortcut R envelope_view return_to_normal_view
 .El
 .Sh COMPOSING
 To compose an e\-mail, you can either start with an empty draft by pressing
@@ -605,7 +605,7 @@ To reply to a specific e\-mail, when in envelope view you can select the specifi
 .Bl -dash -compact
 .It
 Reply to envelope.
-.Shortcut R envelope_view reply
+.Shortcut r envelope_view reply
 .It
 Reply to author.
 .Shortcut Ctrl\-r envelope_view reply_to_author

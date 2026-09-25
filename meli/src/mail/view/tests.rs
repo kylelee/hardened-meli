@@ -24,7 +24,7 @@ use std::{borrow::Cow, path::Path};
 use super::{state::PendingReplyAction, MailView};
 use crate::{
     command::{
-        actions::{Action, ViewAction},
+        actions::{Action, TabAction, ViewAction},
         MailingListAction,
     },
     components::Component,
@@ -295,6 +295,90 @@ fn forward_dialog_quit_key_closes_dialog() {
     assert!(
         view.forward_dialog.is_none(),
         "quit must clear the embedded forward dialog"
+    );
+}
+
+/// The envelope-view `reply` binding moved from `R` to `r`, and the vacated
+/// `R` now maps to `return_to_normal_view` (see `conf::shortcuts`). A Loaded
+/// mail view exposes the envelope-view shortcut map, so `r` must run the
+/// reply action path and `R` must no longer do so.
+#[test]
+fn reply_shortcut_is_r_not_shift_r() {
+    let mut ctx = mock_context();
+    let (account_hash, mailbox_hash, env_hash) = insert_list_unsubscribe_envelope(&ctx);
+    let mut view = MailView::new(
+        Some((account_hash, mailbox_hash, env_hash)),
+        false,
+        &mut ctx,
+    );
+    // `MailView::shortcuts` is empty until the body is `Loaded` (the state's
+    // shortcut map delegates to the envelope view). The synthetic mailbox has
+    // no per-mailbox settings, so `MailViewState::load_bytes` cannot be used
+    // (it indexes the mailbox settings map); build the `Loaded` state directly
+    // with default view settings, which install the same shortcut map the real
+    // load path would.
+    let bytes = b"From: newsletter@list.example\r\n\
+                  To: victim@victim.example\r\n\
+                  Subject: weekly\r\n\
+                  Message-ID: <list-unsub-1@list.example>\r\n\
+                  Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+                  \r\n\
+                  hello\r\n"
+        .to_vec();
+    let mail = Mail::new(bytes.clone(), None).expect("could not parse test mail");
+    let env_view = Box::new(EnvelopeView::new(
+        Mail {
+            envelope: mail.envelope.clone(),
+            bytes: bytes.clone(),
+        },
+        None,
+        None,
+        None,
+        ctx.main_loop_handler.clone(),
+    ));
+    view.state = super::state::MailViewState::Loaded {
+        bytes,
+        env: Box::new(mail.envelope),
+        env_view,
+        stack: vec![],
+    };
+    assert!(
+        view.is_loaded(),
+        "precondition: the mail view must be Loaded"
+    );
+
+    // The reply action either opens a composer tab or, if the mock account
+    // cannot build it, pushes the deterministic "Could not open reply" error;
+    // both mean the reply path ran.
+    fn reply_path(replies: &[UIEvent]) -> bool {
+        replies.iter().any(|ev| match ev {
+            UIEvent::Action(Action::Tab(TabAction::New(_))) => true,
+            UIEvent::Notification { title: Some(t), .. } => t == "Could not open reply",
+            _ => false,
+        })
+    }
+
+    let mut event = UIEvent::Input(Key::Char('r'));
+    assert!(
+        view.process_event(&mut event, &mut ctx),
+        "`r` must be consumed by the envelope-view reply binding"
+    );
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        reply_path(&replies),
+        "`r` must run the reply action path, got replies: {replies:?}"
+    );
+
+    // `R` is the vacated reply key, now `return_to_normal_view`; in the plain
+    // pager state (no sub-view, no filters) it must neither be consumed by
+    // this view nor open a reply.
+    let mut event = UIEvent::Input(Key::Char('R'));
+    let consumed = view.process_event(&mut event, &mut ctx);
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(!consumed, "`R` must not trigger the reply binding");
+    assert!(
+        !reply_path(&replies),
+        "`R` must not run the reply action path, got replies: {replies:?}"
     );
 }
 

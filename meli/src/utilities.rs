@@ -669,21 +669,28 @@ impl StatusBar {
     /// 2. `general.enter_command_mode`  — label `Command`
     /// 3. `scroll_up`                   — label `Scroll Up`
     /// 4. `scroll_down`                 — label `Scroll Down`
-    /// 5. `focus_left`                  — label `Switch Left View`
-    /// 6. `focus_right`                 — label `Switch Right View`
+    /// 5. `focus_left`                  — label `Focus Left`
+    /// 6. `focus_right`                 — label `Focus Right`
     /// 7. `close`                       — label `Close View` (only on
     ///    sub-views that expose a close binding, e.g. composing)
-    /// 8. `general.quit`                — label `Quit`
+    /// 8. `search`                      — label `Search` (only on views
+    ///    that expose a `search` binding)
+    /// 9. `general.quit`                — label `Quit`
     ///
     /// Bindings missing from the active view are skipped silently. Every
     /// key glyph comes from the *configured* binding (remapping a
     /// shortcut changes its hint); with the defaults the format is
-    /// `⌨️ (?:Help)(:/<M-x>:Command)(Up:Scroll Up)(Down:Scroll
-    /// Down)...(<Esc>/q:Quit)` — every hint is rendered as `(key:label)`
+    /// `⌨️ (?:Help)(:/<M-x>:Command)(⬆️|k:Scroll Up)(⬇️|j:Scroll
+    /// Down)...(/|<F3>:Search)(<Esc>|q:Quit)` on emoji-capable terminals, where the four
+    /// arrow keys render as emoji icons; terminals that are not
+    /// emoji-capable (or are in `ascii_drawing` mode) keep the text form
+    /// `(<Up>|k:Scroll Up)`. Every hint is rendered as `(key:label)`
     /// with no separator between them, and the key glyph of each hint
     /// renders in the theme's highlight-selected color (see
     /// [`HintSpan`]) so the actionable binding stands out from the
-    /// descriptive label. Truncates with `…` (or `...` in ASCII
+    /// descriptive label. When one action has two bound keys they are
+    /// joined by a plain `|` so only the key glyphs are highlighted.
+    /// Truncates with `…` (or `...` in ASCII
     /// terminals) when the joined text would overflow the configured
     /// max width.
     #[allow(clippy::type_complexity)]
@@ -716,15 +723,15 @@ impl StatusBar {
             }
             None
         };
-        // Eight entries in fixed display order: help first (so it
+        // Nine entries in fixed display order: help first (so it
         // survives narrow ellipsis), then scroll, then focus switches,
-        // then view close, then exit pinned last so it is the final
-        // actionable hint.
+        // then view close, then search, then exit pinned last so it is
+        // the final actionable hint.
         let pickers: [(
             &'static str,
             Option<&crate::terminal::ShortcutKeys>,
             &'static str,
-        ); 8] = [
+        ); 9] = [
             ("help", general.and_then(|m| m.get("toggle_help")), "Help"),
             (
                 "enter_command_mode",
@@ -733,9 +740,10 @@ impl StatusBar {
             ),
             ("scroll_up", pick_key("scroll_up"), "Scroll Up"),
             ("scroll_down", pick_key("scroll_down"), "Scroll Down"),
-            ("focus_left", pick_key("focus_left"), "Switch Left View"),
-            ("focus_right", pick_key("focus_right"), "Switch Right View"),
+            ("focus_left", pick_key("focus_left"), "Focus Left"),
+            ("focus_right", pick_key("focus_right"), "Focus Right"),
             ("close", pick_key("close"), "Close View"),
+            ("search", pick_key("search"), "Search"),
             ("quit", general.and_then(|m| m.get("quit")), "Quit"),
         ];
         let entries: Vec<(&crate::terminal::ShortcutKeys, &'static str)> = pickers
@@ -750,20 +758,36 @@ impl StatusBar {
         } else {
             "…"
         };
+        // Arrow keys become emoji icons only on emoji-capable terminals
+        // that are not in plain-ASCII drawing mode: ascii_drawing must
+        // keep the whole status row ASCII, and non-emoji terminals must
+        // keep the `<Up>`/`<Down>` text form.
+        let emoji_icons =
+            context.settings.terminal.emoji_capable() && !context.settings.terminal.ascii_drawing;
         // Build one colored run per hint: `(` plain, key glyph in the
         // theme's highlight-selected color (+bold), `:label)` plain. The hint form renders placeholder
-        // keys in angle brackets (`<Up>/k`, `<Esc>/q`) so they read as
-        // key descriptions rather than literal text (see
-        // [`crate::terminal::ShortcutKeys::hint_display`]).
-        let mut spans: Vec<HintSpan> = Vec::with_capacity(entries.len() * 3);
+        // keys in angle brackets (`<Up>|k`, `<Esc>|q`) so they read as
+        // key descriptions rather than literal text, or as emoji icons
+        // for the arrow keys (`⬆️|k`); see
+        // [`crate::terminal::ShortcutKeys::hint_display_iter`]. The `|`
+        // separator between two bound keys is a plain span — normal font
+        // color, no bold — so only the key glyphs carry the highlight.
+        let mut spans: Vec<HintSpan> = Vec::with_capacity(entries.len() * 5);
         for (key, label) in &entries {
             spans.push(HintSpan::plain("("));
-            spans.push(HintSpan::key(key.hint_display()));
+            for (i, part) in key.hint_display_iter(emoji_icons).enumerate() {
+                if i > 0 {
+                    // Plain separator: normal font color, no bold — only
+                    // the key glyphs carry the highlight.
+                    spans.push(HintSpan::plain("|"));
+                }
+                spans.push(HintSpan::key(part));
+            }
             spans.push(HintSpan::plain(format!(":{label})")));
         }
         // Use a generous maximum: the status bar clips the segment at
         // the row's remaining width anyway; this only governs the
-        // ellipsis cutoff. Eight labelled hints run ~100–110 cells, so
+        // ellipsis cutoff. Nine labelled hints run ~100–120 cells, so
         // the previous 80-column budget truncated too aggressively.
         let mut spans = truncate_spans_with_ellipsis(spans, 200, ellipsis);
         if spans.is_empty() {
@@ -1824,7 +1848,7 @@ impl Component for Tabbed {
 
             for (desc, shortcuts) in children_maps.iter() {
                 max_length += shortcuts.len() + 3;
-                // `Display for ShortcutKeys` renders the `/`-joined
+                // `Display for ShortcutKeys` renders the `,`-joined
                 // bindings; format each entry once here instead of twice
                 // per entry (the two `max` computations used to re-run it).
                 let column_width = shortcuts

@@ -2324,9 +2324,101 @@ fn statusbar_hints_follow_keybinding() {
         crate::conf::value(&ctx, "mail.listing.compact.highlighted_selected").bg,
         "hint key glyphs must render in the theme highlight-selected color, got row {row:?}"
     );
+    // The mock context is emoji-capable, so the up-arrow binding renders
+    // as the `⬆️` emoji icon rather than `<Up>`: `(⬆️|k:Scroll Up)`. The
+    // in-group `|` of that group must be a plain span: normal status-bar
+    // font color, no bold — only the key glyphs carry the highlight.
+    // Locate the `|` immediately followed by `k` so the row's other `|`
+    // cells (the segment head and the count separators) do not qualify.
+    let row_cells: Vec<(usize, usize)> = screen
+        .grid()
+        .bounds_iter(area.nth_row(y))
+        .flatten()
+        .collect();
+    let sep_idx = row_cells
+        .iter()
+        .position(|p| {
+            screen.grid()[*p].ch() == '|'
+                && p.0 + 1 < screen.grid().cols
+                && screen.grid()[(p.0 + 1, p.1)].ch() == 'k'
+        })
+        .expect("the `(⬆️|k:Scroll Up)` separator must be on the status row");
+    let (sep_col, sep_row) = row_cells[sep_idx];
+    let k_col = (sep_col + 1, sep_row);
+    // A `base + VS16` emoji-presentation cluster occupies the leading
+    // glyph cell plus an empty continuation cell (see
+    // `CellBuffer::write_string`), so the `⬆` glyph sits two cells before
+    // the separator.
+    let cont_col = sep_col - 1;
     assert!(
-        row.contains("?:Help") && row.contains("(<Up>/k:Scroll Up)"),
-        "default hints must render as `(?:Help)` and `(<Up>/k:Scroll Up)`, got {row:?}"
+        screen.grid()[(cont_col, sep_row)].empty(),
+        "the `⬆️` cluster must reserve an empty continuation cell before the `|`, got row {row:?}"
+    );
+    let arrow_col = sep_col - 2;
+    let arrow = &screen.grid()[(arrow_col, sep_row)];
+    assert_eq!(
+        arrow.ch(),
+        '\u{2B06}',
+        "the up-arrow emoji base glyph must precede the in-group separator, got row {row:?}"
+    );
+    let sep = &screen.grid()[(sep_col, sep_row)];
+    assert_eq!(
+        sep.fg(),
+        crate::conf::value(&ctx, "status.bar").fg,
+        "the in-group `|` separator must use the normal status-bar font color, got row {row:?}"
+    );
+    assert!(
+        !sep.attrs().contains(Attr::BOLD),
+        "the in-group `|` separator must not be bold, got row {row:?}"
+    );
+    let k_cell = &screen.grid()[k_col];
+    assert_eq!(
+        k_cell.fg(),
+        crate::conf::value(&ctx, "mail.listing.compact.highlighted_selected").bg,
+        "the key glyph `k` must render in the theme highlight-selected color, got row {row:?}"
+    );
+    assert!(
+        k_cell.attrs().contains(Attr::BOLD),
+        "the key glyph `k` must be bold, got row {row:?}"
+    );
+    // The arrow glyph IS the highlighted key text: highlight-selected
+    // color, bold, and carrying the emoji-presentation attribute.
+    assert_eq!(
+        arrow.fg(),
+        crate::conf::value(&ctx, "mail.listing.compact.highlighted_selected").bg,
+        "the `⬆` icon must render in the theme highlight-selected color, got row {row:?}"
+    );
+    assert!(
+        arrow.attrs().contains(Attr::BOLD) && arrow.attrs().contains(Attr::FORCE_EMOJI),
+        "the `⬆` icon must be bold and carry FORCE_EMOJI, got row {row:?}"
+    );
+    // `grid_row_text` concatenates each cell's `ch()`, so the VS16
+    // cluster contributes the `⬆` base char followed by the empty
+    // continuation cell's blank `ch()`; assert on the base char and the
+    // `|k:Scroll Up` tail rather than the exact joined string.
+    assert!(
+        row.contains('⬆') && row.contains("|k:Scroll Up") && !row.contains("<Up>"),
+        "default hints must render the arrow as an emoji icon (`⬆` … `|k:Scroll Up`) and drop \
+         `<Up>`, got {row:?}"
+    );
+    assert!(row.contains("?:Help"), "got {row:?}");
+    // The default `listing.search` binding is a two-key group
+    // (`/` first, `F3` second), so the listing hint must surface the
+    // literal group text `(/|<F3>:Search)`, all ASCII.
+    assert!(
+        row.contains(":Search)") && row.contains("(/|<F3>:Search)"),
+        "listing view must surface the default search group `(/|<F3>:Search)`, got {row:?}"
+    );
+    // Display order: search sits before the trailing quit hint.
+    let search_idx = row
+        .find(":Search)")
+        .expect("the search hint must be present on the listing status row");
+    let quit_idx = row
+        .find(":Quit)")
+        .expect("the quit hint must be present on the listing status row");
+    assert!(
+        search_idx < quit_idx,
+        "the search hint (`:Search)`) must precede quit (`:Quit)`), got {row:?}"
     );
     // Rebind the listing section — the focused view's section wins
     // over the `general` catch-all even though both define `scroll_up`.
@@ -2343,7 +2435,7 @@ fn statusbar_hints_follow_keybinding() {
 /// `UT7b`: hint pickers only render for fields the focused view exposes.
 /// On the composing view, `composing.close` exists, so the hint must
 /// include `(Esc:Close View)`; on the contact-list view, `focus_left`
-/// is not in `ContactListShortcuts`, so `Switch Left View` must not
+/// is not in `ContactListShortcuts`, so `Focus Left` must not
 /// appear in the hint.
 #[test]
 fn statusbar_hints_follow_view_section() {
@@ -2363,9 +2455,15 @@ fn statusbar_hints_follow_view_section() {
         row.contains("(<Esc>:Close View)"),
         "composing view must surface `composing.close` as `(<Esc>:Close View)`, got {row:?}"
     );
+    // Composing exposes no `search` binding and `general` has none
+    // either, so the Search hint must be silently skipped.
+    assert!(
+        !row.contains(":Search)"),
+        "composing view must drop the Search hint (no binding), got {row:?}"
+    );
 
     // ContactList has no `focus_left` / `focus_right` — the
-    // `Switch Left/Right View` hints must not appear.
+    // `Focus Left/Right` hints must not appear.
     let bare = StatusBar::new(
         &ctx,
         Box::new(Tabbed::new(vec![Box::new(ContactList::new(&ctx))], &ctx)),
@@ -2378,8 +2476,14 @@ fn statusbar_hints_follow_view_section() {
     bare.draw(screen2.grid_mut(), area2, &mut ctx);
     let row2 = statusbar_row_text(screen2.grid());
     assert!(
-        !row2.contains("Switch Left View") && !row2.contains("Switch Right View"),
-        "contact-list view must drop Switch Left/Right View hints (no binding), got {row2:?}"
+        !row2.contains("Focus Left") && !row2.contains("Focus Right"),
+        "contact-list view must drop Focus Left/Right hints (no binding), got {row2:?}"
+    );
+    // ContactList exposes no `search` binding either, so the Search
+    // hint must be silently skipped here too.
+    assert!(
+        !row2.contains(":Search)"),
+        "contact-list view must drop the Search hint (no binding), got {row2:?}"
     );
 }
 
