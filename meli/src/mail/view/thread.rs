@@ -953,13 +953,40 @@ impl Component for ThreadView {
             (&event, self.entries.is_empty()),
             (UIEvent::Action(Listing(OpenInNewTab)), false)
         ) {
-            // Handle this before self.mailview does
+            // Handle this before self.mailview does.
+            //
+            // Focus-dependent target:
+            //
+            // - Keyboard on the mail pane (the `open_in_new_tab` shortcut,
+            //   layouts 2/4): the new tab is the envelope view of the mail
+            //   being read — full-screen mail content, the same component
+            //   `MailView`'s own command arm produces ("opens envelope view
+            //   in new tab"). A `ThreadView` constructed directly at
+            //   `MailView` focus renders a garbled first frame in a tab
+            //   (reported from layout4), so it must not be used here.
+            // - Thread-list states (the `open-in-tab` command path): the
+            //   tab is the whole-thread view at the whole-list state, the
+            //   configuration that path has always produced.
+            if matches!(self.focus, ThreadViewFocus::MailView) {
+                let (account_hash, mailbox_hash, _) = self.coordinates;
+                let env_hash = self.entries[self.expanded_pos].msg_hash;
+                let mut new_tab = MailViewTab::new(Box::new(MailView::new(
+                    Some((account_hash, mailbox_hash, env_hash)),
+                    true,
+                    context,
+                )));
+                new_tab.set_dirty(true);
+                context
+                    .replies
+                    .push_back(UIEvent::Action(Tab(New(Some(Box::new(new_tab))))));
+                return true;
+            }
             let mut new_tab = Self::new(
                 self.coordinates,
                 self.thread_group,
                 Some(self.entries[self.expanded_pos].msg_hash),
                 false,
-                Some(self.focus),
+                Some(ThreadViewFocus::Thread),
                 context,
             );
             new_tab.set_dirty(true);
@@ -967,6 +994,32 @@ impl Component for ThreadView {
                 .replies
                 .push_back(UIEvent::Action(Tab(New(Some(Box::new(new_tab))))));
             return true;
+        }
+
+        // Command-driven reply/forward actions target the expanded message
+        // even while the thread list (not the mail pane) owns the keyboard.
+        // Handled here, before `process_event_rest`'s generic
+        // forward-to-all-entries fallback would hand them to the first entry
+        // instead of the expanded one. Consumed exactly once: returning here
+        // skips both the focus-gated mail view dispatch below and the
+        // fallback.
+        if matches!(self.focus, ThreadViewFocus::Thread)
+            && !self.entries.is_empty()
+            && matches!(
+                &*event,
+                UIEvent::Action(Action::Compose(
+                    ComposeAction::Reply
+                        | ComposeAction::ReplyToAuthor
+                        | ComposeAction::ReplyToAll
+                        | ComposeAction::Forward
+                        | ComposeAction::ForwardInline
+                        | ComposeAction::ForwardAttachment
+                ))
+            )
+        {
+            return self.entries[self.new_expanded_pos]
+                .mailview
+                .process_event(event, context);
         }
 
         // Pane chain (Left: [mail detail]→[thread list]→[mail listing]→
@@ -2491,6 +2544,42 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
         );
     }
 
+    /// Command-driven reply/forward actions must reach the EXPANDED entry's
+    /// mail view even while the thread list owns the keyboard (`Thread`
+    /// focus). Without the pre-arm, `process_event_rest`'s generic
+    /// forward-to-all-entries fallback would hand them to the first entry
+    /// (the root, still unloaded), queueing the reply there instead of
+    /// running it on the expanded reply.
+    #[test]
+    fn thread_view_compose_action_reaches_expanded_mailview_on_thread_focus() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+        let expanded_pos = view.new_expanded_pos;
+        assert_ne!(
+            expanded_pos, 0,
+            "fixture must expand a non-first entry, otherwise the fallback's \
+             first-entry delivery is indistinguishable from the fix"
+        );
+        load_expanded_entry(&mut view, &mut ctx, REPLY_MAIL_BYTES);
+
+        let mut event = UIEvent::Action(Action::Compose(ComposeAction::ReplyToAll));
+        assert!(
+            view.process_event(&mut event, &mut ctx),
+            "the compose action must be consumed while the thread list is focused"
+        );
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies.iter().any(
+                |ev| matches!(ev, UIEvent::Action(Action::Tab(TabAction::New(_))))
+                    || matches!(
+                        ev,
+                        UIEvent::Notification { title: Some(t), .. } if t == "Could not open reply"
+                    )
+            ),
+            "the expanded entry's mail view must run the reply path, got: {replies:?}"
+        );
+    }
+
     /// Core flip: at focus None, a thread-view navigation key must move the
     /// thread list cursor even though the expanded (Loaded) mail view would
     /// swallow it via the headers-walk (`headers_cursor(0) < headers_no(5)`).
@@ -3152,52 +3241,4 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
             "Down at the body bottom must not switch to the next mail"
         );
     }
-    /// repro: layout4 MailView-focus Enter → new tab render with loaded body.
-    #[test]
-    fn repro_l4_enter_new_tab() {
-        let mut ctx = mock_context();
-        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
-        // settle expanded_pos via a draw, then load the expanded body
-        {
-            let theme_default = crate::conf::value(&ctx, "theme_default");
-            let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme_default);
-            assert!(screen.resize(80, 24));
-            let area = screen.area();
-            view.draw(screen.grid_mut(), area, &mut ctx);
-        }
-        let expanded = view.entries[view.expanded_pos].msg_hash;
-        let bytes = if expanded == Envelope::from_bytes(ROOT_MAIL_BYTES, None).unwrap().hash() { ROOT_MAIL_BYTES } else { REPLY_MAIL_BYTES };
-        load_expanded_entry(&mut view, &mut ctx, bytes);
-        eprintln!("== source layout4 view (expanded {expanded:?}):");
-        dump_view(&mut view, &mut ctx);
-        // exact copy of the OpenInNewTab arm construction:
-        let mut new_tab = ThreadView::new(
-            view.coordinates,
-            view.thread_group,
-            Some(view.entries[view.expanded_pos].msg_hash),
-            false,
-            Some(view.focus),
-            &mut ctx,
-        );
-        new_tab.set_dirty(true);
-        let bytes2 = if new_tab.entries[new_tab.new_expanded_pos].msg_hash == Envelope::from_bytes(ROOT_MAIL_BYTES, None).unwrap().hash() { ROOT_MAIL_BYTES } else { REPLY_MAIL_BYTES };
-        load_expanded_entry(&mut new_tab, &mut ctx, bytes2);
-        new_tab.set_dirty(true);
-        eprintln!("== new tab:");
-        dump_view(&mut new_tab, &mut ctx);
-    }
-
-    fn dump_view(view: &mut ThreadView, ctx: &mut Context) {
-        let theme_default = crate::conf::value(ctx, "theme_default");
-        let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme_default);
-        assert!(screen.resize(80, 24));
-        let area = screen.area();
-        view.draw(screen.grid_mut(), area, ctx);
-        let grid = screen.grid();
-        for y in 0..24 {
-            let row: String = (0..80).map(|x| grid[(x, y)].ch()).collect();
-            eprintln!("{y:2}|{row}");
-        }
-    }
-
 }

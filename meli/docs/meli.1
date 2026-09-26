@@ -601,6 +601,10 @@ select threads matching
 query.
 .It Cm clear-selection
 Clear current selection.
+.It Cm open
+Open the mail or thread under the cursor.
+.It Cm refresh
+Refresh the current mailbox.
 .It Cm set Ar seen | unseen
 Set seen status of message.
 .It Cm import Ar FILEPATH Ar MAILBOX_PATH
@@ -664,6 +668,20 @@ Argument can be either a filepath (that will be created) or a directory, in whic
 Opens a composer tab with initial values parsed from the
 .Li mailto :
 address.
+.It Cm new-mail
+Open a new composer tab with an empty message.
+.It Cm reply
+Open a composer tab replying to the sender of the selected message.
+.It Cm reply all
+Open a composer tab replying to the sender and all recipients of the selected message.
+.It Cm reply author
+Open a composer tab replying only to the author of the selected message.
+.It Cm forward
+Forward the selected message, prompting for inline or attachment forwarding.
+.It Cm forward inline
+Forward the selected message inline.
+.It Cm forward attachment
+Forward the selected message as an attachment.
 .It Cm add-attachment Ar PATH
 in composer, add
 .Ar PATH

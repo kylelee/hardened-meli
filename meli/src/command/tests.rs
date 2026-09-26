@@ -342,3 +342,83 @@ mod toggle_theme_command {
         );
     }
 }
+
+/// Every new mail action command must map to its exact `Action`.
+#[test]
+fn test_command_parser_mail_actions() {
+    use super::{Action::*, ComposeAction, ListingAction};
+
+    assert_eq!(
+        parse_command(b"reply").unwrap(),
+        Compose(ComposeAction::Reply)
+    );
+    assert_eq!(
+        parse_command(b"reply all").unwrap(),
+        Compose(ComposeAction::ReplyToAll)
+    );
+    assert_eq!(
+        parse_command(b"reply author").unwrap(),
+        Compose(ComposeAction::ReplyToAuthor)
+    );
+    assert_eq!(
+        parse_command(b"forward").unwrap(),
+        Compose(ComposeAction::Forward)
+    );
+    assert_eq!(
+        parse_command(b"forward inline").unwrap(),
+        Compose(ComposeAction::ForwardInline)
+    );
+    assert_eq!(
+        parse_command(b"forward attachment").unwrap(),
+        Compose(ComposeAction::ForwardAttachment)
+    );
+    assert_eq!(
+        parse_command(b"new-mail").unwrap(),
+        Compose(ComposeAction::New)
+    );
+    assert_eq!(
+        parse_command(b"open").unwrap(),
+        Listing(ListingAction::OpenEntry)
+    );
+    assert_eq!(
+        parse_command(b"refresh").unwrap(),
+        Listing(ListingAction::Refresh)
+    );
+}
+
+/// Prefix disambiguation: the single-word parsers must not swallow the
+/// multi-word commands, and `open` must not swallow the existing
+/// `open-in-tab`.
+#[test]
+fn test_command_parser_mail_action_disambiguation() {
+    use super::{Action::*, ComposeAction, ListingAction};
+
+    assert_eq!(
+        parse_command(b"open-in-tab").unwrap(),
+        Listing(ListingAction::OpenInNewTab)
+    );
+    assert_eq!(
+        parse_command(b"reply all").unwrap(),
+        Compose(ComposeAction::ReplyToAll)
+    );
+    assert_eq!(
+        parse_command(b"reply author").unwrap(),
+        Compose(ComposeAction::ReplyToAuthor)
+    );
+    assert_eq!(
+        parse_command(b"reply").unwrap(),
+        Compose(ComposeAction::Reply)
+    );
+    assert_eq!(
+        parse_command(b"forward inline").unwrap(),
+        Compose(ComposeAction::ForwardInline)
+    );
+    assert_eq!(
+        parse_command(b"forward attachment").unwrap(),
+        Compose(ComposeAction::ForwardAttachment)
+    );
+    assert_eq!(
+        parse_command(b"forward").unwrap(),
+        Compose(ComposeAction::Forward)
+    );
+}

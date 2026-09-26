@@ -83,6 +83,17 @@ fn notify_if_search_degraded(context: &mut Context, result: &SearchResult) {
     }
 }
 
+/// Tell the user that a cursor-scoped command (`OpenEntry`, compose routing)
+/// had no entry to act on: the grid is empty or the cursor points at nothing.
+fn notify_no_mail_selected(context: &mut Context) {
+    context.replies.push_back(UIEvent::Notification {
+        title: Some("No mail selected".into()),
+        source: None,
+        body: "There is no entry under the cursor.".into(),
+        kind: Some(NotificationType::Info),
+    });
+}
+
 #[derive(Debug, Default)]
 pub struct RowsState<T> {
     pub selection: HashMap<EnvelopeHash, bool>,
@@ -1396,6 +1407,13 @@ pub struct Listing {
     prev_view_fullscreen: bool,
     /// on the grid refresh the view only when the selection changed.
     last_opened_env: Option<EnvelopeHash>,
+    /// The (thread, envelope) the current `view` was realized for. Unlike
+    /// `last_opened_env` (also used as the cursor-follow kick marker, set
+    /// when a kick is queued), this is written only by
+    /// `realize_entry_view`, so the `OpenEntryUnderCursor` reply can tell
+    /// "the open view already shows this entry" from "a kick for it was
+    /// merely issued".
+    last_realized_view: Option<(ThreadHash, EnvelopeHash)>,
     view: Option<Box<ThreadView>>,
 }
 
@@ -1645,6 +1663,27 @@ impl Component for Listing {
             return self.component.process_event(event, context);
         }
         match event {
+            // Command-palette actions the listing itself owns must be
+            // intercepted before the generic pane routing below hands
+            // unhandled `ListingAction`s to the grid component, whose
+            // `perform_action` ends in `unreachable!()` for them.
+            UIEvent::Action(Action::Listing(ListingAction::Refresh)) => {
+                // Follow the keyboard: the mail list refreshes the mailbox it
+                // opened, the sidebar the folder under its highlight (the two
+                // can differ). Both share the `refresh_*_mailbox` helpers.
+                if self.focus == ListingFocus::Menu {
+                    self.refresh_highlighted_mailbox(context);
+                } else {
+                    self.refresh_cursor_mailbox(context);
+                }
+                return true;
+            }
+            UIEvent::Action(Action::Listing(ListingAction::OpenEntry)) => {
+                if !self.open_entry_under_cursor(context) {
+                    notify_no_mail_selected(context);
+                }
+                return true;
+            }
             UIEvent::ConfigReload { old_settings: _ } => {
                 self.theme_default = crate::conf::value(context, "theme_default");
                 let account_hash = context.accounts[self.cursor_pos.account].hash();
@@ -1958,25 +1997,22 @@ impl Component for Listing {
                         thread_hash,
                         go_to_first_unread,
                     }) => {
-                        let (a, m) = self.component.coordinates();
-                        if let Some(view) = self.view.take() {
-                            view.unrealize(context);
+                        // A view for this very envelope may already be open:
+                        // `open_entry_under_cursor` realizes the view
+                        // synchronously (so a command-palette reply/forward
+                        // can be handed to it right away) before this queued
+                        // reply runs. Rebuilding here would drop that view —
+                        // canceling its body fetch and losing any
+                        // `pending_action` stashed while `LoadingBody`, so a
+                        // reply on an async backend (IMAP) would never
+                        // compose. Skip the rebuild when the open view
+                        // already shows this exact (thread, envelope) entry.
+                        if self.last_realized_view == Some((thread_hash, env_hash))
+                            && self.view.is_some()
+                        {
+                            return true;
                         }
-                        self.last_opened_env = Some(env_hash);
-                        let mut view = Box::new(ThreadView::new(
-                            (a, m, env_hash),
-                            thread_hash,
-                            Some(env_hash),
-                            go_to_first_unread,
-                            Some(ThreadViewFocus::Thread),
-                            context,
-                        ));
-                        // The keyboard stays on the grid after opening
-                        // (layout2/layout3 open grid-focused): the view's
-                        // rings render dimmed — except when the keyboard
-                        // already sits on the view (layout4).
-                        view.set_grid_focused(self.focus != ListingFocus::View);
-                        self.view = Some(view);
+                        self.realize_entry_view(thread_hash, env_hash, go_to_first_unread, context);
                     }
                 }
                 return true;
@@ -2477,31 +2513,7 @@ impl Component for Listing {
                     UIEvent::Input(ref key)
                         if shortcut!(key == shortcuts[Shortcuts::LISTING]["refresh"]) =>
                     {
-                        let account_idx = self.cursor_pos.account;
-                        // Map the sidebar index through `entries`, not
-                        // `mailboxes_order`: the latter is the account-level
-                        // ordering over all mailboxes, while the sidebar is the
-                        // subscribed-filtered tree, so the two index spaces can
-                        // disagree.
-                        let target = match self.cursor_pos.menu {
-                            MenuEntryCursor::Mailbox(idx) => self.accounts[account_idx]
-                                .entries
-                                .get(idx)
-                                .map(|e| e.mailbox_hash),
-                            MenuEntryCursor::Status => {
-                                context.accounts[account_idx].default_mailbox()
-                            }
-                        };
-                        if let Some(mailbox_hash) = target {
-                            if let Err(err) = context.accounts[account_idx].refresh(mailbox_hash) {
-                                context.replies.push_back(UIEvent::Notification {
-                                    title: Some("Could not refresh.".into()),
-                                    source: None,
-                                    body: err.to_string().into(),
-                                    kind: Some(NotificationType::Error(err.kind)),
-                                });
-                            }
-                        }
+                        self.refresh_cursor_mailbox(context);
                         return true;
                     }
                     UIEvent::Input(ref key)
@@ -2709,24 +2721,7 @@ impl Component for Listing {
                     // mail list the opened mailbox is `cursor_pos`, while here
                     // the highlight (`menu_cursor_pos`) may sit on another
                     // folder or even another account.
-                    let account_idx = self.menu_cursor_pos.account;
-                    let target = match self.menu_cursor_pos.menu {
-                        MenuEntryCursor::Mailbox(idx) => self.accounts[account_idx]
-                            .entries
-                            .get(idx)
-                            .map(|e| e.mailbox_hash),
-                        MenuEntryCursor::Status => context.accounts[account_idx].default_mailbox(),
-                    };
-                    if let Some(mailbox_hash) = target {
-                        if let Err(err) = context.accounts[account_idx].refresh(mailbox_hash) {
-                            context.replies.push_back(UIEvent::Notification {
-                                title: Some("Could not refresh.".into()),
-                                source: None,
-                                body: err.to_string().into(),
-                                kind: Some(NotificationType::Error(err.kind)),
-                            });
-                        }
-                    }
+                    self.refresh_highlighted_mailbox(context);
                     // Refresh must not steal the sidebar keyboard or open the
                     // highlighted folder, so `focus`, `menu_cursor_pos` and
                     // `cursor_pos` are intentionally left untouched.
@@ -3078,6 +3073,35 @@ impl Component for Listing {
                     .push_back(UIEvent::Action(Tab(New(Some(Box::new(composer))))));
                 return true;
             }
+            UIEvent::Action(Action::Compose(ComposeAction::New)) => {
+                let account_hash = context.accounts[self.cursor_pos.account].hash();
+                let composer = Composer::with_account(account_hash, context);
+                context
+                    .replies
+                    .push_back(UIEvent::Action(Tab(New(Some(Box::new(composer))))));
+                return true;
+            }
+            UIEvent::Action(Action::Compose(
+                ComposeAction::Reply
+                | ComposeAction::ReplyToAuthor
+                | ComposeAction::ReplyToAll
+                | ComposeAction::Forward
+                | ComposeAction::ForwardInline
+                | ComposeAction::ForwardAttachment,
+            )) => {
+                // Reply/forward need a mail view: an already open one takes
+                // the event as-is (the view owns the reply/forward logic and
+                // the forwarding dialog); otherwise open the entry under the
+                // cursor first and hand the same event to the fresh view.
+                if self.view.is_none() && !self.open_entry_under_cursor(context) {
+                    notify_no_mail_selected(context);
+                    return true;
+                }
+                if let Some(view) = self.view.as_mut() {
+                    return view.process_event(event, context);
+                }
+                return true;
+            }
             UIEvent::StartupCheck(_)
             | UIEvent::MailboxUpdate(_)
             | UIEvent::EnvelopeUpdate(_)
@@ -3333,6 +3357,7 @@ impl Listing {
             !*account_settings!(context[first_account_hash].listing.hide_sidebar_on_launch);
         let mut ret = Self {
             last_opened_env: None,
+            last_realized_view: None,
             component: Offline(OfflineListing::new((
                 first_account_hash,
                 MailboxHash::default(),
@@ -4198,12 +4223,121 @@ impl Listing {
             view.unrealize(context);
         }
         self.last_opened_env = None;
+        self.last_realized_view = None;
         if !matches!(self.component.focus(), Focus::None) {
             self.component.set_focus(Focus::None, context);
         }
         self.component.set_grid_has_keyboard(true);
         self.focus = ListingFocus::MailList;
         self.set_dirty(true);
+    }
+
+    /// Replace the open view with a fresh one for `(thread_hash, env_hash)`.
+    ///
+    /// Shared by the queued `OpenEntryUnderCursor` reply (Enter on the grid)
+    /// and [`Listing::open_entry_under_cursor`], which realizes the view
+    /// synchronously so command-palette compose actions can be forwarded to
+    /// it within the same event.
+    fn realize_entry_view(
+        &mut self,
+        thread_hash: ThreadHash,
+        env_hash: EnvelopeHash,
+        go_to_first_unread: bool,
+        context: &mut Context,
+    ) {
+        let (a, m) = self.component.coordinates();
+        if let Some(view) = self.view.take() {
+            view.unrealize(context);
+        }
+        self.last_opened_env = Some(env_hash);
+        self.last_realized_view = Some((thread_hash, env_hash));
+        let mut view = Box::new(ThreadView::new(
+            (a, m, env_hash),
+            thread_hash,
+            Some(env_hash),
+            go_to_first_unread,
+            Some(ThreadViewFocus::Thread),
+            context,
+        ));
+        // The keyboard stays on the grid after opening (layout2/layout3 open
+        // grid-focused): the view's rings render dimmed — except when the
+        // keyboard already sits on the view (layout4).
+        view.set_grid_focused(self.focus != ListingFocus::View);
+        self.view = Some(view);
+    }
+
+    /// Open the entry under the grid cursor exactly like Enter, returning
+    /// whether there was one.
+    ///
+    /// The grid component is handed the entry focus (which also queues its
+    /// `OpenEntryUnderCursor` reply), and the view is realized right away so
+    /// callers can forward the triggering event to it.
+    fn open_entry_under_cursor(&mut self, context: &mut Context) -> bool {
+        let Some((thread_hash, env_hash)) = self.component.cursor_selection() else {
+            return false;
+        };
+        self.component.set_focus(Focus::Entry, context);
+        // Opening a view hides the sidebar (`is_menu_visible` requires no
+        // view), so the keyboard must not stay on it: follow the Menu→Right
+        // pane-chain step and land on the grid, keeping the invariant that
+        // `ListingFocus::Menu` implies no open view.
+        if self.focus == ListingFocus::Menu {
+            self.focus = ListingFocus::MailList;
+        }
+        self.realize_entry_view(thread_hash, env_hash, false, context);
+        true
+    }
+
+    /// Refresh `mailbox_hash` on account `account_idx`, surfacing a backend
+    /// error as a notification. The common tail of both `refresh` shortcut
+    /// paths and the `ListingAction::Refresh` command arm.
+    fn refresh_mailbox_target(
+        &self,
+        context: &mut Context,
+        account_idx: usize,
+        mailbox_hash: MailboxHash,
+    ) {
+        if let Err(err) = context.accounts[account_idx].refresh(mailbox_hash) {
+            context.replies.push_back(UIEvent::Notification {
+                title: Some("Could not refresh.".into()),
+                source: None,
+                body: err.to_string().into(),
+                kind: Some(NotificationType::Error(err.kind)),
+            });
+        }
+    }
+
+    /// Refresh the mailbox the mail-list cursor points at (the currently
+    /// opened one), mapping the sidebar index through `entries` — not
+    /// `mailboxes_order`, whose index space can disagree.
+    fn refresh_cursor_mailbox(&self, context: &mut Context) {
+        let account_idx = self.cursor_pos.account;
+        let target = match self.cursor_pos.menu {
+            MenuEntryCursor::Mailbox(idx) => self.accounts[account_idx]
+                .entries
+                .get(idx)
+                .map(|e| e.mailbox_hash),
+            MenuEntryCursor::Status => context.accounts[account_idx].default_mailbox(),
+        };
+        if let Some(mailbox_hash) = target {
+            self.refresh_mailbox_target(context, account_idx, mailbox_hash);
+        }
+    }
+
+    /// Refresh the folder under the sidebar highlight (`menu_cursor_pos`),
+    /// which may sit on another folder or account than the opened one.
+    fn refresh_highlighted_mailbox(&self, context: &mut Context) {
+        let account_idx = self.menu_cursor_pos.account;
+        let target = match self.menu_cursor_pos.menu {
+            MenuEntryCursor::Mailbox(idx) => self.accounts[account_idx]
+                .entries
+                .get(idx)
+                .map(|e| e.mailbox_hash),
+            MenuEntryCursor::Status => context.accounts[account_idx].default_mailbox(),
+        };
+        if let Some(mailbox_hash) = target {
+            self.refresh_mailbox_target(context, account_idx, mailbox_hash);
+        }
     }
 
     fn is_menu_visible(&self) -> bool {
@@ -6300,6 +6434,169 @@ mod listing_menu_tests {
                 } if title.as_deref() == Some("Could not perform search")
             )),
             "the grid component must not receive the pager's search action"
+        );
+    }
+
+    /// The command-palette `new` compose action opens a blank composer tab,
+    /// exactly like the `m` shortcut: the listing queues the composer as a
+    /// new tab and consumes the action.
+    #[test]
+    fn compose_new_action_opens_empty_composer() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+
+        let mut event = UIEvent::Action(Action::Compose(ComposeAction::New));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "the listing must consume the new-compose action"
+        );
+        assert!(
+            ctx.replies
+                .iter()
+                .any(|e| matches!(e, UIEvent::Action(Action::Tab(TabAction::New(_))))),
+            "ComposeAction::New must queue a new composer tab, got {:?}",
+            ctx.replies
+        );
+        assert!(listing.view.is_none(), "new mail must not open a mail view");
+    }
+
+    /// The command-palette reply/forward actions need a mail view. With none
+    /// open, the listing opens the entry under the cursor first and then
+    /// forwards the untouched event to the fresh view.
+    #[test]
+    fn compose_reply_action_opens_cursor_entry() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(listing.view.is_none(), "precondition: no view is open");
+
+        let mut event = UIEvent::Action(Action::Compose(ComposeAction::Reply));
+        let _ = listing.process_event(&mut event, &mut ctx);
+        let view = listing
+            .view
+            .as_ref()
+            .expect("reply must open the entry under the cursor");
+        assert!(
+            view.is_single_mail(),
+            "the cursor rests on the newest solo single mail"
+        );
+    }
+
+    /// With a view already open, the reply/forward action must reach that
+    /// view instead of replacing it.
+    #[test]
+    fn compose_reply_action_forwards_to_open_view() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        let view_id = listing.view.as_ref().unwrap().id();
+
+        let mut event = UIEvent::Action(Action::Compose(ComposeAction::Reply));
+        let _ = listing.process_event(&mut event, &mut ctx);
+        assert_eq!(
+            listing.view.as_ref().map(|v| v.id()),
+            Some(view_id),
+            "an open view must receive the action instead of being replaced"
+        );
+    }
+
+    /// Regression (async backends): the command-palette reply action opens
+    /// the cursor entry synchronously; the grid's queued
+    /// `OpenEntryUnderCursor` reply must not rebuild that same view — the
+    /// rebuild would drop the `LoadingBody` mail view, cancel its body fetch
+    /// and lose the stashed `pending_action`, so the composer would never
+    /// open (e.g. IMAP).
+    #[test]
+    fn compose_reply_opened_view_survives_queued_open_reply() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(listing.view.is_none(), "precondition: no view is open");
+
+        let mut event = UIEvent::Action(Action::Compose(ComposeAction::Reply));
+        assert!(listing.process_event(&mut event, &mut ctx));
+        let view_id = listing.view.as_ref().unwrap().id();
+
+        // Pump everything the open queued, including the grid's
+        // `OpenEntryUnderCursor` IntraComm reply for the same envelope.
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                let _ = listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+
+        assert_eq!(
+            listing.view.as_ref().map(|v| v.id()),
+            Some(view_id),
+            "the queued open reply must not rebuild the view the action opened"
+        );
+    }
+
+    /// The command-palette `open_entry` action opens the entry under the grid
+    /// cursor, just like Enter.
+    #[test]
+    fn open_entry_action_opens_cursor_entry() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(listing.view.is_none(), "precondition: no view is open");
+
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::OpenEntry));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "the listing must consume the open-entry action"
+        );
+        assert!(listing.view.is_some(), "the cursor entry must open");
+    }
+
+    /// Regression: opening a view from sidebar (Menu) focus via a command
+    /// (`open`/reply/forward) must not leave the keyboard on the now-hidden
+    /// sidebar — `focus` moves to the mail list, keeping the invariant that
+    /// `ListingFocus::Menu` implies no open view.
+    #[test]
+    fn open_entry_action_from_menu_focus_moves_keyboard_to_mail_list() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        listing.focus = ListingFocus::Menu;
+        assert!(listing.view.is_none(), "precondition: no view is open");
+
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::OpenEntry));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "the listing must consume the open-entry action"
+        );
+        assert!(listing.view.is_some(), "the cursor entry must open");
+        assert_eq!(
+            listing.focus,
+            ListingFocus::MailList,
+            "the keyboard must leave the hidden sidebar"
+        );
+    }
+
+    /// The command-palette `refresh` action reuses the F5 path: at mail-list
+    /// focus it refreshes the opened mailbox (mapped through `entries`).
+    #[test]
+    fn refresh_action_targets_cursor_mailbox() {
+        let mut ctx = mock_context();
+        let (_inbox_hash, _inbox_dir) = add_backend_mailbox(&mut ctx, "INBOX", true);
+        let (archive_hash, _archive_dir) = add_backend_mailbox(&mut ctx, "Archive", true);
+        let mut listing = Listing::new(&mut ctx);
+        listing.focus = ListingFocus::MailList;
+        listing.cursor_pos = CursorPos {
+            account: 0,
+            menu: MenuEntryCursor::Mailbox(1),
+        };
+
+        let mut event = UIEvent::Action(Action::Listing(ListingAction::Refresh));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "the listing must consume the refresh action"
+        );
+        assert_eq!(
+            pending_refresh_target(&ctx),
+            Some(archive_hash),
+            "refresh must target the mailbox under the cursor"
         );
     }
 }

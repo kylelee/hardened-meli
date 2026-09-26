@@ -21,14 +21,16 @@
 
 use std::{borrow::Cow, path::Path};
 
-use super::{state::PendingReplyAction, MailView, ThreadView, ThreadViewFocus};
+use indexmap::IndexMap;
+
+use super::{state::PendingReplyAction, MailView, MailViewTab, ThreadView, ThreadViewFocus};
 use crate::{
     accounts::{MailboxEntry, MailboxStatus},
     command::{
-        actions::{Action, TabAction, ViewAction},
+        actions::{Action, ComposeAction, ListingAction, TabAction, ViewAction},
         MailingListAction,
     },
-    components::Component,
+    components::{Component, ComponentId, ComponentPath},
     conf::{composing::SendMail, FileMailboxConf},
     melib::{
         backends::{BackendMailbox, Mailbox, MailboxPermissions, SpecialUsageMailbox},
@@ -36,7 +38,7 @@ use crate::{
     },
     terminal::{Key, Screen, Virtual},
     types::{Link, LinkKind, UIEvent},
-    utilities::UIDialog,
+    utilities::{Tabbed, UIDialog},
     view::{EnvelopeView, ViewFilter, ViewFilterContent, ViewOptions, ViewSettings},
     AccountHash, Context, EnvelopeHash, MailboxHash,
 };
@@ -383,6 +385,138 @@ fn reply_shortcut_is_r_not_shift_r() {
     assert!(
         !reply_path(&replies),
         "`R` must not run the reply action path, got replies: {replies:?}"
+    );
+}
+
+/// Build a `Loaded` `MailView` for the synthetic INBOX envelope used by
+/// [`insert_list_unsubscribe_envelope`]. The `Loaded` state is built directly
+/// (as in [`reply_shortcut_is_r_not_shift_r`]) because the synthetic mailbox
+/// has no per-mailbox settings entry for `MailViewState::load_bytes`.
+fn loaded_mail_view(ctx: &mut Context) -> MailView {
+    _ = register_inbox(ctx);
+    let coordinates = insert_list_unsubscribe_envelope(ctx);
+    let mut view = MailView::new(Some(coordinates), false, ctx);
+    let bytes = b"From: newsletter@list.example\r\n\
+                  To: victim@victim.example\r\n\
+                  Subject: weekly\r\n\
+                  Message-ID: <list-unsub-1@list.example>\r\n\
+                  Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+                  \r\n\
+                  hello\r\n"
+        .to_vec();
+    let mail = Mail::new(bytes.clone(), None).expect("could not parse test mail");
+    let env_view = Box::new(EnvelopeView::new(
+        Mail {
+            envelope: mail.envelope.clone(),
+            bytes: bytes.clone(),
+        },
+        None,
+        None,
+        None,
+        ctx.main_loop_handler.clone(),
+    ));
+    view.state = super::state::MailViewState::Loaded {
+        bytes,
+        env: Box::new(mail.envelope),
+        env_view,
+        stack: vec![],
+    };
+    view
+}
+
+/// `true` if the replies prove the reply/forward action path ran: either a
+/// composer tab was opened or the mock account deterministically failed to
+/// build it (the same acceptance criterion as `reply_path`).
+fn compose_action_path(replies: &[UIEvent]) -> bool {
+    replies.iter().any(|ev| match ev {
+        UIEvent::Action(Action::Tab(TabAction::New(_))) => true,
+        UIEvent::Notification { title: Some(t), .. } => t == "Could not open reply",
+        _ => false,
+    })
+}
+
+/// Push a compose action and assert the mail view consumes it and runs the
+/// reply/forward path.
+fn assert_compose_action_runs(action: ComposeAction) {
+    let mut ctx = mock_context();
+    let mut view = loaded_mail_view(&mut ctx);
+
+    let mut event = UIEvent::Action(Action::Compose(action));
+    assert!(
+        view.process_event(&mut event, &mut ctx),
+        "the compose action must be consumed by the mail view"
+    );
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        compose_action_path(&replies),
+        "the compose action must run the reply/forward path, got replies: {replies:?}"
+    );
+}
+
+/// `ComposeAction::Reply` from the command palette must run the same path as
+/// the envelope-view `reply` binding.
+#[test]
+fn compose_action_reply_opens_composer() {
+    assert_compose_action_runs(ComposeAction::Reply);
+}
+
+/// `ComposeAction::ReplyToAuthor` must run the reply-to-author path.
+#[test]
+fn compose_action_reply_to_author_opens_composer() {
+    assert_compose_action_runs(ComposeAction::ReplyToAuthor);
+}
+
+/// `ComposeAction::ReplyToAll` must run the reply-all path.
+#[test]
+fn compose_action_reply_to_all_opens_composer() {
+    assert_compose_action_runs(ComposeAction::ReplyToAll);
+}
+
+/// `ComposeAction::ForwardInline` must forward without an extra dialog when
+/// chosen explicitly.
+#[test]
+fn compose_action_forward_inline_opens_composer() {
+    assert_compose_action_runs(ComposeAction::ForwardInline);
+}
+
+/// `ComposeAction::ForwardAttachment` must forward as an attachment when
+/// chosen explicitly.
+#[test]
+fn compose_action_forward_attachment_opens_composer() {
+    assert_compose_action_runs(ComposeAction::ForwardAttachment);
+}
+
+/// `ComposeAction::Forward` must follow the exact same `forward` flow as the
+/// `Ctrl-f` shortcut: with the default `composing.forward_as_attachment =
+/// ask` setting both open the inline/as-attachment chooser instead of
+/// forwarding directly.
+#[test]
+fn compose_action_forward_uses_shortcut_dialog_flow() {
+    let mut ctx = mock_context();
+
+    let mut action_view = loaded_mail_view(&mut ctx);
+    let mut action_event = UIEvent::Action(Action::Compose(ComposeAction::Forward));
+    assert!(
+        action_view.process_event(&mut action_event, &mut ctx),
+        "the forward action must be consumed"
+    );
+    assert!(
+        action_view.forward_dialog.is_some(),
+        "the default `ask` setting must open the inline/as-attachment dialog, got replies: {:?}",
+        ctx.replies()
+    );
+
+    // The `Ctrl-f` shortcut must reach the same state through the shared
+    // `perform_forward` helper.
+    let mut key_view = loaded_mail_view(&mut ctx);
+    let mut key_event = UIEvent::Input(Key::Ctrl('f'));
+    assert!(
+        key_view.process_event(&mut key_event, &mut ctx),
+        "`Ctrl-f` must be consumed by the forward shortcut"
+    );
+    assert!(
+        key_view.forward_dialog.is_some(),
+        "`Ctrl-f` must open the same dialog"
     );
 }
 
@@ -926,6 +1060,81 @@ fn enter_at_mail_view_focus_opens_new_tab() {
         has_new_tab_reply(&replies),
         "Enter at mail view focus must open a new tab, got: {replies:?}"
     );
+
+    // The new tab is the envelope view of the mail being read —
+    // full-screen mail content. Draw the tab payload and assert it is NOT
+    // the thread list: no list ring, no thread rows (the mock backend
+    // cannot load the body, so the mail pane renders its loading/error
+    // placeholder — the discriminator is the absent thread-list chrome).
+    let mut tab = replies
+        .into_iter()
+        .find_map(|ev| match ev {
+            UIEvent::Action(Action::Tab(TabAction::New(Some(component)))) => Some(component),
+            _ => None,
+        })
+        .expect("Tab(New) reply must carry the new component");
+    {
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        tab.draw(screen.grid_mut(), area, &mut ctx);
+        let _ = ctx.replies();
+        tab.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        assert_eq!(
+            grid[(0, 0)].ch(),
+            '╭',
+            "the envelope tab is framed with a rounded border"
+        );
+        assert_eq!(
+            grid[(79, 23)].ch(),
+            '╯',
+            "the envelope tab frame is rounded at the bottom-right corner"
+        );
+        let row: String = (0..80).map(|x| grid[(x, 1)].ch()).collect();
+        assert!(
+            !row.contains("thread"),
+            "no thread rows inside the envelope tab (only the frame), got: {row:?}"
+        );
+    }
+
+    // The `open-in-tab` command from the thread list keeps the
+    // whole-thread tab (the whole-list state), unchanged.
+    let mut ctx = mock_context();
+    let mut view = two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+    {
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, &mut ctx);
+    }
+    let _ = ctx.replies();
+    let mut event = UIEvent::Action(Action::Listing(ListingAction::OpenInNewTab));
+    assert!(view.process_event(&mut event, &mut ctx));
+    let mut tab = ctx
+        .replies()
+        .into_iter()
+        .find_map(|ev| match ev {
+            UIEvent::Action(Action::Tab(TabAction::New(Some(component)))) => Some(component),
+            _ => None,
+        })
+        .expect("the command must open a new tab");
+    {
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        tab.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        assert_eq!(grid[(0, 0)].ch(), '╭', "whole-list frame top-left");
+        let row: String = (0..80).map(|x| grid[(x, 1)].ch()).collect();
+        assert!(
+            row.contains("thread"),
+            "the thread rows must render in the whole-list tab, got: {row:?}"
+        );
+    }
 }
 
 /// Enter stays inert when the thread list, not the mail content window,
@@ -1344,43 +1553,80 @@ fn save_all_attachments_solo_inline() {
         "saved solo.png must contain the fixture body"
     );
 }
+
+/// Regression for the `MailViewTab` panic when opening a mail in a new tab
+/// (Enter on a thread while `ThreadViewFocus::MailView` is focused).
+///
+/// `State::process_realizations` walks the realized component tree from the
+/// root through `Component::children()` and asserts every realized id
+/// resolves back to itself. `MailViewTab` used to fall back to the default
+/// empty `children()`, so its embedded `MailView` could not be resolved and
+/// `state.rs`'s `Option::unwrap()` panicked. This replays that algorithm on
+/// a `Tabbed` -> `MailViewTab` -> `MailView` tree.
 #[test]
-fn repro_layout4_enter_new_tab_render() {
+fn mailview_tab_children_resolve() {
     let mut ctx = mock_context();
-    register_inbox(&mut ctx);
-    let (account_hash, mailbox_hash) = (*ctx.accounts.iter().next().unwrap().0, MailboxHash::from_bytes(b"INBOX"));
-    let root_bytes = b"From: a@b.example\r\nTo: c@d.example\r\nSubject: thread\r\nMessage-ID: <enter-root@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\r\nroot body text\r\n";
-    let reply_bytes = b"From: c@d.example\r\nTo: a@b.example\r\nSubject: Re: thread\r\nMessage-ID: <enter-reply@x.example>\r\nIn-Reply-To: <enter-root@x.example>\r\nDate: Thu, 1 Jan 2026 00:01:00 +0000\r\n\r\nreply body text\r\n";
-    let mut hashes = Vec::new();
-    for bytes in [root_bytes.as_slice(), reply_bytes.as_slice()] {
-        let envelope = Envelope::from_bytes(bytes, None).expect("parse");
-        let hash = envelope.hash();
-        ctx.accounts[&account_hash].collection.insert(envelope, mailbox_hash);
-        hashes.push(hash);
-    }
-    let thread_group = {
-        let threads = ctx.accounts[&account_hash].collection.get_threads(mailbox_hash);
-        threads.find_group(threads.envelope_to_thread[&hashes[0]])
-    };
-    // layout4 equivalent: focus = MailView, expanded = the reply entry.
-    let mut view = ThreadView::new(
-        (account_hash, mailbox_hash, hashes[1]),
-        thread_group,
-        None,
-        false,
-        Some(ThreadViewFocus::MailView),
-        &mut ctx,
-    );
-    {
-        let theme_default = crate::conf::value(&ctx, "theme_default");
-        let mut screen = Screen::<Virtual>::new(theme_default);
-        assert!(screen.resize(80, 24));
-        let area = screen.area();
-        view.draw(screen.grid_mut(), area, &mut ctx);
-        let grid = screen.grid();
-        for y in 0..24 {
-            let row: String = (0..80).map(|x| grid[(x, y)].ch()).collect();
-            eprintln!("{y:2}|{row}");
+    let coordinates = insert_list_unsubscribe_envelope(&ctx);
+    let mailview = MailView::new(Some(coordinates), false, &mut ctx);
+    let mailview_id = mailview.id();
+
+    let mut tabbed = Tabbed::new(Vec::new(), &ctx);
+    let tabbed_id = tabbed.id();
+    ctx.realized.clear();
+    tabbed.realize(None, &mut ctx);
+    let mailviewtab = MailViewTab::new(Box::new(mailview));
+    let mailviewtab_id = mailviewtab.id();
+    tabbed.add_component(Box::new(mailviewtab), &mut ctx);
+
+    let components: IndexMap<ComponentId, &dyn Component> =
+        std::iter::once((tabbed_id, &tabbed as &dyn Component)).collect();
+    let mut component_tree: IndexMap<ComponentId, ComponentPath> = IndexMap::default();
+    // Mirrors `State::process_realizations` (meli/src/state.rs).
+    while let Some((id, parent)) = ctx.realized.pop() {
+        match parent {
+            None => {
+                component_tree.insert(id, ComponentPath::new(id));
+            }
+            Some(parent) if component_tree.contains_key(&parent) => {
+                let mut v = component_tree[&parent].clone();
+                v.push_front(id);
+                if let Some(p) = v.root() {
+                    assert_eq!(
+                        v.resolve(components[p]).unwrap().id(),
+                        id,
+                        "realized component {id} must resolve through children()"
+                    );
+                }
+                component_tree.insert(id, v);
+            }
+            Some(parent) if !ctx.realized.contains_key(&parent) => {
+                component_tree.insert(id, ComponentPath::new(id));
+            }
+            Some(_) => {
+                let from_index = ctx.realized.len();
+                ctx.realized.insert(id, parent);
+                ctx.realized.move_index(from_index, 0);
+            }
         }
     }
+
+    let tab_path = component_tree
+        .get(&mailviewtab_id)
+        .expect("the MailViewTab must be realized under Tabbed");
+    assert_eq!(tab_path.root(), Some(&tabbed_id));
+    assert_eq!(
+        tab_path.resolve(components[&tabbed_id]).unwrap().id(),
+        mailviewtab_id,
+        "the MailViewTab path must resolve to itself through Tabbed::children()"
+    );
+
+    let path = component_tree
+        .get(&mailview_id)
+        .expect("the MailView inside MailViewTab must be realized");
+    assert_eq!(path.root(), Some(&tabbed_id));
+    assert_eq!(
+        path.resolve(components[&tabbed_id]).unwrap().id(),
+        mailview_id,
+        "the MailView path must resolve to itself through MailViewTab::children()"
+    );
 }

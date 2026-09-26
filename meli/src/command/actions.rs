@@ -63,6 +63,8 @@ pub enum ListingAction {
     Flag(FlagAction),
     ClearSelection,
     ToggleThreadSnooze,
+    OpenEntry,
+    Refresh,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -119,6 +121,19 @@ pub enum ViewAction {
 #[derive(Debug, Eq, PartialEq)]
 pub enum ComposeAction {
     Mailto(Mailto),
+    /// Open a new composer with an empty message.
+    New,
+    /// Reply to the sender.
+    Reply,
+    /// Reply only to the author.
+    ReplyToAuthor,
+    /// Reply to all recipients.
+    ReplyToAll,
+    /// Forward, prompting for inline or attachment.
+    Forward,
+    /// Forward the message inline.
+    ForwardInline,
+    ForwardAttachment,
 }
 
 #[derive(Debug, Eq, PartialEq)]

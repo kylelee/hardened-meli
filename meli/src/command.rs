@@ -55,11 +55,13 @@ use actions::MailboxOperation;
 use error::CommandError;
 pub use parser::parse_command;
 
+// Only `ComposeAction` itself is re-exported: glob-importing its variants
+// would make the bare name `New` ambiguous with `TabAction::New` in every
+// module that reaches the command module through the crate root's glob.
 pub use crate::actions::{
     AccountAction::{self, *},
     Action::{self, *},
-    ComposeAction::{self, *},
-    ComposerTabAction, FlagAction,
+    ComposeAction, ComposerTabAction, FlagAction,
     ListingAction::{self, *},
     MailingListAction::{self, *},
     TabAction::{self, *},
@@ -194,6 +196,34 @@ define_commands!([
                   desc: "mailto MAILTO_ADDRESS",
                   parser: parser::mailto
                 },
+                { tags: ["new-mail"],
+                  desc: "open a new composer with an empty message",
+                  parser: parser::new_mail
+                },
+                { tags: ["reply"],
+                  desc: "reply to the sender of the selected message",
+                  parser: parser::reply
+                },
+                { tags: ["reply all"],
+                  desc: "reply to the sender and all recipients",
+                  parser: parser::reply_all
+                },
+                { tags: ["reply author"],
+                  desc: "reply to the author of the selected message only",
+                  parser: parser::reply_author
+                },
+                { tags: ["forward"],
+                  desc: "forward the selected message, choosing inline or attachment",
+                  parser: parser::forward
+                },
+                { tags: ["forward inline"],
+                  desc: "forward the selected message inline",
+                  parser: parser::forward_inline
+                },
+                { tags: ["forward attachment"],
+                  desc: "forward the selected message as an attachment",
+                  parser: parser::forward_attachment
+                },
                 /* Pipe pager contents to binary */
                 { tags: ["pipe "],
                   desc: "pipe EXECUTABLE ARGS",
@@ -256,6 +286,14 @@ define_commands!([
                   desc: "opens envelope view in new tab",
                   parser: parser::open_in_new_tab
                 },
+                { tags: ["open"],
+                  desc: "open the mail or thread under the cursor",
+                  parser: parser::open
+                },
+                { tags: ["refresh"],
+                  desc: "refresh the current mailbox",
+                  parser: parser::refresh
+                },
                 { tags: ["save-attachment ", "save-attachment-picker "],
                   desc: "save-attachment INDEX PATH",
                   parser: parser::save_attachment
@@ -283,6 +321,10 @@ define_commands!([
                 { tags: ["tag", "tag add", "tag remove"],
                    desc: "tag [add/remove], edits message's tags.",
                    parser: parser::_tag
+                },
+                { tags: ["flag", "flag set", "flag unset"],
+                   desc: "flag [set/unset] NAME, sets or unsets a message flag: seen, flagged, draft, passed, replied or trash",
+                   parser: parser::flag
                 },
                 { tags: ["print "],
                   desc: "print ACCOUNT SETTING",
