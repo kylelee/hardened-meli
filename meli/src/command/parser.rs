@@ -177,8 +177,22 @@ pub fn parse_command(input: &[u8]) -> Result<Action, CommandError> {
         account_action,
         print_setting,
         toggle,
-        reload_config,
-        quit,
+        // Compose actions. The multi-word commands are tried before their
+        // single-word prefixes: each parser requires `eof`, but a failed
+        // boundary check returns an `Ok((_, Err))` that would otherwise
+        // stop the `alt` chain and swallow the longer command.
+        alt((
+            new_mail,
+            reply_all,
+            reply_author,
+            reply,
+            forward_inline,
+            forward_attachment,
+            forward,
+        )),
+        // Listing actions; `open` is kept after `listing_action`, whose
+        // `open-in-tab` parser must win for that command.
+        alt((open, refresh, reload_config, quit)),
     ))(input)
     .map_err(|err| err.into())
     .and_then(|(_, v)| v)
@@ -657,7 +671,78 @@ pub fn mailto(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
         "Could not parse mailto value. If the value is valid, please report this bug.",
         None
     );
-    Ok((input, Ok(Compose(Mailto(val)))))
+    Ok((input, Ok(Compose(ComposeAction::Mailto(val)))))
+}
+
+pub fn new_mail(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, new_mail};
+    let (input, _) = tag("new-mail")(input.trim())?;
+    arg_chk!(start check, input);
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Compose(ComposeAction::New))))
+}
+
+pub fn reply(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, reply};
+    let (input, _) = tag("reply")(input.trim())?;
+    arg_chk!(start check, input);
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Compose(ComposeAction::Reply))))
+}
+
+pub fn reply_author(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, reply_author};
+    let (input, _) = tag("reply")(input.trim())?;
+    arg_chk!(start check, input);
+    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = tag("author")(input.trim())?;
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Compose(ComposeAction::ReplyToAuthor))))
+}
+
+pub fn reply_all(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, reply_all};
+    let (input, _) = tag("reply")(input.trim())?;
+    arg_chk!(start check, input);
+    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = tag("all")(input.trim())?;
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Compose(ComposeAction::ReplyToAll))))
+}
+
+pub fn forward(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, forward};
+    let (input, _) = tag("forward")(input.trim())?;
+    arg_chk!(start check, input);
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Compose(ComposeAction::Forward))))
+}
+
+pub fn forward_inline(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, forward_inline};
+    let (input, _) = tag("forward")(input.trim())?;
+    arg_chk!(start check, input);
+    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = tag("inline")(input.trim())?;
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Compose(ComposeAction::ForwardInline))))
+}
+
+pub fn forward_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, forward_attachment};
+    let (input, _) = tag("forward")(input.trim())?;
+    arg_chk!(start check, input);
+    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = tag("attachment")(input.trim())?;
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Compose(ComposeAction::ForwardAttachment))))
 }
 pub fn pipe<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandError>> {
     alt((
@@ -947,6 +1032,24 @@ pub fn open_in_new_tab(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErr
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((input, Ok(Listing(OpenInNewTab))))
+}
+
+pub fn open(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, open};
+    let (input, _) = tag("open")(input.trim())?;
+    arg_chk!(start check, input);
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Listing(OpenEntry))))
+}
+
+pub fn refresh(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, refresh};
+    let (input, _) = tag("refresh")(input.trim())?;
+    arg_chk!(start check, input);
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input.trim())?;
+    Ok((input, Ok(Listing(Refresh))))
 }
 
 pub fn save_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandError>> {

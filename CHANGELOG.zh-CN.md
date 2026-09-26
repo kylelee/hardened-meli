@@ -28,6 +28,8 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 - `open_in_new_tab` thread-view 快捷键（默认 `Enter`）：邮件内容面板持有键盘时按下——即所有 layout 的邮件视图（双栏邮件布局的右栏、thread 布局的邮件面板）——将当前正在阅读的邮件在新标签页打开，与 `open-in-tab` 命令完全同一动作（ThreadView 把按键重派发为 `ListingAction::OpenInNewTab`）。邮件视图弹窗（URL 启动、List-Unsubscribe 确认等）打开时 Enter 仍归弹窗；线程列表或邮件网格持键盘时该快捷键不生效。可在 `[shortcuts.thread-view]` 配置。
 
+- 邮件操作全量命令化（计划 `command-palette-mail-ops`）：所有邮件操作均可从命令面板 / `:` 命令栏唤起。新增命令：`reply`、`reply all`、`reply author`、`forward`（按 `composing.forward_as_attachment` 弹 inline/附件选择）、`forward inline`、`forward attachment`、`new-mail`（空白编辑器）、`open`（打开列表光标处邮件/会话，同 `Enter`）、`refresh`（刷新焦点邮箱，同 `F5`：列表焦点刷当前打开邮箱、侧栏焦点刷高亮邮箱）；并把此前仅有解析器的 `flag` 命令补入补全表。回复/转发与键盘快捷键走完全相同的代码路径：已打开会话视图时动作直达该视图，否则先打开光标处条目再转发；在列表上作用于选中邮件，在邮件视图上作用于正在阅读的邮件。
+
 ### 变更（Changes）
 
 - 依赖治理：移除根 `Cargo.toml` 的 `[patch.crates-io]` 与 `vendor/crossterm/` 目录，crossterm 回归 crates.io 0.29.0 原版。原补丁防御的「未识别私有 CSI 卡死」改由删除无用启动查询（`CSI ? 2026 $ p` 同步输出支持探测，全代码库无消费者）+ 输入看门狗承担。离线构建改为依赖本地 cargo cache 预取（`cargo fetch`）。
@@ -39,6 +41,9 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 - 后台账号刷新不再把布局拉回 layout1（163/IMAP 重连场景）：当前账号的 `UIEvent::AccountStatusChange`（看门狗重连时的「Establishing TLS connection.」「Attempting authentication.」，或重连后的邮箱列表对账「Refreshed mailboxes.」）此前会完整执行 `Listing::change_account`，其无条件的 `close_view` 会把屏幕上的 layout2/3/4 塌回 layout1。现在对账路径保留已打开的视图：`change_account` 新增 `keep_view` 标志（跳过 `close_view` 拆除；邮箱未变时跳过 `set_coordinates`——它会重置网格的条目焦点与过滤状态，使打开的视图悬在无焦点网格上，而视图的绘制门是 `component.unfocused()`）；`set_index_style` 在样式无变化时不再关闭视图。若对账把网格落到别的邮箱或光标下已无条目，过期视图仍会关闭并落回 layout1；layout4 的 `View` 键盘焦点随视图存活。刷新重踢 `OpenEntryUnderCursor` 时，`set_grid_focused` / `set_grid_has_keyboard` 现在尊重存活的 `View` 焦点。回归测试：`account_status_change_keeps_open_view`（layout2，含邮件面板实际渲染的 draw 断言）、`account_status_change_keeps_view_focus`（layout4）、`account_status_change_closes_stale_view_on_moved_mailbox`（过期关闭）。
 
 - 退回 layout1 时键盘落在邮箱列表（mailbox list）：从任意会关闭视图退回 layout1 的布局（layout2 的网格或邮件视图、layout3 的网格）按退出键（`exit_entry` 的 `i` 与通用 quit 的 `q`/`Esc`）原先把键盘留在邮件网格上；现在只要侧栏可见，键盘固定落在邮箱侧栏——与 `focus_left` 的落点一致。侧栏隐藏（`menu_visibility = false`）时仍落网格；中间步骤（layout4 → layout3）不变。`conversations_entry_close_no_residue` golden 已重录（侧栏 ring 亮、网格 ring 暗）。测试：`quit_key_exits_open_mail_view`（新增断言 `Menu` 落点）、`layout3_left_goes_to_mailbox_list_and_l4_quit`（layout3 退出落邮箱列表且侧栏可见）。
+
+- 邮件正文标签页（`MailViewTab`）带 ratatui 圆角边框：`open_in_new_tab` 引入的全屏邮件标签页现在在正文四周绘制圆角边框（`draw_rounded_frame`，即 ratatui `Block::bordered` 圆角 border set 的桥接），主题 "tab.focused"、内容底色 "pane.focused"——与其他标签页内容的 pane-ring 约定一致。边框由一个薄包装组件实现，其余（事件、脏标记、kill、快捷键、realize 组件树）全部委托给内层 `MailView`。回归测试：`enter_at_mail_view_focus_opens_new_tab` 断言标签页 payload 渲染出圆角（`╭`/`╯`）且内部无会话列表行。
+- `open_in_new_tab` 打开全屏邮件内容（layout4 修复）：`ThreadView` 的 `ListingAction::OpenInNewTab` 分支改为按焦点分派。邮件面板持键盘时（`open_in_new_tab` 快捷键，layout 2/4）新标签页是正在阅读邮件的 `MailView`——全屏邮件内容，即 `MailView` 自身命令分支一直产出的组件（"opens envelope view in new tab"）；此前转发源焦点、直接以 `MailView` 焦点构造 `ThreadView` 的做法在标签页里首帧渲染错乱。线程列表状态（`open-in-tab` 命令路径）仍打开整线程视图的整列表状态标签页，行为不变。测试：`enter_at_mail_view_focus_opens_new_tab` 同时绘制两种 payload——快捷键标签页无会话列表 chrome，命令标签页保持整列表框与行。
 
 ### 已知问题（Known Issues）
 

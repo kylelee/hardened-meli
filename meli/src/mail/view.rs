@@ -354,6 +354,56 @@ impl MailView {
             .push_back(UIEvent::Action(Tab(New(Some(composer)))));
     }
 
+    /// Start the `forward` flow for the currently viewed message.
+    ///
+    /// Shared by the envelope-view `forward` shortcut and the
+    /// `ComposeAction::Forward` command action so both take the exact same
+    /// path: the mailbox's `composing.forward_as_attachment` setting decides
+    /// between prompting with the inline/as-attachment dialog and forwarding
+    /// directly.
+    fn perform_forward(&mut self, context: &mut Context) {
+        let Some(coordinates) = self.coordinates else {
+            return;
+        };
+        match mailbox_settings!(
+            context[coordinates.0][&coordinates.1]
+                .composing
+                .forward_as_attachment
+        ) {
+            f if f.is_ask() => {
+                self.forward_dialog = Some(Box::new(UIDialog::new(
+                    "How do you want the email to be forwarded?",
+                    vec![
+                        (
+                            Some(PendingReplyAction::ForwardInline),
+                            "inline".to_string(),
+                        ),
+                        (
+                            Some(PendingReplyAction::ForwardAttachment),
+                            "as attachment".to_string(),
+                        ),
+                    ],
+                    true,
+                    Some(Box::new(
+                        move |id: ComponentId, result: &[Option<PendingReplyAction>]| {
+                            Some(UIEvent::FinishedUIDialog(
+                                id,
+                                Box::new(result.first().cloned().flatten()),
+                            ))
+                        },
+                    )),
+                    context,
+                )));
+            }
+            f if f.is_true() => {
+                self.perform_action(PendingReplyAction::ForwardAttachment, context);
+            }
+            _ => {
+                self.perform_action(PendingReplyAction::ForwardInline, context);
+            }
+        }
+    }
+
     pub fn update(
         &mut self,
         new_coordinates: (AccountHash, MailboxHash, EnvelopeHash),
@@ -735,6 +785,24 @@ impl Component for MailView {
                 self.theme_default = crate::conf::value(context, "theme_default");
                 self.set_dirty(true);
             }
+            UIEvent::Action(Action::Compose(ref action)) => {
+                let pending_action = match action {
+                    ComposeAction::Reply => PendingReplyAction::Reply,
+                    ComposeAction::ReplyToAuthor => PendingReplyAction::ReplyToAuthor,
+                    ComposeAction::ReplyToAll => PendingReplyAction::ReplyToAll,
+                    ComposeAction::ForwardInline => PendingReplyAction::ForwardInline,
+                    ComposeAction::ForwardAttachment => PendingReplyAction::ForwardAttachment,
+                    ComposeAction::Forward => {
+                        self.perform_forward(context);
+                        return true;
+                    }
+                    // `Mailto` and any other compose actions are dispatched
+                    // by their own entry points (listing/parser), not here.
+                    _ => return false,
+                };
+                self.perform_action(pending_action, context);
+                return true;
+            }
             UIEvent::Input(ref key)
                 if shortcut!(key == shortcuts[Shortcuts::ENVELOPE_VIEW]["reply"]) =>
             {
@@ -756,43 +824,7 @@ impl Component for MailView {
             UIEvent::Input(ref key)
                 if shortcut!(key == shortcuts[Shortcuts::ENVELOPE_VIEW]["forward"]) =>
             {
-                match mailbox_settings!(
-                    context[coordinates.0][&coordinates.1]
-                        .composing
-                        .forward_as_attachment
-                ) {
-                    f if f.is_ask() => {
-                        self.forward_dialog = Some(Box::new(UIDialog::new(
-                            "How do you want the email to be forwarded?",
-                            vec![
-                                (
-                                    Some(PendingReplyAction::ForwardInline),
-                                    "inline".to_string(),
-                                ),
-                                (
-                                    Some(PendingReplyAction::ForwardAttachment),
-                                    "as attachment".to_string(),
-                                ),
-                            ],
-                            true,
-                            Some(Box::new(
-                                move |id: ComponentId, result: &[Option<PendingReplyAction>]| {
-                                    Some(UIEvent::FinishedUIDialog(
-                                        id,
-                                        Box::new(result.first().cloned().flatten()),
-                                    ))
-                                },
-                            )),
-                            context,
-                        )));
-                    }
-                    f if f.is_true() => {
-                        self.perform_action(PendingReplyAction::ForwardAttachment, context);
-                    }
-                    _ => {
-                        self.perform_action(PendingReplyAction::ForwardInline, context);
-                    }
-                }
+                self.perform_forward(context);
                 return true;
             }
             UIEvent::FinishedUIDialog(id, ref result) if id == self.id() => {
@@ -1110,5 +1142,114 @@ impl Component for MailView {
                 .replies
                 .push_back(UIEvent::Action(Tab(Kill(self.id))));
         }
+    }
+}
+
+/// A standalone, full-screen envelope-view tab: a [`MailView`] framed with
+/// the rounded ratatui border ([`crate::terminal::ratatui_bridge::draw_rounded_frame`],
+/// a ratatui `Block::bordered` with the rounded border set), following the
+/// pane-ring convention every other tab content uses. Everything except
+/// the frame is delegated to the wrapped mail view.
+#[derive(Debug)]
+pub(crate) struct MailViewTab {
+    mailview: Box<MailView>,
+    id: ComponentId,
+}
+
+impl std::fmt::Display for MailViewTab {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.mailview.fmt(f)
+    }
+}
+
+impl MailViewTab {
+    pub(crate) fn new(mailview: Box<MailView>) -> Self {
+        Self {
+            mailview,
+            id: ComponentId::default(),
+        }
+    }
+}
+
+impl Component for MailViewTab {
+    fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
+        // The active tab owns the keyboard, so the ring uses "tab.focused"
+        // and the mail content fills with "pane.focused". The frame is
+        // drawn first and its cells are pushed for flushing, so partial
+        // mail-view redraws cannot leave the border ring eaten.
+        let inner = crate::terminal::ratatui_bridge::draw_rounded_frame(
+            grid,
+            area,
+            crate::conf::value(context, "tab.focused"),
+        );
+        for frame_area in crate::terminal::ratatui_bridge::frame_flush_areas(grid, area) {
+            context.dirty_areas.push_back(frame_area);
+        }
+        self.mailview
+            .set_pane_fill(Some(crate::conf::value(context, "pane.focused")));
+        self.mailview.draw(grid, inner, context);
+    }
+
+    fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
+        self.mailview.process_event(event, context)
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.mailview.is_dirty()
+    }
+
+    fn set_dirty(&mut self, value: bool) {
+        self.mailview.set_dirty(value);
+    }
+
+    fn id(&self) -> ComponentId {
+        self.id
+    }
+
+    fn kill(&mut self, id: ComponentId, context: &mut Context) {
+        self.mailview.kill(id, context);
+    }
+
+    fn can_quit_cleanly(&mut self, context: &Context) -> bool {
+        self.mailview.can_quit_cleanly(context)
+    }
+
+    fn shortcuts(&self, context: &Context) -> ShortcutMaps {
+        self.mailview.shortcuts(context)
+    }
+
+    fn status(&self, context: &Context) -> String {
+        self.mailview.status(context)
+    }
+
+    fn status_watch(&self) -> Option<(AccountHash, MailboxHash)> {
+        self.mailview.status_watch()
+    }
+
+    fn children(&self) -> IndexMap<ComponentId, &dyn Component> {
+        let mut ret: IndexMap<ComponentId, &dyn Component> = IndexMap::default();
+        ret.insert(self.mailview.id(), self.mailview.as_ref());
+
+        ret
+    }
+
+    fn children_mut(&mut self) -> IndexMap<ComponentId, &mut dyn Component> {
+        let mut ret: IndexMap<ComponentId, &mut dyn Component> = IndexMap::default();
+        ret.insert(self.mailview.id(), self.mailview.as_mut());
+
+        ret
+    }
+
+    fn realize(&self, parent: Option<ComponentId>, context: &mut Context) {
+        self.mailview.realize(Some(self.id), context);
+        context.realized.insert(self.id, parent);
+    }
+
+    fn unrealize(&self, context: &mut Context) {
+        self.mailview.unrealize(context);
+        context.unrealized.insert(self.id);
+        context
+            .replies
+            .push_back(UIEvent::ComponentUnrealize(self.id()));
     }
 }
