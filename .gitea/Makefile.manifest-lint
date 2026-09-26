@@ -18,7 +18,6 @@ all: cargo-sort check-debian-changelog
 .PHONY: cargo-sort
 cargo-sort:
 	@printf "cargo-sort\n"
-	cargo-sort --check --check-format --grouped fuzz
 	cargo-sort --check --check-format --grouped tools
 	cargo-sort --check --check-format --grouped --workspace
 

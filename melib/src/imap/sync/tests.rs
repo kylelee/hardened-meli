@@ -132,6 +132,55 @@ fn test_imap_sync_sqlite3_status_roundtrip() {
 
 #[cfg(feature = "sqlite3")]
 #[test]
+fn test_imap_sync_sqlite3_has_envelopes() {
+    use crate::{backends::MailboxHash, imap::*};
+
+    let (tempdir, _uid_store, mut value) = sqlite3_cache_handle();
+    let mailbox_hash = MailboxHash::from(b"test".as_slice());
+    // An unknown mailbox has no persisted envelopes.
+    assert!(!value.has_envelopes(mailbox_hash).unwrap());
+
+    value
+        .init_mailbox(mailbox_hash, &SelectResponse::default())
+        .unwrap();
+    // A `mailbox` skeleton alone is not a usable envelope set: this is the
+    // "poisoned cache" state an interrupted sync leaves behind.
+    assert!(!value.has_envelopes(mailbox_hash).unwrap());
+
+    let env = healthy_envelope("has-envelopes");
+    value
+        .insert_envelopes(mailbox_hash, &[fetch_response_for(1, &env)])
+        .unwrap();
+    assert!(value.has_envelopes(mailbox_hash).unwrap());
+    _ = tempdir.close();
+}
+
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_sync_sqlite3_count_envelopes() {
+    use crate::{backends::MailboxHash, imap::*};
+
+    let (tempdir, _uid_store, mut value) = sqlite3_cache_handle();
+    let mailbox_hash = MailboxHash::from(b"test".as_slice());
+    // An unknown mailbox has no persisted envelopes.
+    assert_eq!(value.count_envelopes(mailbox_hash).unwrap(), Some(0));
+
+    value
+        .init_mailbox(mailbox_hash, &SelectResponse::default())
+        .unwrap();
+    // A `mailbox` skeleton alone counts zero envelopes.
+    assert_eq!(value.count_envelopes(mailbox_hash).unwrap(), Some(0));
+
+    let env = healthy_envelope("count-envelopes");
+    value
+        .insert_envelopes(mailbox_hash, &[fetch_response_for(1, &env)])
+        .unwrap();
+    assert_eq!(value.count_envelopes(mailbox_hash).unwrap(), Some(1));
+    _ = tempdir.close();
+}
+
+#[cfg(feature = "sqlite3")]
+#[test]
 fn test_imap_sync_sqlite3_status_migration() {
     use crate::{
         backends::{IsSubscribedFn, MailboxHash},
@@ -755,7 +804,7 @@ fn test_imap_sync_sqlite3_poison_row_isolated() {
     // Loading must return the healthy envelopes instead of resetting the
     // cache: the poison rows are quarantined (moved into
     // `invalid_envelopes`) and served back as visible placeholders.
-    let mut loaded = value.envelopes(mailbox_hash, 5, 100).unwrap().unwrap();
+    let mut loaded = value.envelopes(mailbox_hash, 5, 100).unwrap().unwrap().0;
     let mut expected_hashes: Vec<EnvelopeHash> = healthy_envs
         .iter()
         .chain(poison_envs.iter())
@@ -930,7 +979,7 @@ fn test_imap_sync_sqlite3_all_rows_poison_no_reset() {
     // Even when every cached row is malformed, the load must not fail and
     // must not reset the cache: it returns a placeholder per quarantined
     // row and the rows are moved out of `envelopes` individually.
-    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     let mut poison_hashes: Vec<EnvelopeHash> = poison_envs.iter().map(|env| env.hash()).collect();
     poison_hashes.sort_unstable();
     loaded.sort_unstable();
@@ -1024,7 +1073,7 @@ fn test_imap_sync_sqlite3_healthy_rows_unchanged() {
     }
     value.insert_envelopes(mailbox_hash, &fetches).unwrap();
 
-    let mut loaded = value.envelopes(mailbox_hash, 3, 100).unwrap().unwrap();
+    let mut loaded = value.envelopes(mailbox_hash, 3, 100).unwrap().unwrap().0;
     let mut healthy_hashes: Vec<EnvelopeHash> = healthy_envs.iter().map(|env| env.hash()).collect();
     healthy_hashes.sort_unstable();
     loaded.sort_unstable();
@@ -1146,7 +1195,7 @@ fn test_imap_sync_sqlite3_quarantine_placeholder_visible() {
 
     // The quarantined row must stay visible: the load returns the healthy
     // envelope AND a placeholder entry for the undecodable one.
-    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     loaded.sort_unstable();
     let mut expected = vec![healthy_hash, poison_hash];
     expected.sort_unstable();
@@ -1203,7 +1252,7 @@ fn test_imap_sync_sqlite3_quarantine_second_load_idempotent() {
         rows
     };
 
-    let mut first = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let mut first = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     first.sort_unstable();
     let rows_after_first = quarantine_rows();
     assert_eq!(rows_after_first.len(), 1);
@@ -1218,7 +1267,7 @@ fn test_imap_sync_sqlite3_quarantine_second_load_idempotent() {
     // capture cannot be shared across test modules: melib's lib tests
     // run in one process, only one global logger may be installed, and
     // the ENVELOPE parser tests already install one.)
-    let mut second = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let mut second = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     second.sort_unstable();
     assert_eq!(second, first);
     assert_eq!(quarantine_rows(), rows_after_first);
@@ -1237,7 +1286,7 @@ fn test_imap_sync_sqlite3_quarantine_second_load_idempotent() {
 
 #[cfg(feature = "sqlite3")]
 #[test]
-fn test_imap_sync_sqlite3_quarantine_uid_window_batching() {
+fn test_imap_sync_sqlite3_quarantine_uid_page_batching() {
     use crate::{backends::MailboxHash, imap::*, utils::sqlite3::rusqlite};
 
     let (tempdir, _uid_store, mut value) = sqlite3_cache_handle();
@@ -1268,22 +1317,75 @@ fn test_imap_sync_sqlite3_quarantine_uid_window_batching() {
         .unwrap()
     };
 
-    // Window [6, 10] (lastseenuid 10, batch 4): the four healthy rows
-    // plus a placeholder for the quarantined uid 8; uid 3 has not been
-    // read yet, so it is neither quarantined nor served.
-    let loaded = value.envelopes(mailbox_hash, 10, 4).unwrap().unwrap();
-    assert_eq!(loaded.len(), 5);
+    // Page 1 (uid <= 10, LIMIT 4, descending): the four highest rows —
+    // uid 10, 9, the just-quarantined uid 8 served as a placeholder, and
+    // uid 7. Nothing below: uid 6 belongs to the next page. uid 3 has not
+    // been read yet, so it is neither quarantined nor served.
+    let loaded = value.envelopes(mailbox_hash, 10, 4).unwrap().unwrap().0;
+    assert_eq!(loaded.len(), 4);
     assert!(loaded.contains(&poison_in_window.hash()));
     assert!(!loaded.contains(&poison_out_of_window.hash()));
     assert_eq!(table_count("invalid_envelopes"), 1);
     assert_eq!(table_count("envelopes"), 7);
 
-    // A batch whose window covers uid 3 quarantines and serves it too.
-    let loaded = value.envelopes(mailbox_hash, 3, 10).unwrap().unwrap();
-    assert_eq!(loaded.len(), 3);
+    // Page 2 (uid < 7): the remaining four rows — uid 6, the quarantined
+    // uid 3 served as a placeholder, uid 2, uid 1. Every row is served
+    // exactly once across the two pages.
+    let loaded = value.envelopes(mailbox_hash, 6, 4).unwrap().unwrap().0;
+    assert_eq!(loaded.len(), 4);
     assert!(loaded.contains(&poison_out_of_window.hash()));
     assert_eq!(table_count("invalid_envelopes"), 2);
     assert_eq!(table_count("envelopes"), 6);
+    _ = tempdir.close();
+}
+
+/// Regression (163/Coremail): the cache walk must page by actual rows, not
+/// by UID-window arithmetic. A sparse UID space (`UIDVALIDITY = 1`,
+/// `uidnext` in the 10^8-10^9 range, a handful of real messages) used to
+/// make the fetch stage machine step `max_uid -= batch_size` across
+/// hundreds of thousands of near-empty windows, emitting an endless stream
+/// of instant payloads that kept the status-bar spinner on permanently
+/// (log evidence: ~50 000 `MailboxUpdate`s per minute, four mailboxes
+/// walking for the whole session).
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_sync_sqlite3_envelopes_pages_by_rows_not_uid_windows() {
+    use crate::{backends::MailboxHash, imap::*};
+    let (tempdir, _uid_store, mut value) = sqlite3_cache_handle();
+    let mailbox_hash = MailboxHash::from(b"sparse".as_slice());
+    value
+        .init_mailbox(mailbox_hash, &SelectResponse::default())
+        .unwrap();
+
+    let mut fetches = Vec::new();
+    for uid in [1_usize, 1_000_000_000] {
+        let healthy = healthy_envelope(&format!("sparse-healthy-{uid}"));
+        fetches.push(fetch_response_for(uid, &healthy));
+    }
+    value.insert_envelopes(mailbox_hash, &fetches).unwrap();
+
+    // Page 1 (batch 1): the newest row only; its lowest UID is the next
+    // page's ceiling — not `max_uid - batch_size` (which would need
+    // 999 999 more queries to reach uid 1).
+    let (page, lowest) = value
+        .envelopes(mailbox_hash, 1_000_000_000, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(lowest, Some(1_000_000_000));
+
+    // Page 2: the remaining row; `lowest == 1` ends the walk.
+    let (page, lowest) = value
+        .envelopes(mailbox_hash, lowest.unwrap() - 1, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(lowest, Some(1));
+
+    // Beyond the last row the page is empty: nothing left to serve.
+    let (page, lowest) = value.envelopes(mailbox_hash, 0, 1).unwrap().unwrap();
+    assert!(page.is_empty());
+    assert_eq!(lowest, None);
     _ = tempdir.close();
 }
 
@@ -1384,7 +1486,7 @@ fn test_imap_sync_sqlite3_quarantine_legacy_schema_migration() {
     let mut value =
         sync::sqlite3_cache::Sqlite3Cache::get(Arc::clone(&uid_store), Some(tempdir.path()))
             .unwrap();
-    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     loaded.sort_unstable();
     let mut expected = vec![
         EnvelopeHash::from_bytes(b"legacy-healthy"),
@@ -1439,7 +1541,7 @@ fn test_imap_sync_sqlite3_quarantine_garbage_blob() {
         .unwrap();
     }
 
-    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     loaded.sort_unstable();
     let mut expected = vec![healthy_envelope("garbage-healthy").hash(), garbage_hash];
     expected.sort_unstable();
@@ -1482,7 +1584,7 @@ fn test_imap_sync_sqlite3_quarantine_refetch_heals() {
     ];
     value.insert_envelopes(mailbox_hash, fetches).unwrap();
 
-    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     loaded.sort_unstable();
     assert_eq!(loaded.len(), 2);
     assert!(loaded.contains(&healed.hash()));
@@ -1490,7 +1592,7 @@ fn test_imap_sync_sqlite3_quarantine_refetch_heals() {
     value
         .insert_envelopes(mailbox_hash, &[fetch_response_for(2, &healed)])
         .unwrap();
-    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let mut loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     loaded.sort_unstable();
     assert_eq!(loaded.len(), 2);
     // The uid 2 entry is the real envelope now, not the placeholder.
@@ -1557,7 +1659,7 @@ fn test_imap_sync_sqlite3_quarantine_cleared_by_rebuild_and_expunge() {
         .unwrap()
     };
 
-    let loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     assert_eq!(loaded.len(), 2);
     assert_eq!(quarantined_count(), 1);
 
@@ -1583,14 +1685,14 @@ fn test_imap_sync_sqlite3_quarantine_cleared_by_rebuild_and_expunge() {
     value
         .insert_envelopes(mailbox_hash, &[fetch_response_for(2, &poison)])
         .unwrap();
-    let loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     assert_eq!(loaded.len(), 2);
     assert_eq!(quarantined_count(), 1);
     value
         .init_mailbox(mailbox_hash, &SelectResponse::default())
         .unwrap();
     assert_eq!(quarantined_count(), 0);
-    let loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap();
+    let loaded = value.envelopes(mailbox_hash, 2, 100).unwrap().unwrap().0;
     assert!(loaded.is_empty());
     _ = tempdir.close();
 }

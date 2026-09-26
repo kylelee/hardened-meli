@@ -169,14 +169,6 @@ run from touching your real user data. Two switches control recording:
 perf record -g target/debug/meli
 perf script | stackcollapse-perf | rust-unmangle | flamegraph > perf.svg
 ```
-<!--  -->
-<!-- ## Running fuzz targets -->
-<!--  -->
-<!-- Note: `cargo-fuzz` requires the nightly toolchain. -->
-<!--  -->
-<!-- ```sh -->
-<!-- cargo +nightly fuzz run envelope_parse -- -dict=fuzz/envelope_tokens.dict -->
-<!-- ``` -->
 
 ## Coverage
 

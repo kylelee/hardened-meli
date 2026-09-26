@@ -1900,11 +1900,8 @@ impl Component for ThreadListing {
                             if let Ok(Some(search_result)) = try_recv_timeout!(&mut handle.chan) {
                                 self.select(search_term, search_result, context);
                             } else {
-                                self.select_job = Some((
-                                    search_term.to_string(),
-                                    self.cursor_pos.1,
-                                    handle,
-                                ));
+                                self.select_job =
+                                    Some((search_term.to_string(), self.cursor_pos.1, handle));
                             }
                         }
                         Err(err) => {

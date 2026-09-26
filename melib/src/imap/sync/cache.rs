@@ -157,6 +157,22 @@ pub trait ImapCache: Send + std::fmt::Debug {
 
     fn lastseenuid(&mut self, mailbox_hash: MailboxHash) -> Result<Option<UID>>;
 
+    /// Returns whether any envelope is persisted for `mailbox_hash`.
+    ///
+    /// A `mailbox` row (UIDVALIDITY, `max_uid`, STATUS counters) can survive
+    /// an interrupted sync while the `envelopes` table is empty; such a
+    /// skeleton must not be mistaken for a synchronized mailbox.
+    fn has_envelopes(&mut self, mailbox_hash: MailboxHash) -> Result<bool>;
+
+    /// Returns the persisted envelope count of `mailbox_hash`.
+    ///
+    /// Returns `Ok(None)` when the offline cache is disabled or no mailbox
+    /// row exists; `Ok(Some(n))` is the number of persisted envelopes of the
+    /// mailbox. A `mailbox` row can survive an interrupted sync while the
+    /// `envelopes` table is empty, so this count — not the mere presence of
+    /// a row — is the completeness baseline.
+    fn count_envelopes(&mut self, mailbox_hash: MailboxHash) -> Result<Option<usize>>;
+
     /// Records the `(MESSAGES, UNSEEN, UIDNEXT)` counters of a mailbox as
     /// returned by a `STATUS` command, to be used as the baseline of the next
     /// quick synchronization check.
@@ -218,12 +234,21 @@ pub trait ImapCache: Send + std::fmt::Debug {
         fetches: &[FetchResponse<'_>],
     ) -> Result<()>;
 
+    /// Returns the newest `batch_size` cached envelopes with
+    /// `uid <= lastseenuid`, in descending UID order, together with the
+    /// lowest UID of the returned page (`None` when the page is empty).
+    ///
+    /// The lowest-page-UID lets callers page by actual rows instead of by
+    /// UID-window arithmetic: long-lived IMAP servers (Coremail / 网易 163,
+    /// `UIDVALIDITY = 1`, `uidnext` in the 10^8-10^9 range) have extremely
+    /// sparse UID spaces where stepping `max_uid -= batch_size` iterates
+    /// hundreds of thousands of (near-)empty windows before terminating.
     fn envelopes(
         &mut self,
         mailbox_hash: MailboxHash,
         lastseenuid: UID,
         batch_size: usize,
-    ) -> Result<Option<Vec<EnvelopeHash>>>;
+    ) -> Result<Option<(Vec<EnvelopeHash>, Option<UID>)>>;
 
     fn init_mailbox(
         &mut self,
@@ -305,6 +330,32 @@ impl ImapCache for Arc<UIDStore> {
 
         if let Some(ref mut cache_handle) = *mutex {
             return cache_handle.lastseenuid(mailbox_hash);
+        }
+        Ok(None)
+    }
+
+    fn has_envelopes(&mut self, mailbox_hash: MailboxHash) -> Result<bool> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.has_envelopes(mailbox_hash);
+        }
+        Ok(false)
+    }
+
+    fn count_envelopes(&mut self, mailbox_hash: MailboxHash) -> Result<Option<usize>> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.count_envelopes(mailbox_hash);
         }
         Ok(None)
     }
@@ -485,7 +536,7 @@ impl ImapCache for Arc<UIDStore> {
         mailbox_hash: MailboxHash,
         lastseenuid: UID,
         batch_size: usize,
-    ) -> Result<Option<Vec<EnvelopeHash>>> {
+    ) -> Result<Option<(Vec<EnvelopeHash>, Option<UID>)>> {
         if !self.keep_offline_cache.load(Ordering::SeqCst) {
             return Ok(None);
         }
@@ -510,8 +561,19 @@ impl ImapCache for Arc<UIDStore> {
         self.init_cache(&mut mutex)?;
 
         if let Some(ref mut cache_handle) = *mutex {
-            return cache_handle.init_mailbox(mailbox_hash, select_response);
+            cache_handle.init_mailbox(mailbox_hash, select_response)?;
         }
+        // The mailbox's persisted rows were just dropped, so the in-memory
+        // envelope map must not outlive them: otherwise `FreshFetch`'s
+        // resume filter (which skips UIDs already present in this map)
+        // would skip messages that no longer exist in the cache, leaving
+        // the rebuild empty. `uid_index` is deliberately left intact so
+        // that already-known UIDs are still deduplicated when Create
+        // events are emitted after the rebuild.
+        self.envelopes
+            .lock()
+            .unwrap()
+            .retain(|_, cached| cached.mailbox_hash != mailbox_hash);
         Ok(())
     }
 

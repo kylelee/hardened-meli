@@ -292,6 +292,22 @@ impl ImapCache for Sqlite3Cache {
         Ok(lastseenuid)
     }
 
+    fn has_envelopes(&mut self, mailbox_hash: MailboxHash) -> Result<bool> {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT EXISTS(SELECT 1 FROM envelopes WHERE mailbox_hash = ?1);")?;
+        let exists: bool = stmt.query_row(sqlite3::params![mailbox_hash], |row| row.get(0))?;
+        Ok(exists)
+    }
+
+    fn count_envelopes(&mut self, mailbox_hash: MailboxHash) -> Result<Option<usize>> {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT COUNT(*) FROM envelopes WHERE mailbox_hash = ?1;")?;
+        let count: usize = stmt.query_row(sqlite3::params![mailbox_hash], |row| row.get(0))?;
+        Ok(Some(count))
+    }
+
     fn record_status(
         &mut self,
         mailbox_hash: MailboxHash,
@@ -658,19 +674,22 @@ impl ImapCache for Sqlite3Cache {
         mailbox_hash: MailboxHash,
         lastseenuid: UID,
         batch_size: usize,
-    ) -> Result<Option<Vec<EnvelopeHash>>> {
+    ) -> Result<Option<(Vec<EnvelopeHash>, Option<UID>)>> {
         if self.mailbox_state(mailbox_hash)?.is_none() {
             return Ok(None);
         }
 
-        let min = lastseenuid.saturating_sub(batch_size).max(1);
         let max = lastseenuid;
         let (ret, quarantined) = {
             let mut stmt = self.connection.prepare(
                 "SELECT uid, hash, envelope, modsequence FROM envelopes WHERE mailbox_hash = \
-                 ?1 AND uid <= ?2 AND uid >= ?3;",
+                 ?1 AND uid <= ?2 ORDER BY uid DESC LIMIT ?3;",
             )?;
-            let mut rows = stmt.query(sqlite3::params![mailbox_hash, max, min])?;
+            let mut rows = stmt.query(sqlite3::params![
+                mailbox_hash,
+                max,
+                batch_size as Sqlite3UID
+            ])?;
             let mut ret: Vec<(UID, EnvelopeHash, Envelope, Option<ModSequence>)> = Vec::new();
             // A row whose envelope blob fails conversion (e.g. an address
             // that the lenient network ENVELOPE parser accepted but strict
@@ -787,19 +806,28 @@ impl ImapCache for Sqlite3Cache {
                 ),
             }
         }
-        // Serve already-quarantined rows from the same uid window as
-        // visible placeholders, so that undecodable cached messages remain
-        // inspectable in the listing instead of being hidden. A uid that is
-        // (again) present in `envelopes` takes precedence over its stale
-        // quarantine entry.
+        // Serve already-quarantined rows from the served page's uid window
+        // as visible placeholders, so that undecodable cached messages
+        // remain inspectable in the listing instead of being hidden. A uid
+        // that is (again) present in `envelopes` takes precedence over its
+        // stale quarantine entry. The window's lower bound is the lowest
+        // uid of the envelope page just served (`ret` is DESC-ordered): a
+        // row-based walk must not re-serve placeholders the next page will
+        // cover, nor skip those inside this page.
+        let page_lowest = ret.last().map(|(uid, ..)| *uid);
         let mut placeholders: Vec<(UID, EnvelopeHash, Envelope, Option<ModSequence>)> = Vec::new();
         {
             let mut stmt = self.connection.prepare(
                 "SELECT uid, hash, error, length(raw), first_seen FROM invalid_envelopes WHERE \
                  mailbox_hash = ?1 AND uid <= ?2 AND uid >= ?3 AND uid NOT IN (SELECT uid FROM \
-                 envelopes WHERE mailbox_hash = ?1);",
+                 envelopes WHERE mailbox_hash = ?1) ORDER BY uid DESC LIMIT ?4;",
             )?;
-            let mut rows = stmt.query(sqlite3::params![mailbox_hash, max, min])?;
+            let mut rows = stmt.query(sqlite3::params![
+                mailbox_hash,
+                max,
+                page_lowest.unwrap_or(1),
+                batch_size as Sqlite3UID
+            ])?;
             while let Some(row) = rows.next()? {
                 let uid: UID = row.get(0)?;
                 let hash: EnvelopeHash = row.get(1)?;
@@ -823,7 +851,7 @@ impl ImapCache for Sqlite3Cache {
                 mailbox_hash
             );
         }
-        let mut lastseenuid = 0;
+        let mut lowest_served: Option<UID> = None;
         let mut env_lck = self.uid_store.envelopes.lock().unwrap();
         let mut hash_index_lck = self.uid_store.hash_index.lock().unwrap();
         let mut uid_index_lck = self.uid_store.uid_index.lock().unwrap();
@@ -833,7 +861,10 @@ impl ImapCache for Sqlite3Cache {
                 return Ok(None);
             }
             env_hashes.push(env.hash());
-            lastseenuid = lastseenuid.max(uid);
+            lowest_served = Some(match lowest_served {
+                None => uid,
+                Some(lowest) => lowest.min(uid),
+            });
             hash_index_lck.insert(env.hash(), (uid, mailbox_hash));
             uid_index_lck.insert((mailbox_hash, uid), env.hash());
             env_lck.insert(
@@ -846,7 +877,7 @@ impl ImapCache for Sqlite3Cache {
                 },
             );
         }
-        Ok(Some(env_hashes))
+        Ok(Some((env_hashes, lowest_served)))
     }
 
     fn insert_envelopes(

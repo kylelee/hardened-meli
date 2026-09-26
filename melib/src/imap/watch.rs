@@ -655,6 +655,18 @@ pub async fn examine_updates(
                 }
             }
         }
+        // Snapshot which of the fetched UIDs were already known *before*
+        // caching the batch: `insert_envelopes` registers every fetched
+        // envelope in the in-memory `uid_index`, so checking the live map
+        // afterwards would mask all of them and emit no Create event for
+        // genuinely new mail whenever the offline cache is enabled.
+        let known_uids: std::collections::HashSet<UID> = {
+            let uid_index_lck = conn.uid_store.uid_index.lock().unwrap();
+            v.iter()
+                .filter_map(|f| f.uid)
+                .filter(|uid| uid_index_lck.contains_key(&(mailbox_hash, *uid)))
+                .collect()
+        };
         {
             conn.uid_store
                 .insert_envelopes(mailbox_hash, &v)
@@ -680,13 +692,7 @@ pub async fn examine_updates(
                 continue;
             }
             let uid = uid.unwrap();
-            if conn
-                .uid_store
-                .uid_index
-                .lock()
-                .unwrap()
-                .contains_key(&(mailbox_hash, uid))
-            {
+            if known_uids.contains(&uid) {
                 continue;
             }
             let env = envelope.unwrap();

@@ -3193,3 +3193,215 @@ fn golden_statusbar_tiny_sizes_no_panic() {
     status_bar.draw(screen.grid_mut(), area, &mut ctx);
     record_or_assert("statusbar_tiny_sizes", screen.grid());
 }
+
+// ----------------------------------------------------------------------------
+// command palette corpus (T6): the VSCode-style palette floating over the
+// UI while Command mode is active. Structural assertions only — the
+// panel's own history sections depend on the shared test home's
+// cmd_history file, which other tests append to.
+// ----------------------------------------------------------------------------
+
+/// Locate the palette panel's top and bottom frame rows: the rows whose
+/// columns 8 and 71 (10% and 90% of an 80-column screen) carry the
+/// rounded corners of the panel ring. `None` when no panel is drawn.
+fn palette_panel_rows(grid: &CellBuffer) -> Option<(usize, usize)> {
+    let mut top = None;
+    let mut bottom = None;
+    for y in 0..grid.rows {
+        if grid[(8, y)].ch() == '╭' && grid[(71, y)].ch() == '╮' {
+            top = Some(y);
+        }
+        if grid[(8, y)].ch() == '╰' && grid[(71, y)].ch() == '╯' {
+            bottom = Some(y);
+        }
+    }
+    match (top, bottom) {
+        (Some(top), Some(bottom)) if bottom > top => Some((top, bottom)),
+        _ => None,
+    }
+}
+
+/// First row in `range` whose text contains the selection marker `❯`.
+fn palette_marker_row(grid: &CellBuffer, mut range: std::ops::Range<usize>) -> Option<usize> {
+    range.find(|&y| grid_row_text(grid, y).contains('❯'))
+}
+
+/// Open the palette over a drawn listing and return the drawn screen.
+fn palette_screen_with_commands_typed(
+    status_bar: &mut StatusBar,
+    ctx: &mut Context,
+    query: &str,
+) -> Screen<Virtual> {
+    status_bar.process_event(&mut UIEvent::ChangeMode(crate::types::UIMode::Command), ctx);
+    for c in query.chars() {
+        status_bar.process_event(&mut UIEvent::CmdInput(Key::Char(c)), ctx);
+    }
+    let mut screen = golden_screen(ctx, 80, 24);
+    let area = screen.area();
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, ctx);
+    screen
+}
+
+#[test]
+fn command_palette_opens_over_ui() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+
+    let mut screen = palette_screen_with_commands_typed(&mut status_bar, &mut ctx, "");
+    let (top, bottom) = palette_panel_rows(screen.grid())
+        .expect("the palette frame must be drawn over the listing");
+    assert!(
+        top >= 1 && bottom <= 22,
+        "the panel must sit inside the (10%,90%) vertical band: {top}..{bottom}"
+    );
+    assert!(
+        bottom - top >= 18,
+        "the panel must span ~80% of 24 rows: {top}..{bottom}"
+    );
+    // The bottom status row still renders beneath the floating panel.
+    assert!(!statusbar_row_text(screen.grid()).trim().is_empty());
+
+    // Typing `quit` narrows the list (rows below the input box) to
+    // matching commands.
+    screen = palette_screen_with_commands_typed(&mut status_bar, &mut ctx, "quit");
+    let (top, bottom) = palette_panel_rows(screen.grid()).expect("panel still drawn");
+    let list_text: String = (top + 4..bottom)
+        .map(|y| grid_row_text(screen.grid(), y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        list_text.contains("quit"),
+        "the list must show `quit` for query `quit`; got {list_text:?}"
+    );
+}
+
+#[test]
+fn command_palette_enter_executes_and_closes() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+
+    let screen = palette_screen_with_commands_typed(&mut status_bar, &mut ctx, "quit");
+    let (top, bottom) = palette_panel_rows(screen.grid()).expect("panel drawn before Enter");
+    status_bar.process_event(&mut UIEvent::CmdInput(Key::Char('\n')), &mut ctx);
+    let replies = ctx.replies();
+    assert!(
+        replies
+            .iter()
+            .any(|event| matches!(event, UIEvent::Command(cmd) if cmd == "quit")),
+        "Enter must queue Command(quit); got {replies:?}"
+    );
+    assert!(
+        replies
+            .iter()
+            .any(|event| matches!(event, UIEvent::ChangeMode(crate::types::UIMode::Normal))),
+        "Enter must queue ChangeMode(Normal); got {replies:?}"
+    );
+    // Feed the queued mode change back like the main loop, then redraw:
+    // the panel must be gone and the listing restored at its corners.
+    for mut event in replies {
+        status_bar.process_event(&mut event, &mut ctx);
+    }
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    assert!(
+        palette_panel_rows(screen.grid()).is_none(),
+        "the panel must close after Enter (was at rows {top}..{bottom})"
+    );
+}
+
+#[test]
+fn command_palette_selection_moves() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+
+    let screen = palette_screen_with_commands_typed(&mut status_bar, &mut ctx, "go");
+    let (top, bottom) = palette_panel_rows(screen.grid()).expect("panel drawn");
+    let before = palette_marker_row(screen.grid(), top + 4..bottom)
+        .expect("the selected entry must carry the marker");
+    status_bar.process_event(&mut UIEvent::CmdInput(Key::Down), &mut ctx);
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let (top, bottom) = palette_panel_rows(screen.grid()).expect("panel still drawn");
+    let after = palette_marker_row(screen.grid(), top + 4..bottom)
+        .expect("the moved selection must carry the marker");
+    assert_eq!(
+        after,
+        before + 1,
+        "Down must move the selection marker one row down"
+    );
+}
+
+#[test]
+fn command_palette_search_key_prefills_query() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+
+    // The listing's `/` (and F3) search binding queues a Paste prefill
+    // *before* the mode change; the palette must keep accepting it while
+    // the mode is still Normal, like the old ex-buffer arms did.
+    status_bar.process_event(
+        &mut UIEvent::CmdInput(Key::Paste("search ".to_string())),
+        &mut ctx,
+    );
+    status_bar.process_event(
+        &mut UIEvent::ChangeMode(crate::types::UIMode::Command),
+        &mut ctx,
+    );
+    let mut screen = golden_screen(&ctx, 80, 24);
+    let area = screen.area();
+    status_bar.set_dirty(true);
+    status_bar.draw(screen.grid_mut(), area, &mut ctx);
+    let (top, _bottom) = palette_panel_rows(screen.grid()).expect("panel drawn");
+    let input_text: String = (top + 1..top + 4)
+        .map(|y| grid_row_text(screen.grid(), y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for y in 0..24 {
+        eprintln!("ROW{:02}: {}", y, grid_row_text(screen.grid(), y));
+    }
+    assert!(
+        input_text.contains("search"),
+        "the prefilled query must show in the palette input; got {input_text:?}"
+    );
+}

@@ -842,16 +842,6 @@ impl From<String> for AutoCompleteEntry {
     }
 }
 
-impl From<&(&str, &str, TokenStream)> for AutoCompleteEntry {
-    fn from(val: &(&str, &str, TokenStream)) -> Self {
-        let (a, b, _) = val;
-        Self {
-            entry: a.to_string(),
-            description: b.to_string(),
-        }
-    }
-}
-
 impl From<(String, String)> for AutoCompleteEntry {
     fn from(val: (String, String)) -> Self {
         let (a, b) = val;

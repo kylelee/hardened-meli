@@ -565,8 +565,34 @@ extension for authentication.
 Use
 .Em ID
 extension to retrieve server metadata, viewable at the account status page.
-Enabling this does not send any information to the server.
+When enabled, the client also identifies itself with an
+.Em ID
+command reporting the client name
+.Po see
+.Ic imap_id_name
+.Pc
+and version.
 .Pq Em false \" default value
+.It Ic imap_id_name Ar string
+.Pq Em optional
+Client name reported in the RFC 2971
+.Em ID
+command sent when
+.Ic use_id
+is enabled.
+Set it to the empty string to send
+.Em ID NIL
+instead, which reports no client identification.
+Netease
+.Pq 163/126/188
+servers reject sessions that send
+.Em ID NIL
+with
+.Dq Unsafe Login. Please contact kefu@188.com for help
+and refuse subsequent
+.Em SELECT Ns ;
+use a non-empty value with those accounts.
+.Pq Em \&"PrivateEmailClient" \" default value
 .It Ic use_connection_pool Ar boolean
 .Pq Em optional
 Use a connection pool of more than one server connections, to prevent time-outs when performing multiple operations.
@@ -1664,6 +1690,11 @@ Focus or enlarge the mail view pane.
 Move the focus rightward and open the entry currently selected in the thread list: from the thread-list state, show the split layout; from the split layout, focus the mail detail.
 The mail detail state is the terminal stop of the pane chain; the key stays consumed.
 .Pq Em Right,l \" default value
+.It Ic open_in_new_tab
+Open the mail being viewed in a new tab
+.Pq the same action as the Ic open-in-tab command .
+Active in every layout whose mail content pane holds the keyboard (the mail view of the two-pane mail layout, the mail pane of the thread layout); while a dialog is open, Enter confirms the dialog instead.
+.Pq Em Enter \" default value
 .El
 .sp
 .\"

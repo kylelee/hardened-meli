@@ -24,9 +24,21 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 - Composer 新增关闭快捷键（`[shortcuts.composing]` 的 `close` 键，默认 `Esc`）：在邮件编辑界面按 `Esc` 关闭标签页返回之前的界面，草稿有未保存修改时弹出 x/y/n 对话框（不保存退出 / 保存草稿退出 / 取消）；附件管理模式按 `Esc` 返回主编辑界面。同步补齐移除附件、附件内层保存、收件人确认、gpg 密钥确认四处 `has_changes` 缺口，避免 Esc 关闭时静默丢弃未保存修改（计划 `composer-esc-exit`）。
 
+- 命令面板（VSCode Ctrl+P 风格，计划 `command-palette`）：按 `:` / `M-x` 不再展开底部第二行命令条，而是在当前界面上弹出居中浮动面板（四角位于屏幕 10%/90%，即 80% × 80%）。面板顶部为单行输入框（`ratatui-textarea`，支持退格/方向键/Home/End），下方为 nucleo 模糊匹配列表（`nucleo-matcher`，智能大小写，按分数降序），候选为 `COMMAND_COMPLETION` 全部命令 + 历史记录，命中字符加粗+下划线高亮。空查询时显示 `Frequent`（使用超过一次的命令，按次数优先，取前 10）与 `History`（新→旧去重，取前 10）两节——无历史时列出全部命令。按键：`Tab` 将输入补全为选中项，`Enter` 执行选中项（或原始输入）并关闭，`Up`/`Down`（`Ctrl-P`/`Ctrl-N`）移动选择，`Esc` 直接关闭不执行。执行路径不变：面板只入队 `UIEvent::Command`，解析、`needs_confirmation` 确认框（如 quit）、历史记录（`cmd_history`）行为与之前完全一致；listing 的 `/` 与 F3 搜索预填仍然落入输入框。同时从 `StatusBar` 移除旧的 ex-buffer/`AutoComplete` 管线与随之死掉的 token 补全机器（`Token`/`TokenStream`/`command_completion_suggestions`）；命令模式不再占用底部第二行，仅保留单行状态行（模式指示仍显示 COMMAND）。新依赖：`nucleo-matcher` 0.3 与 `ratatui-textarea` 0.9（禁用默认 feature，不引入终端后端；`ratatui-core`/`ratatui-widgets` 版本与既有 ratatui 0.30 门面统一）。`TextArea` 因渲染缓存为 `!Sync` 内部可变单元而包在 `Mutex` 后。
+
+- `open_in_new_tab` thread-view 快捷键（默认 `Enter`）：邮件内容面板持有键盘时按下——即所有 layout 的邮件视图（双栏邮件布局的右栏、thread 布局的邮件面板）——将当前正在阅读的邮件在新标签页打开，与 `open-in-tab` 命令完全同一动作（ThreadView 把按键重派发为 `ListingAction::OpenInNewTab`）。邮件视图弹窗（URL 启动、List-Unsubscribe 确认等）打开时 Enter 仍归弹窗；线程列表或邮件网格持键盘时该快捷键不生效。可在 `[shortcuts.thread-view]` 配置。
+
 ### 变更（Changes）
 
 - 依赖治理：移除根 `Cargo.toml` 的 `[patch.crates-io]` 与 `vendor/crossterm/` 目录，crossterm 回归 crates.io 0.29.0 原版。原补丁防御的「未识别私有 CSI 卡死」改由删除无用启动查询（`CSI ? 2026 $ p` 同步输出支持探测，全代码库无消费者）+ 输入看门狗承担。离线构建改为依赖本地 cargo cache 预取（`cargo fetch`）。
+
+### 修复（Fixed）
+
+- IMAP 离线缓存遍历改为按行分页，消除 163/Coremail 的刷新风暴（状态栏图标常转）：`CacheFirst`/`FromCache` 抓取阶段原先按 UID 空间做 `max_uid -= batch_size` 步进，在长寿服务器的稀疏 UID 空间（`UIDVALIDITY = 1`、`uidnext` 达 10^8-10^9、真实邮件只有少量）下一次抓取要迭代数千个几乎全空的缓存窗口——每个窗口都是一次瞬时 sqlite 查询并发出一个 `MailboxUpdate` payload——状态栏邮箱图标因此永久转个不停（日志证据：四个邮箱整场会话合计约每分钟 5 万个 `MailboxUpdate`，每次抓取约 600 个瞬时 `fetch-mailbox-continued` chunk）。`ImapCache::envelopes` 现按 `ORDER BY uid DESC LIMIT ?` 返回最新 `batch_size` 行并附带本页最低 UID（隔离区占位行随同页窗口一并服务），两个阶段的下一页都推进到 `最低 UID − 1`，页面为空或抵达 UID 1 即结束：无论 UID 空间多稀疏，遍历只需 `O(缓存行数 / batch_size)` 次查询，首次抓取数秒内完成，之后只做增量同步（验收目标：刷新完成后安静，仅剩定时 watch/IDLE）。
+
+- 后台账号刷新不再把布局拉回 layout1（163/IMAP 重连场景）：当前账号的 `UIEvent::AccountStatusChange`（看门狗重连时的「Establishing TLS connection.」「Attempting authentication.」，或重连后的邮箱列表对账「Refreshed mailboxes.」）此前会完整执行 `Listing::change_account`，其无条件的 `close_view` 会把屏幕上的 layout2/3/4 塌回 layout1。现在对账路径保留已打开的视图：`change_account` 新增 `keep_view` 标志（跳过 `close_view` 拆除；邮箱未变时跳过 `set_coordinates`——它会重置网格的条目焦点与过滤状态，使打开的视图悬在无焦点网格上，而视图的绘制门是 `component.unfocused()`）；`set_index_style` 在样式无变化时不再关闭视图。若对账把网格落到别的邮箱或光标下已无条目，过期视图仍会关闭并落回 layout1；layout4 的 `View` 键盘焦点随视图存活。刷新重踢 `OpenEntryUnderCursor` 时，`set_grid_focused` / `set_grid_has_keyboard` 现在尊重存活的 `View` 焦点。回归测试：`account_status_change_keeps_open_view`（layout2，含邮件面板实际渲染的 draw 断言）、`account_status_change_keeps_view_focus`（layout4）、`account_status_change_closes_stale_view_on_moved_mailbox`（过期关闭）。
+
+- 退回 layout1 时键盘落在邮箱列表（mailbox list）：从任意会关闭视图退回 layout1 的布局（layout2 的网格或邮件视图、layout3 的网格）按退出键（`exit_entry` 的 `i` 与通用 quit 的 `q`/`Esc`）原先把键盘留在邮件网格上；现在只要侧栏可见，键盘固定落在邮箱侧栏——与 `focus_left` 的落点一致。侧栏隐藏（`menu_visibility = false`）时仍落网格；中间步骤（layout4 → layout3）不变。`conversations_entry_close_no_residue` golden 已重录（侧栏 ring 亮、网格 ring 暗）。测试：`quit_key_exits_open_mail_view`（新增断言 `Menu` 落点）、`layout3_left_goes_to_mailbox_list_and_l4_quit`（layout3 退出落邮箱列表且侧栏可见）。
 
 ### 已知问题（Known Issues）
 

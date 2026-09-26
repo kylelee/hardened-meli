@@ -24,7 +24,7 @@ use imap_codec::imap_types::{
     command::FetchModifier,
     fetch::{MacroOrMessageDataItemNames, MessageDataItemName},
     search::SearchKey,
-    sequence::SequenceSet,
+    sequence::{SeqOrUid, SequenceSet},
     status::StatusDataItemName,
 };
 use indexmap::IndexSet;
@@ -61,6 +61,17 @@ impl ImapConnection {
         }
 
         if self.uid_store.mailbox_state(mailbox_hash)?.is_none() {
+            return Ok(None);
+        }
+
+        // RFC 4549 §4.3 resync is incremental (`UID FETCH lastseenuid+1:*`):
+        // it reconciles a populated cache but cannot backfill a mailbox whose
+        // `envelopes` table is empty. That skeleton is the residue of an
+        // interrupted sync — the `mailbox` row with its STATUS counters and
+        // `max_uid` survived, the cached envelopes did not. Report "no
+        // incremental data" so the caller rebuilds the mailbox with a full
+        // fresh fetch instead of serving an empty listing forever.
+        if !self.uid_store.has_envelopes(mailbox_hash)? {
             return Ok(None);
         }
 
@@ -116,6 +127,16 @@ impl ImapConnection {
         };
         let mut response = Vec::with_capacity(1024);
 
+        // The RFC 4549 §4.3.2 quick check may only trust persisted cache
+        // state. Counters held in memory by a same-session connection (e.g.
+        // the watch connection) do not prove that the `envelopes` table is
+        // usable: an empty table means the incremental `UID FETCH` below has
+        // nothing to reconcile, so the mailbox must be rebuilt with a full
+        // fresh fetch instead of being quick-skipped.
+        if !self.uid_store.has_envelopes(mailbox_hash)? {
+            return Ok(None);
+        }
+
         // Quick synchronization check (RFC4549 Section 4.3.2): if the mailbox
         // STATUS counters are unchanged since the last recorded values, no
         // message was added, removed or had its flags changed, so the UID
@@ -138,14 +159,30 @@ impl ImapConnection {
         .await?;
         self.read_response(&mut response, RequiredResponses::STATUS)
             .await?;
-        match (
-            protocol_parser::status_response(response.as_slice())
-                .ok()
-                .map(|(_, s)| s),
-            self.uid_store.cached_status(mailbox_hash)?,
-        ) {
+        let parsed_status = protocol_parser::status_response(response.as_slice())
+            .ok()
+            .map(|(_, s)| s);
+        // The `STATUS` reply above is the most reliable `UIDNEXT` source
+        // (unlike `SELECT`, servers such as Coremail often omit it there);
+        // keep it for the cache-completeness check below.
+        let status_uidnext = parsed_status.as_ref().and_then(|s| s.uidnext);
+        let cached_status = self.uid_store.cached_status(mailbox_hash)?;
+        // The recorded STATUS counters describe the server, not the cache:
+        // only trust the quick-skip when the persisted envelope count
+        // matches the recorded MESSAGES. A baseline recorded by a no-op
+        // resync while the cache held fewer envelopes (e.g. an interrupted
+        // sync, or a server-side fetch window that widened and revealed
+        // history below `lastseenuid`) would otherwise quick-skip forever
+        // and never rebuild the mailbox.
+        let cache_covers_recorded_messages =
+            match (cached_status, self.uid_store.count_envelopes(mailbox_hash)?) {
+                (Some((Some(messages), _, _)), Some(count)) => count == messages,
+                _ => true,
+            };
+        match (parsed_status, cached_status) {
             (Some(status), Some(cached_status))
-                if status_unchanged(&status, cached_uidvalidity, cached_status) =>
+                if status_unchanged(&status, cached_uidvalidity, cached_status)
+                    && cache_covers_recorded_messages =>
             {
                 if self.stream.as_ref().is_ok_and(|stream| {
                     !matches!(
@@ -213,6 +250,66 @@ impl ImapConnection {
 
         self.uid_store
             .update_mailbox(mailbox_hash, &select_response)?;
+
+        // Cache-completeness invariant: the persisted envelope count must
+        // cover the server's `EXISTS`. If it does not (e.g. a server-side
+        // fetch window widened and revealed UIDs below `lastseenuid`), the
+        // incremental `UID FETCH lastseenuid+1:*` below cannot see the
+        // missing history and would silently serve an incomplete mailbox.
+        // A deficit that the incremental fetch *can* recover (newly
+        // delivered UIDs above `lastseenuid`) must not force a full rebuild.
+        // Report "no incremental data" so `examine_updates` backfills via
+        // message sequence number and the next `fetch()` stream rebuilds the
+        // mailbox.
+        let cached_env_count = self.uid_store.count_envelopes(mailbox_hash)?;
+        let observed_uidnext = status_uidnext.unwrap_or(select_response.uidnext);
+        let deficit_unrecoverable =
+            observed_uidnext == 0 || observed_uidnext <= lastseenuid.saturating_add(1);
+        if cached_env_count.unwrap_or(0) < select_response.exists && deficit_unrecoverable {
+            // Only after a full rebuild has been triggered once for this
+            // mailbox this session may the guard accept the retrievable
+            // set: some servers (Coremail / 网易 163) report an `EXISTS`
+            // larger than the retrievable set, so a permanent deficit
+            // would otherwise re-fetch the mailbox on every poll.
+            // The rebuild itself is triggered by the fetch stream's
+            // `cache_is_incomplete` (which records the mailbox); the guard
+            // must not record it here, or it would suppress exactly the
+            // fresh fetch that refills the cache after this fallback.
+            let already_rebuilt = self
+                .uid_store
+                .completeness_rebuilt
+                .lock()
+                .unwrap()
+                .contains(&mailbox_hash);
+            if !already_rebuilt {
+                // Never wipe the mailbox here (`init_mailbox` used to drop
+                // the row and cascade-delete every envelope). Every refill
+                // path only upserts and therefore needs no clean row:
+                // `FetchStage::InitialFresh` writes through
+                // `update_mailbox` + `insert_envelopes` (`INSERT OR
+                // REPLACE`), and `examine_updates` backfills by message
+                // sequence number with plain inserts. A wipe buys nothing
+                // but destroys mail when the refill dies mid-way: live
+                // Coremail / 网易 163 (frequent disconnects) left several
+                // mailboxes with 0 envelopes and INBOX stuck at 61/825
+                // after a rebuild was interrupted. The fetch stream's
+                // resume+retry keeps refill progress monotonic, so keeping
+                // the cached rows is always safe.
+                log::trace!(
+                    "resync_basic: cache holds {} envelopes but server reports {} for mailbox \
+                     {mailbox_path}; falling back to full rebuild",
+                    cached_env_count.unwrap_or(0),
+                    select_response.exists
+                );
+                return Ok(None);
+            }
+            log::trace!(
+                "resync_basic: cache holds {} envelopes but server reports {} for mailbox \
+                 {mailbox_path}; already rebuilt this session, accepting the retrievable set",
+                cached_env_count.unwrap_or(0),
+                select_response.exists
+            );
+        }
 
         let (mailbox_exists, unseen) = {
             let f = &self.uid_store.mailboxes.lock().await[&mailbox_hash];
@@ -553,6 +650,56 @@ impl ImapConnection {
                 f.unseen.clone(),
             )
         };
+
+        // Same cache-completeness invariant as `resync_basic`: the persisted
+        // envelope count must cover the server's `EXISTS`, otherwise the
+        // incremental `UID FETCH lastseenuid+1:*` below cannot see history
+        // whose UIDs sit below `lastseenuid`. A deficit that the incremental
+        // fetch *can* recover (newly delivered UIDs above `lastseenuid`) must
+        // not force a full rebuild. Report "no incremental data" so the
+        // caller rebuilds the mailbox.
+        let cached_env_count = self.uid_store.count_envelopes(mailbox_hash)?;
+        let deficit_unrecoverable = select_response.uidnext == 0
+            || select_response.uidnext <= lastseenuid.saturating_add(1);
+        if cached_env_count.unwrap_or(0) < select_response.exists && deficit_unrecoverable {
+            // Session-scoped rebuild memo, same rationale as
+            // `resync_basic`: some servers (Coremail / 网易 163) report an
+            // `EXISTS` larger than the retrievable set. Only after the
+            // fetch stream has triggered a full rebuild (recorded via
+            // `cache_is_incomplete`) does the guard accept the retrievable
+            // set; the guard itself must not record the mailbox, or it
+            // would suppress the fresh fetch that refills the cache after
+            // this fallback.
+            let already_rebuilt = self
+                .uid_store
+                .completeness_rebuilt
+                .lock()
+                .unwrap()
+                .contains(&mailbox_hash);
+            if !already_rebuilt {
+                // Same reason as `resync_basic`: the refill paths only
+                // upsert (`FetchStage::InitialFresh` via `update_mailbox` +
+                // `insert_envelopes`/`INSERT OR REPLACE`, `examine_updates`
+                // via plain inserts), so the guard must never call
+                // `init_mailbox` and cascade-delete the cached envelopes.
+                // Live Coremail / 网易 163 proved the wipe destructive: an
+                // interrupted rebuild left mailboxes at 0 envelopes and
+                // INBOX at 61/825.
+                log::trace!(
+                    "resync_condstore: cache holds {} envelopes but server reports {} for \
+                     mailbox {mailbox_path}; falling back to full rebuild",
+                    cached_env_count.unwrap_or(0),
+                    select_response.exists
+                );
+                return Ok(None);
+            }
+            log::trace!(
+                "resync_condstore: cache holds {} envelopes but server reports {} for mailbox \
+                 {mailbox_path}; already rebuilt this session, accepting the retrievable set",
+                cached_env_count.unwrap_or(0),
+                select_response.exists
+            );
+        }
 
         let mut refresh_events = vec![];
         let mut new_envelopes = vec![];
@@ -905,7 +1052,29 @@ impl ImapConnection {
                 }
                 select_response.uidnext = uidnext;
             } else {
-                return Err(Error::new("IMAP server did not reply with UIDNEXT"));
+                /* Third fallback layer: Coremail (Netease 163/126/188) answers
+                 * `UIDNEXT` neither in `SELECT`/`EXAMINE` nor in `STATUS`
+                 * (`STATUS (UIDNEXT)` comes back with an empty `()` item list),
+                 * so both layers above leave `uidnext` unset. `UID SEARCH *` is
+                 * answered however: in a UID command `*` denotes the highest UID
+                 * in use (RFC 3501 §6.4.8), so the reply is just that UID and
+                 * `max_uid + 1` is the UIDNEXT the server would have reported.
+                 * It cannot skip mail: no message can hold a UID above
+                 * `max_uid`. An empty mailbox never reaches this point, because
+                 * `exists == 0` returns early above; should a broken server
+                 * nevertheless answer `* SEARCH` with no UIDs, fall back to
+                 * `uidnext = 1` rather than failing the whole mailbox select. */
+                self.send_command(CommandBody::search(
+                    None,
+                    SearchKey::SequenceSet(SequenceSet::from(SeqOrUid::Asterisk)).into(),
+                    true,
+                ))
+                .await?;
+                self.read_response(&mut response, RequiredResponses::SEARCH)
+                    .await?;
+                let (_, search_uids) = protocol_parser::search_results(response.as_slice())?;
+                let max_uid = search_uids.iter().copied().max().unwrap_or(0);
+                select_response.uidnext = if max_uid == 0 { 1 } else { max_uid + 1 };
             }
         }
         Ok(select_response)

@@ -511,11 +511,8 @@ impl Component for DisplayMessageBox {
              * so it gets the overlay frame treatment — a rounded border in
              * the notification colors over its raised panel background
              * (status.notification bg), distinct from the content below. */
-            let box_displ_area = crate::terminal::ratatui_bridge::draw_rounded_frame(
-                grid,
-                box_area,
-                noto_colors,
-            );
+            let box_displ_area =
+                crate::terminal::ratatui_bridge::draw_rounded_frame(grid, box_area, noto_colors);
             /* Register the frame's writes for flushing: the caller flushes
              * exactly `cached_area` from this (overlay) grid, so it must
              * cover the leading gutter column `draw_rounded_frame` blanked

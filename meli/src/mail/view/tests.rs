@@ -21,16 +21,20 @@
 
 use std::{borrow::Cow, path::Path};
 
-use super::{state::PendingReplyAction, MailView};
+use super::{state::PendingReplyAction, MailView, ThreadView, ThreadViewFocus};
 use crate::{
+    accounts::{MailboxEntry, MailboxStatus},
     command::{
         actions::{Action, TabAction, ViewAction},
         MailingListAction,
     },
     components::Component,
-    conf::composing::SendMail,
-    melib::{Attachment, AttachmentBuilder, Envelope, Mail},
-    terminal::Key,
+    conf::{composing::SendMail, FileMailboxConf},
+    melib::{
+        backends::{BackendMailbox, Mailbox, MailboxPermissions, SpecialUsageMailbox},
+        Attachment, AttachmentBuilder, Envelope, Mail,
+    },
+    terminal::{Key, Screen, Virtual},
     types::{Link, LinkKind, UIEvent},
     utilities::UIDialog,
     view::{EnvelopeView, ViewFilter, ViewFilterContent, ViewOptions, ViewSettings},
@@ -759,6 +763,239 @@ fn go_to_url_confirm_launches_url_after_dialog() {
     assert!(view.pending_launch_url.is_none());
 }
 
+/// Register an `INBOX` mailbox on the mock account so per-mailbox settings
+/// lookups (`mailbox_settings!`, e.g. `ThreadView::shortcuts`) resolve.
+fn register_inbox(context: &mut Context) -> (AccountHash, MailboxHash) {
+    #[derive(Debug)]
+    struct TestMailbox {
+        hash: MailboxHash,
+        name: String,
+        subscribed: bool,
+    }
+
+    impl BackendMailbox for TestMailbox {
+        fn hash(&self) -> MailboxHash {
+            self.hash
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn path(&self) -> &str {
+            &self.name
+        }
+
+        fn children(&self) -> &[MailboxHash] {
+            &[]
+        }
+
+        fn clone(&self) -> Mailbox {
+            Box::new(Self {
+                hash: self.hash,
+                name: self.name.clone(),
+                subscribed: self.subscribed,
+            })
+        }
+
+        fn special_usage(&self) -> SpecialUsageMailbox {
+            SpecialUsageMailbox::Normal
+        }
+
+        fn parent(&self) -> Option<MailboxHash> {
+            None
+        }
+
+        fn permissions(&self) -> MailboxPermissions {
+            MailboxPermissions::default()
+        }
+
+        fn is_subscribed(&self) -> bool {
+            self.subscribed
+        }
+
+        fn set_is_subscribed(&mut self, new_val: bool) -> melib::Result<()> {
+            self.subscribed = new_val;
+            Ok(())
+        }
+
+        fn set_special_usage(&mut self, _new_val: SpecialUsageMailbox) -> melib::Result<()> {
+            Ok(())
+        }
+
+        fn count(&self) -> melib::Result<(usize, usize)> {
+            Ok((0, 0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    let account_hash = *context.accounts.iter().next().unwrap().0;
+    let mailbox_hash = MailboxHash::from_bytes(b"INBOX");
+    let account = context.accounts.get_mut(&account_hash).unwrap();
+    account.mailbox_entries.insert(
+        mailbox_hash,
+        MailboxEntry::new(
+            MailboxStatus::Available,
+            "INBOX".to_string(),
+            Box::new(TestMailbox {
+                hash: mailbox_hash,
+                name: "INBOX".to_string(),
+                subscribed: true,
+            }),
+            FileMailboxConf::default(),
+        ),
+    );
+    (account_hash, mailbox_hash)
+}
+
+/// Insert a two-mail thread (root + reply) into the mock account's
+/// collection and build a `ThreadView` over it at the given focus,
+/// mirroring `golden.rs::golden_two_mail_thread_view`.
+fn two_mail_thread_view(context: &mut Context, focus: ThreadViewFocus) -> ThreadView {
+    let (account_hash, mailbox_hash) = register_inbox(context);
+    let root_bytes = b"From: a@b.example\r\nTo: c@d.example\r\nSubject: thread\r\nMessage-ID: <enter-root@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\r\nroot\r\n";
+    let reply_bytes = b"From: c@d.example\r\nTo: a@b.example\r\nSubject: Re: thread\r\nMessage-ID: <enter-reply@x.example>\r\nIn-Reply-To: <enter-root@x.example>\r\nDate: Thu, 1 Jan 2026 00:01:00 +0000\r\n\r\nreply\r\n";
+    let mut root_hash = None;
+    for bytes in [root_bytes.as_slice(), reply_bytes.as_slice()] {
+        let envelope = Envelope::from_bytes(bytes, None).expect("could not parse test envelope");
+        let hash = envelope.hash();
+        context.accounts[&account_hash]
+            .collection
+            .insert(envelope, mailbox_hash);
+        if root_hash.is_none() {
+            root_hash = Some(hash);
+        }
+    }
+    let root_hash = root_hash.unwrap();
+    let thread_group = {
+        let threads = context.accounts[&account_hash]
+            .collection
+            .get_threads(mailbox_hash);
+        threads.find_group(threads.envelope_to_thread[&root_hash])
+    };
+    ThreadView::new(
+        (account_hash, mailbox_hash, root_hash),
+        thread_group,
+        None,
+        false,
+        Some(focus),
+        context,
+    )
+}
+
+/// Whether any queued reply opens a new tab.
+fn has_new_tab_reply(replies: &[UIEvent]) -> bool {
+    replies
+        .iter()
+        .any(|ev| matches!(ev, UIEvent::Action(Action::Tab(TabAction::New(Some(_))))))
+}
+
+/// Regression: Enter with the keyboard on the mail content pane — every
+/// layout's mail view (the two-pane mail layout's right pane, the thread
+/// layout's mail pane) — opens the mail being viewed in a new tab, the
+/// same action the `open-in-tab` command dispatches.
+#[test]
+fn enter_at_mail_view_focus_opens_new_tab() {
+    let mut ctx = mock_context();
+    let mut view = two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+    // A frame renders first (as in real usage): `draw` settles the pending
+    // expanded-entry selection the new-tab path reads.
+    {
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, &mut ctx);
+    }
+    let _ = ctx.replies();
+    let mut event = UIEvent::Input(Key::Char('\n'));
+    assert!(
+        view.process_event(&mut event, &mut ctx),
+        "Enter at mail view focus must be consumed"
+    );
+
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        has_new_tab_reply(&replies),
+        "Enter at mail view focus must open a new tab, got: {replies:?}"
+    );
+}
+
+/// Enter stays inert when the thread list, not the mail content window,
+/// holds the keyboard.
+#[test]
+fn enter_at_thread_list_focus_does_not_open_tab() {
+    let mut ctx = mock_context();
+    let mut view = two_mail_thread_view(&mut ctx, ThreadViewFocus::Thread);
+
+    let mut event = UIEvent::Input(Key::Char('\n'));
+    let _ = view.process_event(&mut event, &mut ctx);
+
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        !has_new_tab_reply(&replies),
+        "Enter at thread list focus must not open a new tab, got: {replies:?}"
+    );
+}
+
+/// While a mail view dialog (List-Unsubscribe confirmation) is open, Enter
+/// belongs to the dialog: it must confirm it instead of opening a new tab.
+#[test]
+fn enter_with_open_dialog_confirms_instead_of_new_tab() {
+    let mut ctx = mock_context();
+    register_inbox(&mut ctx);
+    let (account_hash, mailbox_hash, env_hash) = insert_list_unsubscribe_envelope(&ctx);
+    let thread_group = {
+        let threads = ctx.accounts[&account_hash]
+            .collection
+            .get_threads(mailbox_hash);
+        threads.find_group(threads.envelope_to_thread[&env_hash])
+    };
+    let mut view = ThreadView::new(
+        (account_hash, mailbox_hash, env_hash),
+        thread_group,
+        None,
+        false,
+        Some(ThreadViewFocus::MailView),
+        &mut ctx,
+    );
+
+    // Open the List-Unsubscribe confirmation dialog through the embedded
+    // mail view.
+    let mut open = UIEvent::Action(Action::MailingListAction(
+        MailingListAction::ListUnsubscribe,
+    ));
+    assert!(
+        view.process_event(&mut open, &mut ctx),
+        "the unsubscribe action must reach the embedded mail view"
+    );
+    let _ = ctx.replies();
+
+    let mut event = UIEvent::Input(Key::Char('\n'));
+    assert!(
+        view.process_event(&mut event, &mut ctx),
+        "Enter must be consumed by the dialog"
+    );
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::FinishedUIDialog(_, _))),
+        "Enter must confirm the open dialog, got: {replies:?}"
+    );
+    assert!(
+        !has_new_tab_reply(&replies),
+        "an open dialog must keep Enter for itself, got: {replies:?}"
+    );
+}
+
 /// Cancel path: Esc must tear the dialog down without launching anything and
 /// leave no pending URL behind; this must also hold for a malformed URL with
 /// no parseable scheme.
@@ -1106,4 +1343,44 @@ fn save_all_attachments_solo_inline() {
         String::from_utf8_lossy(&content).contains("SOLO-fake"),
         "saved solo.png must contain the fixture body"
     );
+}
+#[test]
+fn repro_layout4_enter_new_tab_render() {
+    let mut ctx = mock_context();
+    register_inbox(&mut ctx);
+    let (account_hash, mailbox_hash) = (*ctx.accounts.iter().next().unwrap().0, MailboxHash::from_bytes(b"INBOX"));
+    let root_bytes = b"From: a@b.example\r\nTo: c@d.example\r\nSubject: thread\r\nMessage-ID: <enter-root@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\r\nroot body text\r\n";
+    let reply_bytes = b"From: c@d.example\r\nTo: a@b.example\r\nSubject: Re: thread\r\nMessage-ID: <enter-reply@x.example>\r\nIn-Reply-To: <enter-root@x.example>\r\nDate: Thu, 1 Jan 2026 00:01:00 +0000\r\n\r\nreply body text\r\n";
+    let mut hashes = Vec::new();
+    for bytes in [root_bytes.as_slice(), reply_bytes.as_slice()] {
+        let envelope = Envelope::from_bytes(bytes, None).expect("parse");
+        let hash = envelope.hash();
+        ctx.accounts[&account_hash].collection.insert(envelope, mailbox_hash);
+        hashes.push(hash);
+    }
+    let thread_group = {
+        let threads = ctx.accounts[&account_hash].collection.get_threads(mailbox_hash);
+        threads.find_group(threads.envelope_to_thread[&hashes[0]])
+    };
+    // layout4 equivalent: focus = MailView, expanded = the reply entry.
+    let mut view = ThreadView::new(
+        (account_hash, mailbox_hash, hashes[1]),
+        thread_group,
+        None,
+        false,
+        Some(ThreadViewFocus::MailView),
+        &mut ctx,
+    );
+    {
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, &mut ctx);
+        let grid = screen.grid();
+        for y in 0..24 {
+            let row: String = (0..80).map(|x| grid[(x, y)].ch()).collect();
+            eprintln!("{y:2}|{row}");
+        }
+    }
 }

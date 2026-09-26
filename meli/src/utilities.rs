@@ -25,7 +25,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use indexmap::IndexMap;
-use melib::{text::Reflow, ShellExpandTrait};
+use melib::text::Reflow;
 use ratatui::layout::{Constraint, Layout};
 
 use super::*;
@@ -48,6 +48,9 @@ pub use self::dialogs::*;
 
 mod tables;
 pub use self::tables::*;
+
+mod command_palette;
+pub use self::command_palette::*;
 
 #[cfg(test)]
 pub mod tests;
@@ -77,9 +80,7 @@ pub struct StatusBar {
     container: Box<dyn Component>,
     status_message: String,
     substatus_message: String,
-    ex_buffer: TextField,
-    ex_buffer_cmd_history_pos: Option<usize>,
-    display_buffer: String,
+    palette: CommandPalette,
     mode: UIMode,
     mouse: bool,
     height: usize,
@@ -112,8 +113,7 @@ pub struct StatusBar {
     /// sync — arrivals surface immediately. `None` while no parse
     /// session is active.
     parse_first_fetch: Option<bool>,
-    auto_complete: Box<AutoComplete>,
-    cmd_history: Vec<String>,
+    display_buffer: String,
 }
 
 impl std::fmt::Display for StatusBar {
@@ -133,15 +133,13 @@ impl StatusBar {
             container,
             status_message: String::with_capacity(256),
             substatus_message: String::with_capacity(256),
-            ex_buffer: TextField::new(UText::new(String::with_capacity(256)), None),
-            ex_buffer_cmd_history_pos: None,
+            palette: CommandPalette::new(crate::command::history::old_cmd_history()),
             display_buffer: String::with_capacity(8),
             dirty: true,
             mode: UIMode::Normal,
             mouse: context.settings.terminal.use_mouse.is_true(),
             height: 1,
             id: ComponentId::default(),
-            auto_complete: AutoComplete::new(Vec::new()),
             progress_spinner,
             in_progress_jobs: HashSet::default(),
             done_jobs: HashSet::default(),
@@ -149,7 +147,6 @@ impl StatusBar {
             unseen_floor: 0,
             settled_total: None,
             parse_first_fetch: None,
-            cmd_history: crate::command::history::old_cmd_history(),
         }
     }
 
@@ -813,28 +810,6 @@ impl StatusBar {
         (spans, width)
     }
 
-    fn draw_command_bar(&self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
-        grid.clear_area(area, crate::conf::value(context, "theme_default"));
-        let command_bar = crate::conf::value(context, "status.command_bar");
-        let (_, y) = grid.write_string(
-            self.ex_buffer.as_str(),
-            command_bar.fg,
-            command_bar.bg,
-            command_bar.attrs,
-            area,
-            None,
-            None,
-        );
-        grid.change_theme(area, command_bar);
-        if let Some(c) = grid
-            .row_iter(area, self.ex_buffer.cursor()..area.width(), y)
-            .next()
-        {
-            grid[c].set_attrs(command_bar.attrs | Attr::UNDERLINE);
-        }
-        context.dirty_areas.push_back(area);
-    }
-
     /// Per-mode attributes for the status bar's leading [`UIMode`]
     /// indicator, derived strictly from the existing theme vocabulary (no
     /// new keys): "status.bar" is the base; Insert inverts it (the classic
@@ -887,9 +862,7 @@ impl Component for StatusBar {
         }
 
         /* Top-level vertical split via ratatui Layout: the container takes
-         * every row but the framed bottom strip, which the status bar and
-         * (in Command mode, where the strip is two rows) the command line
-         * share. */
+         * every row but the framed bottom strip (the status row). */
         let [body, bar] = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length((self.height + FRAME_ROWS) as u16),
@@ -909,11 +882,6 @@ impl Component for StatusBar {
         for frame_area in crate::terminal::ratatui_bridge::frame_flush_areas(grid, bar_area) {
             context.dirty_areas.push_back(frame_area);
         }
-        let [command_line, status_row] = Layout::vertical([
-            Constraint::Length(self.height.saturating_sub(1) as u16),
-            Constraint::Length(1),
-        ])
-        .areas(crate::terminal::ratatui_bridge::area_to_rect(bar_inner));
 
         self.container.draw(
             grid,
@@ -922,271 +890,12 @@ impl Component for StatusBar {
         );
 
         self.dirty = false;
-        self.draw_status_bar(
-            grid,
-            crate::terminal::ratatui_bridge::rect_to_area(status_row, area),
-            context,
-        );
+        self.draw_status_bar(grid, bar_inner, context);
 
-        if self.mode != UIMode::Command && !self.is_dirty() {
-            return;
-        }
-        match self.mode {
-            UIMode::Normal => {}
-            UIMode::Command => {
-                let command_line_area =
-                    crate::terminal::ratatui_bridge::rect_to_area(command_line, area);
-                self.draw_command_bar(grid, command_line_area, context);
-                /* don't autocomplete for less than 3 characters */
-                if self.ex_buffer.as_str().split_graphemes().len() <= 2 {
-                    return;
-                }
-
-                let mut unique_suggestions: HashSet<&str> = HashSet::default();
-                let mut suggestions: Vec<AutoCompleteEntry> = self
-                    .cmd_history
-                    .iter()
-                    .rev()
-                    .filter_map(|h| {
-                        let sug = self.ex_buffer.as_str();
-                        if h.starts_with(sug) && !unique_suggestions.contains(sug) {
-                            unique_suggestions.insert(sug);
-                            Some(h.clone().into())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let command_completion_suggestions =
-                    crate::command::command_completion_suggestions(self.ex_buffer.as_str());
-
-                suggestions.extend(command_completion_suggestions.iter().filter_map(|e| {
-                    if unique_suggestions.insert(e.as_str()) {
-                        Some(e.clone().into())
-                    } else {
-                        None
-                    }
-                }));
-                /*
-                suggestions.extend(crate::command::COMMAND_COMPLETION.iter().filter_map(|e| {
-                    if e.0.starts_with(self.ex_buffer.as_str()) {
-                        Some(e.into())
-                    } else {
-                        None
-                    }
-                }));
-                */
-                if let Some(p) = self.ex_buffer.as_str().split_whitespace().last() {
-                    let path = std::path::Path::new(p);
-                    suggestions.extend(
-                        path.complete(true, p.ends_with('/'))
-                            .into_iter()
-                            .map(|m| format!("{}{}", self.ex_buffer.as_str(), m).into()),
-                    );
-                }
-                if suggestions.is_empty() && !self.auto_complete.suggestions().is_empty() {
-                    self.auto_complete.set_suggestions(suggestions);
-                    /* redraw self.container because we have got ridden of an autocomplete
-                     * box, and it must be drawn over */
-                    self.container.set_dirty(true);
-                    return;
-                }
-                /* redraw self.container because we have less suggestions than before */
-                if suggestions.len() < self.auto_complete.suggestions().len() {
-                    self.container.set_dirty(true);
-                }
-
-                suggestions.sort_by(|a, b| a.entry.cmp(&b.entry));
-                suggestions.dedup_by(|a, b| a.entry == b.entry);
-                if self.auto_complete.set_suggestions(suggestions) {
-                    let len = self.auto_complete.suggestions().len() - 1;
-                    self.auto_complete.set_cursor(len);
-
-                    self.container.set_dirty(true);
-                }
-                /* Completion popup: a rounded floating panel anchored right
-                 * above the status strip (the widget styles itself with the
-                 * dialog vocabulary in `AutoComplete::draw`). */
-                if !self.auto_complete.suggestions().is_empty() {
-                    self.auto_complete.draw(
-                        grid,
-                        area.skip_rows_from_end(self.height + 2),
-                        context,
-                    );
-                }
-                /*
-                let hist_height = std::cmp::min(15, self.auto_complete.suggestions().len());
-                    let hist_area = if status_bar_height < self.auto_complete.suggestions().len() {
-                        let hist_area = (
-                            (
-                                get_x(upper_left),
-                                std::cmp::min(
-                                    get_y(bottom_right) - status_bar_height - hist_height + 1,
-                                    get_y(pos_dec(bottom_right, (0, status_bar_height))),
-                                ),
-                            ),
-                            pos_dec(bottom_right, (0, status_bar_height)),
-                        );
-                        ScrollBar::default().set_show_arrows(false).draw(
-                            grid,
-                            hist_area,
-                            context,
-                            self.auto_complete.cursor(),
-                            hist_height,
-                            self.auto_complete.suggestions().len(),
-                        );
-                        grid.change_theme(hist_area, crate::conf::value(context, "status.history"));
-                        context.dirty_areas.push_back(hist_area);
-                        hist_area
-                    } else {
-                        (
-                            get_x(upper_left),
-                            std::cmp::min(
-                                get_y(bottom_right) - status_bar_height - hist_height + 1,
-                                get_y(pos_dec(bottom_right, (0, status_bar_height))),
-                            ),
-                        ),
-                        pos_dec(bottom_right, (0, status_bar_height)),
-                    )
-                };
-                let offset = if hist_height
-                    > (self.auto_complete.suggestions().len() - self.auto_complete.cursor())
-                {
-                    self.auto_complete.suggestions().len() - hist_height
-                } else {
-                    self.auto_complete.cursor()
-                };
-
-                grid.clear_area(hist_area, crate::conf::value(context, "theme_default"));
-                let history_hints = crate::conf::value(context, "status.history.hints");
-                if hist_height > 0 {
-                    grid.change_theme(hist_area, history_hints);
-                }
-                for (y_offset, s) in self
-                    .auto_complete
-                    .suggestions()
-                    .iter()
-                    .skip(offset)
-                    .take(hist_height)
-                    .enumerate()
-                {
-                    let (x, y) = grid.write_string(
-                        s.as_str(),
-                        history_hints.fg,
-                        history_hints.bg,
-                        history_hints.attrs,
-                        (
-                            set_y(
-                                upper_left!(hist_area),
-                                get_y(bottom_right!(hist_area)) - hist_height + y_offset + 1,
-                            ),
-                            bottom_right!(hist_area),
-                        ),
-                        Some(get_x(upper_left!(hist_area))),
-                    );
-                    grid.write_string(
-                        &s.description,
-                        history_hints.fg,
-                        history_hints.bg,
-                        history_hints.attrs,
-                        ((x + 2, y), bottom_right!(hist_area)),
-                        None,
-                    );
-                    if y_offset + offset == self.auto_complete.cursor() {
-                        grid.change_theme(
-                            (
-                                get_x(upper_left),
-                                std::cmp::min(
-                                    get_y(bottom_right) - status_bar_height - hist_height + 1,
-                                    get_y(pos_dec(bottom_right, (0, status_bar_height))),
-                                ),
-                            ),
-                            pos_dec(bottom_right, (0, status_bar_height)),
-                        )
-                    };
-                    let offset = if hist_height
-                        > (self.auto_complete.suggestions().len() - self.auto_complete.cursor())
-                    {
-                        self.auto_complete.suggestions().len() - hist_height
-                    } else {
-                        self.auto_complete.cursor()
-                    };
-                    grid.clear_area(hist_area, crate::conf::value(context, "theme_default"));
-                    let history_hints = crate::conf::value(context, "status.history.hints");
-                    if hist_height > 0 {
-                        grid.change_theme(hist_area, history_hints);
-                    }
-                    for (y_offset, s) in self
-                        .auto_complete
-                        .suggestions()
-                        .iter()
-                        .skip(offset)
-                        .take(hist_height)
-                        .enumerate()
-                    {
-                        let (x, y) = grid.write_string(
-                            s.as_str(),
-                            grid,
-                            history_hints.fg,
-                            history_hints.bg,
-                            history_hints.attrs,
-                            (
-                                set_y(
-                                    hist_area.upper_left(),
-                                    get_y(hist_area.bottom_right()) - hist_height + y_offset + 1,
-                                ),
-                                hist_area.bottom_right(),
-                            ),
-                            Some(get_x(hist_area.upper_left())),
-                        );
-                        grid.write_string(
-                            &s.description,
-                            grid,
-                            history_hints.fg,
-                            history_hints.bg,
-                            history_hints.attrs,
-                            ((x + 2, y), hist_area.bottom_right()),
-                            None,
-                        );
-                        if y_offset + offset == self.auto_complete.cursor() {
-                            grid.change_theme(
-                                (
-                                    set_y(
-                                        hist_area.upper_left(),
-                                        get_y(hist_area.bottom_right()) - hist_height
-                                            + y_offset
-                                            + 1,
-                                    ),
-                                    set_y(
-                                        hist_area.bottom_right(),
-                                        get_y(hist_area.bottom_right()) - hist_height
-                                            + y_offset
-                                            + 1,
-                                    ),
-                                ),
-                                history_hints,
-                            );
-                            grid.write_string(
-                                &s.as_str()[self.ex_buffer.as_str().len()..],
-                                history_hints.fg,
-                                history_hints.bg,
-                                history_hints.attrs,
-                                (
-                                    (
-                                        get_x(upper_left)
-                                            + self.ex_buffer.as_str().split_graphemes().len(),
-                                        get_y(bottom_right) - status_bar_height + 1,
-                                    ),
-                                    set_y(bottom_right, get_y(bottom_right) - status_bar_height + 1),
-                                ),
-                                None,
-                            );
-                        }
-                    }
-                    context.dirty_areas.push_back(hist_area);
-                    */
-            }
-            _ => {}
+        // The command palette floats over the container and the status
+        // row while Command mode is active.
+        if self.mode == UIMode::Command {
+            self.palette.draw(grid, area, context);
         }
     }
 
@@ -1226,141 +935,16 @@ impl Component for StatusBar {
                 self.set_dirty(true);
                 self.container.set_dirty(true);
                 self.mode = *m;
-                match m {
-                    UIMode::Normal => {
-                        self.height = 1;
-                        if !self.ex_buffer.is_empty() {
-                            context
-                                .replies
-                                .push_back(UIEvent::Command(self.ex_buffer.as_str().to_string()));
-                        }
-                        if parse_command(self.ex_buffer.as_str().as_bytes()).is_ok()
-                            && self.cmd_history.last().map(String::as_str)
-                                != Some(self.ex_buffer.as_str())
-                        {
-                            crate::command::history::log_cmd(self.ex_buffer.as_str().to_string());
-                            self.cmd_history.push(self.ex_buffer.as_str().to_string());
-                        }
-                        self.ex_buffer.clear();
-                        self.ex_buffer_cmd_history_pos.take();
-                    }
-                    UIMode::Command => {
-                        self.height = 2;
-                    }
-                    _ => {
-                        self.height = 1;
-                    }
-                };
+                // The bottom strip is always the single status row now:
+                // the command palette floats over the UI instead of
+                // occupying a command-line row.
+                self.height = 1;
             }
-            UIEvent::CmdInput(Key::Char('\n')) => {
-                if let Some(suggestion) = self.auto_complete.get_suggestion() {
-                    self.ex_buffer.set_text(suggestion);
-                }
-                context
-                    .replies
-                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
-                self.dirty = true;
-                return true;
-            }
-            UIEvent::CmdInput(Key::Char('\t')) => {
-                if let Some(suggestion) = self.auto_complete.get_suggestion().or_else(|| {
-                    if self.auto_complete.cursor() == 0 {
-                        self.auto_complete
-                            .suggestions()
-                            .last()
-                            .map(|e| e.entry.clone())
-                    } else {
-                        None
-                    }
-                }) {
-                    self.container.set_dirty(true);
-                    self.set_dirty(true);
-                    self.ex_buffer.set_text(suggestion);
-                }
-            }
-            UIEvent::CmdInput(Key::Char(c)) => {
-                self.dirty = true;
-                self.ex_buffer
-                    .process_event(&mut UIEvent::InsertInput(Key::Char(*c)), context);
-                return true;
-            }
-            UIEvent::CmdInput(Key::Paste(s)) => {
-                self.dirty = true;
-                self.ex_buffer
-                    .process_event(&mut UIEvent::InsertInput(Key::Paste(s.clone())), context);
-                return true;
-            }
-            UIEvent::CmdInput(Key::Ctrl('u')) => {
-                self.dirty = true;
-                self.ex_buffer.clear();
-                self.ex_buffer_cmd_history_pos.take();
-                return true;
-            }
-            UIEvent::CmdInput(Key::Up) => {
-                self.auto_complete.dec_cursor();
-                self.dirty = true;
-            }
-            UIEvent::CmdInput(Key::Down) => {
-                self.auto_complete.inc_cursor();
-                self.set_dirty(true);
-            }
-            UIEvent::CmdInput(Key::Left) => {
-                self.ex_buffer.cursor_dec();
-                self.set_dirty(true);
-            }
-            UIEvent::CmdInput(Key::Right) => {
-                self.ex_buffer.cursor_inc();
-                self.set_dirty(true);
-            }
-            UIEvent::CmdInput(Key::Ctrl('p')) => {
-                if self.cmd_history.is_empty() {
-                    return true;
-                }
-                let pos = self.ex_buffer_cmd_history_pos.map(|p| p + 1).unwrap_or(0);
-                let pos = std::cmp::min(pos, self.cmd_history.len().saturating_sub(1));
-                if Some(pos) != self.ex_buffer_cmd_history_pos {
-                    let history_entry =
-                        self.cmd_history[self.cmd_history.len().saturating_sub(1) - pos].clone();
-                    self.container.set_dirty(true);
-                    self.set_dirty(true);
-                    self.ex_buffer.set_text(history_entry);
-                    self.ex_buffer_cmd_history_pos = Some(pos);
-                    self.dirty = true;
-                }
-
-                return true;
-            }
-            UIEvent::CmdInput(Key::Ctrl('n')) => {
-                if self.cmd_history.is_empty() {
-                    return true;
-                }
-                if Some(0) == self.ex_buffer_cmd_history_pos {
-                    self.ex_buffer_cmd_history_pos = None;
-                    self.ex_buffer.clear();
-                    self.dirty = true;
-                } else if let Some(pos) = self.ex_buffer_cmd_history_pos.map(|p| p - 1) {
-                    let history_entry =
-                        self.cmd_history[self.cmd_history.len().saturating_sub(1) - pos].clone();
-                    self.container.set_dirty(true);
-                    self.set_dirty(true);
-                    self.ex_buffer.set_text(history_entry);
-                    self.ex_buffer_cmd_history_pos = Some(pos);
-                    self.dirty = true;
-                }
-
-                return true;
-            }
-            UIEvent::CmdInput(k @ Key::Backspace) | UIEvent::CmdInput(k @ Key::Ctrl(_)) => {
-                self.dirty = true;
-                self.ex_buffer
-                    .process_event(&mut UIEvent::InsertInput(k.clone()), context);
-                return true;
-            }
-            UIEvent::CmdInput(Key::Esc) => {
-                self.ex_buffer.clear();
-                context
-                    .replies
-                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+            // The palette owns every command-mode key (and the Paste
+            // prefill some views push before entering Command mode —
+            // hence no mode guard, mirroring the old ex-buffer arms).
+            UIEvent::CmdInput(key) => {
+                self.palette.process_key(key, context);
                 self.dirty = true;
                 return true;
             }
@@ -1455,13 +1039,13 @@ impl Component for StatusBar {
     fn is_dirty(&self) -> bool {
         self.dirty
             || self.container.is_dirty()
-            || self.ex_buffer.is_dirty()
+            || self.palette.is_dirty()
             || self.progress_spinner.is_dirty()
     }
 
     fn set_dirty(&mut self, value: bool) {
         self.dirty = value;
-        self.ex_buffer.set_dirty(value);
+        self.palette.set_dirty(value);
         self.progress_spinner.set_dirty(value);
     }
 
@@ -1484,7 +1068,6 @@ impl Component for StatusBar {
     fn children(&self) -> IndexMap<ComponentId, &dyn Component> {
         let mut ret = IndexMap::default();
         ret.insert(self.container.id(), &self.container as &dyn Component);
-        ret.insert(self.ex_buffer.id(), &self.ex_buffer as &dyn Component);
         ret.insert(
             self.progress_spinner.id(),
             &self.progress_spinner as &dyn Component,
@@ -1500,14 +1083,12 @@ impl Component for StatusBar {
         context.realized.insert(self.id(), parent);
         self.container.realize(self.id().into(), context);
         self.progress_spinner.realize(self.id().into(), context);
-        self.ex_buffer.realize(self.id().into(), context);
     }
 
     fn unrealize(&self, context: &mut Context) {
         context.unrealized.insert(self.id());
         self.container.unrealize(context);
         self.progress_spinner.unrealize(context);
-        self.ex_buffer.unrealize(context);
     }
 }
 

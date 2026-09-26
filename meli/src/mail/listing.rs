@@ -620,22 +620,22 @@ impl FlagString {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct MailboxMenuEntry {
-    depth: usize,
-    indentation: u32,
-    has_sibling: bool,
-    visible: bool,
-    collapsed: bool,
-    mailbox_hash: MailboxHash,
-    index_style: Option<IndexStyle>,
+pub(crate) struct MailboxMenuEntry {
+    pub(crate) depth: usize,
+    pub(crate) indentation: u32,
+    pub(crate) has_sibling: bool,
+    pub(crate) visible: bool,
+    pub(crate) collapsed: bool,
+    pub(crate) mailbox_hash: MailboxHash,
+    pub(crate) index_style: Option<IndexStyle>,
 }
 
 #[derive(Debug)]
-struct AccountMenuEntry {
-    name: String,
-    hash: AccountHash,
-    index: usize,
-    entries: SmallVec<[MailboxMenuEntry; 16]>,
+pub(crate) struct AccountMenuEntry {
+    pub(crate) name: String,
+    pub(crate) hash: AccountHash,
+    pub(crate) index: usize,
+    pub(crate) entries: SmallVec<[MailboxMenuEntry; 16]>,
 }
 
 impl AccountMenuEntry {
@@ -1291,7 +1291,7 @@ impl ListingComponent {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ListingFocus {
     Menu,
     MailList,
@@ -1337,13 +1337,13 @@ impl ListingComponent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CursorPos {
-    account: usize,
-    menu: MenuEntryCursor,
+pub(crate) struct CursorPos {
+    pub(crate) account: usize,
+    pub(crate) menu: MenuEntryCursor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MenuEntryCursor {
+pub(crate) enum MenuEntryCursor {
     Status,
     Mailbox(usize),
 }
@@ -1369,12 +1369,12 @@ enum ShowMenuScrollbar {
 
 #[derive(Debug)]
 pub struct Listing {
-    component: ListingComponent,
-    accounts: Vec<AccountMenuEntry>,
+    pub(crate) component: ListingComponent,
+    pub(crate) accounts: Vec<AccountMenuEntry>,
     status: Option<AccountStatus>,
     dirty: bool,
-    cursor_pos: CursorPos,
-    menu_cursor_pos: CursorPos,
+    pub(crate) cursor_pos: CursorPos,
+    pub(crate) menu_cursor_pos: CursorPos,
     menu: Screen<Virtual>,
     menu_scrollbar_show_timer: crate::jobs::Timer,
     show_menu_scrollbar: ShowMenuScrollbar,
@@ -1685,25 +1685,72 @@ impl Component for Listing {
                     // This is a background reconcile of the current account (the
                     // watcher reporting that it (re)connected or refreshed), not
                     // a user navigation, so it must not steal the keyboard focus
-                    // from the sidebar. `change_account` resets the focus via
-                    // `close_view`, so remember the pre-reconcile focus and put
-                    // it back. A `View` focus cannot survive because
-                    // `change_account` force-closes the open view, and
-                    // `close_view` already lands the grid for that case.
-                    let previous_focus = match self.focus {
-                        ListingFocus::Menu => Some(ListingFocus::Menu),
-                        ListingFocus::MailList => Some(ListingFocus::MailList),
-                        ListingFocus::View => None,
+                    // from the sidebar and must not tear down the open view:
+                    // whichever layout is on screen stays on screen. The view is
+                    // only closed when the reconcile lands the grid on a
+                    // different mailbox (stale guard below).
+                    let previous_focus = self.focus;
+                    // A background reconcile must not move the user's sidebar
+                    // selection either: while the sidebar holds the keyboard,
+                    // `menu_cursor_pos` legitimately differs from `cursor_pos`
+                    // (navigation only moves `menu_cursor_pos` until the
+                    // selection is confirmed). `change_account` re-anchors
+                    // `menu_cursor_pos` for the navigation paths, so remember
+                    // the pre-reconcile sidebar cursor and restore it below.
+                    let previous_menu_cursor = self.menu_cursor_pos;
+                    let previous_coordinates = self.component.coordinates();
+                    self.change_account(context, /* keep_view */ true);
+                    // The reconcile rebuilt the sidebar entries and re-pointed
+                    // the grid. If the grid landed on another mailbox (the entry
+                    // list shifted) or nothing is under the cursor anymore, the
+                    // open view is stale: close it and land the keyboard on the
+                    // grid (layout1).
+                    if self.view.is_some()
+                        && (self.component.coordinates() != previous_coordinates
+                            || self.component.cursor_selection().is_none())
+                    {
+                        self.close_view(context);
+                    }
+                    // The account list may have shrunk since the cursor was
+                    // remembered; fall back to `cursor_pos` when the account is
+                    // gone, and clamp a mailbox index the rebuilt entries no
+                    // longer contain.
+                    self.menu_cursor_pos = if previous_menu_cursor.account >= self.accounts.len() {
+                        self.cursor_pos
+                    } else if let MenuEntryCursor::Mailbox(idx) = previous_menu_cursor.menu {
+                        let entries_len = self.accounts[previous_menu_cursor.account].entries.len();
+                        if idx >= entries_len {
+                            CursorPos {
+                                account: previous_menu_cursor.account,
+                                menu: if entries_len == 0 {
+                                    MenuEntryCursor::Status
+                                } else {
+                                    MenuEntryCursor::Mailbox(entries_len - 1)
+                                },
+                            }
+                        } else {
+                            previous_menu_cursor
+                        }
+                    } else {
+                        previous_menu_cursor
                     };
-                    self.change_account(context);
                     match previous_focus {
-                        // `change_account` (via `close_view`) lands the
-                        // keyboard on the grid; handing the focus back to
-                        // the sidebar must take the grid's keyboard
-                        // highlight with it (see `focus_menu`).
-                        Some(ListingFocus::Menu) => self.focus_menu(),
-                        Some(focus) => self.focus = focus,
-                        None => {}
+                        // `close_view` may land the keyboard on the grid;
+                        // handing the focus back to the sidebar must take the
+                        // grid's keyboard highlight with it (see
+                        // `focus_menu`).
+                        ListingFocus::Menu => self.focus_menu(),
+                        // A `View` focus survives only while its view does;
+                        // the stale guard above already landed the keyboard
+                        // on the grid otherwise.
+                        ListingFocus::View if self.view.is_some() => {
+                            self.focus = ListingFocus::View;
+                            self.component.set_grid_has_keyboard(false);
+                            if let Some(view) = self.view.as_mut() {
+                                view.set_grid_focused(false);
+                            }
+                        }
+                        ListingFocus::View | ListingFocus::MailList => {}
                     }
                 } else {
                     let previous_collapsed_mailboxes: BTreeSet<MailboxHash> = self.accounts
@@ -1891,8 +1938,11 @@ impl Component for Listing {
                                 // the grid (layout2/layout3 keep the grid
                                 // pane focused after opening — the
                                 // `OpenEntryUnderCursor` reply has run
-                                // first, so the view exists).
-                                self.component.set_grid_has_keyboard(true);
+                                // first, so the view exists) — unless the
+                                // keyboard already sits on the view (a
+                                // layout4 refresh re-kick).
+                                self.component
+                                    .set_grid_has_keyboard(self.focus != ListingFocus::View);
                             }
                         }
                         // Need to clear gap between sidebar and listing component, if any.
@@ -1923,8 +1973,9 @@ impl Component for Listing {
                         ));
                         // The keyboard stays on the grid after opening
                         // (layout2/layout3 open grid-focused): the view's
-                        // rings render dimmed.
-                        view.set_grid_focused(true);
+                        // rings render dimmed — except when the keyboard
+                        // already sits on the view (layout4).
+                        view.set_grid_focused(self.focus != ListingFocus::View);
                         self.view = Some(view);
                     }
                 }
@@ -2066,8 +2117,13 @@ impl Component for Listing {
                     }
                     ListingFocus::MailList if exit_entry && self.view.is_some() => {
                         // quit from layout2/layout3's grid: back to
-                        // layout1, the focus on the grid.
+                        // layout1, the focus on the mailbox list (mirroring
+                        // `focus_left`: the sidebar is layout1's landing
+                        // pane whenever it is visible).
                         self.close_view(context);
+                        if self.menu_visibility {
+                            self.focus_menu();
+                        }
                         return true;
                     }
                     ListingFocus::View if focus_left => {
@@ -2088,10 +2144,14 @@ impl Component for Listing {
                     }
                     ListingFocus::View if exit_entry => {
                         // quit from layout2's mail view: close the view
-                        // back to layout1. quit from layout4: close the
-                        // mail pane and land on layout3's grid.
+                        // back to layout1, the focus on the mailbox list
+                        // (when the sidebar is visible). quit from layout4:
+                        // close the mail pane and land on layout3's grid.
                         if self.view.as_ref().is_some_and(|v| v.is_single_mail()) {
                             self.close_view(context);
+                            if self.menu_visibility {
+                                self.focus_menu();
+                            }
                         } else {
                             if let Some(view) = self.view.as_mut() {
                                 view.close_mail_pane();
@@ -2150,39 +2210,25 @@ impl Component for Listing {
                 {
                     self.component.set_modifier_active(false);
                     let amount = context.cmd_buf_clear().unwrap_or(1);
-                    let target = match k {
-                        k if shortcut!(k == shortcuts[Shortcuts::LISTING]["next_mailbox"]) => {
-                            match self.cursor_pos.menu {
-                                MenuEntryCursor::Status => amount.saturating_sub(1),
-                                MenuEntryCursor::Mailbox(idx) => idx + amount,
-                            }
+                    let next = shortcut!(k == shortcuts[Shortcuts::LISTING]["next_mailbox"]);
+                    let mut cursor = self.cursor_pos;
+                    let mut moved = false;
+                    for _ in 0..amount {
+                        let stepped = if next {
+                            self.menu_step_next(&mut cursor)
+                        } else {
+                            self.menu_step_prev(&mut cursor)
+                        };
+                        if stepped {
+                            moved = true;
+                        } else {
+                            break;
                         }
-                        k if shortcut!(k == shortcuts[Shortcuts::LISTING]["prev_mailbox"]) => {
-                            match self.cursor_pos.menu {
-                                MenuEntryCursor::Status => {
-                                    return true;
-                                }
-                                MenuEntryCursor::Mailbox(idx) => {
-                                    if idx >= amount {
-                                        idx - amount
-                                    } else {
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                        _ => return true,
-                    };
-                    if self.accounts[self.cursor_pos.account]
-                        .entries
-                        .get(target)
-                        .is_some()
-                    {
-                        self.cursor_pos.menu = MenuEntryCursor::Mailbox(target)
-                    } else {
-                        return true;
                     }
-                    self.change_account(context);
+                    if moved {
+                        self.cursor_pos = cursor;
+                        self.change_account(context, false);
+                    }
                     return true;
                 }
                 UIEvent::Input(ref k)
@@ -2226,7 +2272,7 @@ impl Component for Listing {
                         }
                         _ => return false,
                     }
-                    self.change_account(context);
+                    self.change_account(context, false);
 
                     return true;
                 }
@@ -2431,17 +2477,29 @@ impl Component for Listing {
                     UIEvent::Input(ref key)
                         if shortcut!(key == shortcuts[Shortcuts::LISTING]["refresh"]) =>
                     {
-                        let account = &mut context.accounts[self.cursor_pos.account];
-                        if let MenuEntryCursor::Mailbox(idx) = self.cursor_pos.menu {
-                            if let Some(&mailbox_hash) = account.mailboxes_order.get(idx) {
-                                if let Err(err) = account.refresh(mailbox_hash) {
-                                    context.replies.push_back(UIEvent::Notification {
-                                        title: Some("Could not refresh.".into()),
-                                        source: None,
-                                        body: err.to_string().into(),
-                                        kind: Some(NotificationType::Error(err.kind)),
-                                    });
-                                }
+                        let account_idx = self.cursor_pos.account;
+                        // Map the sidebar index through `entries`, not
+                        // `mailboxes_order`: the latter is the account-level
+                        // ordering over all mailboxes, while the sidebar is the
+                        // subscribed-filtered tree, so the two index spaces can
+                        // disagree.
+                        let target = match self.cursor_pos.menu {
+                            MenuEntryCursor::Mailbox(idx) => self.accounts[account_idx]
+                                .entries
+                                .get(idx)
+                                .map(|e| e.mailbox_hash),
+                            MenuEntryCursor::Status => {
+                                context.accounts[account_idx].default_mailbox()
+                            }
+                        };
+                        if let Some(mailbox_hash) = target {
+                            if let Err(err) = context.accounts[account_idx].refresh(mailbox_hash) {
+                                context.replies.push_back(UIEvent::Notification {
+                                    title: Some("Could not refresh.".into()),
+                                    source: None,
+                                    body: err.to_string().into(),
+                                    kind: Some(NotificationType::Error(err.kind)),
+                                });
                             }
                         }
                         return true;
@@ -2564,7 +2622,7 @@ impl Component for Listing {
                     // thread → layout3 — with the focus on the grid
                     // (mirroring `open_mailbox` for the mailbox switch).
                     self.cursor_pos = self.menu_cursor_pos;
-                    self.change_account(context);
+                    self.change_account(context, false);
                     self.focus = ListingFocus::MailList;
                     self.component.set_grid_has_keyboard(true);
                     self.component.set_focus(Focus::Entry, context);
@@ -2586,7 +2644,7 @@ impl Component for Listing {
                         && self.menu_cursor_pos.menu == MenuEntryCursor::Status =>
                 {
                     self.cursor_pos = self.menu_cursor_pos;
-                    self.change_account(context);
+                    self.change_account(context, false);
                     self.set_dirty(true);
                     self.focus = ListingFocus::MailList;
                     self.component.set_grid_has_keyboard(true);
@@ -2627,7 +2685,7 @@ impl Component for Listing {
                     if shortcut!(k == shortcuts[Shortcuts::LISTING]["open_mailbox"]) =>
                 {
                     self.cursor_pos = self.menu_cursor_pos;
-                    self.change_account(context);
+                    self.change_account(context, false);
                     self.focus = ListingFocus::MailList;
                     self.component.set_grid_has_keyboard(true);
                     self.set_dirty(true);
@@ -2641,6 +2699,37 @@ impl Component for Listing {
                         self.status_watch(),
                         &mut context.replies,
                     );
+                    return true;
+                }
+                UIEvent::Input(ref k)
+                    if shortcut!(k == shortcuts[Shortcuts::LISTING]["refresh"]) =>
+                {
+                    // Refresh the folder the sidebar highlight points at, not
+                    // the currently opened one: with the keyboard on the
+                    // mail list the opened mailbox is `cursor_pos`, while here
+                    // the highlight (`menu_cursor_pos`) may sit on another
+                    // folder or even another account.
+                    let account_idx = self.menu_cursor_pos.account;
+                    let target = match self.menu_cursor_pos.menu {
+                        MenuEntryCursor::Mailbox(idx) => self.accounts[account_idx]
+                            .entries
+                            .get(idx)
+                            .map(|e| e.mailbox_hash),
+                        MenuEntryCursor::Status => context.accounts[account_idx].default_mailbox(),
+                    };
+                    if let Some(mailbox_hash) = target {
+                        if let Err(err) = context.accounts[account_idx].refresh(mailbox_hash) {
+                            context.replies.push_back(UIEvent::Notification {
+                                title: Some("Could not refresh.".into()),
+                                source: None,
+                                body: err.to_string().into(),
+                                kind: Some(NotificationType::Error(err.kind)),
+                            });
+                        }
+                    }
+                    // Refresh must not steal the sidebar keyboard or open the
+                    // highlighted folder, so `focus`, `menu_cursor_pos` and
+                    // `cursor_pos` are intentionally left untouched.
                     return true;
                 }
                 UIEvent::Input(ref k)
@@ -2753,7 +2842,7 @@ impl Component for Listing {
                     // stays on the mailbox list.
                     if self.menu_cursor_pos != self.cursor_pos {
                         self.cursor_pos = self.menu_cursor_pos;
-                        self.change_account(context);
+                        self.change_account(context, false);
                         self.focus_menu();
                     }
                     if self.show_menu_scrollbar != ShowMenuScrollbar::Never {
@@ -2770,38 +2859,19 @@ impl Component for Listing {
                 {
                     self.component.set_modifier_active(false);
                     let amount = context.cmd_buf_clear().unwrap_or(1);
-                    let target = match k {
-                        k if shortcut!(k == shortcuts[Shortcuts::LISTING]["next_mailbox"]) => {
-                            match self.menu_cursor_pos.menu {
-                                MenuEntryCursor::Status => amount.saturating_sub(1),
-                                MenuEntryCursor::Mailbox(idx) => idx + amount,
-                            }
+                    let next = shortcut!(k == shortcuts[Shortcuts::LISTING]["next_mailbox"]);
+                    let mut cursor = self.menu_cursor_pos;
+                    for _ in 0..amount {
+                        let stepped = if next {
+                            self.menu_step_next(&mut cursor)
+                        } else {
+                            self.menu_step_prev(&mut cursor)
+                        };
+                        if !stepped {
+                            break;
                         }
-                        k if shortcut!(k == shortcuts[Shortcuts::LISTING]["prev_mailbox"]) => {
-                            match self.menu_cursor_pos.menu {
-                                MenuEntryCursor::Status => {
-                                    return true;
-                                }
-                                MenuEntryCursor::Mailbox(idx) => {
-                                    if idx >= amount {
-                                        idx - amount
-                                    } else {
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                        _ => return true,
-                    };
-                    if self.accounts[self.menu_cursor_pos.account]
-                        .entries
-                        .get(target)
-                        .is_some()
-                    {
-                        self.menu_cursor_pos.menu = MenuEntryCursor::Mailbox(target)
-                    } else {
-                        return true;
                     }
+                    self.menu_cursor_pos = cursor;
                     if self.show_menu_scrollbar != ShowMenuScrollbar::Never {
                         self.menu_scrollbar_show_timer.rearm();
                         self.show_menu_scrollbar = ShowMenuScrollbar::True;
@@ -3316,7 +3386,7 @@ impl Listing {
                 ret.menu_cursor_pos.menu = MenuEntryCursor::Mailbox(idx);
             }
         }
-        ret.change_account(context);
+        ret.change_account(context, false);
         // `change_account` switches to the account's index style, and
         // `set_index_style` calls `close_view`, which by contract lands the
         // keyboard on the grid. Re-assert the launch focus here so a visible
@@ -3897,10 +3967,82 @@ impl Listing {
         }
     }
 
-    fn change_account(&mut self, context: &mut Context) {
-        // The view belongs to the previous account/mailbox; close it so no
-        // stale view (or sidebar occlusion) survives the switch.
-        self.close_view(context);
+    /// Move `cursor` one visible sidebar row up. Returns true if it moved.
+    ///
+    /// The sidebar is a single column of per-account rows: each account's
+    /// `Status` row is followed by its mailbox rows, accounts in order.
+    pub(crate) fn menu_step_prev(&self, cursor: &mut CursorPos) -> bool {
+        match cursor.menu {
+            MenuEntryCursor::Mailbox(idx) if idx > 0 => {
+                cursor.menu = MenuEntryCursor::Mailbox(idx - 1);
+                true
+            }
+            MenuEntryCursor::Mailbox(_) => {
+                cursor.menu = MenuEntryCursor::Status;
+                true
+            }
+            MenuEntryCursor::Status if cursor.account > 0 => {
+                cursor.account -= 1;
+                cursor.menu = match self.accounts[cursor.account].entries.last() {
+                    Some(_) => {
+                        MenuEntryCursor::Mailbox(self.accounts[cursor.account].entries.len() - 1)
+                    }
+                    None => MenuEntryCursor::Status,
+                };
+                true
+            }
+            MenuEntryCursor::Status => false,
+        }
+    }
+
+    /// Move `cursor` one visible sidebar row down. Returns true if it moved.
+    ///
+    /// Mirror of [`Self::menu_step_prev`]: within an account the cursor walks
+    /// `Status` then its mailboxes, then crosses into the next account.
+    pub(crate) fn menu_step_next(&self, cursor: &mut CursorPos) -> bool {
+        match cursor.menu {
+            MenuEntryCursor::Status => {
+                if !self.accounts[cursor.account].entries.is_empty() {
+                    cursor.menu = MenuEntryCursor::Mailbox(0);
+                    true
+                } else if cursor.account + 1 < self.accounts.len() {
+                    cursor.account += 1;
+                    cursor.menu = MenuEntryCursor::Status;
+                    true
+                } else {
+                    false
+                }
+            }
+            MenuEntryCursor::Mailbox(idx) => {
+                if self.accounts[cursor.account].entries.get(idx + 1).is_some() {
+                    cursor.menu = MenuEntryCursor::Mailbox(idx + 1);
+                    true
+                } else if cursor.account + 1 < self.accounts.len() {
+                    cursor.account += 1;
+                    cursor.menu = MenuEntryCursor::Status;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Re-anchor the sidebar entries, grid coordinates and index style to
+    /// `cursor_pos`.
+    ///
+    /// `keep_view` is set only by the background `AccountStatusChange`
+    /// reconcile of the *same* account (watcher reconnect/refresh): the
+    /// open view (layout2/3/4) and the keyboard focus stay where the user
+    /// put them; only the sidebar entries and the grid rows are rebuilt.
+    /// Real navigation passes `false` so no stale view (or sidebar
+    /// occlusion) survives the account/mailbox switch.
+    fn change_account(&mut self, context: &mut Context, keep_view: bool) {
+        if !keep_view {
+            // The view belongs to the previous account/mailbox; close it so
+            // no stale view (or sidebar occlusion) survives the switch.
+            self.close_view(context);
+        }
         let account_hash = context.accounts[self.cursor_pos.account].hash();
         let previous_collapsed_mailboxes: BTreeSet<MailboxHash> = self.accounts
             [self.cursor_pos.account]
@@ -3944,20 +4086,10 @@ impl Listing {
                 index_style: previous_index_styles.get(&f.hash).copied(),
             })
             .collect::<_>();
-        if let (
-            ListingComponent::Offline(_),
-            MenuEntryCursor::Mailbox(ref mut idx),
-            Some(default),
-        ) = (
-            &self.component,
-            &mut self.cursor_pos.menu,
-            context.accounts[self.cursor_pos.account]
-                .default_mailbox()
-                .and_then(|h| self.accounts[self.cursor_pos.account].entry_by_hash(h)),
-        ) {
-            *idx = default;
-            self.menu_cursor_pos.menu = MenuEntryCursor::Mailbox(default);
-        }
+        // A background `AccountStatusChange` reconcile must not move the
+        // user's sidebar selection. Every navigation/construction path sets
+        // `cursor_pos.menu` explicitly before calling `change_account`, so
+        // there is nothing to re-anchor to the account default here.
         match self.cursor_pos.menu {
             MenuEntryCursor::Mailbox(idx) => {
                 // Account might have no mailboxes yet if it's offline
@@ -3969,8 +4101,18 @@ impl Listing {
                 {
                     self.component
                         .process_event(&mut UIEvent::VisibilityChange(false), context);
-                    self.component
-                        .set_coordinates((account_hash, *mailbox_hash));
+                    // On a `keep_view` reconcile of the same mailbox, keep
+                    // the grid's entry focus and filter state:
+                    // `set_coordinates` resets both unconditionally, which
+                    // would strand the open view on an unfocused grid (the
+                    // view's draw gate is `component.unfocused()`, so it
+                    // would stop rendering while still open).
+                    let same_mailbox =
+                        self.component.coordinates() == (account_hash, *mailbox_hash);
+                    if !(keep_view && same_mailbox) {
+                        self.component
+                            .set_coordinates((account_hash, *mailbox_hash));
+                    }
                     self.component.refresh_mailbox(context, true);
 
                     // Check if per-mailbox configuration overrides general configuration
@@ -4003,7 +4145,6 @@ impl Listing {
                 self.component
                     .process_event(&mut UIEvent::VisibilityChange(true), context);
                 self.status = None;
-                self.cursor_pos.menu = MenuEntryCursor::Mailbox(0);
                 self.push_status_watch(
                     self.status(context),
                     self.status_watch(),
@@ -4072,14 +4213,23 @@ impl Listing {
     }
 
     fn set_index_style(&mut self, new_style: IndexStyle, context: &mut Context) {
+        // A no-op style switch (the grid already renders `new_style`) must
+        // not tear down the open view: the background `AccountStatusChange`
+        // reconcile re-resolves the very style it applied before.
+        let same_style = match new_style {
+            IndexStyle::Plain => matches!(self.component, Plain(_)),
+            IndexStyle::Threaded => matches!(self.component, Threaded(_)),
+            IndexStyle::Compact => matches!(self.component, Compact(_)),
+            IndexStyle::Conversations => matches!(self.component, Conversations(_)),
+        };
+        if same_style {
+            return;
+        }
         // The view belongs to the previous listing style; close it so no
         // stale view (or sidebar occlusion) survives the switch.
         self.close_view(context);
         let old = match new_style {
             IndexStyle::Plain => {
-                if matches!(self.component, Plain(_)) {
-                    return;
-                }
                 let coordinates = self.component.coordinates();
                 std::mem::replace(
                     &mut self.component,
@@ -4087,9 +4237,6 @@ impl Listing {
                 )
             }
             IndexStyle::Threaded => {
-                if matches!(self.component, Threaded(_)) {
-                    return;
-                }
                 let coordinates = self.component.coordinates();
                 std::mem::replace(
                     &mut self.component,
@@ -4097,9 +4244,6 @@ impl Listing {
                 )
             }
             IndexStyle::Compact => {
-                if matches!(self.component, Compact(_)) {
-                    return;
-                }
                 let coordinates = self.component.coordinates();
                 std::mem::replace(
                     &mut self.component,
@@ -4107,9 +4251,6 @@ impl Listing {
                 )
             }
             IndexStyle::Conversations => {
-                if matches!(self.component, Conversations(_)) {
-                    return;
-                }
                 let coordinates = self.component.coordinates();
                 std::mem::replace(
                     &mut self.component,
@@ -4222,7 +4363,7 @@ mod listing_menu_tests {
 
     use super::*;
     use crate::{
-        accounts::{build_mailboxes_order, MailboxEntry, MailboxStatus},
+        accounts::{build_mailboxes_order, JobRequest, MailboxEntry, MailboxStatus},
         components::Component,
         conf::{composing::SendMail, FileMailboxConf},
         terminal::Key,
@@ -4234,6 +4375,7 @@ mod listing_menu_tests {
     struct TestMailbox {
         hash: MailboxHash,
         name: String,
+        subscribed: bool,
     }
 
     impl BackendMailbox for TestMailbox {
@@ -4260,6 +4402,7 @@ mod listing_menu_tests {
             Box::new(Self {
                 hash: self.hash,
                 name: self.name.clone(),
+                subscribed: self.subscribed,
             })
         }
 
@@ -4276,7 +4419,7 @@ mod listing_menu_tests {
         }
 
         fn is_subscribed(&self) -> bool {
-            true
+            self.subscribed
         }
 
         fn set_is_subscribed(&mut self, _: bool) -> Result<()> {
@@ -4361,6 +4504,7 @@ mod listing_menu_tests {
                     Box::new(TestMailbox {
                         hash: mailbox_hash,
                         name: name.to_string(),
+                        subscribed: true,
                     }),
                     FileMailboxConf::default(),
                 ),
@@ -4399,6 +4543,70 @@ mod listing_menu_tests {
         .unwrap();
         context.accounts.insert(account_hash, account);
         account_hash
+    }
+
+    /// Register `name` both as a real maildir folder in the mock account's
+    /// backend and as a sidebar mailbox entry. The backend hashes maildir
+    /// folders by canonical filesystem path, so the sidebar entry must reuse
+    /// the hash `mailbox_from_path` returned for `Account::refresh` to find the
+    /// folder.
+    ///
+    /// Unlike `register_two_mailboxes` (which uses synthetic hashes the mock
+    /// maildir backend rejects, so `Account::refresh` silently does nothing),
+    /// this makes the refresh job observable in `Account::active_jobs`. The
+    /// returned `TempDir` must be kept alive for the duration of the test.
+    fn add_backend_mailbox(
+        context: &mut Context,
+        name: &str,
+        subscribed: bool,
+    ) -> (MailboxHash, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mailbox_path = dir.path().join(name);
+        for sub in ["cur", "new", "tmp"] {
+            std::fs::create_dir_all(mailbox_path.join(sub)).unwrap();
+        }
+        let account_hash = *context.accounts.iter().next().unwrap().0;
+        let account = context.accounts.get_mut(&account_hash).unwrap();
+        let hash = account
+            .backend
+            .lock()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<melib::maildir::MaildirType>()
+            .expect("the mock account uses the maildir backend")
+            .mailbox_from_path(mailbox_path, name.to_string())
+            .unwrap();
+        account.mailbox_entries.insert(
+            hash,
+            MailboxEntry::new(
+                MailboxStatus::Available,
+                name.to_string(),
+                Box::new(TestMailbox {
+                    hash,
+                    name: name.to_string(),
+                    subscribed,
+                }),
+                FileMailboxConf::default(),
+            ),
+        );
+        build_mailboxes_order(
+            &mut account.tree,
+            &account.mailbox_entries,
+            &mut account.mailboxes_order,
+        );
+        (hash, dir)
+    }
+
+    /// The mailbox hash of the mock account's pending `JobRequest::Refresh`, or
+    /// `None` when no refresh was requested.
+    fn pending_refresh_target(context: &Context) -> Option<MailboxHash> {
+        context.accounts[0]
+            .active_jobs
+            .values()
+            .find_map(|job| match job {
+                JobRequest::Refresh { mailbox_hash, .. } => Some(*mailbox_hash),
+                _ => None,
+            })
     }
 
     #[test]
@@ -4643,6 +4851,10 @@ mod listing_menu_tests {
                 !listing.component.unfocused(),
                 "{key:?} must exit the open mail view back to the list"
             );
+            assert!(
+                matches!(listing.focus, ListingFocus::Menu),
+                "{key:?} must land the keyboard on the mailbox list in layout1"
+            );
         }
     }
 
@@ -4752,26 +4964,140 @@ mod listing_menu_tests {
         );
     }
 
-    /// Regression: a `View` focus cannot survive the reconcile because
-    /// `change_account` force-closes the open view; the grid is the only
-    /// consistent landing for the keyboard.
+    /// Regression (163/IMAP reconnect loop): a background
+    /// `AccountStatusChange` (the watcher reconnecting or refreshing the
+    /// current account, e.g. "Refreshed mailboxes.") must not tear down the
+    /// open layout. layout2 stays layout2: the view stays open and the
+    /// keyboard stays on the grid.
     #[test]
-    fn account_status_change_lands_on_grid_when_view_force_closed() {
+    fn account_status_change_keeps_open_view() {
         let mut ctx = mock_context();
-        let (account_hash, ..) = register_two_mailboxes(&mut ctx);
-        let mut listing = Listing::new(&mut ctx);
-        listing.focus = ListingFocus::View;
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        let mut listing = pane_chain_setup(&mut ctx);
+        // The setup's cursor rests on the solo mail; Right opens it
+        // (layout2: grid + mail view, keyboard on the grid).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(listing.view.is_some(), "precondition: the view is open");
+        assert!(matches!(listing.focus, ListingFocus::MailList));
 
-        listing.process_event(
-            &mut UIEvent::AccountStatusChange(account_hash, None),
-            &mut ctx,
-        );
+        let mut event =
+            UIEvent::AccountStatusChange(account_hash, Some("Refreshed mailboxes.".into()));
+        listing.process_event(&mut event, &mut ctx);
+        // Pump the reconcile's queued replies (the grid re-opens the cursor
+        // entry via `OpenEntryUnderCursor`).
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                listing.process_event(&mut ev, &mut ctx);
+            }
+        }
 
-        assert_eq!(
-            listing.focus,
-            ListingFocus::MailList,
-            "the force-closed view must land the keyboard on the grid"
+        assert!(
+            listing.view.is_some(),
+            "the reconcile must not close the open view (layout2 stays layout2)"
         );
+        assert!(
+            matches!(listing.focus, ListingFocus::MailList),
+            "the keyboard must stay on the grid"
+        );
+        assert!(
+            matches!(listing.component.focus(), Focus::Entry),
+            "the grid must keep its entry focus: it is the view's draw gate, \
+             losing it renders layout2 as a bare listing"
+        );
+        // The view must actually render, not merely exist: draw and check
+        // that the right pane (past the 30% grid) got painted.
+        {
+            let theme_default = crate::conf::value(&ctx, "theme_default");
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            let _ = screen.resize(80, 24);
+            let area = screen.area();
+            listing.draw(screen.grid_mut(), area, &mut ctx);
+            let grid = screen.grid();
+            let view_pane_painted = (26..80).any(|x| (0..24).any(|y| grid[(x, y)].ch() != ' '));
+            assert!(
+                view_pane_painted,
+                "the mail view pane must render after the reconcile"
+            );
+        }
+    }
+
+    /// The layout4 equivalent: with the keyboard on the mail view, the
+    /// reconcile keeps both the view and the keyboard where they were.
+    #[test]
+    fn account_status_change_keeps_view_focus() {
+        let mut ctx = mock_context();
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        let mut listing = pane_chain_setup(&mut ctx);
+        // Right opens the solo mail (layout2), a second Right hands the
+        // keyboard to the mail view.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(matches!(listing.focus, ListingFocus::View));
+        assert!(listing.view.is_some());
+
+        let mut event = UIEvent::AccountStatusChange(account_hash, None);
+        listing.process_event(&mut event, &mut ctx);
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+
+        assert!(
+            listing.view.is_some(),
+            "the reconcile must not close the open view"
+        );
+        assert!(
+            matches!(listing.focus, ListingFocus::View),
+            "the keyboard must stay on the mail view"
+        );
+        assert!(
+            matches!(listing.component.focus(), Focus::Entry),
+            "the grid must keep its entry focus: it is the view's draw gate"
+        );
+    }
+
+    /// If the reconcile lands the grid on a different mailbox than the one
+    /// the open view belongs to (the sidebar entry list shifted), the stale
+    /// view must close and the keyboard must land on the grid (layout1).
+    #[test]
+    fn account_status_change_closes_stale_view_on_moved_mailbox() {
+        let mut ctx = mock_context();
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(listing.view.is_some());
+
+        // Force the divergence the stale guard protects against: the
+        // sidebar selection points at another mailbox while the view is
+        // still open.
+        listing.cursor_pos.menu = MenuEntryCursor::Mailbox(1);
+
+        let mut event = UIEvent::AccountStatusChange(account_hash, None);
+        listing.process_event(&mut event, &mut ctx);
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+
+        assert!(
+            listing.view.is_none(),
+            "the stale view must close when the grid lands on another mailbox"
+        );
+        assert!(matches!(listing.focus, ListingFocus::MailList));
     }
 
     /// Regression: when the reconcile restores a sidebar focus it must
@@ -5574,10 +5900,11 @@ mod listing_menu_tests {
             "quit from layout4 must land on layout3"
         );
 
-        // quit from layout3's grid: layout1, focus on the grid.
+        // quit from layout3's grid: layout1, the focus on the mailbox list.
         assert!(pane_step(&mut listing, &mut ctx, Key::Char('q')));
         assert!(listing.view.is_none());
-        assert!(matches!(listing.focus, ListingFocus::MailList));
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+        assert!(listing.is_menu_visible());
     }
 
     /// The grid cursor move refreshes the open view and the layout follows
@@ -5797,6 +6124,129 @@ mod listing_menu_tests {
         assert!(
             !listing.process_event(&mut event, &mut ctx),
             "an unbound key must not be consumed as refresh"
+        );
+    }
+
+    /// With the sidebar holding the keyboard, `refresh` must refresh the folder
+    /// under the sidebar highlight (`menu_cursor_pos`), which can differ from the
+    /// currently opened folder (`cursor_pos`). The refreshed mailbox is observed
+    /// as the account's pending `JobRequest::Refresh` (the folders are real
+    /// maildir directories, so the mock backend accepts their hashes).
+    #[test]
+    fn menu_focus_refresh_targets_highlighted_folder() {
+        let mut ctx = mock_context();
+        let (_inbox_hash, _inbox_dir) = add_backend_mailbox(&mut ctx, "INBOX", true);
+        let (archive_hash, _archive_dir) = add_backend_mailbox(&mut ctx, "Archive", true);
+        let mut listing = Listing::new(&mut ctx);
+        assert_eq!(
+            listing.accounts[0].entries[1].mailbox_hash, archive_hash,
+            "precondition: Archive is the second sidebar entry"
+        );
+
+        listing.focus_menu();
+        listing.menu_cursor_pos = CursorPos {
+            account: 0,
+            menu: MenuEntryCursor::Mailbox(1),
+        };
+        let mut event = UIEvent::Input(Key::F(5));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "refresh must be consumed while the sidebar owns the keyboard"
+        );
+        assert_eq!(
+            pending_refresh_target(&ctx),
+            Some(archive_hash),
+            "refresh must target the highlighted sidebar folder (Archive)"
+        );
+        assert_eq!(
+            listing.focus,
+            ListingFocus::Menu,
+            "refresh must not steal the sidebar keyboard"
+        );
+        assert_eq!(
+            listing.menu_cursor_pos.menu,
+            MenuEntryCursor::Mailbox(1),
+            "refresh must not move the sidebar highlight"
+        );
+    }
+
+    /// `refresh` on the sidebar's account `Status` row falls back to the
+    /// account's default mailbox and is consumed without an error notification.
+    #[test]
+    fn menu_focus_refresh_on_status_targets_default_mailbox() {
+        let mut ctx = mock_context();
+        let (inbox_hash, _inbox_dir) = add_backend_mailbox(&mut ctx, "INBOX", true);
+        let (_archive_hash, _archive_dir) = add_backend_mailbox(&mut ctx, "Archive", true);
+        let mut listing = Listing::new(&mut ctx);
+        assert_eq!(
+            ctx.accounts[0].default_mailbox(),
+            Some(inbox_hash),
+            "precondition: INBOX is the account default mailbox"
+        );
+
+        listing.focus_menu();
+        listing.menu_cursor_pos = CursorPos {
+            account: 0,
+            menu: MenuEntryCursor::Status,
+        };
+        let mut event = UIEvent::Input(Key::F(5));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "refresh on the Status row must be consumed"
+        );
+        assert_eq!(
+            pending_refresh_target(&ctx),
+            Some(inbox_hash),
+            "the Status fallback must refresh the account's default mailbox"
+        );
+        assert!(
+            !ctx.replies.iter().any(|e| matches!(
+                e,
+                UIEvent::Notification {
+                    title: Some(t),
+                    ..
+                } if t.as_ref() == "Could not refresh."
+            )),
+            "the default-mailbox fallback must not queue a refresh error"
+        );
+        assert_eq!(listing.focus, ListingFocus::Menu);
+    }
+
+    /// Regression: the sidebar `entries` are the subscribed-filtered tree while
+    /// `Account::mailboxes_order` lists every mailbox. An unsubscribed folder
+    /// that sorts between INBOX and Archive makes the two index spaces disagree,
+    /// so a MailList-focus refresh must map through `entries[idx]` — not
+    /// `mailboxes_order[idx]` (which would refresh the unsubscribed AAA).
+    #[test]
+    fn mail_list_refresh_maps_sidebar_index_not_mailboxes_order() {
+        let mut ctx = mock_context();
+        let (_inbox_hash, _inbox_dir) = add_backend_mailbox(&mut ctx, "INBOX", true);
+        let (archive_hash, _archive_dir) = add_backend_mailbox(&mut ctx, "Archive", true);
+        let (aaa_hash, _aaa_dir) = add_backend_mailbox(&mut ctx, "AAA", false);
+        let mut listing = Listing::new(&mut ctx);
+
+        // Precondition: the two orderings disagree at index 1 — the sidebar
+        // shows Archive, while the account-level order lists the unsubscribed
+        // AAA.
+        assert_eq!(listing.accounts[0].entries.len(), 2);
+        assert_eq!(listing.accounts[0].entries[1].mailbox_hash, archive_hash);
+        assert_eq!(ctx.accounts[0].mailboxes_order[1], aaa_hash);
+        assert_ne!(archive_hash, aaa_hash);
+
+        listing.focus = ListingFocus::MailList;
+        listing.cursor_pos = CursorPos {
+            account: 0,
+            menu: MenuEntryCursor::Mailbox(1),
+        };
+        let mut event = UIEvent::Input(Key::F(5));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "refresh must be consumed at MailList focus"
+        );
+        assert_eq!(
+            pending_refresh_target(&ctx),
+            Some(archive_hash),
+            "MailList refresh must map the sidebar entry index, not mailboxes_order"
         );
     }
 

@@ -2208,9 +2208,7 @@ impl Component for CompactListing {
 
 #[cfg(test)]
 mod tests {
-    use melib::backends::{
-        BackendMailbox, Mailbox, MailboxPermissions, SpecialUsageMailbox,
-    };
+    use melib::backends::{BackendMailbox, Mailbox, MailboxPermissions, SpecialUsageMailbox};
 
     use super::*;
     use crate::{
@@ -2400,7 +2398,11 @@ mod tests {
         listing.draw(screen.grid_mut(), area, ctx);
         let grid = screen.grid();
         (0..grid.rows)
-            .map(|y| (0..grid.cols).map(|x| grid[(x, y)].ch()).collect::<String>())
+            .map(|y| {
+                (0..grid.cols)
+                    .map(|x| grid[(x, y)].ch())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

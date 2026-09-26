@@ -136,6 +136,65 @@ rusty_fork_test! {
         tests::run_imap_watch_id_gated_push();
     }
 
+    /// Test that `imap_id_name` customizes the RFC 2971 `ID` handshake.
+    /// See `tests::run_imap_id_name_custom`.
+    #[test]
+    fn test_imap_id_name_custom() {
+        tests::run_imap_id_name_custom();
+    }
+
+    /// Regression pin for the Coremail (网易 163/126/188) UIDNEXT gap:
+    /// `SELECT`/`EXAMINE` omit `UIDNEXT` and `STATUS (UIDNEXT)` returns
+    /// `()`; the client must complete the initial fetch and a heartbeat
+    /// resync without error by issuing `UID SEARCH *` to derive
+    /// `UIDNEXT = max_uid + 1`.
+    #[test]
+    fn test_imap_init_uidnext_via_uid_search_star() {
+        tests::run_imap_init_uidnext_via_uid_search_star();
+    }
+
+    /// Failing-first regression for long-lived Coremail-style
+    /// mailboxes (e.g. 网易 163) whose UID space is sparse: `UIDVALIDITY`
+    /// stays at `1` while `uidnext` grows into the 10⁹ range, but only a
+    /// handful of real messages exist. The historic fresh-fetch path
+    /// walked `UID FETCH min..max` downward from `uidnext` in
+    /// `batch_size = 2500` steps — i.e. ≈528 000 round-trips at
+    /// `uidnext ≈ 1.3×10⁹`, effectively hanging the cold-start fetch.
+    ///
+    /// The fix issues one `UID SEARCH ALL` to enumerate the real UIDs
+    /// and then `UID FETCH`es them in batches by explicit UID list. With
+    /// only two seed mails (`UID 5` and `UID 1_320_000_000`) the entire
+    /// initial fetch must complete with at most a couple of envelope
+    /// `UID FETCH` round-trips — never the
+    /// `(1_320_000_000 − 5) / 2500 ≈ 528 000` that the old code path
+    /// would have produced.
+    #[test]
+    fn test_imap_fresh_fetch_sparse_uids() {
+        tests::run_imap_fresh_fetch_sparse_uids();
+    }
+
+    /// Failing-first repro for the 网易 163 "收取全部邮件" scenario: a
+    /// mailbox first seen empty (server-side fetch window closed) is later
+    /// revealed to hold history. The watch `refresh` must emit Create
+    /// events for every revealed mail so the open listing backfills.
+    #[test]
+    fn test_imap_revealed_history_refresh() {
+        tests::run_imap_revealed_history_refresh();
+    }
+
+    /// Failing-first repro for the 网易 163 "收取全部邮件" scenario on a
+    /// **warm** cache: the account already cached the mails the 30-day
+    /// window showed, then switching the setting reveals history whose
+    /// UIDs sit below everything cached. `refresh` must detect that the
+    /// persisted envelope count is below the server `EXISTS` and rebuild
+    /// instead of trusting the empty incremental fetch. See
+    /// `tests::run_imap_revealed_history_warm_cache`.
+    #[cfg(feature = "sqlite3")]
+    #[test]
+    fn test_imap_revealed_history_warm_cache() {
+        tests::run_imap_revealed_history_warm_cache();
+    }
+
     /// Failing-first pin for the tag-not-last DONE reply framing: the
     /// tagged reply and a trailing `* EXISTS` push arrive in one TCP
     /// write; `read_lines` must stop at the tag line and the trailing
@@ -179,6 +238,45 @@ rusty_fork_test! {
     #[test]
     fn test_imap_resync_status_shortcircuit_miss() {
         tests::run_imap_resync_status_shortcircuit(false);
+    }
+
+    /// Failing-first regression for a cache poisoned by an **old**
+    /// binary: the persisted skeleton records a STATUS baseline measured
+    /// after a no-op resync (`messages = 24`) while only 4 envelopes
+    /// actually persist. The RFC 4549 STATUS quick-skip must not trust
+    /// the recorded counters when the persisted envelope count disagrees
+    /// with the recorded `MESSAGES`; otherwise the refresh/F5/watch path
+    /// quick-skips forever and only reopening the mailbox heals it. See
+    /// `tests::run_imap_resync_quickskip_poisoned_cache`.
+    #[cfg(feature = "sqlite3")]
+    #[test]
+    fn test_imap_resync_quickskip_poisoned_cache() {
+        tests::run_imap_resync_quickskip_poisoned_cache();
+    }
+
+    /// Failing-first regression for the "poisoned cache" intermediate
+    /// state: a persisted mailbox skeleton with matching STATUS counters
+    /// and an empty `envelopes` table must not short-circuit the initial
+    /// fetch to an empty listing; it must fall back to the full
+    /// `UID SEARCH ALL` fresh fetch. See
+    /// `tests::run_imap_fetch_poisoned_cache_backfills`.
+    #[cfg(feature = "sqlite3")]
+    #[test]
+    fn test_imap_fetch_poisoned_cache_backfills() {
+        tests::run_imap_fetch_poisoned_cache_backfills();
+    }
+
+    /// Regression pin for the NULL-skeleton "poisoned cache" shape: the
+    /// `mailbox` row exists but `max_uid` and every STATUS counter are
+    /// NULL, and the `envelopes` table is empty. `CacheFirst` reports
+    /// `lastseenuid() == Ok(None)` and the initial fetch must still reach
+    /// the full `UID SEARCH ALL` fresh fetch instead of ending as an
+    /// empty listing. See
+    /// `tests::run_imap_fetch_null_skeleton_cache_backfills`.
+    #[cfg(feature = "sqlite3")]
+    #[test]
+    fn test_imap_fetch_null_skeleton_cache_backfills() {
+        tests::run_imap_fetch_null_skeleton_cache_backfills();
     }
 
     /// Failing-first pin for the UID-less `UID FETCH` reply regression:
@@ -282,6 +380,39 @@ rusty_fork_test! {
     #[test]
     fn test_imap_offline_startup_uses_cache() {
         tests::run_imap_offline_startup_uses_cache();
+    }
+
+    /// Failing-first regression for the Coremail 网易 163 under-delivering
+    /// `FETCH`: the server reports `EXISTS` larger than the number of
+    /// messages it actually returns. The cache-completeness guard must
+    /// rebuild at most once per session, not wipe and re-fetch the mailbox
+    /// on every poll. See `tests::run_imap_fetch_underdelivered_exists`.
+    #[cfg(feature = "sqlite3")]
+    #[test]
+    fn test_imap_fetch_underdelivered_exists() {
+        tests::run_imap_fetch_underdelivered_exists();
+    }
+
+    /// Failing-first regression for resuming a `FreshFetch` after the
+    /// connection drops mid-batch: the retry must reconnect and complete
+    /// the same batch instead of aborting the whole fetch stream. See
+    /// `tests::run_imap_fetch_resumes_after_conn_drop`.
+    #[cfg(feature = "sqlite3")]
+    #[test]
+    fn test_imap_fetch_resumes_after_conn_drop() {
+        tests::run_imap_fetch_resumes_after_conn_drop();
+    }
+
+    /// Failing-first regression for the **destructive** cache-completeness
+    /// rebuild: when the refill that follows the guard is cut short by a
+    /// connection drop, the already-cached envelopes must survive. The
+    /// guard must report "no incremental data" without wiping the mailbox
+    /// (`init_mailbox` used to cascade-delete every `envelopes` row). See
+    /// `tests::run_imap_rebuild_nondestructive_on_conn_drop`.
+    #[cfg(feature = "sqlite3")]
+    #[test]
+    fn test_imap_rebuild_nondestructive_on_conn_drop() {
+        tests::run_imap_rebuild_nondestructive_on_conn_drop();
     }
 }
 
@@ -432,6 +563,52 @@ pub mod server {
         /// CRLF) received by each `UID SEARCH X-GM-RAW {N}` continuation
         /// exchange, for assertions.
         pub x_gm_raw_literals: Vec<Vec<u8>>,
+        /// The raw bytes of the RFC 2971 `ID` command line received at the
+        /// `M4` handshake stage, for assertions on `imap_id_name` (the
+        /// client name). `None` when the client sent no `ID` at all
+        /// (`use_id = false`) or before the handshake reached `M4`.
+        pub id_handshake_line: Option<Vec<u8>>,
+        /// When `true`, the mock emulates a Coremail-style server
+        /// (e.g. 网易 163/126/188) on the `STATUS` layer: `STATUS
+        /// (UIDNEXT)` replies with an empty `()` item list like Coremail
+        /// does, so the client's `status.uidnext` parses as `None` and the
+        /// third-layer `UID SEARCH *` fallback must kick in to derive
+        /// UIDNEXT as `max_uid + 1`. Note that this mock never adds a
+        /// `* OK [UIDNEXT n]` line to `SELECT`/`EXAMINE` even when this
+        /// flag is `false`, so `select_response.uidnext == 0` and the
+        /// `STATUS` layer is reached either way. Default is `false` so
+        /// existing tests keep their standard `STATUS` reply shape.
+        pub omit_uidnext: bool,
+        /// When `Some(n)`, the reply to an envelope `FETCH`/`UID FETCH`
+        /// omits the first `n` responses of the requested range, while
+        /// `STATUS`/`EXISTS` keep reporting the full count. This emulates
+        /// the observed Coremail behaviour (网易 163): the server reports
+        /// `EXISTS = 32` but some message sequence numbers (MSN 12-16 in
+        /// the captured case) are never returned by `FETCH`, so only 27 of
+        /// the 32 messages are actually retrievable. `None` (the default)
+        /// answers every requested message.
+        pub fetch_underdelivers: Option<usize>,
+        /// When `Some(n)`, the mock truncates the reply to the **nth**
+        /// (1-based) envelope `FETCH`/`UID FETCH` after about half the
+        /// requested responses and closes the TCP connection without
+        /// sending the tagged `OK`. Both the plain (MSN) backfill `FETCH`
+        /// and the explicit-UID `UID FETCH` count towards `n`, so a test
+        /// can let an earlier fetch succeed and drop a later one. This
+        /// emulates the observed Coremail behaviour (网易 163): the
+        /// connection is dropped mid-fetch (`unexpected EOF`), so the
+        /// client must reconnect and resume rather than abort the whole
+        /// fetch stream. `None` (the default) answers every requested
+        /// message; [`Self::fetch_drop_connection_count`] records how many
+        /// times the drop fired.
+        pub fetch_drop_connection_on_nth: Option<usize>,
+        /// How many envelope `FETCH`/`UID FETCH` commands the mock has
+        /// answered so far (used to resolve
+        /// [`Self::fetch_drop_connection_on_nth`]).
+        pub fetch_envelope_fetches: usize,
+        /// How many times [`Self::fetch_drop_connection_on_nth`] has
+        /// fired (a counter, not a flag, so one drop does not disarm a
+        /// later connection's normal answer).
+        pub fetch_drop_connection_count: usize,
     }
 
     impl Default for ServerState {
@@ -458,6 +635,12 @@ pub mod server {
                 // advertised, so the client takes the RFC 4315 path.
                 advertise_unselect: true,
                 x_gm_raw_literals: Vec::new(),
+                id_handshake_line: None,
+                omit_uidnext: false,
+                fetch_underdelivers: None,
+                fetch_drop_connection_on_nth: None,
+                fetch_envelope_fetches: 0,
+                fetch_drop_connection_count: 0,
             }
         }
     }
@@ -620,9 +803,10 @@ pub mod server {
         pub sent_id: bool,
         /// Number of bytes already read into `buf` before the loop handler
         /// starts: bytes of a client command that arrived at the `M4`
-        /// handshake stage instead of `ID NIL` (a client with `use_id`
-        /// disabled proceeds to its next command immediately). The loop
-        /// handler must consume them before reading more from the socket.
+        /// handshake stage instead of the client's `M4 ID` command (a
+        /// client with `use_id` disabled proceeds to its next command
+        /// immediately). The loop handler must consume them before
+        /// reading more from the socket.
         pub preread_len: usize,
         /// Whether the `M4` handshake stage observed the caller's driving
         /// future completing (possible with `use_id` disabled: the connect
@@ -755,11 +939,12 @@ pub mod server {
                     block_on(tcp_stream.write_all(m3_reply.as_bytes())).unwrap();
                     // The capability list above advertises `ID`, so a
                     // client with `use_id` enabled (melib's default) sends
-                    // `M4 ID NIL` and waits for its reply before the connect
-                    // future completes. Answer it here, while the caller is
-                    // still driving the client future alone: the loop
-                    // handler is not polled yet, and leaving ID unanswered
-                    // would time the connection out.
+                    // `M4 ID` with its identification parameters
+                    // (name/version) and waits for its reply before the
+                    // connect future completes. Answer it here, while the
+                    // caller is still driving the client future alone: the
+                    // loop handler is not polled yet, and leaving ID
+                    // unanswered would time the connection out.
                     //
                     // A client with `use_id` disabled sends no `ID` at
                     // all: its connect future completes on the `M3`
@@ -786,7 +971,11 @@ pub mod server {
                         }
                         Either::Right((value2, _)) => {
                             let read_bytes = value2.unwrap();
-                            if &buf[..read_bytes] == b"M4 ID NIL\r\n" {
+                            if buf[..read_bytes].starts_with(b"M4 ID ") {
+                                {
+                                    let mut state_lck = state.lock().unwrap();
+                                    state_lck.id_handshake_line = Some(buf[..read_bytes].to_vec());
+                                }
                                 block_on(tcp_stream.write_all(
                                     b"* ID (\"name\" \"mock\" \"version\" \"1.0\")\r\nM4 OK ID \
                                      completed\r\n",
@@ -1200,7 +1389,10 @@ pub mod server {
                             // treat the session as unselected.
                             let (advertise_unselect, extra_mailbox) = {
                                 let state_lck = state.lock().unwrap();
-                                (state_lck.advertise_unselect, state_lck.extra_mailbox.clone())
+                                (
+                                    state_lck.advertise_unselect,
+                                    state_lck.extra_mailbox.clone(),
+                                )
                             };
                             let requested = select
                                 .trim_end_matches("\r\n")
@@ -1208,7 +1400,9 @@ pub mod server {
                                 .unwrap_or_default()
                                 .trim_matches('"');
                             let mailbox_exists = requested.eq_ignore_ascii_case("inbox")
-                                || extra_mailbox.as_deref().is_some_and(|extra| extra == requested);
+                                || extra_mailbox
+                                    .as_deref()
+                                    .is_some_and(|extra| extra == requested);
                             if !advertise_unselect && !mailbox_exists {
                                 if matches!(session_state, SessionState::SelectedMailbox) {
                                     state.lock().unwrap().session_unselected("INBOX");
@@ -1314,8 +1508,18 @@ pub mod server {
                             if uids.is_empty() {
                                 tcp_stream.write_all(b"* SEARCH\r\n").await.unwrap();
                             } else {
+                                // RFC 3501 §7.2.5: the SEARCH response
+                                // contains a space-separated list of UIDs;
+                                // emitting them without a separator would
+                                // glue `1` and `2` into `12`, which the
+                                // client parses as a single UID — and the
+                                // new fresh-fetch path requests an exact
+                                // UID list that must match.
                                 tcp_stream.write_all(b"* SEARCH ").await.unwrap();
-                                for uid in uids {
+                                for (i, uid) in uids.iter().enumerate() {
+                                    if i > 0 {
+                                        tcp_stream.write_all(b" ").await.unwrap();
+                                    }
                                     tcp_stream
                                         .write_all(format!("{uid}").as_bytes())
                                         .await
@@ -1425,6 +1629,94 @@ pub mod server {
                                 .unwrap();
                             tcp_stream.flush().await.unwrap();
                         }
+                        "UID SEARCH ALL\r\n" => {
+                            // `UID SEARCH ALL` enumerates every UID in
+                            // the selected mailbox. The fresh-fetch path
+                            // uses this on cold startup to drive explicit
+                            // UID-list batches instead of the historic
+                            // (and O(uidnext) on sparse UID spaces)
+                            // `UID FETCH min..max` walk.
+                            if !matches!(session_state, SessionState::SelectedMailbox) {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD no mailbox is selected\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            let uids = state
+                                .lock()
+                                .unwrap()
+                                .envelopes
+                                .iter()
+                                .map(|(u, _)| *u)
+                                .collect::<Vec<_>>();
+                            if uids.is_empty() {
+                                tcp_stream.write_all(b"* SEARCH\r\n").await.unwrap();
+                            } else {
+                                // RFC 3501 §7.2.5: the SEARCH response
+                                // contains a space-separated list of UIDs;
+                                // emitting them without a separator would
+                                // glue `1` and `2` into `12`, which the
+                                // client parses as a single UID — and the
+                                // new fresh-fetch path requests an exact
+                                // UID list that must match.
+                                tcp_stream.write_all(b"* SEARCH ").await.unwrap();
+                                for (i, uid) in uids.iter().enumerate() {
+                                    if i > 0 {
+                                        tcp_stream.write_all(b" ").await.unwrap();
+                                    }
+                                    tcp_stream
+                                        .write_all(format!("{uid}").as_bytes())
+                                        .await
+                                        .unwrap();
+                                }
+                                tcp_stream.write_all(b"\r\n").await.unwrap();
+                            }
+                            tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                            tcp_stream
+                                .write_all(b" OK SEARCH completed\r\n")
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
+                        "UID SEARCH *\r\n" => {
+                            // `UID SEARCH *` in its UID form: `*` is the
+                            // highest UID in use (RFC 3501 §6.4.8), so a
+                            // conforming server answers with that UID. This
+                            // is the third-layer UIDNEXT fallback the client
+                            // uses for Coremail-style servers (e.g. 网易
+                            // 163/126/188) that report UIDNEXT neither in
+                            // SELECT/EXAMINE nor in STATUS.
+                            if !matches!(session_state, SessionState::SelectedMailbox) {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD no mailbox is selected\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            let max_uid = state.lock().unwrap().envelopes.keys().copied().max();
+                            match max_uid {
+                                Some(uid) => {
+                                    tcp_stream
+                                        .write_all(format!("* SEARCH {uid}\r\n").as_bytes())
+                                        .await
+                                        .unwrap();
+                                }
+                                None => {
+                                    tcp_stream.write_all(b"* SEARCH\r\n").await.unwrap();
+                                }
+                            }
+                            tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                            tcp_stream
+                                .write_all(b" OK SEARCH completed\r\n")
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
                         uid_search_msn
                             if uid_search_msn.starts_with("UID SEARCH ")
                                 && uid_search_msn.ends_with("\r\n") =>
@@ -1510,13 +1802,22 @@ pub mod server {
                             tcp_stream.flush().await.unwrap();
                         }
                         "STATUS INBOX (UIDNEXT)\r\n" => {
-                            let uidnext = state.lock().unwrap().next_uid;
-                            tcp_stream
-                                .write_all(
-                                    format!("* STATUS INBOX (UIDNEXT {uidnext})\r\n").as_bytes(),
-                                )
-                                .await
-                                .unwrap();
+                            let (uidnext, omit_uidnext) = {
+                                let state_lck = state.lock().unwrap();
+                                (state_lck.next_uid, state_lck.omit_uidnext)
+                            };
+                            let payload: Vec<u8> = if omit_uidnext {
+                                // Coremail (e.g. 网易 163) swallows the
+                                // requested UIDNEXT item and replies
+                                // with an empty parenthesized list, so
+                                // the client's `status.uidnext` parses
+                                // as `None` and the third-layer
+                                // `UID SEARCH *` fallback must kick in.
+                                b"* STATUS INBOX ()\r\n".to_vec()
+                            } else {
+                                format!("* STATUS INBOX (UIDNEXT {uidnext})\r\n").into_bytes()
+                            };
+                            tcp_stream.write_all(&payload).await.unwrap();
                             tcp_stream.write_all(id.as_bytes()).await.unwrap();
                             tcp_stream
                                 .write_all(b" OK STATUS completed\r\n")
@@ -1591,11 +1892,33 @@ pub mod server {
                             // current EXISTS count.
                             let exists = state.lock().unwrap().envelopes.len() as u32;
                             let largest = std::num::NonZeroU32::new(exists.max(1)).unwrap();
+                            // Same envelope-FETCH counter/drop hook as the
+                            // `UID FETCH` arm below: the MSN backfill used
+                            // by `examine_updates` is still an envelope
+                            // FETCH, so it must count towards
+                            // `fetch_drop_connection_on_nth`. See the
+                            // `ServerState` field docs.
+                            let drop_connection = {
+                                let mut st = state.lock().unwrap();
+                                st.fetch_envelope_fetches += 1;
+                                st.fetch_drop_connection_on_nth == Some(st.fetch_envelope_fetches)
+                            };
+                            let drop_at = sequence_set.iter(largest).count() / 2;
+                            let mut answered: usize = 0;
                             eprintln!(
                                 "{name} loop_handler got FETCH {sequence_set:?} (exists \
                                  {exists})"
                             );
                             for msn in sequence_set.iter(largest) {
+                                if drop_connection && answered >= drop_at {
+                                    state.lock().unwrap().fetch_drop_connection_count += 1;
+                                    eprintln!(
+                                        "{name} loop_handler: dropping connection mid FETCH \
+                                         after {answered} responses"
+                                    );
+                                    Self::reset_connection(&tcp_stream);
+                                    break 'outer;
+                                }
                                 let Some((uid, mail)) = state
                                     .lock()
                                     .unwrap()
@@ -1650,6 +1973,7 @@ pub mod server {
                                         },
                                     }
                                 }
+                                answered += 1;
                             }
                             tcp_stream
                                 .write_all(format!("{id} OK FETCH completed\r\n").as_bytes())
@@ -1777,7 +2101,39 @@ pub mod server {
 
                             eprintln!("{name} loop_handler got UID FETCH {sequence_set:?}");
                             let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
+                            // `fetch_underdelivers` /
+                            // `fetch_drop_connection_on_nth` emulate the
+                            // observed Coremail 网易 163 behaviour; see the
+                            // `ServerState` field docs.
+                            let (underdeliver, drop_connection) = {
+                                let mut st = state.lock().unwrap();
+                                st.fetch_envelope_fetches += 1;
+                                (
+                                    st.fetch_underdelivers,
+                                    st.fetch_drop_connection_on_nth
+                                        == Some(st.fetch_envelope_fetches),
+                                )
+                            };
+                            let drop_at =
+                                sequence_set.iter(largest.try_into().unwrap()).count() / 2;
+                            let mut skipped: usize = 0;
+                            let mut answered: usize = 0;
                             'uid_fetch: for uid in sequence_set.iter(largest.try_into().unwrap()) {
+                                if let Some(n) = underdeliver {
+                                    if skipped < n {
+                                        skipped += 1;
+                                        continue 'uid_fetch;
+                                    }
+                                }
+                                if drop_connection && answered >= drop_at {
+                                    state.lock().unwrap().fetch_drop_connection_count += 1;
+                                    eprintln!(
+                                        "{name} loop_handler: dropping connection mid UID FETCH \
+                                         after {answered} responses"
+                                    );
+                                    Self::reset_connection(&tcp_stream);
+                                    break 'outer;
+                                }
                                 let Some(mail) = state
                                     .lock()
                                     .unwrap()
@@ -1830,6 +2186,7 @@ pub mod server {
                                         }
                                     }
                                 }
+                                answered += 1;
                             }
                             tcp_stream
                                 .write_all(format!("{id} OK UID FETCH completed\r\n").as_bytes())
@@ -2066,27 +2423,51 @@ pub mod server {
             }
         }
 
+        /// Reset the TCP connection mid-reply: no tagged completion is
+        /// sent. `SO_LINGER 0` makes the close send an RST, so the client's
+        /// read surfaces a network-kind error. A clean `shutdown`/FIN is
+        /// read as EOF and the client would instead parse the truncated
+        /// response (or reject it as a protocol error), which is not the
+        /// retryable error the observed Coremail 网易 163 drop
+        /// (`unexpected EOF`) produces.
+        fn reset_connection(tcp_stream: &Async<TcpStream>) {
+            let _ = socket2::SockRef::from(tcp_stream.get_ref()).set_linger(Some(Duration::ZERO));
+        }
+
         fn parse_sequence_set(set: &str) -> imap_types::sequence::SequenceSet {
             use imap_types::sequence::{SeqOrUid, Sequence, SequenceSet};
 
-            if set.contains(':') {
-                let [a, b]: [SeqOrUid; 2] = set
-                    .split(":")
-                    .map(|n| {
-                        if n == "*" {
-                            SeqOrUid::Asterisk
-                        } else {
-                            SeqOrUid::Value(n.parse::<u32>().unwrap().try_into().unwrap())
-                        }
-                    })
-                    .collect::<Vec<SeqOrUid>>()
-                    .try_into()
-                    .unwrap();
-                SequenceSet::try_from(vec![Sequence::Range(a, b)]).unwrap()
-            } else {
-                let item = set.parse::<u32>().unwrap().try_into().unwrap();
-                SequenceSet::try_from(vec![Sequence::Single(item)]).unwrap()
+            // The fresh-fetch path now issues `UID FETCH <u1>,<u2>,...
+            // (UID FLAGS ENVELOPE ...)` with an explicit UID list
+            // (RFC 3501 §6.4.8 also allows comma-separated sets), so
+            // accept `,` here too in addition to the historical `:`
+            // range and single-UID shapes.
+            let mut sequences: Vec<Sequence> = Vec::new();
+            for part in set.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                if part.contains(':') {
+                    let [a, b]: [SeqOrUid; 2] = part
+                        .split(':')
+                        .map(|n| {
+                            if n == "*" {
+                                SeqOrUid::Asterisk
+                            } else {
+                                SeqOrUid::Value(n.parse::<u32>().unwrap().try_into().unwrap())
+                            }
+                        })
+                        .collect::<Vec<SeqOrUid>>()
+                        .try_into()
+                        .unwrap();
+                    sequences.push(Sequence::Range(a, b));
+                } else {
+                    let item = part.parse::<u32>().unwrap().try_into().unwrap();
+                    sequences.push(Sequence::Single(item));
+                }
             }
+            SequenceSet::try_from(sequences).unwrap()
         }
     }
 }
@@ -2472,19 +2853,22 @@ hello world 3.
     }
 
     /// Create the `test` account's cache database under `db_dir` with the
-    /// current schema and seed it with an already synchronized INBOX: a
-    /// `mailbox` row for `mailbox_hash` with uidvalidity 1, max_uid 3, the
-    /// given `(MESSAGES, UNSEEN, UIDNEXT)` baseline, and the envelopes of
-    /// `mails`.
+    /// current schema and seed it with a `mailbox` row for `mailbox_hash`
+    /// (uidvalidity 1, the given `max_uid` and `(MESSAGES, UNSEEN, UIDNEXT)`
+    /// baseline, any of which may be `None` to persist SQL `NULL`) plus the
+    /// envelopes of `mails`. An all-`None` baseline with no `mails` is the
+    /// "skeleton row all NULL" poison shape.
     #[cfg(feature = "sqlite3")]
+    #[allow(clippy::too_many_arguments)]
     fn seed_imap_cache_db(
         db_dir: &std::path::Path,
         mailbox_hash: MailboxHash,
         mailbox_path: &str,
         mails: &[(UID, &Mail)],
-        messages: UID,
-        unseen: UID,
-        uidnext: UID,
+        max_uid: Option<UID>,
+        messages: Option<UID>,
+        unseen: Option<UID>,
+        uidnext: Option<UID>,
     ) {
         use melib::utils::sqlite3::rusqlite;
 
@@ -2522,12 +2906,13 @@ hello world 3.
         .unwrap();
         conn.execute(
             "INSERT INTO mailbox (mailbox_hash, uidvalidity, max_uid, flags, messages, unseen, \
-             uidnext) VALUES (?1, 1, 3, X'', ?2, ?3, ?4);",
+             uidnext) VALUES (?1, 1, ?2, X'', ?3, ?4, ?5);",
             rusqlite::params![
                 mailbox_hash.0 as i64,
-                messages as i64,
-                unseen as i64,
-                uidnext as i64
+                max_uid.map(|u| u as i64),
+                messages.map(|u| u as i64),
+                unseen.map(|u| u as i64),
+                uidnext.map(|u| u as i64)
             ],
         )
         .unwrap();
@@ -2731,9 +3116,10 @@ hello world 3.
             inbox_hash,
             &mailbox_path,
             &mails,
-            messages,
-            unseen,
-            uidnext,
+            Some(3),
+            Some(messages),
+            Some(unseen),
+            Some(uidnext),
         );
 
         let loops_handle = std::thread::spawn(move || {
@@ -2815,6 +3201,297 @@ hello world 3.
                 "second fetch did not short-circuit: {lck:?}"
             );
         }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first regression for the "poisoned cache" intermediate state:
+    /// an interrupted sync can leave the `mailbox` skeleton row behind
+    /// (UIDVALIDITY, `max_uid` and the recorded STATUS counters) while the
+    /// `envelopes` table is empty. The incremental RFC 4549 resync
+    /// (`UID FETCH lastseenuid+1:*`) cannot backfill the missing history, and
+    /// the STATUS quick check accepts the mailbox as "unchanged" because its
+    /// persisted counters match the server, so the initial fetch used to
+    /// short-circuit to an empty listing even though the server holds
+    /// messages.
+    ///
+    /// The fix must force the initial fetch onto the full `InitialFresh` ->
+    /// `UID SEARCH ALL` -> `FreshFetch` path whenever the persisted envelope
+    /// set is empty, and the quick check must only run when it is backed by
+    /// persisted envelopes.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_fetch_poisoned_cache_backfills() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: poison seed 1
+Message-ID: <poison1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: poison seed 2
+Message-ID: <poison2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let mails = [(1 as UID, &*seed_mail_1), (2 as UID, &*seed_mail_2)];
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for (_, mail) in mails {
+                state_lck.insert(Box::new(mail.clone()));
+            }
+        }
+
+        let backend_event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                true,
+            );
+
+        let mailbox_path = {
+            let mailboxes_lck = block_on(imap.uid_store.mailboxes.lock());
+            mailboxes_lck[&inbox_hash].imap_path().to_string()
+        };
+        // The poison: a `mailbox` row whose STATUS baseline matches the
+        // server exactly (2 messages, 2 unseen, UIDNEXT 3) and whose
+        // `max_uid` claims a synchronized mailbox, but with an empty
+        // `envelopes` table.
+        seed_imap_cache_db(
+            &temp_dir.path().join(".local/share/meli"),
+            inbox_hash,
+            &mailbox_path,
+            &[],
+            Some(3),
+            Some(2),
+            Some(2),
+            Some(3),
+        );
+
+        let envelopes = {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || block_on(fetch_all_envs(imap, inbox_hash)))
+                    .join()
+                    .unwrap()
+            })
+        };
+
+        let mut subjects: Vec<String> = envelopes
+            .iter()
+            .map(|env| env.subject().into_owned())
+            .collect();
+        subjects.sort_unstable();
+        assert_eq!(
+            envelopes.len(),
+            2,
+            "poisoned cache short-circuited the fresh fetch; subjects: {subjects:?}; commands: {:?}",
+            main_commands.lock().unwrap()
+        );
+        assert_eq!(
+            subjects,
+            vec![
+                "RE: poison seed 1".to_string(),
+                "RE: poison seed 2".to_string()
+            ]
+        );
+        assert!(
+            main_commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("UID FETCH 1,2 ")),
+            "a full explicit-UID fresh fetch must have run; commands: {:?}",
+            main_commands.lock().unwrap()
+        );
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first regression for the NULL-skeleton "poisoned cache"
+    /// shape (the real-machine residue of an interrupted sync): the
+    /// `mailbox` row exists, but `max_uid` and all three STATUS counters
+    /// are NULL and the `envelopes` table is empty. `CacheFirst` therefore
+    /// sees `lastseenuid() == Ok(None)`. That must not fall through the
+    /// online cache stages and end in a silently empty listing: as long as
+    /// the server reports messages, the fetch must reach `InitialFresh`
+    /// and issue a full `UID SEARCH ALL` + explicit-UID `UID FETCH`.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_fetch_null_skeleton_cache_backfills() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: null skeleton seed 1
+Message-ID: <nullskel1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: null skeleton seed 2
+Message-ID: <nullskel2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let mails = [(1 as UID, &*seed_mail_1), (2 as UID, &*seed_mail_2)];
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for (_, mail) in mails {
+                state_lck.insert(Box::new(mail.clone()));
+            }
+        }
+
+        let backend_event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                true,
+            );
+
+        let mailbox_path = {
+            let mailboxes_lck = block_on(imap.uid_store.mailboxes.lock());
+            mailboxes_lck[&inbox_hash].imap_path().to_string()
+        };
+        // The poison: a `mailbox` skeleton with no `max_uid` and no
+        // recorded STATUS baseline at all, plus an empty `envelopes`
+        // table. This is the shape the first-round fix did not cover.
+        seed_imap_cache_db(
+            &temp_dir.path().join(".local/share/meli"),
+            inbox_hash,
+            &mailbox_path,
+            &[],
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let envelopes = {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || block_on(fetch_all_envs(imap, inbox_hash)))
+                    .join()
+                    .unwrap()
+            })
+        };
+
+        let mut subjects: Vec<String> = envelopes
+            .iter()
+            .map(|env| env.subject().into_owned())
+            .collect();
+        subjects.sort_unstable();
+        assert_eq!(
+            envelopes.len(),
+            2,
+            "NULL-skeleton cache short-circuited the fresh fetch; subjects: {subjects:?}; \
+             commands: {:?}",
+            main_commands.lock().unwrap()
+        );
+        assert_eq!(
+            subjects,
+            vec![
+                "RE: null skeleton seed 1".to_string(),
+                "RE: null skeleton seed 2".to_string()
+            ]
+        );
+        let commands = main_commands.lock().unwrap();
+        assert!(
+            commands.iter().any(|l| l.contains("UID SEARCH ALL")),
+            "a full `UID SEARCH ALL` fresh fetch must have run; commands: {commands:?}"
+        );
+        assert!(
+            commands.iter().any(|l| l.contains("UID FETCH 1,2 ")),
+            "a full explicit-UID fresh fetch must have run; commands: {commands:?}"
+        );
+        // A NULL-skeleton mailbox must be routed straight to the single
+        // `InitialFresh` rebuild: walking `ResyncCache` -> `InitialCache`
+        // first would issue a second `SELECT`/`EXAMINE` pair (and the
+        // cache stages below) before the fresh fetch. Ground truth is the
+        // mock's received-command log.
+        let examine_count = commands
+            .iter()
+            .filter(|l| l.contains("EXAMINE INBOX"))
+            .count();
+        assert_eq!(
+            examine_count, 1,
+            "the NULL skeleton must not walk the `ResyncCache`/`InitialCache` stages before \
+             `InitialFresh`; commands: {commands:?}"
+        );
+        drop(commands);
 
         main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
         loops_handle.join().unwrap();
@@ -3371,9 +4048,10 @@ hello world 4.
                 inbox_hash,
                 &mailbox_path,
                 &mails[..3],
-                2,
-                2,
-                3,
+                Some(3),
+                Some(2),
+                Some(2),
+                Some(3),
             );
         }
 
@@ -3486,7 +4164,14 @@ hello world 4.
                 "M14 EXAMINE INBOX\r\n",
                 "M15 UID SEARCH 1:*\r\n",
                 "M16 STATUS INBOX (UIDNEXT)\r\n",
-                "M17 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
+                // See the drift note in
+                // [`crate::imap::fetch::FetchStage::FreshFetch`]: the
+                // fresh-fetch path now drives `UID FETCH` with an
+                // explicit comma-separated UID list (`1,2,3`) sourced
+                // from `UID SEARCH ALL`, so the additional round-trip
+                // also bumps the UID FETCH tag from M17 to M18.
+                "M17 UID SEARCH ALL\r\n",
+                "M18 UID FETCH 1,2,3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
                  BODYSTRUCTURE)\r\n",
             ]
             .iter()
@@ -3964,13 +4649,22 @@ hello world 3.
         // Drift note (semantic port of upstream meli 4f2414a3 "fetch from
         // cache then resync"): the online `ResyncCache` path now re-walks
         // the cache stages first, adding one `SELECT INBOX` round-trip,
-        // which shifts the initial full fetch's tag from M16 to M17. The
-        // UID FETCH command bytes themselves are unchanged.
+        // which shifts the initial full fetch's tag from M16 to M17.
+        //
+        // Drift note (UID SEARCH ALL → explicit UID list):
+        // [`FetchStage::FreshFetch`] now drives `UID FETCH` with an
+        // explicit comma-separated UID list (`1,2,3`) instead of the
+        // `1:max_uid` range that the historic `FreshFetch { max_uid }`
+        // arm emitted. The list is sourced from `UID SEARCH ALL` in
+        // [`FetchStage::InitialFresh`], so the additional round-trip
+        // also bumps the UID FETCH tag from M17 to M18. See the
+        // doc-comment on `FetchStage::FreshFetch` for the rationale
+        // (long-lived Coremail mailboxes with sparse UIDs).
         let frozen_uid_fetch = if enabled {
-            "M17 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
+            "M18 UID FETCH 1,2,3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
              BODYSTRUCTURE)\r\n"
         } else {
-            "M17 UID FETCH 1:4 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)])\r\n"
+            "M18 UID FETCH 1,2,3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)])\r\n"
         };
         {
             let lck = received_commands.lock().unwrap();
@@ -5207,8 +5901,58 @@ hello world 3.
         MailboxHash,
         Arc<Mutex<Vec<String>>>,
     ) {
+        warm_start_setup_with_id_name(
+            backend_event_consumer,
+            server_state,
+            idle_heartbeat_interval,
+            watch_sweep_interval,
+            use_id,
+            offline_cache,
+            None,
+        )
+    }
+
+    /// Like `warm_start_setup`, but lets the caller set the account's
+    /// `imap_id_name` option (the client name sent in the RFC 2971 `ID`
+    /// handshake command). `None` leaves the option unset, which is
+    /// melib's default `"PrivateEmailClient"`.
+    #[allow(clippy::type_complexity)]
+    fn warm_start_setup_with_id_name(
+        backend_event_consumer: BackendEventConsumer,
+        server_state: Arc<Mutex<ServerState>>,
+        idle_heartbeat_interval: u64,
+        watch_sweep_interval: u64,
+        use_id: bool,
+        offline_cache: bool,
+        imap_id_name: Option<String>,
+    ) -> (
+        Box<ImapType>,
+        smol::Async<TcpListener>,
+        futures::channel::mpsc::UnboundedSender<ServerEvent>,
+        std::thread::JoinHandle<()>,
+        MailboxHash,
+        Arc<Mutex<Vec<String>>>,
+    ) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
+        let mut extra = indexmap::indexmap! {
+            "server_hostname".to_string() => local_addr.ip().to_string(),
+            "server_username".to_string() => "user".to_string(),
+            "server_password".to_string() => "password".to_string(),
+            "server_port".to_string() => local_addr.port().to_string(),
+            "use_starttls".to_string() => "false".to_string(),
+            "use_tls".to_string() => "false".to_string(),
+            // Important for testing, because we expect only one connection to be used.
+            "use_connection_pool".to_string() => "false".to_string(),
+            "timeout".to_string() => 1_u64.to_string(),
+            "idle_heartbeat_interval".to_string() => idle_heartbeat_interval.to_string(),
+            "watch_sweep_interval".to_string() => watch_sweep_interval.to_string(),
+            "use_id".to_string() => use_id.to_string(),
+            "offline_cache".to_string() => offline_cache.to_string(),
+        };
+        if let Some(imap_id_name) = imap_id_name {
+            extra.insert("imap_id_name".to_string(), imap_id_name);
+        }
         let account_conf = AccountSettings {
             name: "test".to_string(),
             root_mailbox: "INBOX".to_string(),
@@ -5220,21 +5964,7 @@ hello world 3.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
-            extra: indexmap::indexmap! {
-                "server_hostname".to_string() => local_addr.ip().to_string(),
-                "server_username".to_string() => "user".to_string(),
-                "server_password".to_string() => "password".to_string(),
-                "server_port".to_string() => local_addr.port().to_string(),
-                "use_starttls".to_string() => "false".to_string(),
-                "use_tls".to_string() => "false".to_string(),
-                // Important for testing, because we expect only one connection to be used.
-                "use_connection_pool".to_string() => "false".to_string(),
-                "timeout".to_string() => 1_u64.to_string(),
-                "idle_heartbeat_interval".to_string() => idle_heartbeat_interval.to_string(),
-                "watch_sweep_interval".to_string() => watch_sweep_interval.to_string(),
-                "use_id".to_string() => use_id.to_string(),
-                "offline_cache".to_string() => offline_cache.to_string(),
-            },
+            extra,
         };
 
         let mut imap =
@@ -5416,6 +6146,723 @@ hello new world.
             backend_event_queue.lock().unwrap()
         );
 
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first repro for the 网易 163 (Coremail) fetch-window
+    /// scenario: the account's webmail setting 「收取邮件的时间范围」
+    /// starts as 「仅收取最近30天」, so a mailbox (e.g. a 标签 tag
+    /// subfolder) first reads as `EXISTS 0` and meli caches nothing. When
+    /// the user switches the setting to 「收取全部邮件」, the server
+    /// reveals the mailbox's history (`EXISTS` jumps from 0 to N). The
+    /// manual `refresh` path (`examine_updates`) must emit Create events
+    /// for every revealed mail so an already-open listing backfills.
+    pub(crate) fn run_imap_revealed_history_refresh() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        // Server starts with an empty mailbox: the 30-day fetch window
+        // hides the whole history.
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        // The mailbox is opened while it reads empty: the initial fetch
+        // serves nothing and the offline cache records the empty state.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert!(seed_envs.is_empty(), "mailbox must initially read empty");
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // The user switches 163 webmail to 「收取全部邮件」: the server
+        // reveals the history that was always there (UIDs below anything
+        // meli has seen).
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for i in 0..5 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2002 00:00:{i:02} +0000
+Cc:
+Subject: RE: revealed history {i}
+Message-ID: <revealed{i}@example.com>
+Content-Type: text/plain
+
+hello revealed {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        // Manual refresh (the same path the 3-minute poll uses).
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let subjects = queue_create_subjects(&backend_event_queue);
+        for i in 0..5 {
+            assert!(
+                subjects
+                    .iter()
+                    .any(|s| s == &format!("RE: revealed history {i}")),
+                "refresh after the fetch window opened did not emit a Create event for revealed \
+                 mail {i}; Create events so far: {subjects:?}; full queue: {:?}",
+                backend_event_queue.lock().unwrap()
+            );
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first repro for the 网易 163 (Coremail) fetch-window
+    /// scenario on a **warm** cache: the mailbox was first read through
+    /// the 「仅收取最近30天」 window and meli cached the 4 mails it saw
+    /// (`UID 801..=804`). Switching the account to 「收取全部邮件」
+    /// reveals 20 older mails whose UIDs (`1..=20`) sit *below*
+    /// everything cached, so the incremental
+    /// `UID FETCH lastseenuid+1:*` (`805:*`) returns nothing. The
+    /// manual `refresh` must notice that the persisted envelope count
+    /// (4) is below the server `EXISTS` (24) and rebuild the mailbox,
+    /// emitting Create events for every revealed mail. The following
+    /// `fetch` must then surface all 24 envelopes (the stream may re-emit
+    /// cache-served ones before rebuilding; the account layer dedups by
+    /// hash via `Collection::merge`).
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_revealed_history_warm_cache() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        // Server starts empty; the 4 mails inside the 30-day window are
+        // handed the sparse UIDs the long-lived mailbox already uses.
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            // Hand UIDs out by overriding `next_uid` before each
+            // `insert` (see `ServerState::insert`).
+            state_lck.next_uid = 801;
+            for i in 0..4 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2001 00:00:{i:02} +0000
+Cc:
+Subject: RE: warm seed {i}
+Message-ID: <warm{i}@example.com>
+Content-Type: text/plain
+
+hello warm seed {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        // The mailbox is warm: the initial fetch caches the 4 seeds the
+        // 30-day window exposes.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                4,
+                                "warm fetch must load the 4 seeded mails; got {}",
+                                seed_envs.len()
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // The user switches 163 webmail to 「收取全部邮件」: the server
+        // reveals 20 mails that were always there, with UIDs below
+        // everything meli has seen.
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.next_uid = 1;
+            for i in 0..20 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2002 00:00:{i:02} +0000
+Cc:
+Subject: RE: revealed history {i}
+Message-ID: <revealed{i}@example.com>
+Content-Type: text/plain
+
+hello revealed {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+            // The mock derives both the `*` in a `UID FETCH a:*` range and
+            // the `STATUS (UIDNEXT ...)` value from `next_uid`. A real
+            // server reports `max_uid + 1 = 805` after the seeds
+            // (`801..=804`); restore that instead of leaving the temporary
+            // `1` base at 21, which would make `805:*` resolve to UID 20.
+            state_lck.next_uid = 805;
+        }
+
+        // Manual refresh (the same path the 3-minute poll uses).
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let subjects = queue_create_subjects(&backend_event_queue);
+        for i in 0..20 {
+            assert!(
+                subjects
+                    .iter()
+                    .any(|s| s == &format!("RE: revealed history {i}")),
+                "refresh after the fetch window opened did not emit a Create event for revealed \
+                 mail {i}; Create events so far: {subjects:?}; full queue: {:?}",
+                backend_event_queue.lock().unwrap()
+            );
+        }
+
+        // The cache-wipe caused by the rebuild must force the next fetch
+        // stream to load the full history again: 4 seed + 20 revealed. The
+        // stream may re-emit envelopes already served by the
+        // stale-while-revalidate cache walk; the account layer dedups by
+        // hash via `Collection::merge`, so compare distinct message-ids.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let all_envs = fetch_all_envs(imap, inbox_hash).await;
+                            let message_ids: std::collections::BTreeSet<String> = all_envs
+                                .iter()
+                                .map(|env| env.message_id().to_string())
+                                .collect();
+                            assert_eq!(
+                                message_ids.len(),
+                                24,
+                                "fetch after the window opened must rebuild the full mailbox \
+                                 (4 seed + 20 revealed); got {} distinct message-ids from {} \
+                                 streamed envelopes",
+                                message_ids.len(),
+                                all_envs.len()
+                            );
+                            for i in 0..4 {
+                                assert!(
+                                    message_ids.iter().any(|m| m.contains(&format!("warm{i}@"))),
+                                    "seed mail {i} missing after rebuild: {message_ids:?}"
+                                );
+                            }
+                            for i in 0..20 {
+                                assert!(
+                                    message_ids
+                                        .iter()
+                                        .any(|m| m.contains(&format!("revealed{i}@"))),
+                                    "revealed mail {i} missing after rebuild: {message_ids:?}"
+                                );
+                            }
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // A third refresh must not churn: the cache now holds all 24
+        // envelopes, so no new distinct Create subject may appear. The
+        // exact multiset may legitimately differ; compare the deduped
+        // (sorted) sets instead.
+        let creates_before_third: std::collections::BTreeSet<String> =
+            queue_create_subjects(&backend_event_queue)
+                .into_iter()
+                .collect();
+        backend_event_queue.lock().unwrap().clear();
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+        let third_subjects = queue_create_subjects(&backend_event_queue);
+        let creates_after_third: std::collections::BTreeSet<String> =
+            third_subjects.iter().cloned().collect();
+        assert!(
+            creates_before_third
+                .iter()
+                .all(|s| !creates_after_third.contains(s)),
+            "third refresh re-emitted Create events for already known mails: {third_subjects:?}"
+        );
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first regression for a cache poisoned by an **old** binary:
+    /// the persisted mailbox skeleton records a STATUS baseline measured
+    /// after a no-op resync (`messages = 24`, matching the server) while
+    /// only 4 envelopes actually persist. The RFC 4549 STATUS quick-skip
+    /// at the top of `resync_basic` used to trust those recorded counters
+    /// unconditionally, so `refresh` (F5 / the watch poll) short-circuited
+    /// forever and only reopening the mailbox (a full fresh fetch) healed
+    /// the listing.
+    ///
+    /// With the fix, the quick-skip additionally requires the persisted
+    /// envelope count to cover the recorded `MESSAGES`; here 4 != 24, so
+    /// the arm falls through to the full resync, whose SELECT +
+    /// count-completeness guard wipes and rebuilds the mailbox.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_resync_quickskip_poisoned_cache() {
+        use melib::imap::sync::cache::ImapCache as _;
+
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        // Server starts with the 4 mails inside the fetch window, handed
+        // the sparse UIDs the long-lived mailbox already uses.
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            // Hand UIDs out by overriding `next_uid` before each
+            // `insert` (see `ServerState::insert`).
+            state_lck.next_uid = 801;
+            for i in 0..4 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2001 00:00:{i:02} +0000
+Cc:
+Subject: RE: poisoned seed {i}
+Message-ID: <poisonedseed{i}@example.com>
+Content-Type: text/plain
+
+hello poisoned seed {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        // The mailbox is warm: the initial fetch caches the 4 seeds.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                4,
+                                "warm fetch must load the 4 seeded mails; got {}",
+                                seed_envs.len()
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // The server reveals 20 older mails whose UIDs (`1..=20`) sit
+        // below everything cached.
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.next_uid = 1;
+            for i in 0..20 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2002 00:00:{i:02} +0000
+Cc:
+Subject: RE: poisoned revealed {i}
+Message-ID: <poisoned{i}@example.com>
+Content-Type: text/plain
+
+hello poisoned revealed {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+            // The mock derives both the `*` in a `UID FETCH a:*` range and
+            // the `STATUS (UIDNEXT ...)` value from `next_uid`. The live
+            // STATUS now reports `max_uid + 1 = 21` for the poison below.
+            state_lck.next_uid = 21;
+        }
+
+        // Poison the recorded STATUS baseline exactly like the old
+        // binary's no-op resync did: the values match the mock's live
+        // STATUS (`messages = 24`, `unseen = 24`, `uidnext = 21`) while
+        // only the 4 seed envelopes persist.
+        let mut uid_store = Arc::clone(&imap.uid_store);
+        uid_store
+            .record_status(inbox_hash, Some(24), Some(24), Some(21))
+            .unwrap();
+
+        // The real F5 / watch path resyncs on a connection that does not
+        // hold the mailbox selection. `warm_start_setup`'s initial fetch
+        // leaves the main connection selected, and the quick-skip arm's
+        // `NOOP` flush would then observe the widened `EXISTS` and run the
+        // full resync anyway, masking the bug. Drop the selection so this
+        // exercises the plain quick-skip branch (`MailboxSelection::None`).
+        block_on(async {
+            let mut conn = imap.connection.lock().await.unwrap();
+            conn.unselect().await.unwrap();
+        });
+
+        // Manual refresh (the same path the 3-minute poll / F5 uses).
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let subjects = queue_create_subjects(&backend_event_queue);
+        for i in 0..20 {
+            assert!(
+                subjects
+                    .iter()
+                    .any(|s| s == &format!("RE: poisoned revealed {i}")),
+                "refresh on a poisoned cache did not emit a Create event for revealed mail {i}; \
+                 Create events so far: {subjects:?}; full queue: {:?}",
+                backend_event_queue.lock().unwrap()
+            );
+        }
+
+        // The cache-wipe caused by the rebuild must force the next fetch
+        // stream to load the full history again: 4 seed + 20 revealed. The
+        // stream may re-emit envelopes already served by the
+        // stale-while-revalidate cache walk; the account layer dedups by
+        // hash via `Collection::merge`, so compare distinct message-ids.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let all_envs = fetch_all_envs(imap, inbox_hash).await;
+                            let message_ids: std::collections::BTreeSet<String> = all_envs
+                                .iter()
+                                .map(|env| env.message_id().to_string())
+                                .collect();
+                            assert_eq!(
+                                message_ids.len(),
+                                24,
+                                "fetch after the poisoned refresh must rebuild the full mailbox \
+                                 (4 seed + 20 revealed); got {} distinct message-ids from {} \
+                                 streamed envelopes",
+                                message_ids.len(),
+                                all_envs.len()
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // A second refresh must not churn. Note that the fresh-fetch rebuild
+        // performed by the poisoned-cache recovery does not itself record a
+        // STATUS baseline, so the next refresh is a catch-up resync that may
+        // legitimately re-emit already-known mails (the account layer dedups
+        // by envelope hash via `Collection::merge`, so a duplicate Create is
+        // harmless). Assert that this catch-up never invents a mail outside
+        // the expected 24 (4 seeds + 20 revealed), then that the *following*
+        // refresh -- baseline recorded and cache complete -- is a true no-op.
+        let expected_all: std::collections::BTreeSet<String> = (0..4)
+            .map(|i| format!("RE: poisoned seed {i}"))
+            .chain((0..20).map(|i| format!("RE: poisoned revealed {i}")))
+            .collect();
+        assert_eq!(expected_all.len(), 24);
+        let creates_before_second: std::collections::BTreeSet<String> =
+            queue_create_subjects(&backend_event_queue)
+                .into_iter()
+                .collect();
+        let expected_revealed: std::collections::BTreeSet<String> = (0..20)
+            .map(|i| format!("RE: poisoned revealed {i}"))
+            .collect();
+        assert_eq!(
+            creates_before_second, expected_revealed,
+            "the poisoned-cache rebuild must emit exactly the 20 revealed Create events"
+        );
+        backend_event_queue.lock().unwrap().clear();
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+        let creates_after_second: std::collections::BTreeSet<String> =
+            queue_create_subjects(&backend_event_queue)
+                .into_iter()
+                .collect();
+        assert!(
+            creates_after_second.is_subset(&expected_all),
+            "second refresh emitted Create events for unknown mails: {:?}",
+            creates_after_second
+                .difference(&expected_all)
+                .collect::<Vec<_>>()
+        );
+        backend_event_queue.lock().unwrap().clear();
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+        let creates_after_third: std::collections::BTreeSet<String> =
+            queue_create_subjects(&backend_event_queue)
+                .into_iter()
+                .collect();
+        assert!(
+            creates_after_third.is_empty(),
+            "third refresh on a complete cache emitted new Create events: \
+             {creates_after_third:?}"
+        );
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Test that the IMAP account option `imap_id_name` customizes the
+    /// client name reported in the RFC 2971 `ID` command sent during the
+    /// connection handshake. A non-empty custom value must appear in the
+    /// raw `M4 ID` line and must not be the anonymous `ID NIL` form, while
+    /// the empty string must fall back to `ID NIL`. (The default
+    /// `"PrivateEmailClient"` path and the `use_id = false` path are
+    /// covered by `run_imap_watch_id_gated_push`.)
+    pub(crate) fn run_imap_id_name_custom() {
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+
+        // Phase 1: a non-empty custom client name is reported as-is and is
+        // not the anonymous `ID NIL` form.
+        let server_state = Arc::new(Mutex::new(ServerState::default()));
+        let (_imap, _listener, main_conn_sender, loops_handle, _inbox_hash, _main_commands) =
+            warm_start_setup_with_id_name(
+                Default::default(),
+                Arc::clone(&server_state),
+                60,
+                300,
+                true,
+                false,
+                Some("CustomClient".to_string()),
+            );
+        let id_line = server_state
+            .lock()
+            .unwrap()
+            .id_handshake_line
+            .clone()
+            .expect("the client must send an `M4 ID` command during the handshake");
+        let id_line_str = String::from_utf8_lossy(&id_line);
+        assert!(
+            id_line.starts_with(b"M4 ID "),
+            "handshake ID line has unexpected prefix: {id_line_str:?}"
+        );
+        assert!(
+            id_line_str.contains("CustomClient"),
+            "the handshake ID line must report the configured `imap_id_name`: {id_line_str:?}"
+        );
+        assert!(
+            !id_line_str.contains("NIL"),
+            "a non-empty `imap_id_name` must not send `ID NIL`: {id_line_str:?}"
+        );
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+
+        // Phase 2: the empty string falls back to the anonymous `ID NIL`.
+        let server_state = Arc::new(Mutex::new(ServerState::default()));
+        let (_imap, _listener, main_conn_sender, loops_handle, _inbox_hash, _main_commands) =
+            warm_start_setup_with_id_name(
+                Default::default(),
+                Arc::clone(&server_state),
+                60,
+                300,
+                true,
+                false,
+                Some(String::new()),
+            );
+        let id_line = server_state
+            .lock()
+            .unwrap()
+            .id_handshake_line
+            .clone()
+            .expect("the client must send an `ID` command during the handshake");
+        assert_eq!(
+            id_line, b"M4 ID NIL\r\n",
+            "an empty `imap_id_name` must send the anonymous `ID NIL`"
+        );
         main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
         loops_handle.join().unwrap();
     }
@@ -5717,6 +7164,12 @@ hello new world b.
             advertise_x_gm_ext_1: false,
             advertise_unselect: true,
             x_gm_raw_literals: vec![],
+            id_handshake_line: None,
+            omit_uidnext: false,
+            fetch_underdelivers: None,
+            fetch_drop_connection_on_nth: None,
+            fetch_envelope_fetches: 0,
+            fetch_drop_connection_count: 0,
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
@@ -9328,6 +10781,943 @@ hello new world.
 
         main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
         watch_loops_handle.join().unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Regression test for the Coremail (e.g. 网易 163/126/188) UIDNEXT gap:
+    /// `SELECT`/`EXAMINE` omit the `* OK [UIDNEXT n]` line and
+    /// `STATUS (UIDNEXT)` returns an empty `()` item list, so
+    /// `select_response.uidnext == 0` and `status.uidnext == None` on the
+    /// standard two-layer fallback. The client must transparently fall
+    /// back to `UID SEARCH *` to derive `UIDNEXT = max_uid + 1` and
+    /// complete the initial fetch + a heartbeat resync without error.
+    pub(crate) fn run_imap_init_uidnext_via_uid_search_star() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: coremail seed 1
+Message-ID: <coremail1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: coremail seed 2
+Message-ID: <coremail2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let new_mail = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:02 +0000
+Cc:
+Subject: RE: coremail NEW mail
+Message-ID: <coremailnew@example.com>
+Content-Type: text/plain
+
+hello new world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            // Coremail: no UIDNEXT in SELECT/EXAMINE, empty parens from
+            // STATUS (UIDNEXT). Client must derive UIDNEXT via
+            // `UID SEARCH *`.
+            omit_uidnext: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        // Short heartbeat so the watch's compensating resync runs quickly
+        // during the second half of the assertion.
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                2,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+        let main_commands_for_asserts = Arc::clone(&main_commands);
+
+        // Initial fetch must succeed despite the missing UIDNEXT.
+        {
+            let imap = &mut imap;
+            let main_commands_for_thread = Arc::clone(&main_commands_for_asserts);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load both seed mails even though the \
+                                 server omits UIDNEXT; received_commands = {:?}",
+                                main_commands_for_thread.lock().unwrap()
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // The third-layer fallback must have run: after the standard
+        // `STATUS INBOX (UIDNEXT)` the client must have sent at least one
+        // `UID SEARCH *` to derive UIDNEXT. The mock records each command
+        // exactly once per call.
+        {
+            let lck = main_commands.lock().unwrap();
+            let mut uid_search_star_count = 0;
+            for line in lck.iter() {
+                if line.ends_with(" UID SEARCH *\r\n") {
+                    uid_search_star_count += 1;
+                }
+            }
+            assert!(
+                uid_search_star_count >= 1,
+                "client did not send the third-layer `UID SEARCH *` UIDNEXT fallback; \
+                 commands were: {lck:?}"
+            );
+            // Sanity: the envelope fetch must use the SEARCH-driven
+            // UID list (one entry per real UID; see the doc-comment on
+            // [`FetchStage::FreshFetch`]). `ServerState::insert` hands
+            // out UIDs from `next_uid`, so the 2 seed mails have UIDs
+            // 1 and 2, exactly the value the mock's own `next_uid` /
+            // `STATUS` layer would have reported. The fetch carries an
+            // explicit `UID FETCH 1,2` list rather than the historic
+            // `1:max_uid` range; the latter would degenerate into the
+            // ≈528 000 round-trip walk on Coremail long-lived
+            // mailboxes.
+            let saw_envelope_fetch = lck
+                .iter()
+                .any(|line| line.contains(" UID FETCH 1,2 ") && line.contains("ENVELOPE"));
+            assert!(
+                saw_envelope_fetch,
+                "envelope UID FETCH did not use the SEARCH-derived explicit UID list \
+                 `1,2`; commands were: {lck:?}"
+            );
+        }
+
+        // Watch + heartbeat resync must also survive the missing UIDNEXT.
+        let mut watch_fut = Box::pin(imap.watch().unwrap().into_future());
+        let (watch_conn_sender, watch_conn_receiver) = unbounded();
+        let watch_conn = ImapServerStream::new(
+            &listener,
+            &mut watch_fut,
+            (watch_conn_sender.clone(), watch_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let watch_conn_loop = watch_conn.loop_handler("watch");
+        let watch_loops_handle = std::thread::spawn(move || {
+            block_on(watch_conn_loop);
+        });
+        watch_conn_sender
+            .unbounded_send(ServerEvent::New(new_mail))
+            .unwrap();
+
+        // Drive the watch stream until the new mail surfaces as a
+        // Refresh event (heartbeat re-sync picks it up because the mock
+        // does not push EXISTS by default).
+        let main_commands_for_watch = Arc::clone(&main_commands_for_asserts);
+        block_on(async {
+            let mut found = false;
+            let deadline = std::time::Instant::now() + WATCH_TEST_DEADLINE;
+            while !found {
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "watch stream did not emit the new mail's Create event within \
+                         {WATCH_TEST_DEADLINE:?}; received_commands = {:?}",
+                        main_commands_for_watch.lock().unwrap()
+                    );
+                }
+                let item = match future::select(
+                    watch_fut.as_mut(),
+                    smol::Timer::after(WATCH_TEST_POLL_TICK),
+                )
+                .await
+                {
+                    Either::Left(((item, rest), _tick)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        item
+                    }
+                    Either::Right((_tick, _pending)) => continue,
+                };
+                let Some(backend_event) = item else {
+                    panic!("watch stream ended before the new mail's Create event");
+                };
+                match backend_event.unwrap() {
+                    BackendEvent::RefreshBatch(events) => {
+                        found = events.iter().any(|event| {
+                            matches!(
+                                &event.kind,
+                                RefreshEventKind::Create(env)
+                                    if env.subject() == "RE: coremail NEW mail"
+                            )
+                        });
+                    }
+                    BackendEvent::Refresh(event) => {
+                        found = matches!(
+                            &event.kind,
+                            RefreshEventKind::Create(env)
+                                if env.subject() == "RE: coremail NEW mail"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        watch_loops_handle.join().unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first regression for the Coremail (网易 163) sparse-UID
+    /// cold-start hang described in
+    /// [`crate::imap::fetch::FetchStage::FreshFetch`]: with two seed
+    /// mails whose UIDs are 5 and 1_320_000_000, the historic
+    /// `UID FETCH min..max` downward walk from `uidnext` would have
+    /// needed `(1_320_000_000 - 5) / 2500 ≈ 528 000` round-trips.
+    ///
+    /// The fix issues one `UID SEARCH ALL` to enumerate the real UIDs
+    /// and then `UID FETCH`es them as an explicit comma-separated UID
+    /// list. Both envelopes must land in the result stream, and the
+    /// mock must observe at most a couple of envelope `UID FETCH`
+    /// commands — never the O(uidnext) explosion.
+    pub(crate) fn run_imap_fresh_fetch_sparse_uids() {
+        let backend_event_consumer = BackendEventConsumer::new(Arc::new(move |_ah, _be| {}));
+
+        // $ date -R -u -r 0
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: sparse seed 1
+Message-ID: <sparse1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        // $ date -R -u -r 1
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: sparse seed 2
+Message-ID: <sparse2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            // Default mock: `STATUS INBOX (UIDNEXT)` reports `next_uid`
+            // (= `max_uid + 1`), so the `uidnext` value the client would
+            // otherwise have walked downward from is `1_320_000_001`.
+            omit_uidnext: false,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            // Hand UIDs out by overriding `next_uid` before each
+            // `insert` (see `ServerState::insert`).
+            state_lck.next_uid = 5;
+            state_lck.insert(seed_mail_1);
+            state_lck.next_uid = 1_320_000_000;
+            state_lck.insert(seed_mail_2);
+            // Leave `next_uid` set so `STATUS (UIDNEXT)` reports
+            // `max_uid + 1 = 1_320_000_001` (the `insert` already
+            // advanced it to exactly that value).
+        }
+
+        // Cold cache: do not pass `offline_cache` so no sqlite file is
+        // consulted. `idle_heartbeat_interval` and
+        // `watch_sweep_interval` are kept at 1 second so the watch can
+        // produce heartbeat round-trips during the post-fetch
+        // assertion without issuing envelope `UID FETCH` commands
+        // (the mailbox has no new mail).
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                1,
+                1,
+                true,
+                false,
+            );
+        let main_commands_for_asserts = Arc::clone(&main_commands);
+
+        // Initial fetch must succeed and load both seed mails.
+        {
+            let imap = &mut imap;
+            let main_commands_for_thread = Arc::clone(&main_commands_for_asserts);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load both sparse seed mails; \
+                                 received_commands = {:?}",
+                                main_commands_for_thread.lock().unwrap()
+                            );
+                            // Mail 1 is older than mail 2; fetch_all_envs
+                            // returns them in whatever order the stream
+                            // emits, so compare by message-id instead.
+                            let subjects: Vec<_> = seed_envs
+                                .iter()
+                                .map(|env| env.message_id().to_string())
+                                .collect();
+                            assert!(
+                                subjects.iter().any(|s| s.contains("sparse1@example.com")),
+                                "UID 5 mail is missing from fetched envelopes: {subjects:?}"
+                            );
+                            assert!(
+                                subjects.iter().any(|s| s.contains("sparse2@example.com")),
+                                "UID 1320000000 mail is missing from fetched envelopes: \
+                                 {subjects:?}"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // Failing-first regression: the historic `UID FETCH min..max`
+        // downward walk would have produced ≈528 000 `UID FETCH`
+        // commands; with the fix the count is bounded by the number of
+        // real messages (and the explicit UID list goes in a single
+        // batch because `2 ≤ batch_size = 2500`). Two envelopes ⇒ at
+        // most two envelope `UID FETCH` commands (the batch never
+        // splits). The historic code path never reaches this assertion
+        // because it would exceed the watchdog long before then.
+        {
+            let lck = main_commands.lock().unwrap();
+            let envelope_fetches: Vec<&String> = lck
+                .iter()
+                .filter(|line| line.contains(" UID FETCH ") && line.contains("ENVELOPE"))
+                .collect();
+            assert!(
+                envelope_fetches.len() <= 2,
+                "envelope UID FETCH command count for 2 sparse seed mails must be ≤ 2 \
+                 (got {}); historic code would have produced ≈528 000. Commands: {:?}",
+                envelope_fetches.len(),
+                envelope_fetches,
+            );
+            // The fetch must carry the explicit UID list, not the
+            // historic `min..max` range that the fix replaced.
+            let saw_explicit_list = envelope_fetches
+                .iter()
+                .any(|line| line.contains(" UID FETCH 5,1320000000 "));
+            assert!(
+                saw_explicit_list,
+                "envelope UID FETCH did not use the explicit UID list `5,1320000000` \
+                 sourced from `UID SEARCH ALL`; commands were: {lck:?}"
+            );
+        }
+
+        // Drive the watch stream through a few idle-heartbeat ticks
+        // (the interval is 1s above) to confirm the fix doesn't leave
+        // residual `UID FETCH` commands behind in the idle state: the
+        // initial fetch already loaded the entire mailbox, so no resync
+        // fetch should appear and the count must not grow.
+        let mut watch_fut = Box::pin(imap.watch().unwrap().into_future());
+        let (watch_conn_sender, watch_conn_receiver) = unbounded();
+        let watch_conn = ImapServerStream::new(
+            &listener,
+            &mut watch_fut,
+            (watch_conn_sender.clone(), watch_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let watch_conn_loop = watch_conn.loop_handler("watch");
+        let watch_loops_handle = std::thread::spawn(move || {
+            block_on(watch_conn_loop);
+        });
+
+        let baseline_fetches = {
+            let lck = main_commands.lock().unwrap();
+            lck.iter()
+                .filter(|line| line.contains(" UID FETCH ") && line.contains("ENVELOPE"))
+                .count()
+        };
+
+        block_on(async {
+            // Wait long enough that the watch would have resync'd a few
+            // times if there were any residual fetch commands. No
+            // resync fetches are expected because the initial fetch
+            // already loaded the entire mailbox.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                let tick = smol::Timer::after(Duration::from_millis(25));
+                let _ = future::select(watch_fut.as_mut(), tick).await;
+                let lck = main_commands.lock().unwrap();
+                let fetches_now = lck
+                    .iter()
+                    .filter(|line| line.contains(" UID FETCH ") && line.contains("ENVELOPE"))
+                    .count();
+                assert!(
+                    fetches_now <= baseline_fetches,
+                    "watch tick issued new envelope UID FETCH commands ({} → {}); \
+                     the fix should not need any resync fetches: commands = {:?}",
+                    baseline_fetches,
+                    fetches_now,
+                    lck,
+                );
+            }
+        });
+
+        watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        watch_loops_handle.join().unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first regression for the Coremail 网易 163 under-delivering
+    /// `FETCH`: the server reports `EXISTS = 8` but only ever returns 3 of
+    /// the 8 messages (`fetch_underdelivers = Some(5)`). The first fetch
+    /// (empty cache) can only cache those 3; the *second* fetch notices the
+    /// persisted count is below `EXISTS` and runs the completeness rebuild
+    /// (`cache_is_incomplete`), which must record the mailbox in the
+    /// session memo. From then on the guards must accept the retrievable
+    /// set: a `refresh` must not wipe and re-fetch the mailbox, otherwise
+    /// every poll loops forever.
+    ///
+    /// The explicit-UID envelope `FETCH` command shape only appears on the
+    /// `FreshFetch` path (resync uses ranges such as `UID FETCH 9:*`, which
+    /// carry no comma), so counting it is a direct measure of rebuilds.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_fetch_underdelivered_exists() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            fetch_underdelivers: Some(5),
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for i in 0..8usize {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"some name\" <some@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:{i:02} +0000
+Cc:
+Subject: underdelivered seed {i}
+Message-ID: <underdelivered{i}@example.com>
+Content-Type: text/plain
+
+hello underdelivered {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                true,
+            );
+
+        let fetch_once = |imap: &mut ImapType, inbox_hash: MailboxHash| -> Vec<Envelope> {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || block_on(fetch_all_envs(imap, inbox_hash)))
+                    .join()
+                    .unwrap()
+            })
+        };
+        let refresh_once = |imap: &mut ImapType, inbox_hash: MailboxHash| {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        };
+        let message_ids = |envs: &[Envelope]| -> std::collections::BTreeSet<String> {
+            envs.iter()
+                .map(|env| env.message_id().to_string())
+                .collect()
+        };
+        // The `FreshFetch` explicit-UID list (`UID FETCH 1,2,...`); the
+        // resync/incremental fetches use ranges (`UID FETCH 9:*`) and have
+        // no comma in the sequence set.
+        let explicit_uid_fetch_count = |cmds: &[String]| -> usize {
+            cmds.iter()
+                .filter(|l| l.contains(" UID FETCH ") && l.contains(',') && l.contains("ENVELOPE"))
+                .count()
+        };
+
+        // (a) The first full fresh fetch can only ever load the 3
+        // retrievable messages, while the server claims 8.
+        let first_ids = message_ids(&fetch_once(&mut imap, inbox_hash));
+        assert_eq!(
+            first_ids.len(),
+            3,
+            "the under-delivering server must yield only the 3 retrievable messages; commands: \
+             {:?}",
+            main_commands.lock().unwrap()
+        );
+
+        // The second fetch sees the persisted count (3) below `EXISTS` (8)
+        // and triggers the one allowed completeness rebuild. Its fresh
+        // fetch still cannot reach 8, but the memo must now be set.
+        let second_ids = message_ids(&fetch_once(&mut imap, inbox_hash));
+        assert_eq!(
+            second_ids,
+            first_ids,
+            "the first completeness rebuild must still surface the retrievable set; commands: {:?}",
+            main_commands.lock().unwrap()
+        );
+        let fetches_after_first_rebuild = explicit_uid_fetch_count(&main_commands.lock().unwrap());
+        assert_eq!(
+            fetches_after_first_rebuild,
+            2,
+            "expected exactly two explicit-UID envelope fetches (initial + one rebuild); \
+             commands: {:?}",
+            main_commands.lock().unwrap()
+        );
+
+        // (b) Two further refreshes must be inert: the memo makes the
+        // guards accept the retrievable set. Without it each refresh wipes
+        // the mailbox and the next fetch rebuilds it again.
+        let creates_before_second_refresh: std::collections::BTreeSet<String> =
+            queue_create_subjects(&backend_event_queue)
+                .into_iter()
+                .collect();
+        refresh_once(&mut imap, inbox_hash);
+        refresh_once(&mut imap, inbox_hash);
+
+        let third_ids = message_ids(&fetch_once(&mut imap, inbox_hash));
+        assert_eq!(
+            third_ids,
+            first_ids,
+            "the 3 retrievable envelopes must survive the refreshes; commands: {:?}",
+            main_commands.lock().unwrap()
+        );
+        let fetches_after_refreshes = explicit_uid_fetch_count(&main_commands.lock().unwrap());
+        assert_eq!(
+            fetches_after_refreshes,
+            fetches_after_first_rebuild,
+            "a refresh wiped and re-fetched the mailbox (a new explicit-UID envelope FETCH \
+             ran); commands: {:?}",
+            main_commands.lock().unwrap()
+        );
+        let creates_after: std::collections::BTreeSet<String> =
+            queue_create_subjects(&backend_event_queue)
+                .into_iter()
+                .collect();
+        assert!(
+            creates_before_second_refresh
+                .iter()
+                .all(|s| !creates_after.contains(s)),
+            "a refresh re-emitted Create events for already known mails: {creates_after:?}"
+        );
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first regression for resuming a `FreshFetch` after the
+    /// connection drops mid-batch. The mock truncates the first envelope
+    /// `UID FETCH` reply after half the responses and resets the
+    /// connection without a tagged `OK` (Coremail 网易 163 drops the
+    /// stream mid-fetch). The client must reconnect and retry the same
+    /// batch; a plain abort would surface a partial listing or an error.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_fetch_resumes_after_conn_drop() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            fetch_drop_connection_on_nth: Some(1),
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for i in 0..12usize {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"some name\" <some@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:{i:02} +0000
+Cc:
+Subject: resume seed {i}
+Message-ID: <resume{i}@example.com>
+Content-Type: text/plain
+
+hello resume {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        let backend_event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                true,
+            );
+
+        // `warm_start_setup` owns (and already accepted) the first
+        // connection only. The dropped first attempt makes the client open
+        // a new one, so serve reconnects here. The thread is detached: it
+        // blocks on `accept()`/the reconnected session after the test ends
+        // and the process exit reaps it.
+        {
+            let reconnect_state = Arc::clone(&server_state);
+            std::thread::spawn(move || {
+                for _ in 0..4 {
+                    let (sender, receiver) = unbounded();
+                    let conn = ImapServerStream::new(
+                        &listener,
+                        std::future::pending::<()>(),
+                        (sender, receiver),
+                        Arc::clone(&reconnect_state),
+                    );
+                    block_on(conn.loop_handler("reconnect"));
+                }
+            });
+        }
+
+        let envelopes = {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || block_on(fetch_all_envs(imap, inbox_hash)))
+                    .join()
+                    .unwrap()
+            })
+        };
+
+        let message_ids: std::collections::BTreeSet<String> = envelopes
+            .iter()
+            .map(|env| env.message_id().to_string())
+            .collect();
+        assert_eq!(
+            message_ids.len(),
+            12,
+            "the fetch must resume after the mid-batch connection drop and return all 12 \
+             message-ids; got {} distinct from {} streamed envelopes",
+            message_ids.len(),
+            envelopes.len()
+        );
+        for i in 0..12usize {
+            assert!(
+                message_ids
+                    .iter()
+                    .any(|m| m.contains(&format!("resume{i}@"))),
+                "message {i} missing after the reconnect: {message_ids:?}"
+            );
+        }
+        assert!(
+            server_state.lock().unwrap().fetch_drop_connection_count >= 1,
+            "the mock never dropped the first connection"
+        );
+
+        // The mock reset the main connection, so its loop handler already
+        // exited and the receiver is gone; the send is best-effort.
+        let _ = main_conn_sender.unbounded_send(ServerEvent::Quit);
+        loops_handle.join().unwrap();
+    }
+
+    /// Failing-first regression for the destructive cache-completeness
+    /// rebuild on a flaky connection: a warm cache holds the 4 seed mails
+    /// (UID `801..=804`); switching 163 webmail to 「收取全部邮件」 reveals
+    /// 20 older mails (UID `1..=20`) and poisons the recorded STATUS
+    /// baseline (`messages = 24`) exactly like the old binary's no-op
+    /// resync did. The `refresh` therefore falls through to the
+    /// completeness guard, which used to wipe the mailbox (`init_mailbox`,
+    /// cascading the `envelopes` rows away) before the refill could run.
+    /// The mock then drops the connection mid-backfill (the 2nd envelope
+    /// FETCH; the warm 4-seed fetch is the 1st and must succeed), so the
+    /// refill never completes. The 4 cached seeds must survive: the guard
+    /// must not wipe, because every refill path only upserts and the fetch
+    /// stream's resume+retry keeps progress monotonic.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_rebuild_nondestructive_on_conn_drop() {
+        use melib::imap::sync::cache::ImapCache as _;
+
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
+        set_test_xdg_env(&temp_dir);
+
+        // Server starts with the 4 mails inside the fetch window, handed
+        // the sparse UIDs the long-lived mailbox already uses.
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            // Drop the *second* envelope FETCH: the warm 4-seed fetch is
+            // the first (and must complete), the refresh backfill is the
+            // second.
+            fetch_drop_connection_on_nth: Some(2),
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            // Hand UIDs out by overriding `next_uid` before each `insert`.
+            state_lck.next_uid = 801;
+            for i in 0..4 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2001 00:00:{i:02} +0000
+Cc:
+Subject: RE: nondestructive seed {i}
+Message-ID: <nondestructive{i}@example.com>
+Content-Type: text/plain
+
+hello nondestructive seed {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        // The mailbox is warm: the initial fetch caches the 4 seeds. This is
+        // envelope FETCH #1, so the drop quirk must not disturb it.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                4,
+                                "warm fetch must load the 4 seeded mails; got {}",
+                                seed_envs.len()
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+        assert_eq!(
+            imap.uid_store.count_envelopes(inbox_hash).unwrap(),
+            Some(4),
+            "the warm fetch must have persisted the 4 seed envelopes"
+        );
+
+        // The server reveals 20 older mails whose UIDs (`1..=20`) sit below
+        // everything cached.
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.next_uid = 1;
+            for i in 0..20 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2002 00:00:{i:02} +0000
+Cc:
+Subject: RE: nondestructive revealed {i}
+Message-ID: <nondestructive{i}@example.com>
+Content-Type: text/plain
+
+hello nondestructive revealed {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+            // The mock derives both the `*` in a `UID FETCH a:*` range and
+            // the `STATUS (UIDNEXT ...)` value from `next_uid`; restore the
+            // real `max_uid + 1 = 21`.
+            state_lck.next_uid = 21;
+        }
+
+        // Poison the recorded STATUS baseline exactly like the old
+        // binary's no-op resync did: the values match the mock's live
+        // STATUS (`messages = 24`, `unseen = 24`, `uidnext = 21`) while
+        // only the 4 seed envelopes persist.
+        let mut uid_store = Arc::clone(&imap.uid_store);
+        uid_store
+            .record_status(inbox_hash, Some(24), Some(24), Some(21))
+            .unwrap();
+
+        // The real F5 / watch path resyncs on a connection that does not
+        // hold the mailbox selection; the quick-skip arm's `NOOP` flush
+        // would otherwise observe the widened `EXISTS` and run the full
+        // resync anyway.
+        block_on(async {
+            let mut conn = imap.connection.lock().await.unwrap();
+            conn.unselect().await.unwrap();
+        });
+
+        // Manual refresh: the completeness guard fires, then the mock drops
+        // the connection mid-backfill (envelope FETCH #2). `refresh` may
+        // surface that as a network error; that error is the scenario under
+        // test, so tolerate it instead of unwrapping.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let _ = imap.refresh(inbox_hash).unwrap().await;
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+        assert!(
+            server_state.lock().unwrap().fetch_drop_connection_count >= 1,
+            "the mock never dropped the connection during the refresh backfill"
+        );
+
+        // Failing-first assertion: the interrupted rebuild must not have
+        // destroyed the 4 already-cached seeds. Before the fix the guard
+        // wiped the mailbox (`init_mailbox` cascades the `envelopes` rows),
+        // leaving 0 envelopes.
+        let count_after_drop = imap.uid_store.count_envelopes(inbox_hash).unwrap();
+        assert_eq!(
+            count_after_drop,
+            Some(4),
+            "the cache-completeness guard wiped the mailbox before the refill could complete; \
+             the 4 seed envelopes must survive the dropped rebuild"
+        );
+
+        // The mock reset the main connection, so its loop handler already
+        // exited and the receiver is gone; the send is best-effort.
+        let _ = main_conn_sender.unbounded_send(ServerEvent::Quit);
         loops_handle.join().unwrap();
     }
 }

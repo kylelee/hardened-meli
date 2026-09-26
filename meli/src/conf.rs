@@ -529,8 +529,7 @@ fn strip_legacy_listing_keys(s: String) -> String {
                 .get_mut("listing")
                 .and_then(toml::Value::as_table_mut)
             {
-                removed |=
-                    remove_legacy_listing_keys(listing, &format!("accounts.{name}.listing"));
+                removed |= remove_legacy_listing_keys(listing, &format!("accounts.{name}.listing"));
             }
             let Some(mailboxes) = account
                 .get_mut("mailboxes")

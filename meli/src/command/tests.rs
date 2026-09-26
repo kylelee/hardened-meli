@@ -24,65 +24,6 @@
 use super::*;
 
 #[test]
-fn test_command_parser() {
-    let mut input = "sort".to_string();
-    macro_rules! match_input {
-        ($input:expr) => {{
-            let mut sugg: HashSet<String> = Default::default();
-            //print!("{}", $input);
-            for (_tags, _desc, tokens, _) in COMMAND_COMPLETION.iter() {
-                //    //println!("{:?}, {:?}, {:?}", _tags, _desc, tokens);
-                let _ = tokens.matches(&mut $input.as_str(), &mut sugg);
-                //    if !m.is_empty() {
-                //        //print!("{:?} ", desc);
-                //        //println!(" result = {:#?}\n\n", m);
-                //    }
-            }
-            //println!("suggestions = {:#?}", sugg);
-            sugg.into_iter()
-                .map(|s| format!("{}{}", $input.as_str(), s.as_str()))
-                .collect::<HashSet<String>>()
-        }};
-    }
-    assert_eq!(
-        &match_input!(input),
-        &IntoIterator::into_iter(["sort date".to_string(), "sort subject".to_string()]).collect(),
-    );
-    input = "so".to_string();
-    assert_eq!(
-        &match_input!(input),
-        &IntoIterator::into_iter(["sort".to_string()]).collect(),
-    );
-    input = "so ".to_string();
-    assert_eq!(&match_input!(input), &HashSet::default(),);
-    input = "to".to_string();
-    assert_eq!(
-        &match_input!(input),
-        &IntoIterator::into_iter(["toggle".to_string()]).collect(),
-    );
-    input = "toggle t".to_string();
-    {
-        let matches = match_input!(input);
-        assert!(
-            matches.iter().any(|m| m.contains("theme")),
-            "toggle t should complete to theme: {matches:?}"
-        );
-    }
-    input = "toggle ".to_string();
-    assert_eq!(
-        &match_input!(input),
-        &IntoIterator::into_iter([
-            "toggle mouse".to_string(),
-            "toggle sign".to_string(),
-            "toggle encrypt".to_string(),
-            "toggle theme".to_string(),
-            "toggle thread_snooze".to_string()
-        ])
-        .collect(),
-    );
-}
-
-#[test]
 fn test_command_parser_all() {
     use CommandError::*;
 
