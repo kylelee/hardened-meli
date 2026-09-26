@@ -927,6 +927,28 @@ impl Component for ThreadView {
     }
 
     fn process_event(&mut self, event: &mut UIEvent, context: &mut Context) -> bool {
+        // The `open_in_new_tab` shortcut with the keyboard on the mail view
+        // pane (every layout's mail content window: layout2's mail view,
+        // layout4's mail pane) rewrites the keypress into the very action
+        // the `open-in-tab` command dispatches, so the arm below runs it
+        // through the same code path. Gated on `has_active_modal` so the
+        // mail view's dialogs (URL launch, List-Unsubscribe confirmation,
+        // …) keep their Enter-confirm semantics.
+        let shortcuts = self.shortcuts(context);
+        let open_in_new_tab_here = matches!(
+            (&*event, self.entries.is_empty()),
+            (UIEvent::Input(key), false)
+                if matches!(self.focus, ThreadViewFocus::MailView)
+                    && !self.entries[self.new_expanded_pos]
+                        .mailview
+                        .has_active_modal()
+                    && shortcut!(
+                        key == shortcuts[Shortcuts::THREAD_VIEW]["open_in_new_tab"]
+                    )
+        );
+        if open_in_new_tab_here {
+            *event = UIEvent::Action(Listing(OpenInNewTab));
+        }
         if matches!(
             (&event, self.entries.is_empty()),
             (UIEvent::Action(Listing(OpenInNewTab)), false)
@@ -3130,4 +3152,52 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
             "Down at the body bottom must not switch to the next mail"
         );
     }
+    /// repro: layout4 MailView-focus Enter → new tab render with loaded body.
+    #[test]
+    fn repro_l4_enter_new_tab() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::MailView);
+        // settle expanded_pos via a draw, then load the expanded body
+        {
+            let theme_default = crate::conf::value(&ctx, "theme_default");
+            let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme_default);
+            assert!(screen.resize(80, 24));
+            let area = screen.area();
+            view.draw(screen.grid_mut(), area, &mut ctx);
+        }
+        let expanded = view.entries[view.expanded_pos].msg_hash;
+        let bytes = if expanded == Envelope::from_bytes(ROOT_MAIL_BYTES, None).unwrap().hash() { ROOT_MAIL_BYTES } else { REPLY_MAIL_BYTES };
+        load_expanded_entry(&mut view, &mut ctx, bytes);
+        eprintln!("== source layout4 view (expanded {expanded:?}):");
+        dump_view(&mut view, &mut ctx);
+        // exact copy of the OpenInNewTab arm construction:
+        let mut new_tab = ThreadView::new(
+            view.coordinates,
+            view.thread_group,
+            Some(view.entries[view.expanded_pos].msg_hash),
+            false,
+            Some(view.focus),
+            &mut ctx,
+        );
+        new_tab.set_dirty(true);
+        let bytes2 = if new_tab.entries[new_tab.new_expanded_pos].msg_hash == Envelope::from_bytes(ROOT_MAIL_BYTES, None).unwrap().hash() { ROOT_MAIL_BYTES } else { REPLY_MAIL_BYTES };
+        load_expanded_entry(&mut new_tab, &mut ctx, bytes2);
+        new_tab.set_dirty(true);
+        eprintln!("== new tab:");
+        dump_view(&mut new_tab, &mut ctx);
+    }
+
+    fn dump_view(view: &mut ThreadView, ctx: &mut Context) {
+        let theme_default = crate::conf::value(ctx, "theme_default");
+        let mut screen = crate::terminal::Screen::<crate::terminal::Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, ctx);
+        let grid = screen.grid();
+        for y in 0..24 {
+            let row: String = (0..80).map(|x| grid[(x, y)].ch()).collect();
+            eprintln!("{y:2}|{row}");
+        }
+    }
+
 }

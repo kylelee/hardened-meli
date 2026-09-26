@@ -45,7 +45,7 @@ use imap_codec::{
     imap_types::{
         auth::AuthMechanism,
         command::{Command, CommandBody},
-        core::{AString, Literal, LiteralMode, Tag, Vec1},
+        core::{AString, IString, Literal, LiteralMode, NString, Tag, Vec1},
         extensions::{compress::CompressionAlgorithm, enable::CapabilityEnable},
         mailbox::Mailbox,
         search::SearchKey,
@@ -888,8 +888,41 @@ impl ImapStream {
         ) && capabilities.contains(b"ID".as_slice())
         {
             imap_log!(trace, ret, "sending ID command");
-            ret.send_command(CommandBody::Id { parameters: None })
+            // Netease (163/126/188) IMAP servers answer clients that send `ID NIL` with
+            // `Unsafe Login. Please contact kefu@188.com for help` and then refuse
+            // subsequent SELECTs, so by default we identify ourselves with the client
+            // name configured in `imap_id_name` (default `PrivateEmailClient`). RFC 2971
+            // recommends identifying the client with at least a `name` and a `version`.
+            //
+            // Setting `imap_id_name` to the empty string restores the old anonymous
+            // `ID NIL` behavior.
+            if server_conf.imap_id_name.is_empty() {
+                ret.send_command(CommandBody::Id { parameters: None })
+                    .await?;
+            } else {
+                let name = server_conf.imap_id_name.as_str();
+                let version = env!("CARGO_PKG_VERSION");
+                let name_key = IString::try_from("name").map_err(|err| {
+                    Error::new(format!("Invalid IMAP ID value `name`: {err}"))
+                        .set_kind(ErrorKind::ValueError)
+                })?;
+                let name_value = NString::try_from(name).map_err(|err| {
+                    Error::new(format!("Invalid IMAP ID value `{name}`: {err}"))
+                        .set_kind(ErrorKind::ValueError)
+                })?;
+                let version_key = IString::try_from("version").map_err(|err| {
+                    Error::new(format!("Invalid IMAP ID value `version`: {err}"))
+                        .set_kind(ErrorKind::ValueError)
+                })?;
+                let version_value = NString::try_from(version).map_err(|err| {
+                    Error::new(format!("Invalid IMAP ID value `{version}`: {err}"))
+                        .set_kind(ErrorKind::ValueError)
+                })?;
+                ret.send_command(CommandBody::Id {
+                    parameters: Some(vec![(name_key, name_value), (version_key, version_value)]),
+                })
                 .await?;
+            }
             ret.read_response(&mut res).await?;
             imap_log!(trace, ret, "ID response {}", String::from_utf8_lossy(&res));
             match id_ext_response(&res) {
@@ -2140,6 +2173,7 @@ mod tests {
                 timeout: None,
                 idle_heartbeat_interval: Duration::from_secs(60),
                 watch_sweep_interval: Duration::from_secs(300),
+                imap_id_name: "PrivateEmailClient".to_string(),
             };
             let mut conn = ImapConnection::new_connection(
                 &server_conf,

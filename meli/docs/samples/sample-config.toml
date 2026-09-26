@@ -7,6 +7,96 @@
 ##`include("/home/absolute/path/to/shortcuts/config.toml")`
 ##
 ##
+## ============================================================
+## 常用中文邮箱三例：QQ 邮箱 / 163 邮箱 / 腾讯企业邮箱（企业微信邮箱）
+## 均为 IMAP 收件 + SMTP 发件。取消注释任意一节即可使用，
+## 记得替换 user@example.com 与 /path/to/email.*.key 占位符。
+## 授权码/客户端专用密码存放于仅本人可读的 key 文件（chmod 600），
+## 严禁写入本文件或提交到 git：
+##   printf '你的授权码' > /path/to/email.qq.key && chmod 600 /path/to/email.qq.key
+##
+## ---- QQ 邮箱 ----
+## 前置(QQ 邮箱网页版 mail.qq.com): 设置 → 账户 → 开启「IMAP/SMTP 服务」，
+## 按提示发短信生成 16 位「授权码」（客户端密码是授权码，不是 QQ 密码）。
+#[accounts.qq-mail]
+#offline_cache = true
+#use_idle = true
+#idle_heartbeat_interval = 30
+#root_mailbox = "INBOX"
+#format = "imap"
+#identity = "user@qq.com"
+#display_name = "Example User"
+#server_hostname = "imap.qq.com"
+#server_port = 993
+#server_username = "user@qq.com"
+##server_password = "<16 位授权码>"  # 明文不推荐，推荐下一行从 key 文件读取:
+#server_password_command = "cat /path/to/email.qq.key"
+#listing.index_style = "Conversations"
+## QQ SMTP 会自动保存已发送，本地不再存一份避免重复:
+#composing.store_sent_mail = false
+#timeout = 90
+#  [accounts.qq-mail.send_mail]
+#  hostname = "smtp.qq.com"
+#  port = 465
+##  auth = { type = "auto", username = "user@qq.com", password = { type = "raw", value = "" } }
+#  security = { type = "tls" }
+#  auth = { type = "auto", username = "user@qq.com", password = { type = "command_eval", value = "cat /path/to/email.qq.key" } }
+##
+## ---- 163 邮箱 ----
+## 前置(163 邮箱网页版 mail.163.com): 设置 → POP3/SMTP/IMAP →
+## 开启「IMAP/SMTP 服务」，手机验证后生成 16 位「授权码」。
+#[accounts.mail163]
+#offline_cache = true
+#use_idle = true
+#idle_heartbeat_interval = 30
+#root_mailbox = "INBOX"
+#format = "imap"
+#identity = "user@163.com"
+#display_name = "Example User"
+#server_hostname = "imap.163.com"
+#server_port = 993
+#server_username = "user@163.com"
+#server_password_command = "cat /path/to/email.163.key"
+#listing.index_style = "Conversations"
+## 163 SMTP 会自动保存已发送，本地不再存一份避免重复:
+#composing.store_sent_mail = false
+#timeout = 90
+#  [accounts.mail163.send_mail]
+#  hostname = "smtp.163.com"
+#  port = 465
+#  security = { type = "tls" }
+#  auth = { type = "auto", username = "user@163.com", password = { type = "command_eval", value = "cat /path/to/email.163.key" } }
+##
+## ---- 腾讯企业邮箱 / 企业微信邮箱 ----
+## 参数来源: https://open.work.weixin.qq.com/help2/pc/19886?person_id=1
+##   IMAP: imap.exmail.qq.com:993 (SSL)   SMTP: smtp.exmail.qq.com:465 (SSL)
+## 前置:
+##   1. 管理后台: 协作 -> 邮件 -> 安全管理 -> 应用收发信权限, 放开 IMAP/SMTP 范围;
+##   2. 网页版(exmail.qq.com): 设置 → 收发信设置 → 开启 IMAP/SMTP 服务,
+##      收信范围选「全部」，否则客户端只能收到最近 30 天邮件;
+##   3. 若开启「安全登录」，必须用「客户端专用密码」，不是登录密码。
+#[accounts.work]
+#offline_cache = true
+#use_idle = true
+#idle_heartbeat_interval = 30
+#root_mailbox = "INBOX"
+#format = "imap"
+#identity = "user@example.com"
+#display_name = "Example User"
+#server_hostname = "imap.exmail.qq.com"
+#server_port = 993
+#server_username = "user@example.com"
+#server_password_command = "cat /path/to/email.work.key"
+#listing.index_style = "Conversations"
+## 企业邮箱 SMTP 发信后服务器自动存「已发送」，本地不再存一份:
+#composing.store_sent_mail = false
+#timeout = 90
+#  [accounts.work.send_mail]
+#  hostname = "smtp.exmail.qq.com"
+#  port = 465
+#  security = { type = "tls" }
+#  auth = { type = "auto", username = "user@example.com", password = { type = "command_eval", value = "cat /path/to/email.work.key" } }
+##
 ## Setting up a Maildir account
 #[accounts.account-name]
 #root_mailbox = "/path/to/root/mailbox"

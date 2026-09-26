@@ -32,8 +32,9 @@ use melib::{
 use tempfile::TempDir;
 
 use crate::{
-    accounts::{AccountConf, FileMailboxConf, MailboxEntry, MailboxStatus},
+    accounts::{build_mailboxes_order, AccountConf, FileMailboxConf, MailboxEntry, MailboxStatus},
     command::actions::MailboxOperation,
+    mail::listing::{CursorPos, ListingComponent, MenuEntryCursor, OfflineListing},
     types::UIEvent,
     utilities::tests::{eprint_step_fn, eprintln_ok_fn},
 };
@@ -1438,4 +1439,193 @@ fn test_statusbar_tree_blackhole_focus_roundtrip() {
         status_bar.draw(screen.grid_mut(), area, &mut ctx);
         eprintln!("[tree-focus] key {i} ({key_desc}) drew");
     }
+}
+
+/// Register `INBOX` and `Archive` on the single mock account and rebuild its
+/// mailbox tree/order, so `Listing::new` snapshots two sidebar entries (the
+/// sidebar order is `INBOX` then `Archive`).
+fn register_listing_mailboxes(
+    context: &mut crate::Context,
+) -> (
+    melib::backends::prelude::AccountHash,
+    MailboxHash,
+    MailboxHash,
+) {
+    let account_hash = *context.accounts.iter().next().unwrap().0;
+    let account = context.accounts.get_mut(&account_hash).unwrap();
+    for name in ["INBOX", "Archive"] {
+        let mailbox_hash = MailboxHash::from_bytes(name.as_bytes());
+        account.mailbox_entries.insert(
+            mailbox_hash,
+            MailboxEntry::new(
+                MailboxStatus::Available,
+                name.to_string(),
+                synth_mailbox(name, SpecialUsageMailbox::Normal),
+                FileMailboxConf::default(),
+            ),
+        );
+    }
+    build_mailboxes_order(
+        &mut account.tree,
+        &account.mailbox_entries,
+        &mut account.mailboxes_order,
+    );
+    (
+        account_hash,
+        MailboxHash::from_bytes(b"INBOX"),
+        MailboxHash::from_bytes(b"Archive"),
+    )
+}
+
+/// Build a sidebar mailbox row for the synthetic `Listing::accounts` used by
+/// the cursor tests below.
+fn mailbox_entry(name: &str) -> crate::mail::listing::MailboxMenuEntry {
+    crate::mail::listing::MailboxMenuEntry {
+        depth: 0,
+        indentation: 0,
+        has_sibling: false,
+        visible: true,
+        collapsed: false,
+        mailbox_hash: MailboxHash::from_bytes(name.as_bytes()),
+        index_style: None,
+    }
+}
+
+/// Build a sidebar account row holding the named synthetic mailboxes.
+fn account_entry(name: &str, mailboxes: &[&str]) -> crate::mail::listing::AccountMenuEntry {
+    crate::mail::listing::AccountMenuEntry {
+        name: name.to_string(),
+        hash: melib::backends::prelude::AccountHash::from_bytes(name.as_bytes()),
+        index: 0,
+        entries: mailboxes.iter().map(|m| mailbox_entry(m)).collect(),
+    }
+}
+
+/// Regression: while the focused account is offline, a background
+/// `AccountStatusChange` (e.g. `"Attempting authentication."`) triggers
+/// `change_account`. That reconcile must not snap the user's sidebar
+/// selection back to the account's default mailbox (`INBOX`); the cursor and
+/// the sidebar highlight must stay on the mailbox the user picked.
+#[test]
+fn listing_offline_status_change_keeps_selected_mailbox() {
+    use crate::components::Component;
+
+    let _home = crate::golden::shared_test_home();
+    let temp_dir = TempDir::new().unwrap();
+    let mut ctx = crate::Context::new_mock(&temp_dir);
+    let (account_hash, _inbox_hash, archive_hash) = register_listing_mailboxes(&mut ctx);
+    let mut listing = crate::mail::listing::Listing::new(&mut ctx);
+
+    // Precondition: two sidebar entries, default mailbox is INBOX (index 0).
+    assert_eq!(
+        listing.accounts[0].entries.len(),
+        2,
+        "precondition: the mock account must expose INBOX and Archive"
+    );
+    // Park the cursor on the non-default Archive row (index 1) and force the
+    // offline placeholder component, the exact state reached while a remote
+    // account is trying to (re)connect. The sidebar cursor is on a second
+    // account, as the default launch focus leaves it: sidebar navigation only
+    // moves `menu_cursor_pos` until the user confirms the selection.
+    listing.cursor_pos = CursorPos {
+        account: 0,
+        menu: MenuEntryCursor::Mailbox(1),
+    };
+    listing
+        .accounts
+        .push(account_entry("acct-b", &["b-inbox", "b-archive"]));
+    listing.menu_cursor_pos = CursorPos {
+        account: 1,
+        menu: MenuEntryCursor::Mailbox(0),
+    };
+    listing.component =
+        ListingComponent::Offline(OfflineListing::new((account_hash, archive_hash)));
+
+    let _ = listing.process_event(
+        &mut UIEvent::AccountStatusChange(account_hash, Some("Attempting authentication.".into())),
+        &mut ctx,
+    );
+
+    assert_eq!(
+        listing.cursor_pos.menu,
+        MenuEntryCursor::Mailbox(1),
+        "a background status reconcile must not snap the cursor to the default mailbox"
+    );
+    assert_eq!(
+        listing.menu_cursor_pos,
+        CursorPos {
+            account: 1,
+            menu: MenuEntryCursor::Mailbox(0),
+        },
+        "a background status reconcile must not move the user's sidebar highlight"
+    );
+}
+
+/// `menu_step_prev`/`menu_step_next` walk the whole sidebar column: within an
+/// account `Status` and its mailboxes, then across account boundaries. This
+/// is the logic behind `prev_mailbox`/`next_mailbox`.
+#[test]
+fn listing_menu_step_crosses_account_boundaries() {
+    let _home = crate::golden::shared_test_home();
+    let temp_dir = TempDir::new().unwrap();
+    let mut ctx = crate::Context::new_mock(&temp_dir);
+    let mut listing = crate::mail::listing::Listing::new(&mut ctx);
+    // Deterministic sidebar shape: two accounts with two mailboxes each.
+    listing.accounts = vec![
+        account_entry("acct-a", &["a-inbox", "a-archive"]),
+        account_entry("acct-b", &["b-inbox", "b-archive"]),
+    ];
+
+    // `Mailbox(0)` steps up to its own account's `Status` row.
+    let mut cursor = CursorPos {
+        account: 0,
+        menu: MenuEntryCursor::Mailbox(0),
+    };
+    assert!(listing.menu_step_prev(&mut cursor));
+    assert_eq!(cursor.account, 0);
+    assert_eq!(cursor.menu, MenuEntryCursor::Status);
+
+    // Account 0's `Status` is the top of the sidebar: prev is a no-op.
+    assert!(!listing.menu_step_prev(&mut cursor));
+    assert_eq!(cursor.account, 0);
+    assert_eq!(cursor.menu, MenuEntryCursor::Status);
+
+    // A later account's `Status` steps up to the previous account's last
+    // mailbox.
+    cursor = CursorPos {
+        account: 1,
+        menu: MenuEntryCursor::Status,
+    };
+    assert!(listing.menu_step_prev(&mut cursor));
+    assert_eq!(cursor.account, 0);
+    assert_eq!(cursor.menu, MenuEntryCursor::Mailbox(1));
+
+    // `Status` steps down into the account's first mailbox.
+    cursor = CursorPos {
+        account: 0,
+        menu: MenuEntryCursor::Status,
+    };
+    assert!(listing.menu_step_next(&mut cursor));
+    assert_eq!(cursor.account, 0);
+    assert_eq!(cursor.menu, MenuEntryCursor::Mailbox(0));
+
+    // The last mailbox of an account crosses into the next account's
+    // `Status` row.
+    cursor = CursorPos {
+        account: 0,
+        menu: MenuEntryCursor::Mailbox(1),
+    };
+    assert!(listing.menu_step_next(&mut cursor));
+    assert_eq!(cursor.account, 1);
+    assert_eq!(cursor.menu, MenuEntryCursor::Status);
+
+    // The last account's last row is the bottom of the sidebar: next is a
+    // no-op.
+    cursor = CursorPos {
+        account: 1,
+        menu: MenuEntryCursor::Mailbox(1),
+    };
+    assert!(!listing.menu_step_next(&mut cursor));
+    assert_eq!(cursor.account, 1);
+    assert_eq!(cursor.menu, MenuEntryCursor::Mailbox(1));
 }

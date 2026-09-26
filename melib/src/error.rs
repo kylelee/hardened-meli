@@ -460,6 +460,16 @@ impl From<io::Error> for Error {
             // more intelligent than a hardcoded string `contains`.
             // <https://github.com/sfackler/rust-openssl/blob/538a5cb737e8d83085553cac01643820dc7ff205/openssl/src/ssl/error.rs#L100-L123>
             ErrorKind::Network(NetworkErrorKind::TLSConnectionFailed)
+        } else if s.contains("unexpected EOF") {
+            // `openssl` reports a TLS stream truncated by the peer (the TCP connection
+            // closed without a `close_notify` alert, e.g. Coremail/网易 163 drops idle
+            // IMAP connections this way) as `ErrorCode::SYSCALL` with no errno, which
+            // stringifies as "unexpected EOF" and surfaces via `native-tls` as an
+            // `io::Error`. This is a dropped connection, not a platform error.
+            // FIXME: This is an error from the `openssl` crate, make the check more
+            // intelligent than a hardcoded string `contains`.
+            // <https://github.com/sfackler/rust-openssl/blob/538a5cb737e8d83085553cac01643820dc7ff205/openssl/src/ssl/error.rs#L112-L115>
+            ErrorKind::Network(NetworkErrorKind::ConnectionFailed)
         } else if s.contains("OpenSSL error") {
             // FIXME: This is an OS-specific error from the `openssl` crate, make the check
             // more intelligent than a hardcoded string `contains`.
@@ -712,6 +722,31 @@ mod tests {
             matches!(not_found.kind, ErrorKind::OSError(_)),
             "ENOENT maps to Platform via the catch-all arm, so it must fall back to OSError, got {}",
             not_found.kind
+        );
+    }
+
+    /// Regression test for the OpenSSL `unexpected EOF` classification.
+    ///
+    /// `openssl` reports a TLS stream truncated by the peer (connection closed
+    /// without a `close_notify` alert, e.g. Coremail/网易 163 dropping idle
+    /// IMAP connections) as `ErrorCode::SYSCALL` with no errno, stringified as
+    /// "unexpected EOF" and surfaced through `native-tls` as an `io::Error`.
+    /// It used to fall through to the `ErrorKind::Platform` catch-all, which
+    /// made the IMAP watch loop abort with an error instead of reconnecting.
+    #[test]
+    fn test_io_error_unexpected_eof_is_network() {
+        let unexpected_eof = Error::from(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected EOF",
+        ));
+        assert!(
+            matches!(
+                unexpected_eof.kind,
+                ErrorKind::Network(NetworkErrorKind::ConnectionFailed)
+            ),
+            "the OpenSSL SYSCALL-no-errno \"unexpected EOF\" connection drop must classify \
+             as Network(ConnectionFailed), got {}",
+            unexpected_eof.kind
         );
     }
 }

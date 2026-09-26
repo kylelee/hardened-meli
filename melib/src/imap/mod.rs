@@ -65,7 +65,7 @@ use imap_codec::imap_types::{
     core::Atom,
     flag::{Flag as ImapCodecFlag, StoreResponse, StoreType},
     mailbox::Mailbox as ImapTypesMailbox,
-    sequence::{SequenceSet, ONE},
+    sequence::SequenceSet,
 };
 pub use sync::cache::ModSequence;
 
@@ -136,6 +136,11 @@ pub struct ImapServerConf {
     /// (300 seconds) preserves the historical fixed 5-minute cadence; it
     /// is configurable so tests can force frequent sweeps.
     pub watch_sweep_interval: Duration,
+    /// Client name reported in the RFC 2971 `ID` command sent at connection
+    /// setup when `use_id` is enabled. The empty string sends `ID NIL`
+    /// (no identification), which some servers (e.g. Netease 163/126/188)
+    /// reject with `Unsafe Login. Please contact kefu@188.com for help`.
+    pub imap_id_name: String,
 }
 
 type Capabilities = indexmap::IndexSet<Box<[u8]>>;
@@ -189,6 +194,21 @@ pub struct UIDStore {
     pub uidvalidity: Arc<Mutex<HashMap<MailboxHash, UID>>>,
     pub envelopes: Arc<Mutex<HashMap<EnvelopeHash, sync::cache::CachedEnvelope>>>,
     pub lastseenuid: Arc<Mutex<HashMap<MailboxHash, UID>>>,
+    /// Mailboxes whose cache-completeness rebuild has already been
+    /// triggered once in this process.
+    ///
+    /// A server may report an `EXISTS` larger than the number of messages
+    /// it is actually willing to return for `FETCH` (verified on Coremail
+    /// / 网易 163: `EXISTS = 32` while only 27 messages are retrievable,
+    /// some message sequence numbers are never sent). The completeness
+    /// guards compare the persisted envelope count against `EXISTS`, so
+    /// without this memo that deficit is seen as "cache incomplete" on
+    /// every poll: the mailbox is wiped and re-fetched forever and never
+    /// reaches a complete state. After one full rebuild per mailbox per
+    /// session the guards must accept the retrievable set as complete:
+    /// this set lets the first trigger rebuild and makes every later
+    /// trigger inert.
+    pub completeness_rebuilt: Arc<Mutex<HashSet<MailboxHash>>>,
     pub modseq: Arc<Mutex<HashMap<EnvelopeHash, ModSequence>>>,
     pub highestmodseqs: Arc<Mutex<HashMap<MailboxHash, std::result::Result<ModSequence, ()>>>>,
     pub mailboxes: Arc<FutureMutex<HashMap<MailboxHash, ImapMailbox>>>,
@@ -219,6 +239,7 @@ impl UIDStore {
             uidvalidity: Default::default(),
             envelopes: Default::default(),
             lastseenuid: Default::default(),
+            completeness_rebuilt: Default::default(),
             modseq: Default::default(),
             highestmodseqs: Default::default(),
             hash_index: Default::default(),
@@ -437,6 +458,14 @@ impl MailBackend for ImapType {
             cache_batch_size: 95_000,
             response: Vec::with_capacity(8 * 1024),
             cache_served_offline: false,
+            last_select_exists: 0,
+            last_select_uidvalidity: 0,
+            last_select_uidnext: 0,
+            // Populated by `InitialFresh` via `UID SEARCH ALL` and
+            // consumed by the `FreshFetch` stage in batches of
+            // `batch_size`. Starts empty.
+            fresh_fetch_uids: Vec::new(),
+            fresh_fetch_next: 0,
         };
 
         Ok(Box::pin(try_fn_stream(|emitter| async move {
@@ -1496,6 +1525,7 @@ impl ImapType {
             timeout,
             idle_heartbeat_interval,
             watch_sweep_interval,
+            imap_id_name: get_conf_val!(s["imap_id_name"], "PrivateEmailClient".to_string())?,
         };
         let account_hash = AccountHash::from_bytes(s.name.as_bytes());
         let account_name = s.name.to_string().into();
@@ -1868,6 +1898,7 @@ impl ImapType {
         get_conf_val!(s["use_deflate"], true)?;
         get_conf_val!(s["use_auth_anonymous"], false)?;
         get_conf_val!(s["use_id"], true)?;
+        get_conf_val!(s["imap_id_name"], "PrivateEmailClient".to_string())?;
         let _timeout = get_conf_val!(s["timeout"], 16_u64)?;
         let _fetch_body_structure = get_conf_val!(s["fetch_body_structure"], true)?;
         get_conf_val!(s["use_connection_pool"], true)?;
@@ -1940,7 +1971,13 @@ mod tests {
     /// a re-LIST.
     #[test]
     fn encode_utf7_imap_round_trips_through_decode() {
-        for name in ["收件箱", "已发送/归档", "Šiukšliadėžė", "théâtre", "中文 folder"] {
+        for name in [
+            "收件箱",
+            "已发送/归档",
+            "Šiukšliadėžė",
+            "théâtre",
+            "中文 folder",
+        ] {
             let wire = encode_utf7_imap(name);
             assert_eq!(decode_utf7_imap(&wire), name);
             assert_eq!(encode_utf7_imap(&decode_utf7_imap(&wire)), wire);

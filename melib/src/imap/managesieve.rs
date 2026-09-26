@@ -83,6 +83,7 @@ impl ManageSieveConnection {
             timeout,
             idle_heartbeat_interval: std::time::Duration::from_secs(60),
             watch_sweep_interval: std::time::Duration::from_secs(300),
+            imap_id_name: "PrivateEmailClient".to_string(),
         };
         let uid_store = Arc::new(UIDStore {
             is_online: Arc::new(Mutex::new((

@@ -4,7 +4,7 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 
 ## Layout
 
-- Workspace members are only `meli/` and `melib/` (root `Cargo.toml`). `tools/` and `fuzz/` are standalone crates (tools declares its own `[workspace]`); they are not built by `cargo build` at the root.
+- Workspace members are only `meli/` and `melib/` (root `Cargo.toml`). `tools/` is a standalone crate (it declares its own `[workspace]`); it is not built by `cargo build` at the root.
 - `melib/` — mail library. Backend trait in `src/backends.rs`; protocol implementations are per-protocol modules: `src/imap/` (connection pool + sqlite3 sync cache in `src/imap/sync/`), `src/maildir/`, `src/mbox/`, `src/notmuch/`, `src/jmap/`, `src/nntp/`, `src/smtp/`. E-mail parsing in `src/email/`.
 - `meli/` — terminal UI (binary `src/main.rs`). UI components in `src/mail/`, `src/terminal/`; thread-pool job executor in `src/jobs.rs`; account/backend glue in `src/accounts/`.
 

@@ -276,6 +276,7 @@ shortcut_key_values! { "thread-view",
         prev_page |> "Go to previous page." |> ShortcutKeys::single(Key::PageUp),
         reverse_thread_order |> "reverse thread order." |> ShortcutKeys::single(Key::Ctrl('r')),
         focus_left |> "Focus or enlarge the thread list pane." |> ShortcutKeys::double(Key::Left, Key::Char('h')),
-        focus_right |> "Focus or enlarge the mail view pane." |> ShortcutKeys::double(Key::Right, Key::Char('l'))
+        focus_right |> "Focus or enlarge the mail view pane." |> ShortcutKeys::double(Key::Right, Key::Char('l')),
+        open_in_new_tab |> "Open the mail being viewed in a new tab." |> ShortcutKeys::single(Key::Char('\n'))
     }
 }
