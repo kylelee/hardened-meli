@@ -5506,6 +5506,96 @@ mod listing_menu_tests {
         assert!(matches!(listing.focus, ListingFocus::MailList));
     }
 
+    /// A filter that matches nothing must both keep the listing dirty (so the
+    /// outer `Listing::draw` does not early-return and leave the cleared pane
+    /// blank) and paint a visible "No results" hint in the list area — for
+    /// every index style.
+    #[test]
+    fn empty_filter_result_repaints_with_hint() {
+        for style in [
+            IndexStyle::Conversations,
+            IndexStyle::Compact,
+            IndexStyle::Plain,
+            IndexStyle::Threaded,
+        ] {
+            let mut ctx = mock_context();
+            let mut listing = pane_chain_setup(&mut ctx);
+            listing.set_index_style(style, &mut ctx);
+
+            let theme_default = crate::conf::value(&ctx, "theme_default");
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            assert!(screen.resize(80, 24));
+            let area = screen.area();
+            // Draw once so the freshly switched component has its rows/state
+            // initialized before filtering.
+            listing.set_dirty(true);
+            listing.draw(screen.grid_mut(), area, &mut ctx);
+
+            // No result for a non-empty term: the filter must mark the
+            // component dirty on its own (no external `set_dirty` here).
+            listing
+                .component
+                .filter("no-such-term".to_string(), Vec::new(), &ctx);
+            assert!(
+                listing.is_dirty(),
+                "{style:?}: filter() must leave the listing dirty"
+            );
+
+            listing.draw(screen.grid_mut(), area, &mut ctx);
+
+            let rendered: String = (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| screen.grid()[(x, y)].ch())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                rendered.contains("No results for \"no-such-term\""),
+                "{style:?}: the empty filter result must render a hint; screen was:\n{rendered}"
+            );
+        }
+    }
+
+    /// The empty-filter hint must survive the Entry-focus layout too: with a
+    /// view open the grid is only the left 30% subpane, and the empty-result
+    /// path clears the pane before repainting.
+    #[test]
+    fn empty_filter_result_with_open_view_shows_hint() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(listing.view.is_some(), "precondition: a view is open");
+        assert!(
+            listing.component.unfocused(),
+            "precondition: the grid is a subpane"
+        );
+
+        listing
+            .component
+            .filter("zzz".to_string(), Vec::new(), &ctx);
+
+        let theme_default = crate::conf::value(&ctx, "theme_default");
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(80, 24));
+        let area = screen.area();
+        listing.draw(screen.grid_mut(), area, &mut ctx);
+
+        let rendered: String = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| screen.grid()[(x, y)].ch())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("No results for \"zzz\""),
+            "the open-view empty filter result must render a hint; screen was:\n{rendered}"
+        );
+    }
+
     /// Structured queries (`from:…`, `subject:…`) must go through melib's
     /// `is_match`; only the unimplemented `Body`/`AllText` variants fall
     /// back to `Account::search`'s header substring scan.

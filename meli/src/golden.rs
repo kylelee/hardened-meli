@@ -3405,3 +3405,49 @@ fn command_palette_search_key_prefills_query() {
         "the prefilled query must show in the palette input; got {input_text:?}"
     );
 }
+
+/// CJK typed into the command palette must survive the ratatui blit: each
+/// wide glyph sits on its own column with an empty continuation cell to its
+/// right. A non-empty "ghost" space there made the flush re-anchor backwards
+/// onto the glyph, blanking the input box.
+#[test]
+fn command_palette_cjk_query_uses_empty_continuations() {
+    let mut ctx = mock_context();
+    let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+    insert_golden_mails(&ctx, inbox_hash);
+    let listing = Listing::new(&mut ctx);
+    let tabbed = Tabbed::new(
+        vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
+        &ctx,
+    );
+    let mut status_bar = StatusBar::new(&ctx, Box::new(tabbed));
+    status_bar.realize(None, &mut ctx);
+    pump_replies(&mut status_bar, &mut ctx);
+
+    let screen = palette_screen_with_commands_typed(&mut status_bar, &mut ctx, "中文");
+    let (top, _bottom) = palette_panel_rows(screen.grid()).expect("panel drawn");
+    let grid = screen.grid();
+    let mut wide_cells = 0;
+    // The input box occupies the three rows starting at the panel's inner
+    // top row; the typed query sits on the middle one.
+    for y in top + 1..top + 4 {
+        for x in 0..grid.cols.saturating_sub(1) {
+            let ch = grid[(x, y)].ch();
+            if ch == '中' || ch == '文' {
+                assert!(
+                    !grid[(x, y)].empty(),
+                    "'{ch}' at ({x},{y}) must not be an empty continuation"
+                );
+                assert!(
+                    grid[(x + 1, y)].empty(),
+                    "ghost non-empty space after '{ch}' at ({x},{y})"
+                );
+                wide_cells += 1;
+            }
+        }
+    }
+    assert_eq!(
+        wide_cells, 2,
+        "both '中' and '文' must render in the palette input box"
+    );
+}

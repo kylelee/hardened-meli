@@ -642,11 +642,26 @@ impl ListingTrait for CompactListing {
         if self.length == 0 {
             grid.clear_area(area, pane_fill);
 
-            grid.copy_area(
-                self.data_columns.columns[0].grid(),
-                area,
-                self.data_columns.columns[0].area(),
-            );
+            if self.filter_term.is_empty() {
+                grid.copy_area(
+                    self.data_columns.columns[0].grid(),
+                    area,
+                    self.data_columns.columns[0].area(),
+                );
+            } else {
+                // Filtered to nothing: the rebuilt row set is empty, so spell
+                // the empty result out instead of leaving the cleared pane
+                // blank.
+                grid.write_string(
+                    &format!("No results for \"{}\"", self.filter_term),
+                    self.color_cache.theme_default.fg,
+                    self.color_cache.theme_default.bg,
+                    self.color_cache.theme_default.attrs,
+                    area,
+                    None,
+                    None,
+                );
+            }
             context.dirty_areas.push_back(area);
             self.force_draw = false;
             return;
@@ -838,6 +853,11 @@ impl ListingTrait for CompactListing {
         // incremental `row_updates` path would leave stale rows on
         // screen until the next keypress.
         self.force_draw = true;
+        // `force_draw` only makes the list repaint once drawn; the outer
+        // `Listing::draw` gates on the dirty chain, so mark the component
+        // dirty as well or the rebuilt (possibly empty) row set is never
+        // repainted after a global clear.
+        self.set_dirty(true);
     }
 
     fn view_area(&self) -> Option<Area> {
@@ -1819,6 +1839,22 @@ impl Component for CompactListing {
                     );
                     grid.clear_area(area, pane_fill);
                     context.dirty_areas.push_back(area);
+                    if !self.filter_term.is_empty() {
+                        // An active filter matched nothing: `draw_list` is not
+                        // reached in Entry focus, so paint the hint on the
+                        // list column (the view owns the right 70%).
+                        let (list_area, _) = crate::mail::pane_split(area);
+                        grid.write_string(
+                            &format!("No results for \"{}\"", self.filter_term),
+                            self.color_cache.theme_default.fg,
+                            self.color_cache.theme_default.bg,
+                            self.color_cache.theme_default.attrs,
+                            list_area,
+                            None,
+                            None,
+                        );
+                        context.dirty_areas.push_back(list_area);
+                    }
                 }
                 self.view_area = area.into();
             } else {

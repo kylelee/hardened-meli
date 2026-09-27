@@ -48,6 +48,29 @@ rusty_fork_test! {
         tests::run_imap_raw_search_gmail();
     }
 
+    /// Non-ASCII `SEARCH` term must travel as an RFC 3501 literal. See
+    /// `tests::run_imap_search_subject_cjk_literal`.
+    #[test]
+    fn test_imap_search_subject_cjk_literal() {
+        tests::run_imap_search_subject_cjk_literal();
+    }
+
+    /// QQ Mail never answers a synchronizing-literal `SEARCH` with a `+ `
+    /// continuation, so the search must fail within a bounded wait instead of
+    /// hanging. See `tests::run_imap_search_qq_literal_no_continuation`.
+    #[test]
+    fn test_imap_search_qq_literal_no_continuation() {
+        tests::run_imap_search_qq_literal_no_continuation();
+    }
+
+    /// A `LITERAL+` server receives the whole non-ASCII `SEARCH` command in
+    /// one write (`{N+}`, no continuation request). It must parse the
+    /// `* SEARCH` result. See `tests::run_imap_search_literal_plus`.
+    #[test]
+    fn test_imap_search_literal_plus() {
+        tests::run_imap_search_literal_plus();
+    }
+
     #[test]
     fn test_imap_refresh_status_stale_when_selected() {
         tests::run_imap_refresh_status_stale_when_selected();
@@ -550,6 +573,23 @@ pub mod server {
         /// and the connection loop gains a `UID SEARCH X-GM-RAW {N}`
         /// literal continuation arm.
         pub advertise_x_gm_ext_1: bool,
+        /// When `true`, the post-auth `M3 CAPABILITY` reply additionally
+        /// advertises `LITERAL+` (RFC 7888), so the client sends non-ASCII
+        /// search terms as non-synchronizing `{N+}` literals in a single
+        /// command write instead of waiting for a `+ ` continuation.
+        pub advertise_literal_plus: bool,
+        /// When `true`, the mock emulates QQ Mail: a `UID SEARCH CHARSET
+        /// UTF-8 ... {N}` line that carries a synchronizing literal is
+        /// answered with the command's tagged completion (optionally
+        /// preceded by an untagged `* SEARCH` line) instead of a `+ `
+        /// continuation request, without reading the literal octets. The
+        /// client must fail the search within its bounded wait instead of
+        /// hanging.
+        pub search_ignore_literal_continuation: bool,
+        /// How many `+ ` continuation requests the mock sent in response to
+        /// `UID SEARCH CHARSET UTF-8 ... {N}` literal lines, for asserting
+        /// that a `LITERAL+` server never needs one.
+        pub search_literal_continuations: usize,
         /// When `true` (the default), the post-auth `M3 CAPABILITY` reply
         /// advertises `UNSELECT`, and the client uses the RFC 4315
         /// `UNSELECT` command to drop a selection. When `false`, the mock
@@ -563,6 +603,10 @@ pub mod server {
         /// CRLF) received by each `UID SEARCH X-GM-RAW {N}` continuation
         /// exchange, for assertions.
         pub x_gm_raw_literals: Vec<Vec<u8>>,
+        /// The raw literal octets (without the `{N}` framing or trailing
+        /// CRLF) received by each `UID SEARCH CHARSET UTF-8 ... {N}`
+        /// continuation exchange, for assertions on non-ASCII search terms.
+        pub search_literals: Vec<Vec<u8>>,
         /// The raw bytes of the RFC 2971 `ID` command line received at the
         /// `M4` handshake stage, for assertions on `imap_id_name` (the
         /// client name). `None` when the client sent no `ID` at all
@@ -631,10 +675,14 @@ pub mod server {
                 uid_fetch_flags_drop_uid: false,
                 uid_fetch_drop_uid_all: false,
                 advertise_x_gm_ext_1: false,
+                advertise_literal_plus: false,
+                search_ignore_literal_continuation: false,
+                search_literal_continuations: 0,
                 // Most tests need the historical behavior: `UNSELECT` is
                 // advertised, so the client takes the RFC 4315 path.
                 advertise_unselect: true,
                 x_gm_raw_literals: Vec::new(),
+                search_literals: Vec::new(),
                 id_handshake_line: None,
                 omit_uidnext: false,
                 fetch_underdelivers: None,
@@ -927,6 +975,10 @@ pub mod server {
                         let state_lck = state.lock().unwrap();
                         (state_lck.advertise_x_gm_ext_1, state_lck.advertise_unselect)
                     };
+                    let advertise_literal_plus = {
+                        let state_lck = state.lock().unwrap();
+                        state_lck.advertise_literal_plus
+                    };
                     let mut m3_reply = String::from("* CAPABILITY IMAP4rev1 ID IDLE");
                     if advertise_unselect {
                         m3_reply.push_str(" UNSELECT");
@@ -934,6 +986,9 @@ pub mod server {
                     m3_reply.push_str(" ENABLE");
                     if advertise_x_gm_ext_1 {
                         m3_reply.push_str(" X-GM-EXT-1");
+                    }
+                    if advertise_literal_plus {
+                        m3_reply.push_str(" LITERAL+");
                     }
                     m3_reply.push_str("\r\nM3 OK Success\r\n");
                     block_on(tcp_stream.write_all(m3_reply.as_bytes())).unwrap();
@@ -1595,6 +1650,146 @@ pub mod server {
                                 .lock()
                                 .unwrap()
                                 .x_gm_raw_literals
+                                .push(literal[..n].to_vec());
+                            let uids = state
+                                .lock()
+                                .unwrap()
+                                .envelopes
+                                .iter()
+                                .filter(|(_, mail)| {
+                                    mail.envelope()
+                                        .subject()
+                                        .to_lowercase()
+                                        .contains(&query.to_lowercase())
+                                })
+                                .map(|(u, _)| *u)
+                                .collect::<Vec<_>>();
+                            if uids.is_empty() {
+                                tcp_stream.write_all(b"* SEARCH\r\n").await.unwrap();
+                            } else {
+                                let uid_list = uids
+                                    .iter()
+                                    .map(|u| u.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                tcp_stream
+                                    .write_all(format!("* SEARCH {uid_list}\r\n").as_bytes())
+                                    .await
+                                    .unwrap();
+                            }
+                            tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                            tcp_stream
+                                .write_all(b" OK SEARCH completed\r\n")
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
+                        uid_search_charset_literal
+                            if uid_search_charset_literal
+                                .starts_with("UID SEARCH CHARSET UTF-8 ")
+                                && uid_search_charset_literal.ends_with("}\r\n")
+                                && uid_search_charset_literal.matches('{').count() == 1 =>
+                        {
+                            // A non-ASCII `SEARCH` value arrives as an IMAP
+                            // literal. With `LITERAL+` (`{N+}`, see
+                            // `ServerState::advertise_literal_plus`) the raw
+                            // octets follow immediately; otherwise it is an
+                            // RFC 3501 synchronizing literal (`{N}`) and the
+                            // server must first answer the continuation
+                            // request. Either way, read the octets and reply
+                            // with the UIDs whose subject contains the query,
+                            // so a test can assert that the term travelled as
+                            // a literal instead of inside a 7-bit quoted
+                            // string.
+                            let literal_spec = uid_search_charset_literal
+                                .trim_end_matches("\r\n")
+                                .rsplit_once('{')
+                                .and_then(|(_, tail)| tail.strip_suffix('}'))
+                                .expect("guarded literal size");
+                            let (n, non_sync) = match literal_spec.strip_suffix('+') {
+                                Some(n) => {
+                                    (n.parse::<usize>().expect("guarded literal size"), true)
+                                }
+                                None => (
+                                    literal_spec.parse::<usize>().expect("guarded literal size"),
+                                    false,
+                                ),
+                            };
+                            if !matches!(session_state, SessionState::SelectedMailbox) {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD no mailbox is selected\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            if state.lock().unwrap().search_ignore_literal_continuation {
+                                // QQ Mail emulation: the server never answers
+                                // the literal with a `+ ` continuation; it
+                                // completes the command with an untagged
+                                // `* SEARCH` line followed by the tagged
+                                // reply, without reading the literal octets.
+                                let uids = state
+                                    .lock()
+                                    .unwrap()
+                                    .envelopes
+                                    .keys()
+                                    .copied()
+                                    .collect::<Vec<_>>();
+                                if uids.is_empty() {
+                                    tcp_stream.write_all(b"* SEARCH\r\n").await.unwrap();
+                                } else {
+                                    let uid_list = uids
+                                        .iter()
+                                        .map(|u| u.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    tcp_stream
+                                        .write_all(format!("* SEARCH {uid_list}\r\n").as_bytes())
+                                        .await
+                                        .unwrap();
+                                }
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" OK SEARCH completed\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            if !non_sync {
+                                state.lock().unwrap().search_literal_continuations += 1;
+                                tcp_stream.write_all(b"+ \r\n").await.unwrap();
+                                tcp_stream.flush().await.unwrap();
+                            }
+                            // Read exactly `n + 2` bytes: the literal followed
+                            // by its CRLF. Buffered bytes are consumed first.
+                            let mut literal = vec![0_u8; n + 2];
+                            let buffered = buf_end - buf_start;
+                            let take = buffered.min(n + 2);
+                            literal[..take].copy_from_slice(&buf[buf_start..buf_start + take]);
+                            buf_start += take;
+                            if buf_start == buf_end {
+                                buf_start = 0;
+                                buf_end = 0;
+                            }
+                            let mut filled = take;
+                            while filled < n + 2 {
+                                let read_bytes =
+                                    tcp_stream.read(&mut literal[filled..]).await.unwrap();
+                                assert!(
+                                    read_bytes != 0,
+                                    "connection closed while awaiting SEARCH literal"
+                                );
+                                filled += read_bytes;
+                            }
+                            let query = String::from_utf8_lossy(&literal[..n]).to_string();
+                            eprintln!("{name} loop_handler SEARCH literal ({n} bytes): {query:?}");
+                            state
+                                .lock()
+                                .unwrap()
+                                .search_literals
                                 .push(literal[..n].to_vec());
                             let uids = state
                                 .lock()
@@ -6867,6 +7062,287 @@ hello poisoned revealed {i}.
         loops_handle.join().unwrap();
     }
 
+    /// End-to-end test of a non-ASCII `MailBackend::search` term: the mock
+    /// answers the `{N}` continuation request for a `Subject` search and
+    /// records the raw literal octets, so the test pins both the wire shape
+    /// (literal, not an 8-bit quoted string) and the returned hashes. See
+    /// `test_imap_search_subject_cjk_literal`.
+    pub(crate) fn run_imap_search_subject_cjk_literal() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_hit = t3_test_mail("网易邮箱账号安全", "cjk-hit@example.com");
+        let seed_mail_miss = t3_test_mail("unrelated subject", "cjk-miss@example.com");
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_hit);
+            state_lck.insert(seed_mail_miss);
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            let server_state = &server_state;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                            let expected: EnvelopeHash = seed_envs
+                                .iter()
+                                .find(|env| env.subject().contains("账号"))
+                                .map(|env| env.hash())
+                                .expect("the CJK-subject seed must be fetched");
+                            let found = imap
+                                .search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                .unwrap()
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                found,
+                                vec![expected],
+                                "the CJK subject search must return the matching UID"
+                            );
+                            let literals = server_state.lock().unwrap().search_literals.clone();
+                            assert_eq!(
+                                literals,
+                                vec!["账号".as_bytes().to_vec()],
+                                "server must receive the CJK term as a literal"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// QQ Mail emulation (`ServerState::search_ignore_literal_continuation`):
+    /// a `UID SEARCH CHARSET UTF-8 ... {N}` line carrying a synchronizing
+    /// literal is answered with an untagged `* SEARCH` line plus the tagged
+    /// completion instead of a `+ ` continuation request (QQ does not
+    /// advertise `LITERAL+`). The search must return `Err` within a bounded
+    /// wait rather than hang forever.
+    pub(crate) fn run_imap_search_qq_literal_no_continuation() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            search_ignore_literal_continuation: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(t3_test_mail("网易邮箱账号安全", "qq-cjk@example.com"));
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            let server_state = &server_state;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(seed_envs.len(), 1, "initial fetch must load the seed mail");
+                            let search_fut = imap
+                                .search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                .unwrap();
+                            match melib::utils::futures::timeout(
+                                Some(Duration::from_secs(10)),
+                                search_fut,
+                            )
+                            .await
+                            {
+                                Ok(res) => {
+                                    let err = res.expect_err(
+                                        "QQ completes the command without a literal continuation, \
+                                         so the search must fail",
+                                    );
+                                    eprintln!("QQ search error (expected): {err:?}");
+                                }
+                                Err(_) => panic!(
+                                    "the search hung waiting for a continuation request that QQ \
+                                     never sends"
+                                ),
+                            }
+                            let state_lck = server_state.lock().unwrap();
+                            assert_eq!(
+                                state_lck.search_literal_continuations, 0,
+                                "the QQ mock must not have sent a continuation request"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// `LITERAL+` server emulation (`ServerState::advertise_literal_plus`):
+    /// the client sends the whole non-ASCII `SEARCH` command in one write
+    /// (`{N+}`, no continuation request) and still parses the `* SEARCH`
+    /// result.
+    pub(crate) fn run_imap_search_literal_plus() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            advertise_literal_plus: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(t3_test_mail("网易邮箱账号安全", "cjk-plus-hit@example.com"));
+            state_lck.insert(t3_test_mail(
+                "unrelated subject",
+                "cjk-plus-miss@example.com",
+            ));
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            let server_state = &server_state;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                            let expected: EnvelopeHash = seed_envs
+                                .iter()
+                                .find(|env| env.subject().contains("账号"))
+                                .map(|env| env.hash())
+                                .expect("the CJK-subject seed must be fetched");
+                            let found = imap
+                                .search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                .unwrap()
+                                .await
+                                .expect("a LITERAL+ server must accept the one-shot literal");
+                            assert_eq!(
+                                found,
+                                vec![expected],
+                                "the CJK subject search must return the matching UID"
+                            );
+                            let state_lck = server_state.lock().unwrap();
+                            assert_eq!(
+                                state_lck.search_literals,
+                                vec!["账号".as_bytes().to_vec()],
+                                "server must receive the CJK term as a literal"
+                            );
+                            assert_eq!(
+                                state_lck.search_literal_continuations, 0,
+                                "LITERAL+ must not need a continuation request"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let commands = main_commands.lock().unwrap().clone();
+        assert!(
+            commands
+                .iter()
+                .any(|line| line.ends_with("UID SEARCH CHARSET UTF-8 SUBJECT {6+}\r\n")),
+            "the command must use the non-synchronizing `{{6+}}` literal; got: {commands:?}"
+        );
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
     /// End-to-end test of `MailBackend::raw_search` against a Gmail
     /// emulation: the mock advertises `X-GM-EXT-1`, `raw_search` drives
     /// the `UID SEARCH X-GM-RAW {N}` literal continuation exchange, and
@@ -7162,8 +7638,12 @@ hello new world b.
             uid_fetch_flags_drop_uid: false,
             uid_fetch_drop_uid_all: false,
             advertise_x_gm_ext_1: false,
+            advertise_literal_plus: false,
+            search_ignore_literal_continuation: false,
+            search_literal_continuations: 0,
             advertise_unselect: true,
             x_gm_raw_literals: vec![],
+            search_literals: vec![],
             id_handshake_line: None,
             omit_uidnext: false,
             fetch_underdelivers: None,

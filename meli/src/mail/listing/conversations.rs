@@ -499,6 +499,23 @@ impl ListingTrait for ConversationsListing {
             context.dirty_areas.push_back(area);
             return;
         }
+        if self.length == 0 && !self.filter_term.is_empty() {
+            // Filtered to nothing: the error branch above keeps precedence, so
+            // here the rebuilt row set is empty and the cleared pane would be
+            // blank; spell the result out instead.
+            grid.clear_area(area, pane_fill);
+            grid.write_string(
+                &format!("No results for \"{}\"", self.filter_term),
+                self.color_cache.theme_default.fg,
+                self.color_cache.theme_default.bg,
+                self.color_cache.theme_default.attrs,
+                area,
+                None,
+                None,
+            );
+            context.dirty_areas.push_back(area);
+            return;
+        }
         let rows = area.height() / 3;
 
         if rows == 0 {
@@ -621,6 +638,11 @@ impl ListingTrait for ConversationsListing {
         // incremental `row_updates` path would leave stale rows on
         // screen until the next keypress.
         self.force_draw = true;
+        // `force_draw` only makes the list repaint once drawn; the outer
+        // `Listing::draw` gates on the dirty chain, so mark the component
+        // dirty as well or the rebuilt (possibly empty) row set is never
+        // repainted after a global clear.
+        self.set_dirty(true);
     }
 
     fn view_area(&self) -> Option<Area> {
@@ -1457,6 +1479,26 @@ impl Component for ConversationsListing {
                 );
                 grid.clear_area(area, pane_fill);
                 context.dirty_areas.push_back(area);
+                if self.error.is_ok() && !self.filter_term.is_empty() {
+                    // An active filter matched nothing: the clear above also
+                    // erased `draw_list`'s hint, so paint it back on the list
+                    // column (the view owns the right 70%). An error keeps
+                    // precedence and is never covered by the empty state.
+                    let (list_area, _) = crate::mail::pane_split(area);
+                    grid.write_string(
+                        &format!("No results for \"{}\"", self.filter_term),
+                        self.color_cache.theme_default.fg,
+                        self.color_cache.theme_default.bg,
+                        self.color_cache.theme_default.attrs,
+                        list_area,
+                        None,
+                        None,
+                    );
+                    context.dirty_areas.push_back(list_area);
+                }
+                // The pane (and hint) is painted: clear the dirty flag or the
+                // early return would leave it set and repaint every frame.
+                self.dirty = false;
                 return;
             }
 
