@@ -71,7 +71,10 @@ use crate::{
             self, id_ext::id_ext_response, ImapLineSplit, ImapResponse, RequiredResponses,
             SelectResponse,
         },
-        search::ToImapSearch,
+        search::{
+            search_send_steps, search_send_steps_non_sync, ImapSearchSegment, ImapSearchSendStep,
+            ToImapSearch,
+        },
         sync::cache::ImapCache,
         Capabilities, ImapServerConf, MessageSequenceNumber, UIDStore, UID, UIDVALIDITY,
     },
@@ -1149,6 +1152,17 @@ impl ImapStream {
         Ok(())
     }
 
+    /// Write `data` verbatim without appending a CRLF.
+    ///
+    /// The `SEARCH` sender uses this to control the exact framing of a command
+    /// that contains synchronizing literals: text lines already end in CRLF,
+    /// while literal octets must be followed by the rest of the command.
+    pub async fn send_bytes(&mut self, data: &[u8]) -> Result<()> {
+        self.stream.write_all(data).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+
     pub async fn send_raw(&mut self, raw: &[u8]) -> Result<()> {
         self.stream.write_all(raw).await?;
         self.stream.write_all(b"\r\n").await?;
@@ -1505,6 +1519,75 @@ impl ImapConnection {
         Ok(())
     }
 
+    /// Bounded wait for a synchronizing literal continuation request.
+    ///
+    /// This is the `SEARCH`-specific analogue of
+    /// [`ImapConnection::wait_for_continuation_request`]: the latter reads
+    /// lines until it sees a `+ ` continuation and never inspects the tagged
+    /// response, so it loops forever against a server that does not send a
+    /// continuation request at all. Some servers (observed: QQ Mail, which
+    /// does not advertise `LITERAL+`) answer a command carrying a
+    /// synchronizing literal directly with the command's tagged completion —
+    /// optionally preceded by untagged data such as `* SEARCH ...` — instead
+    /// of a `+ ` line, which used to hang the search job.
+    ///
+    /// The whole exchange is bounded by `uid_store.timeout`. Complete lines
+    /// are inspected one at a time:
+    ///
+    /// - a line starting with `+` is the continuation request: return
+    ///   `Ok(())`;
+    /// - a line starting with the pending command's `tag` means the server
+    ///   answered (or refused) the command without consuming the literal:
+    ///   return `Err` with the server's response text;
+    /// - any other untagged line is inconclusive: keep waiting for the
+    ///   continuation request or the tagged response;
+    /// - no line before the timeout: return `Err(TimedOut)`.
+    ///
+    /// Other callers of [`ImapConnection::wait_for_continuation_request`] are
+    /// unaffected.
+    pub async fn wait_for_literal_continuation(&mut self, tag: &[u8]) -> Result<()> {
+        let overall = self.uid_store.timeout;
+        timeout(
+            overall,
+            try_await(async move {
+                let mut buf: Vec<u8> = vec![0; Connection::IO_BUF_SIZE];
+                let mut pending: Vec<u8> = Vec::new();
+                loop {
+                    let read = self.stream.as_mut()?.stream.read(&mut buf).await?;
+                    if read == 0 {
+                        return Err(Error::new("Disconnected"));
+                    }
+                    pending.extend_from_slice(&buf[..read]);
+                    enforce_response_size_limit(pending.len())?;
+                    let mut consumed = 0;
+                    while let Some(rel) = pending[consumed..].find(b"\r\n") {
+                        let end = consumed + rel + b"\r\n".len();
+                        let line = &pending[consumed..end];
+                        let is_continuation = line.starts_with(b"+");
+                        let is_tagged = line.starts_with(tag);
+                        let repr = String::from_utf8_lossy(line).trim_end().to_string();
+                        consumed = end;
+                        if is_continuation {
+                            return Ok(());
+                        }
+                        if is_tagged {
+                            return Err(Error::new(format!(
+                                "Server did not send a literal continuation request: {repr}"
+                            )));
+                        }
+                        // Another untagged line (e.g. `* SEARCH ...`): the
+                        // literal is not accepted, but the tagged completion
+                        // still has to arrive to know the outcome.
+                    }
+                    if consumed > 0 {
+                        pending.drain(..consumed);
+                    }
+                }
+            }),
+        )
+        .await?
+    }
+
     pub async fn send_command(&mut self, command: CommandBody<'_>) -> Result<()> {
         if let Err(err) =
             try_await(async { self.stream.as_mut()?.send_command(command).await }).await
@@ -1538,6 +1621,18 @@ impl ImapConnection {
     pub async fn send_literal(&mut self, data: &[u8]) -> Result<()> {
         if let Err(err) = try_await(async { self.stream.as_mut()?.send_literal(data).await }).await
         {
+            self.stream = Err(err.clone());
+            if err.kind.is_network() {
+                self.connect().await?;
+            }
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn send_bytes(&mut self, data: &[u8]) -> Result<()> {
+        if let Err(err) = try_await(async { self.stream.as_mut()?.send_bytes(data).await }).await {
             self.stream = Err(err.clone());
             if err.kind.is_network() {
                 self.connect().await?;
@@ -2053,20 +2148,125 @@ impl ImapConnection {
                 "Cannot search without specifying mailbox on IMAP",
             ));
         };
-        let query_str = query.to_imap_search();
+        let segments = query.to_imap_search_segments();
+        let query_repr = segments
+            .iter()
+            .map(|segment| match segment {
+                ImapSearchSegment::Text(text) => text.clone(),
+                ImapSearchSegment::Literal(octets) => String::from_utf8_lossy(octets).into_owned(),
+            })
+            .collect::<String>();
 
         let mut response = Vec::with_capacity(8 * 1024);
         self.examine_mailbox(mailbox_hash, &mut response, false)
             .await?;
-        self.send_command_raw(format!("UID SEARCH CHARSET UTF-8 {}", query_str.trim()).as_bytes())
+        if segments.iter().any(ImapSearchSegment::is_literal) {
+            // Non-ASCII values cannot travel inside a quoted string (RFC 3501
+            // limits quoted strings to 7-bit `CHAR`s), so they are sent as
+            // IMAP literals. Prefer the non-synchronizing form (RFC 7888)
+            // when the server accepts it, otherwise fall back to RFC 3501
+            // synchronizing literals.
+            let (has_literal_plus, has_literal_minus) = {
+                let capabilities = self.uid_store.capabilities.lock().unwrap();
+                (
+                    capabilities
+                        .iter()
+                        .any(|cap| cap.eq_ignore_ascii_case(b"LITERAL+")),
+                    capabilities
+                        .iter()
+                        .any(|cap| cap.eq_ignore_ascii_case(b"LITERAL-")),
+                )
+            };
+            let max_literal_len = segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    ImapSearchSegment::Literal(octets) => Some(octets.len()),
+                    ImapSearchSegment::Text(_) => None,
+                })
+                .max()
+                .unwrap_or(0);
+            // `send_command_raw` trims the command before appending the final
+            // CRLF, so a trailing literal ending in ASCII whitespace would
+            // lose octets and desynchronize its `{n+}` count. This corner
+            // case (a user-supplied term with trailing whitespace) keeps the
+            // synchronizing form, whose literal octets are written verbatim.
+            let trailing_literal_whitespace = matches!(
+                segments.last(),
+                Some(ImapSearchSegment::Literal(octets))
+                    if octets.last().is_some_and(|byte| byte.is_ascii_whitespace())
+            );
+            let use_non_sync = !trailing_literal_whitespace
+                && (has_literal_plus || (has_literal_minus && max_literal_len <= 4096));
+            let mode = if use_non_sync {
+                if has_literal_plus {
+                    "literal+"
+                } else {
+                    "literal-"
+                }
+            } else {
+                "sync"
+            };
+            imap_log!(trace, self, "search literals sent in {} mode", mode);
+            if use_non_sync {
+                // One shot: `{n+}` needs no `+ ` continuation, so the entire
+                // command (text and raw literal octets) goes out in a single
+                // `send_command_raw` call.
+                let mut command = Vec::with_capacity(query_repr.len() + 64);
+                command.extend_from_slice(b"UID SEARCH CHARSET UTF-8 ");
+                for step in search_send_steps_non_sync(&segments) {
+                    if let ImapSearchSendStep::Write(bytes) = step {
+                        command.extend_from_slice(&bytes);
+                    }
+                }
+                self.send_command_raw(&command).await?;
+            } else {
+                // RFC 3501 synchronizing literals: write the text up to each
+                // `{n}`, wait for the continuation request, write the raw
+                // octets, and repeat until the command is fully sent.
+                // `send_command_raw` prepends the tag and appends the first
+                // line's CRLF; the remaining steps are written verbatim by
+                // `send_bytes`, which must not add a CRLF.
+                let mut first_write = true;
+                let mut tag: Option<Vec<u8>> = None;
+                for step in search_send_steps(&segments) {
+                    match step {
+                        ImapSearchSendStep::Write(bytes) if first_write => {
+                            let mut command = Vec::with_capacity(bytes.len() + 32);
+                            command.extend_from_slice(b"UID SEARCH CHARSET UTF-8 ");
+                            command.extend_from_slice(&bytes);
+                            self.send_command_raw(&command).await?;
+                            first_write = false;
+                            tag = Some(
+                                format!("M{} ", self.stream.as_ref()?.cmd_id - 1).into_bytes(),
+                            );
+                        }
+                        ImapSearchSendStep::Write(bytes) => {
+                            self.send_bytes(&bytes).await?;
+                        }
+                        ImapSearchSendStep::WaitContinuation => {
+                            let tag = tag.as_deref().expect("a write precedes every continuation");
+                            self.wait_for_literal_continuation(tag).await?;
+                        }
+                    }
+                }
+            }
+        } else {
+            let query_str = segments
+                .iter()
+                .filter_map(ImapSearchSegment::as_text)
+                .collect::<String>();
+            self.send_command_raw(
+                format!("UID SEARCH CHARSET UTF-8 {}", query_str.trim()).as_bytes(),
+            )
             .await?;
+        }
         self.read_response(&mut response, RequiredResponses::SEARCH)
             .await?;
         imap_log!(
             trace,
             self,
             "searching for {} returned: {}",
-            query_str,
+            query_repr,
             String::from_utf8_lossy(&response)
         );
 

@@ -129,6 +129,38 @@ pub struct SearchResult {
     pub degraded: bool,
 }
 
+/// Pure decision helper: should an empty *remote* search result be
+/// re-checked with the local fallback scan?
+///
+/// `remote_hits` is `None` when the remote search itself returned `Err`;
+/// that case keeps the pre-existing "remote failed -> full fallback"
+/// path and is deliberately not handled here, so this function only ever
+/// triggers an *extra* scan on top of a successful remote round trip.
+///
+/// Rationale for the non-ASCII test: some servers (e.g. Coremail, which
+/// still advertises `SEARCH`) accept `UID SEARCH CHARSET UTF-8 ...` and
+/// answer `OK` with an empty `* SEARCH` even though matching mail exists,
+/// because the server-side encoding/charset semantics do not line up with
+/// the UTF-8 query bytes (mail is commonly GB18030 or RFC2047 encoded).
+/// A remote `Ok(0)` is therefore not trustworthy whenever the query
+/// carries non-ASCII bytes, and the locally cached headers must be
+/// scanned to recover the hits. For an ASCII query there is no such
+/// encoding ambiguity, so an empty `Ok` really means "no match" and no
+/// extra scan is performed (the result then stays non-degraded).
+///
+/// The check is intentionally not narrowed to `Body`/`AllText`: any
+/// structured query (`from:`, `subject:`, ...) containing non-ASCII text
+/// is subject to the very same server-side charset handling, and the
+/// local header scan can still resolve those hits. The fallback scan
+/// itself skips body scanning for remote backends, which is fine — it is
+/// a supplement, not a replacement for the remote search.
+fn should_scan_local_on_empty_remote(
+    remote_hits: Option<&[EnvelopeHash]>,
+    search_term: &str,
+) -> bool {
+    !search_term.is_ascii() && matches!(remote_hits, Some(hits) if hits.is_empty())
+}
+
 /// Attach a [`SearchResult::degraded`] flag to a plain envelope-hash future.
 fn wrap_search_result(
     res: ResultFuture<Vec<EnvelopeHash>>,
@@ -1605,20 +1637,51 @@ impl Account {
                     let query = melib::search::Query::try_from(search_term)?;
                     let log_name = self.name.clone();
                     let backend = self.backend.clone();
+                    let search_term = search_term.to_string();
                     let fallback = fallback_scan(backend.clone(), query.clone(), &log_name);
                     Ok(Box::pin(async move {
                         let backend_res = backend.lock().unwrap().search(query, Some(mailbox_hash));
                         match backend_res {
                             Ok(fut) => match fut.await {
                                 Ok(ret) => {
-                                    melib::log::debug!(
-                                        "search: remote returned {} hits",
-                                        ret.len()
-                                    );
-                                    Ok(SearchResult {
-                                        envelopes: ret,
-                                        degraded: false,
-                                    })
+                                    if should_scan_local_on_empty_remote(
+                                        Some(&ret),
+                                        &search_term,
+                                    ) {
+                                        // The remote round trip succeeded but
+                                        // returned nothing for a non-ASCII
+                                        // term, which is not trustworthy
+                                        // (see `should_scan_local_on_empty_remote`).
+                                        // Supplement it with the local scan.
+                                        melib::log::debug!(
+                                            "search: remote returned 0 hits for non-ascii term; \
+                                             running local fallback scan"
+                                        );
+                                        let hits = fallback.await;
+                                        if hits.is_empty() {
+                                            // The local cache has no match
+                                            // either: report the original
+                                            // empty, non-degraded result.
+                                            Ok(SearchResult {
+                                                envelopes: ret,
+                                                degraded: false,
+                                            })
+                                        } else {
+                                            Ok(SearchResult {
+                                                envelopes: hits,
+                                                degraded: true,
+                                            })
+                                        }
+                                    } else {
+                                        melib::log::debug!(
+                                            "search: remote returned {} hits",
+                                            ret.len()
+                                        );
+                                        Ok(SearchResult {
+                                            envelopes: ret,
+                                            degraded: false,
+                                        })
+                                    }
                                 }
                                 Err(err) => {
                                     melib::log::debug!(
@@ -2281,5 +2344,45 @@ impl Index<&MailboxHash> for Account {
 impl IndexMut<&MailboxHash> for Account {
     fn index_mut(&mut self, index: &MailboxHash) -> &mut MailboxEntry {
         self.mailbox_entries.get_mut(index).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod search_supplement_tests {
+    use super::*;
+
+    /// Non-ASCII query + successful but empty remote result: the empty
+    /// answer is untrustworthy, so the local fallback must run.
+    #[test]
+    fn test_supplement_triggers_for_non_ascii_empty_remote() {
+        let empty: &[EnvelopeHash] = &[];
+        assert!(should_scan_local_on_empty_remote(Some(empty), "网易"));
+        assert!(should_scan_local_on_empty_remote(Some(empty), "café"));
+    }
+
+    /// ASCII query + empty remote result: no charset ambiguity, a genuine
+    /// "no match", so no local scan.
+    #[test]
+    fn test_supplement_skipped_for_ascii_empty_remote() {
+        let empty: &[EnvelopeHash] = &[];
+        assert!(!should_scan_local_on_empty_remote(Some(empty), "netease"));
+        assert!(!should_scan_local_on_empty_remote(Some(empty), ""));
+    }
+
+    /// Non-empty remote result: there is nothing to recover.
+    #[test]
+    fn test_supplement_skipped_when_remote_has_hits() {
+        let hits = [EnvelopeHash(1), EnvelopeHash(2)];
+        assert!(!should_scan_local_on_empty_remote(Some(&hits), "网易"));
+        assert!(!should_scan_local_on_empty_remote(Some(&hits), "netease"));
+    }
+
+    /// Remote `Err` is modelled as `None`: the helper must not claim a
+    /// supplement, because the existing "remote failed -> full fallback"
+    /// arm keeps handling it (no regression, no double scan).
+    #[test]
+    fn test_remote_error_keeps_legacy_fallback_path() {
+        assert!(!should_scan_local_on_empty_remote(None, "网易"));
+        assert!(!should_scan_local_on_empty_remote(None, "netease"));
     }
 }

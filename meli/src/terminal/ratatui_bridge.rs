@@ -72,7 +72,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton as CrosstermMouseButton,
     MouseEvent as CrosstermMouseEvent, MouseEventKind,
 };
-use ratatui::buffer::{Buffer as RatatuiBuffer, CellDiffOption};
+use ratatui::buffer::{Buffer as RatatuiBuffer, CellDiffOption, CellWidth};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color as RatatuiColor, Modifier as RatatuiModifier, Style as RatatuiStyle};
 use ratatui::symbols::border::Set as RatatuiBorderSet;
@@ -562,24 +562,93 @@ pub fn blit_buffer_to_cellbuffer(src: &RatatuiBuffer, dst: &mut CellBuffer) {
 /// Per cell: the symbol's first char becomes the cell glyph, fg/bg
 /// colors and modifiers are copied. The intersection of `area` and the
 /// source buffer dimensions is copied; everything else is untouched.
+///
+/// Wide glyphs are transcribed with their continuation cells, mirroring
+/// [`CellBuffer::write_string`]: ratatui's `Buffer::set_stringn` lays a
+/// width-`n` grapheme in one cell and resets the following `n - 1` cells
+/// to a blank default (`Cell::reset`), relying on its own diff to hide
+/// them. Copying those blanks verbatim would turn each into a *non-empty*
+/// space, which meli's flush emits as a real cell and then re-anchors
+/// backwards onto, erasing the wide glyph's right half (the command
+/// palette showed CJK input as blank this way). The width is measured
+/// with ratatui's own [`CellWidth`] (`unicode-width`, East-Asian
+/// Ambiguous = 1) so it matches the layout `set_stringn` used; the
+/// continuation cells take the wide glyph's colors/attributes and are
+/// marked empty, exactly like `write_string`.
+///
+/// A symbol that is the empty string is treated as a continuation too. If
+/// the copied window's first column is covered by a wide glyph sitting
+/// immediately to its left — either in the source (`src.cell((x0 - 1, y))`)
+/// or already painted in the destination at `(x0 - 1, y0 + y)` — that
+/// column stays an empty continuation instead of receiving the source
+/// window's first cell.
 pub fn blit_buffer_to_cellbuffer_at(src: &RatatuiBuffer, dst: &mut CellBuffer, area: Area) {
     debug_assert_eq!(dst.generation(), area.generation());
     let (x0, y0) = area.upper_left();
     let width = area.width().min(src.area().width as usize);
     let height = area.height().min(src.area().height as usize);
     for y in 0..height {
-        for x in 0..width {
+        // Left boundary: a wide glyph just left of the window owns the
+        // window's first column as its continuation.
+        let mut skip_first = false;
+        if x0 > 0 {
+            let src_left = src.cell(((x0 - 1) as u16, y as u16)).and_then(|s| {
+                (s.symbol().cell_width() >= 2)
+                    .then(|| (s.fg.into(), s.bg.into(), s.modifier.into()))
+            });
+            let dst_left = dst
+                .get(x0 - 1, y0 + y)
+                .and_then(|d| d.spans_two_columns().then(|| (d.fg(), d.bg(), d.attrs())));
+            if let Some((fg, bg, attrs)) = src_left.or(dst_left) {
+                if let Some(d) = dst.get_mut(x0, y0 + y) {
+                    d.overwrite(' ', fg, bg, attrs, true);
+                }
+                skip_first = true;
+            }
+        }
+        // Destination columns still covered by the wide glyph before them,
+        // and the colors/attributes those continuation cells inherit.
+        let mut covered = 0usize;
+        let mut covered_style = (Color::Default, Color::Default, Attr::DEFAULT);
+        if skip_first {
+            // The skipped source cell can itself be a wide glyph; keep its
+            // continuation columns marked.
+            if let Some(s0) = src.cell((0, y as u16)) {
+                let cell_width = s0.symbol().cell_width() as usize;
+                if cell_width >= 2 {
+                    covered = cell_width - 1;
+                    covered_style = (s0.fg.into(), s0.bg.into(), s0.modifier.into());
+                }
+            }
+        }
+        for x in usize::from(skip_first)..width {
             let (Some(s), Some(d)) = (src.cell((x as u16, y as u16)), dst.get_mut(x0 + x, y0 + y))
             else {
                 continue;
             };
+            if covered > 0 {
+                covered -= 1;
+                d.overwrite(' ', covered_style.0, covered_style.1, covered_style.2, true);
+                continue;
+            }
+            let symbol = s.symbol();
+            let (fg, bg, attrs) = (s.fg.into(), s.bg.into(), s.modifier.into());
+            if symbol.is_empty() {
+                d.overwrite(' ', fg, bg, attrs, true);
+                continue;
+            }
+            let cell_width = symbol.cell_width() as usize;
             d.overwrite(
-                s.symbol().chars().next().unwrap_or(' '),
-                s.fg.into(),
-                s.bg.into(),
-                s.modifier.into(),
+                symbol.chars().next().unwrap_or(' '),
+                fg,
+                bg,
+                attrs,
                 false,
             );
+            if cell_width >= 2 {
+                covered = cell_width - 1;
+                covered_style = (fg, bg, attrs);
+            }
         }
     }
 }
@@ -1915,6 +1984,67 @@ mod tests {
         assert_eq!(roundtrip, orig);
         assert_eq!(roundtrip.get(0, 0).unwrap().ch(), 'q');
         println!("blit_empty_and_1x1_buffers: 0x0 no-op + 1x1 round trip ok");
+    }
+
+    /// `blit_buffer_to_cellbuffer_at` must mirror `Buffer::set_stringn`'s
+    /// wide-glyph layout: a width-2 glyph lands non-empty on its own column
+    /// and its right neighbour is an empty continuation, never a ghost
+    /// non-empty space (which meli's flush would emit and then re-anchor
+    /// backwards onto, blanking the glyph).
+    #[test]
+    fn blit_at_wide_chars_use_empty_continuation_cells() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
+        buffer.set_string(0, 0, "a中b日", RStyle::default());
+        let mut screen = Screen::<Virtual>::new(ThemeAttribute::default());
+        assert!(screen.resize(6, 1));
+        let area = screen.area();
+        blit_buffer_to_cellbuffer_at(&buffer, screen.grid_mut(), area);
+        let grid = screen.grid();
+        assert_eq!(grid[(0, 0)].ch(), 'a');
+        assert!(!grid[(0, 0)].empty());
+        assert_eq!(grid[(1, 0)].ch(), '中');
+        assert!(!grid[(1, 0)].empty(), "'中' must occupy its own column");
+        assert!(grid[(2, 0)].empty(), "'中' continuation must be empty");
+        assert_eq!(grid[(3, 0)].ch(), 'b');
+        assert!(!grid[(3, 0)].empty(), "'b' must land on its own column");
+        assert_eq!(grid[(4, 0)].ch(), '日');
+        assert!(!grid[(4, 0)].empty(), "'日' must occupy its own column");
+        assert!(grid[(5, 0)].empty(), "'日' continuation must be empty");
+        println!("blit_at_wide_chars_use_empty_continuation_cells: a中b日 pinned");
+    }
+
+    /// A wide glyph straddling the blit window's left edge keeps its
+    /// continuation: the window's first column is written as an empty
+    /// continuation instead of receiving the source's first cell.
+    #[test]
+    fn blit_at_left_boundary_wide_char_keeps_continuation() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buffer.set_string(0, 0, "abcd", RStyle::default());
+        let mut screen = Screen::<Virtual>::new(ThemeAttribute::default());
+        assert!(screen.resize(6, 1));
+        {
+            let grid = screen.grid_mut();
+            grid[(1, 0)] = Cell::new('中', Color::Default, Color::Default, Attr::DEFAULT);
+            grid[(2, 0)] = Cell::new(' ', Color::Default, Color::Default, Attr::DEFAULT);
+            grid[(2, 0)].set_empty(true);
+        }
+        // Blit four columns anchored at x0 = 2; the wide glyph's first half
+        // sits at x0 - 1 and its continuation at x0.
+        let area = screen.area().skip_cols(2).take_cols(4);
+        blit_buffer_to_cellbuffer_at(&buffer, screen.grid_mut(), area);
+        let grid = screen.grid();
+        assert_eq!(grid[(1, 0)].ch(), '中');
+        assert!(!grid[(1, 0)].empty());
+        assert!(
+            grid[(2, 0)].empty(),
+            "the left glyph's continuation must stay empty"
+        );
+        // The window's first source cell is clipped by the boundary, so the
+        // remaining cells land one column over.
+        assert_eq!(grid[(3, 0)].ch(), 'b');
+        assert_eq!(grid[(4, 0)].ch(), 'c');
+        assert_eq!(grid[(5, 0)].ch(), 'd');
+        println!("blit_at_left_boundary_wide_char_keeps_continuation: gutter pinned");
     }
 
     /// OSC8 hyperlink tables live in `CellBuffer` metadata; blits must leave
