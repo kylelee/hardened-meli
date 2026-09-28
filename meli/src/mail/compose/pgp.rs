@@ -22,7 +22,11 @@
 
 use super::*;
 
-type KeylistJoinHandle = JoinHandle<Result<Vec<melib::gpgme::Key>>>;
+use melib::email::pgp::PGPBackend;
+
+use crate::conf::pgp::PGPBackendChoice;
+
+type KeylistJoinHandle = JoinHandle<Result<Vec<melib::email::pgp::Key>>>;
 
 #[derive(Debug)]
 pub struct KeySelectionLoading {
@@ -32,25 +36,27 @@ pub struct KeySelectionLoading {
     local: bool,
     patterns: (String, Vec<String>),
     allow_remote_lookup: ActionFlag,
+    backend_choice: PGPBackendChoice,
 }
 
 impl KeySelectionLoading {
     pub fn new(
+        backend_choice: &PGPBackendChoice,
         secret: bool,
         local: bool,
         patterns: (String, Vec<String>),
         allow_remote_lookup: ActionFlag,
         context: &Context,
     ) -> Result<Self> {
-        use melib::{email::pgp::LocateKey, gpgme};
-        let mut ctx = gpgme::Context::new()?;
+        use melib::email::pgp::LocateKey;
+        let mut backend = backend_choice.instantiate()?;
         if local {
-            ctx.set_auto_key_locate(LocateKey::LOCAL)?;
+            backend.set_auto_key_locate(LocateKey::LOCAL)?;
         } else {
-            ctx.set_auto_key_locate(LocateKey::WKD | LocateKey::LOCAL)?;
+            backend.set_auto_key_locate(LocateKey::WKD | LocateKey::LOCAL)?;
         }
         let (pattern, other_patterns) = patterns;
-        let main_job = ctx.keylist(secret, Some(pattern.clone()))?;
+        let main_job = PGPBackend::keylist(&backend, secret, Some(pattern.clone()))?;
         let main_handle = context.main_loop_handler.job_executor.spawn(
             "gpg::keylist".into(),
             main_job,
@@ -59,7 +65,7 @@ impl KeySelectionLoading {
         let other_handles = other_patterns
             .iter()
             .map(|pattern| {
-                let job = ctx.keylist(secret, Some(pattern.clone()))?;
+                let job = PGPBackend::keylist(&backend, secret, Some(pattern.clone()))?;
                 Ok(context.main_loop_handler.job_executor.spawn(
                     "gpg::keylist".into(),
                     job,
@@ -76,6 +82,7 @@ impl KeySelectionLoading {
             patterns: (pattern, other_patterns),
             allow_remote_lookup,
             progress_spinner,
+            backend_choice: backend_choice.clone(),
         })
     }
 
@@ -87,6 +94,7 @@ impl KeySelectionLoading {
             patterns: (_, ref mut other_patterns),
             allow_remote_lookup: _,
             progress_spinner: _,
+            backend_choice: _,
         } = self;
         let Self {
             handles: (rhs_handle, rhs_other_handles),
@@ -95,6 +103,7 @@ impl KeySelectionLoading {
             local: _,
             allow_remote_lookup: _,
             progress_spinner: _,
+            backend_choice: _,
         } = rhs;
         other_handles.push(rhs_handle);
         other_handles.extend(rhs_other_handles);
@@ -104,20 +113,21 @@ impl KeySelectionLoading {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum KeySelection {
     Loading {
         inner: KeySelectionLoading,
         /// Accumulate results from intermediate results (i.e. not the main
         /// pattern)
-        keys_accumulator: Vec<melib::gpgme::Key>,
+        keys_accumulator: Vec<melib::email::pgp::Key>,
     },
     Error {
         id: ComponentId,
         err: Error,
     },
     Loaded {
-        widget: Box<UIDialog<melib::gpgme::Key>>,
-        keys: Vec<melib::gpgme::Key>,
+        widget: Box<UIDialog<melib::email::pgp::Key>>,
+        keys: Vec<melib::email::pgp::Key>,
     },
 }
 
@@ -178,6 +188,7 @@ impl Component for KeySelection {
                         local,
                         patterns: (ref mut pattern, ref mut other_patterns),
                         allow_remote_lookup,
+                        ref backend_choice,
                         ..
                     },
                 ref mut keys_accumulator,
@@ -207,6 +218,7 @@ impl Component for KeySelection {
                                 let id = progress_spinner.id();
                                 if allow_remote_lookup.is_true() {
                                     match KeySelectionLoading::new(
+                                        backend_choice,
                                         *secret,
                                         *local,
                                         (std::mem::take(pattern), std::mem::take(other_patterns)),
@@ -270,17 +282,17 @@ impl Component for KeySelection {
                                         .map(|k| {
                                             (
                                                 k.clone(),
-                                                if let Some(primary_uid) = k.primary_uid() {
-                                                    format!("{} {}", k.fingerprint(), primary_uid)
+                                                if let Some(ref primary_uid) = k.primary_uid {
+                                                    format!("{} {}", k.fingerprint, primary_uid)
                                                 } else {
-                                                    k.fingerprint().to_string()
+                                                    k.fingerprint.clone()
                                                 },
                                             )
                                         })
-                                        .collect::<Vec<(melib::gpgme::Key, String)>>(),
+                                        .collect::<Vec<(melib::email::pgp::Key, String)>>(),
                                     false,
                                     Some(Box::new(
-                                        move |id: ComponentId, results: &[melib::gpgme::Key]| {
+                                        move |id: ComponentId, results: &[melib::email::pgp::Key]| {
                                             Some(UIEvent::FinishedUIDialog(
                                                 id,
                                                 Box::new(if results.is_empty() {
@@ -391,9 +403,9 @@ impl Component for KeySelection {
 pub struct GpgComposeState {
     pub sign_mail: Option<ActionFlag>,
     pub encrypt_mail: Option<ActionFlag>,
-    pub encrypt_keys: Vec<melib::gpgme::Key>,
+    pub encrypt_keys: Vec<melib::email::pgp::Key>,
     pub encrypt_for_self: bool,
-    pub sign_keys: Vec<melib::gpgme::Key>,
+    pub sign_keys: Vec<melib::email::pgp::Key>,
 }
 
 impl Default for GpgComposeState {
@@ -434,10 +446,20 @@ mod tests {
             } else {
                 ctx.set_auto_key_locate(LocateKey::WKD | LocateKey::LOCAL)?;
             }
+            // Wrap a raw gpgme::Context::keylist into a fresh job whose
+            // payload has been mapped from gpgme::Key to pgp::Key, matching
+            // the post-port component type.
             let job = ctx.keylist(secret, Some(pattern.clone()))?;
             let handle = context.main_loop_handler.job_executor.spawn(
                 "gpg::keylist".into(),
-                job,
+                async move {
+                    let raw = job.await;
+                    raw.map(|v| {
+                        v.into_iter()
+                            .map(melib::email::pgp::Key::from)
+                            .collect::<Vec<_>>()
+                    })
+                },
                 IsAsync::Blocking,
             );
             let mut progress_spinner = ProgressSpinner::new(8, context);
@@ -450,6 +472,7 @@ mod tests {
                     patterns: (pattern, vec![]),
                     allow_remote_lookup,
                     progress_spinner,
+                    backend_choice: crate::conf::pgp::PGPBackendChoice::default(),
                 },
                 keys_accumulator: vec![],
             })
@@ -582,19 +605,19 @@ mod tests {
                 gpgme_ctx.import_key(pubkey_data).unwrap();
             } else {
                 // 2nd loop iteration enters here
-                let assert_key = |key: &melib::gpgme::Key| {
-                    key.fingerprint() == "ADAB7FCC1F4DE2616ECFA402AF82244F9CD9FD55"
-                        && key.primary_uid()
+                let assert_key = |key: &melib::email::pgp::Key| {
+                    key.fingerprint == "ADAB7FCC1F4DE2616ECFA402AF82244F9CD9FD55"
+                        && key.primary_uid
                             == Some(melib::Address::new(
                                 Some("Joe Random Hacker"),
                                 "joe@example.com",
                             ))
-                        && key.can_encrypt()
-                        && key.can_sign()
-                        && !key.secret()
-                        && !key.revoked()
-                        && !key.expired()
-                        && !key.invalid()
+                        && key.can_encrypt
+                        && key.can_sign
+                        && !key.secret
+                        && !key.revoked
+                        && !key.expired
+                        && !key.invalid
                 };
                 assert!(
                     matches!(

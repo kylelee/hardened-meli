@@ -2,6 +2,7 @@
  * meli - jmap module.
  *
  * Copyright 2019 Manos Pitsidianakis
+ * Copyright 2026 Kyle Lee
  *
  * This file is part of meli.
  *
@@ -141,6 +142,12 @@ impl<OBJ> Id<OBJ> {
 
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+}
+
+impl<'a, OBJ> From<&'a Id<OBJ>> for &'a str {
+    fn from(id: &'a Id<OBJ>) -> Self {
+        id.inner.as_str()
     }
 }
 

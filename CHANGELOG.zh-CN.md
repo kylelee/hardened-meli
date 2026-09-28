@@ -30,6 +30,10 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 - 邮件操作全量命令化（计划 `command-palette-mail-ops`）：所有邮件操作均可从命令面板 / `:` 命令栏唤起。新增命令：`reply`、`reply all`、`reply author`、`forward`（按 `composing.forward_as_attachment` 弹 inline/附件选择）、`forward inline`、`forward attachment`、`new-mail`（空白编辑器）、`open`（打开列表光标处邮件/会话，同 `Enter`）、`refresh`（刷新焦点邮箱，同 `F5`：列表焦点刷当前打开邮箱、侧栏焦点刷高亮邮箱）；并把此前仅有解析器的 `flag` 命令补入补全表。回复/转发与键盘快捷键走完全相同的代码路径：已打开会话视图时动作直达该视图，否则先打开光标处条目再转发；在列表上作用于选中邮件，在邮件视图上作用于正在阅读的邮件。
 
+- PGP 可插拔后端（上游 `89f834b6` + `97f02477` + `7110e8d0`，语义移植）：`melib::email::pgp` 新增 `PGPBackend` trait（sign/verify/encrypt/decrypt/keylist/get_key）与 `Key` 抽象；gpgme 降为该 trait 的一个实现，另新增 `cli` 后端——按 `[pgp] backend = "cli"` 配置执行外部辅助脚本（含 `display_name`/`scan_command` 等键），`contrib/pgp-cli-backends/gpg/` 附带六个 GnuPG 参考脚本。`compose/gpg.rs` 更名 `compose/pgp.rs` 并改走 trait；keylist 结果以 `IndexSet` 去重；后端反序列化的错误提示修正。fork 偏差：cleartext 验证管线（`UnverifiedSignature`/`extract_unverified_signature`/`Context::verify_cleartext`、SignedPending→SignedVerified 路由）逐字保留，不引入上游 ViewFilter/FilterOutputMetadata 机制；无 `gpgme` feature 时默认 CLI 后端且 compose 签名/加密开关保持隐藏（延续 fork 的 no-gpgme UI 契约）；`conf/overrides.rs` 经 sentinel 重新生成。
+
+- JMAP EventSource 推送（上游 `40a45b04` + `af619461`，语义移植）：RFC 8620 URI 模板展开抽为独立模块 `melib/src/jmap/url_template.rs`（含单测）；新增 `melib/src/jmap/eventsource.rs` 对 session 的 `eventSourceUrl` 维持 SSE 长连接，按推送的 `State` 变化触发重同步，取代轮询。fork 偏差：协议违规返回 `ErrorKind::ProtocolError` 而非 panic；SSE 请求用 `RedirectPolicy::None` 延续 fork 的跨源重定向凭据加固；fork 的 JMAP 测试插桩（`error_responses`、since_state==current → 空响应）保留，并新增 `test_jmap_watch` SSE mock 服务器用例。
+
 ### 变更（Changes）
 
 - 依赖治理：移除根 `Cargo.toml` 的 `[patch.crates-io]` 与 `vendor/crossterm/` 目录，crossterm 回归 crates.io 0.29.0 原版。原补丁防御的「未识别私有 CSI 卡死」改由删除无用启动查询（`CSI ? 2026 $ p` 同步输出支持探测，全代码库无消费者）+ 输入看门狗承担。离线构建改为依赖本地 cargo cache 预取（`cargo fetch`）。
@@ -39,11 +43,22 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 - IMAP 离线缓存遍历改为按行分页，消除 163/Coremail 的刷新风暴（状态栏图标常转）：`CacheFirst`/`FromCache` 抓取阶段原先按 UID 空间做 `max_uid -= batch_size` 步进，在长寿服务器的稀疏 UID 空间（`UIDVALIDITY = 1`、`uidnext` 达 10^8-10^9、真实邮件只有少量）下一次抓取要迭代数千个几乎全空的缓存窗口——每个窗口都是一次瞬时 sqlite 查询并发出一个 `MailboxUpdate` payload——状态栏邮箱图标因此永久转个不停（日志证据：四个邮箱整场会话合计约每分钟 5 万个 `MailboxUpdate`，每次抓取约 600 个瞬时 `fetch-mailbox-continued` chunk）。`ImapCache::envelopes` 现按 `ORDER BY uid DESC LIMIT ?` 返回最新 `batch_size` 行并附带本页最低 UID（隔离区占位行随同页窗口一并服务），两个阶段的下一页都推进到 `最低 UID − 1`，页面为空或抵达 UID 1 即结束：无论 UID 空间多稀疏，遍历只需 `O(缓存行数 / batch_size)` 次查询，首次抓取数秒内完成，之后只做增量同步（验收目标：刷新完成后安静，仅剩定时 watch/IDLE）。
 
 - 后台账号刷新不再把布局拉回 layout1（163/IMAP 重连场景）：当前账号的 `UIEvent::AccountStatusChange`（看门狗重连时的「Establishing TLS connection.」「Attempting authentication.」，或重连后的邮箱列表对账「Refreshed mailboxes.」）此前会完整执行 `Listing::change_account`，其无条件的 `close_view` 会把屏幕上的 layout2/3/4 塌回 layout1。现在对账路径保留已打开的视图：`change_account` 新增 `keep_view` 标志（跳过 `close_view` 拆除；邮箱未变时跳过 `set_coordinates`——它会重置网格的条目焦点与过滤状态，使打开的视图悬在无焦点网格上，而视图的绘制门是 `component.unfocused()`）；`set_index_style` 在样式无变化时不再关闭视图。若对账把网格落到别的邮箱或光标下已无条目，过期视图仍会关闭并落回 layout1；layout4 的 `View` 键盘焦点随视图存活。刷新重踢 `OpenEntryUnderCursor` 时，`set_grid_focused` / `set_grid_has_keyboard` 现在尊重存活的 `View` 焦点。回归测试：`account_status_change_keeps_open_view`（layout2，含邮件面板实际渲染的 draw 断言）、`account_status_change_keeps_view_focus`（layout4）、`account_status_change_closes_stale_view_on_moved_mailbox`（过期关闭）。
-
 - 退回 layout1 时键盘落在邮箱列表（mailbox list）：从任意会关闭视图退回 layout1 的布局（layout2 的网格或邮件视图、layout3 的网格）按退出键（`exit_entry` 的 `i` 与通用 quit 的 `q`/`Esc`）原先把键盘留在邮件网格上；现在只要侧栏可见，键盘固定落在邮箱侧栏——与 `focus_left` 的落点一致。侧栏隐藏（`menu_visibility = false`）时仍落网格；中间步骤（layout4 → layout3）不变。`conversations_entry_close_no_residue` golden 已重录（侧栏 ring 亮、网格 ring 暗）。测试：`quit_key_exits_open_mail_view`（新增断言 `Menu` 落点）、`layout3_left_goes_to_mailbox_list_and_l4_quit`（layout3 退出落邮箱列表且侧栏可见）。
 
 - 邮件正文标签页（`MailViewTab`）带 ratatui 圆角边框：`open_in_new_tab` 引入的全屏邮件标签页现在在正文四周绘制圆角边框（`draw_rounded_frame`，即 ratatui `Block::bordered` 圆角 border set 的桥接），主题 "tab.focused"、内容底色 "pane.focused"——与其他标签页内容的 pane-ring 约定一致。边框由一个薄包装组件实现，其余（事件、脏标记、kill、快捷键、realize 组件树）全部委托给内层 `MailView`。回归测试：`enter_at_mail_view_focus_opens_new_tab` 断言标签页 payload 渲染出圆角（`╭`/`╯`）且内部无会话列表行。
 - `open_in_new_tab` 打开全屏邮件内容（layout4 修复）：`ThreadView` 的 `ListingAction::OpenInNewTab` 分支改为按焦点分派。邮件面板持键盘时（`open_in_new_tab` 快捷键，layout 2/4）新标签页是正在阅读邮件的 `MailView`——全屏邮件内容，即 `MailView` 自身命令分支一直产出的组件（"opens envelope view in new tab"）；此前转发源焦点、直接以 `MailView` 焦点构造 `ThreadView` 的做法在标签页里首帧渲染错乱。线程列表状态（`open-in-tab` 命令路径）仍打开整线程视图的整列表状态标签页，行为不变。测试：`enter_at_mail_view_focus_opens_new_tab` 同时绘制两种 payload——快捷键标签页无会话列表 chrome，命令标签页保持整列表框与行。
+
+- IMAP `resync_condstore` 空序列集边界（上游 `ed162e11`）：`lastseenuid == 1` 时 `(1..lastseenuid)` 生成空区间 `1..1`，被 imap_types 以 `ValidationError` 拒绝；`tag2 UID FETCH … FLAGS` 阶段改为 `lastseenuid < 2` 时使用全区间 `1:*`。`resync_basic` 处为闭区间 `..=`，经核对不受影响。
+
+- 标签重命名哈希（上游 `d8cc16b9`）：`TagName` 的 `Hash` impl 原先哈希显示名而非标签哈希，两个不同标签同名时 `[tags] rename` 映射查表错乱；现改为哈希 `TagHash`（字段改 `pub` 供测试构造），附 `test_conf_tag_rename` 回归测试。
+
+- 私用区（PUA）字符宽度（上游 `3f8427b0`）：PUA 码位（Nerd Fonts 等图标字体大量使用）原先被判为不可打印（`None`）；现归入 Ambiguous 宽度（1 格），附回归测试。
+
+- compact 列表标签边距（上游 `6d3dd4bd`）：标签文本现在从 `area_col_4.skip_cols(1)` 起打印，补齐此前"留 1 格"修复的最后一处。
+
+- 通知框边框残留（上游 `c498d7e6`）：清屏循环现遍历完整 `cached_area`（含边框环，适配 fork 的 `draw_rounded_frame`）后再画框，高亮属性不再残留于边框。
+
+- 编辑器启动（上游 `59c5ad4b` + `bb6d5916`）：编辑器解析优先级为 `composing.editor_command` > `$VISUAL` > `$EDITOR`（未设置提示文案同步更新）；草稿路径改为经 argv 传参（`sh -c '<editor> "$@"' -- editor path`），不再字符串拼接——路径含空格或 shell 元字符不再破坏启动，草稿文件名也无法注入 shell 语法。fork 的临时文件名长度加固保持不变。
 
 ### 已知问题（Known Issues）
 
@@ -66,6 +81,8 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 ### 杂项（Miscellaneous Tasks）
 
 - 核对确认与上游 meli 完全同步（截至 2026-09-15）：上游 HEAD `3d7eb2c5` 自 2026-09-14 同步 `4f2414a3..3d7eb2c5` 以来无新提交（见 [SYNC.zh-CN.md](./SYNC.zh-CN.md)）。
+- 与上游 meli 完全同步（截至 2026-09-28）：上游区间 `3d7eb2c5..bb6d5916`（22 个提交）在四个并行 worktree 上语义移植——PGP 可插拔后端、JMAP EventSource 推送及八个修复/重构提交（逐提交记账见 [SYNC.zh-CN.md](./SYNC.zh-CN.md)）。刻意跳过：命令补全框架重构 `a041bc90`（fork 自有命令面板 + nucleo 模糊匹配已覆盖并更优）、`ListingTrait::select` 纯内部重构 `03e1f5de`（无外部调用方）、上游 CI 移除 cargo-derivefmt 的 `0eaae124`（fork CI 为绿且保留该步骤）、`quote` 升级 `45a5d376`（fork 已在 1.0.47）。已通过 `make check`、`make lint`、`make test`（全 feature 全绿）。
+
 
 ## [v0.9.0] - 2026-09-13
 

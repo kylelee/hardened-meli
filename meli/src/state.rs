@@ -87,7 +87,6 @@ impl Drop for DrawSpan {
     }
 }
 use crate::{
-    conf::data_types::SearchBackend,
     jobs::JobExecutor,
     notifications::DisplayMessageBox,
     terminal::{get_events, Screen, Tty},
@@ -1214,7 +1213,7 @@ impl State {
                     .settings
                     .conf
                     .search_backend()
-                    != SearchBackend::Sqlite3
+                    != crate::conf::data_types::SearchBackend::Sqlite3
                 {
                     self.context.replies.push_back(UIEvent::Notification {
                         title: None,

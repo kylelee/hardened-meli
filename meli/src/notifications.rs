@@ -507,12 +507,6 @@ impl Component for DisplayMessageBox {
                 false,
                 false,
             );
-            /* Rounded OSD panel: the notification floats above all content,
-             * so it gets the overlay frame treatment — a rounded border in
-             * the notification colors over its raised panel background
-             * (status.notification bg), distinct from the content below. */
-            let box_displ_area =
-                crate::terminal::ratatui_bridge::draw_rounded_frame(grid, box_area, noto_colors);
             /* Register the frame's writes for flushing: the caller flushes
              * exactly `cached_area` from this (overlay) grid, so it must
              * cover the leading gutter column `draw_rounded_frame` blanked
@@ -530,7 +524,11 @@ impl Component for DisplayMessageBox {
             } else {
                 box_area
             };
-            for row in grid.bounds_iter(box_displ_area) {
+            /* Clear the panel's whole footprint — the border ring included —
+             * before the frame is drawn: clearing only the area inside the
+             * border left the previous content's highlight/colors showing
+             * around the edges (upstream c498d7e6). */
+            for row in grid.bounds_iter(self.cached_area) {
                 for c in row {
                     grid[c]
                         .set_ch(' ')
@@ -539,6 +537,12 @@ impl Component for DisplayMessageBox {
                         .set_attrs(noto_colors.attrs);
                 }
             }
+            /* Rounded OSD panel: the notification floats above all content,
+             * so it gets the overlay frame treatment — a rounded border in
+             * the notification colors over its raised panel background
+             * (status.notification bg), distinct from the content below. */
+            let box_displ_area =
+                crate::terminal::ratatui_bridge::draw_rounded_frame(grid, box_area, noto_colors);
             let mut lines_no = 0;
             for (idx, line) in msg_lines
                 .into_iter()

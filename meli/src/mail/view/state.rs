@@ -186,6 +186,8 @@ impl MailViewState {
                     context[coordinates.0][&coordinates.1].pgp.auto_decrypt
                 ),
                 charset: None,
+                pgp_backend: mailbox_settings!(context[coordinates.0][&coordinates.1].pgp.backend)
+                    .clone(),
             }),
             context.main_loop_handler.clone(),
         ));

@@ -38,6 +38,42 @@ git fetch upstream
 
 ## 同步记录
 
+## 2026-09-28 03:47 (UTC+8)
+
+- 同步方式：四个并行 worktree 分支语义移植（`t1-melib-conf-fixes` melib/conf 小修复、`t2-pgp-backends` PGP 后端、`t3-jmap-eventsource` JMAP 推送、`t4-compose-notify-fixes` compose/notify 修复）
+- 上游区间：`3d7eb2c5..bb6d5916`（22 个提交；4 个 SKIP——见下表）
+- 合并提交：`b6360713`（T1）、`5f0c3d3a`（T3）、`240a1cbf`（T2）、`57490df6`（T4）
+- 冲突处理：仅 `meli/src/conf/tests.rs`——双方都在文件尾追加新测试块，两者皆保留（T1 的 `test_conf_tag_rename` + T2 的 `pgp_backend_choice_tests`）
+- 验证：`make check`、`make lint`、`make test` 全绿（全 feature，0 警告）
+
+| 本地提交 | 上游提交 | 记账 | 类型 | 说明 |
+| --- | --- | --- | --- | --- |
+| `3e49d1a1` | `ed162e11` | port+deviation | fix(melib) | `resync_condstore` 仅在 condstore FLAGS 处 `== 0`→`< 2`；`resync_basic` 为闭区间 `..=`，经核对无空区间缺陷，不动（提交正文已注明） |
+| `8fab4a01` | `3f8427b0` | port | fix(melib) | PUA → Ambiguous 宽度 `Some(1)` + `wcswidth("\u{F09B}")` 回归测试 |
+| `8eda294c` | `d8cc16b9` | port | fix(meli) | `TagName` 哈希 `TagHash`（非 name）；字段 `pub`；新增 `test_conf_tag_rename` |
+| `53b101f3` | `fe48ab20` | port | refactor(meli) | fork 等价位置移除 feature 相关导入 |
+| `c975e9a4` | `b33e50fc` | port | style(melib) | 修正 clippy `allow` 属性位置 |
+| — | `9cbb4f41` | **SKIP** | style | fork 的 `conf.rs` 无该 import（顶层仅 `extern crate serde;`） |
+| `d0250dc6` | `40a45b04` | port+deviation | refactor(melib) | 从 `methods.rs` 抽出 `url_template` 模块（RFC 8620 URI 模板，含单测）；fork 保留 `Arc<FutureMutex<usize>>` + async `add_call`（不采纳上游 `AtomicUsize` 重写，纯内部实现） |
+| `98fd3296` | `af619461` | port+deviation | feat(melib) | 对 `eventSourceUrl` 的 EventSource(SSE) 推送取代轮询；偏差：协议违规由 `panic!`/`assert_eq!` 改为 `ErrorKind::ProtocolError`（fork 不 panic 加固）；SSE 请求 `RedirectPolicy::None`（延续 fork 跨源重定向凭据加固，上游 `Limit(10)`）；删除死字段 `last_method_response` 与 `new()` 硬编码 10s 超时（否则会掐断 `timeout: None` 的 SSE）；fork 测试插桩（`error_responses`、since_state==current → 空响应）保留；新增 `run_jmap_watch`/`test_jmap_watch` SSE mock 用例 |
+| `afbd67f8`+`debe90c0`+`5805c091` | `89f834b6`+`97f02477`+`7110e8d0` | **3:1** port+deviation | feat(pgp) | `melib::email::pgp` 新增 `PGPBackend` trait + `Key` 抽象；gpgme 收敛为 trait 实现；`cli` 脚本后端（`[pgp] backend = "cli"`）+ `contrib/pgp-cli-backends/gpg/` 六个 GnuPG 参考脚本；`compose/gpg.rs`→`pgp.rs`；keylist `IndexSet` 去重；反序列化错误提示。偏差：cleartext 管线（`UnverifiedSignature`/`extract_unverified_signature`/`verify_cleartext`）与 SignedPending→SignedVerified 路由逐字保留，不引入 ViewFilter/FilterOutputMetadata；`PGPBackendInstance` 为 owned 以适配 `JobExecutor::spawn`；用 `From<gpgme::Key> for pgp::Key` 替代上游 `GpgmeKey` 重命名；上游在 `command/{actions,parser}.rs` 移除 `#[cfg(feature="gpgme")]` 守卫的改动**不移植**（保 fork no-gpgme UI 契约，延续 `00d3b65d` 语义）；`overrides.rs` 经 sentinel 重新生成 |
+| `971f1f9d` | `59c5ad4b` | port | fix(compose) | 编辑器解析：`composing.editor_command` > `$VISUAL` > `$EDITOR`，提示文案更新 |
+| `86348503` | `bb6d5916` | port | fix(compose) | 编辑器参数经 argv 传递（`sh -c '<editor> "$@"'` + `.arg(&editor).arg(path)`），杜绝拼接；fork 的 `EDITOR_TEMP_FILENAME_MAX_BYTES` 加固不动 |
+| `d9c32af8` | `c498d7e6` | port+deviation | fix(ui) | 画框前清完整 `cached_area`（含边框）；适配 fork 的 `draw_rounded_frame`（fork 无 `create_box`） |
+| `dc0537a5` | `6d3dd4bd` | port | fix(ui) | compact 标签文本从 `area_col_4.skip_cols(1)` 起打印 |
+| — | `a041bc90` | **SKIP** | feat(ui) | 上游命令补全框架重构（新 `completions.rs`、parser/UI 重做，约 2800 行）；fork 命令面板 + nucleo 模糊匹配已覆盖并更优（用户决策 2026-09-28）。债务：后续涉及 `meli/src/command/**` 的上游提交须对照 fork 解析器人工评估，不能直接 diff |
+| — | `03e1f5de` | **SKIP** | refactor | `ListingTrait::select` 提升——纯内部重构，整个上游区间内零外部调用方；fork 保留各 listing 固有实现 |
+| — | `0eaae124` | **SKIP** | ci | 上游移除 cargo-derivefmt（对新 Rust 语法失效）；fork CI 为绿且保留该步骤——仅在 fork 的 derivefmt 也开始失败时再评估 |
+| — | `45a5d376` | **SKIP** | chore(deps) | fork `Cargo.lock` 的 `quote` 已在 1.0.47 |
+
+- 债务登记：
+  - FilterOutputMetadata 未移植（解密收件人 / 每过滤器签名状态展示）——在 1-2 个同步周期内对齐 fork 的 SignedVerified 管线 *（承接 2026-09-14）*
+  - filters.rs ViewFilter 路径不触发 cleartext 验证（经 ViewFilter 打开的邮件绕过 envelope.rs 路由）*（承接 2026-09-14）*
+  - imap 测试基建 fork 化：上游 imap 测试提交须重实现（见 SKIP b08a39b3）*（承接 2026-09-14）*
+  - sqlite3 搜索后端忽略 raw_search（上游怪癖，原样保留）*（承接 2026-09-14）*
+  - 上游命令补全框架未移植（fork 命令面板已覆盖）；关注后续上游 `meli/src/command/**` 提交中夹带的非 UI 修复
+  - `mailbox_changed` SSE 分支已实现但 mock 服务器未覆盖（上游新套件同样未覆盖）
+
 ## 2026-09-15 02:11 (UTC+8)
 
 - 同步方式：仅核对（无代码变更）
