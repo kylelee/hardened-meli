@@ -41,7 +41,7 @@ use smallvec::SmallVec;
 use super::*;
 use crate::{
     accounts::{JobRequest, MailboxStatus, SearchResult},
-    components::ExtendShortcutsMaps,
+    components::{ExtendShortcutsMaps, HintFocus},
     jobs::IsAsync,
     terminal::{
         draw_rounded_frame, frame_flush_areas,
@@ -3249,6 +3249,24 @@ impl Component for Listing {
         Some((entry.hash, mailbox.mailbox_hash))
     }
 
+    fn hint_focus(&self) -> Option<HintFocus> {
+        if self.status.is_some() {
+            // A status view replaces the listing content; keep the default
+            // full hints.
+            return None;
+        }
+        let Some(view) = self.view.as_ref() else {
+            return Some(HintFocus::NoView);
+        };
+        if self.focus == ListingFocus::View
+            && matches!(view.thread_view_focus(), ThreadViewFocus::MailView)
+        {
+            Some(HintFocus::MailView)
+        } else {
+            Some(HintFocus::List)
+        }
+    }
+
     fn children(&self) -> IndexMap<ComponentId, &dyn Component> {
         let mut ret = IndexMap::default();
         ret.insert(
@@ -3283,6 +3301,14 @@ impl Component for Listing {
 }
 
 impl Listing {
+    /// Test-only: mutable access to the open view, so out-of-module tests
+    /// can force-load the expanded entry's body (see
+    /// [`ThreadView::load_expanded_entry_for_tests`]).
+    #[cfg(test)]
+    pub(crate) fn view_mut_for_tests(&mut self) -> Option<&mut ThreadView> {
+        self.view.as_deref_mut()
+    }
+
     /// Whether the offline placeholder should replace the listing
     /// component while drawing: only when the account is offline *and* has
     /// no mailbox list to show. A cached mailbox list (loaded by the
@@ -6586,6 +6612,66 @@ mod listing_menu_tests {
             listing.view.as_ref().map(|v| v.id()),
             Some(view_id),
             "an open view must receive the action instead of being replaced"
+        );
+    }
+
+    /// The mail-detail hints advertise `Reply` (`r`) and `Reply All`
+    /// (`Ctrl-a`); pin that the advertised keys really open the composer
+    /// at the `(View, MailView)` focus: the input reaches the embedded
+    /// mail view, which queues the composer as a new tab.
+    #[test]
+    fn reply_keys_open_composer_at_view_focus() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        // Open the cursor entry (layout2, keyboard stays on the grid),
+        // then move the keyboard onto the open mail view.
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(pane_step(&mut listing, &mut ctx, Key::Right));
+        assert!(
+            matches!(listing.focus, ListingFocus::View),
+            "precondition: the keyboard must be on the open view"
+        );
+        assert!(
+            matches!(
+                listing.view.as_ref().unwrap().thread_view_focus(),
+                ThreadViewFocus::MailView
+            ),
+            "precondition: a single-mail view opened at the mail view"
+        );
+        // Force the body to `Loaded` so the envelope-view section exists
+        // and the reply actions can build the composer right away.
+        let solo_bytes = b"From: s@x.example\r\nTo: y@x.example\r\nSubject: chain solo\r\nMessage-ID: <chain-solo@x.example>\r\nDate: Thu, 1 Jan 2026 00:02:00 +0000\r\n\r\nsolo\r\n";
+        listing
+            .view
+            .as_mut()
+            .unwrap()
+            .load_expanded_entry_for_tests(solo_bytes.to_vec(), &mut ctx);
+
+        let mut event = UIEvent::Input(Key::Char('r'));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "the mail view must consume the reply key at (View, MailView)"
+        );
+        assert!(
+            ctx.replies
+                .iter()
+                .any(|e| matches!(e, UIEvent::Action(Action::Tab(TabAction::New(_))))),
+            "the default reply key must queue a composer tab, got {:?}",
+            ctx.replies
+        );
+
+        ctx.replies.clear();
+        let mut event = UIEvent::Input(Key::Ctrl('a'));
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "the mail view must consume the reply_to_all key at (View, MailView)"
+        );
+        assert!(
+            ctx.replies
+                .iter()
+                .any(|e| matches!(e, UIEvent::Action(Action::Tab(TabAction::New(_))))),
+            "the default reply_to_all key must queue a composer tab, got {:?}",
+            ctx.replies
         );
     }
 

@@ -30,7 +30,9 @@ use ratatui::layout::{Constraint, Layout};
 
 use super::*;
 use crate::{
-    accounts::MailboxStatus, components::ExtendShortcutsMaps, jobs::JobId,
+    accounts::MailboxStatus,
+    components::{ExtendShortcutsMaps, HintFocus},
+    jobs::JobId,
     melib::text::TextProcessing,
 };
 
@@ -672,7 +674,16 @@ impl StatusBar {
     ///    sub-views that expose a close binding, e.g. composing)
     /// 8. `search`                      — label `Search` (only on views
     ///    that expose a `search` binding)
-    /// 9. `general.quit`                — label `Quit`
+    /// 9. `general.quit`                — label `Quit` (always last)
+    ///
+    /// The list is filtered by the focused listing pane reported by
+    /// [`Component::hint_focus`]: layout1 (no view open) drops the
+    /// `Search` hint; when the mail view holds the keyboard (the mail
+    /// detail state of the single-mail and thread layouts) the scroll
+    /// and focus hints plus `Search` are dropped and three mail actions
+    /// are appended — `reply`/`Reply` and `reply_to_all`/`Reply All`
+    /// (envelope-view bindings) and `open_in_new_tab`/`Open in Tab`
+    /// (thread-view binding). Any other focus keeps the list unchanged.
     ///
     /// Bindings missing from the active view are skipped silently. Every
     /// key glyph comes from the *configured* binding (remapping a
@@ -692,6 +703,7 @@ impl StatusBar {
     /// max width.
     #[allow(clippy::type_complexity)]
     fn hints_metrics(&self, context: &Context) -> (Vec<HintSpan>, usize) {
+        let hint_focus = self.container.hint_focus();
         let maps = self.container.shortcuts(context);
         let general = maps.get(crate::conf::Shortcuts::GENERAL);
         // Walk every non-general section first, then fall back to
@@ -720,15 +732,16 @@ impl StatusBar {
             }
             None
         };
-        // Nine entries in fixed display order: help first (so it
+        // Eight entries in fixed display order: help first (so it
         // survives narrow ellipsis), then scroll, then focus switches,
-        // then view close, then search, then exit pinned last so it is
-        // the final actionable hint.
-        let pickers: [(
+        // then view close, then search. `quit` is appended after the
+        // hint-focus filtering below so it stays the final actionable
+        // hint.
+        let mut pickers: Vec<(
             &'static str,
             Option<&crate::terminal::ShortcutKeys>,
             &'static str,
-        ); 9] = [
+        )> = vec![
             ("help", general.and_then(|m| m.get("toggle_help")), "Help"),
             (
                 "enter_command_mode",
@@ -741,8 +754,29 @@ impl StatusBar {
             ("focus_right", pick_key("focus_right"), "Focus Right"),
             ("close", pick_key("close"), "Close View"),
             ("search", pick_key("search"), "Search"),
-            ("quit", general.and_then(|m| m.get("quit")), "Quit"),
         ];
+        match hint_focus {
+            Some(HintFocus::NoView) => pickers.retain(|(name, _, _)| *name != "search"),
+            Some(HintFocus::MailView) => {
+                pickers.retain(|(name, _, _)| {
+                    !matches!(
+                        *name,
+                        "scroll_up" | "scroll_down" | "focus_left" | "focus_right" | "search"
+                    )
+                });
+                pickers.extend([
+                    ("reply", pick_key("reply"), "Reply"),
+                    ("reply_to_all", pick_key("reply_to_all"), "Reply All"),
+                    (
+                        "open_in_new_tab",
+                        pick_key("open_in_new_tab"),
+                        "Open in Tab",
+                    ),
+                ]);
+            }
+            Some(HintFocus::List) | None => {}
+        }
+        pickers.push(("quit", general.and_then(|m| m.get("quit")), "Quit"));
         let entries: Vec<(&crate::terminal::ShortcutKeys, &'static str)> = pickers
             .iter()
             .filter_map(|(_, key, label)| key.as_ref().copied().map(|k| (k, *label)))
@@ -1958,6 +1992,12 @@ impl Component for Tabbed {
         self.children
             .get(self.cursor_pos)
             .and_then(|c| c.status_watch())
+    }
+
+    fn hint_focus(&self) -> Option<HintFocus> {
+        self.children
+            .get(self.cursor_pos)
+            .and_then(|c| c.hint_focus())
     }
 
     fn attributes(&self) -> &'static ComponentAttr {
