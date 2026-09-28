@@ -95,7 +95,18 @@ impl Object for Identity {
     const NAME: &'static str = "Identity";
 }
 
-pub type IdentityGet = Get<Identity>;
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityGet {
+    #[serde(flatten)]
+    pub get_call: Get<Identity>,
+}
+
+impl IdentityGet {
+    pub fn new(get_call: Get<Identity>) -> Self {
+        Self { get_call }
+    }
+}
 
 impl Method<Identity> for IdentityGet {
     const NAME: &'static str = "Identity/get";

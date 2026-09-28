@@ -21,32 +21,29 @@
  */
 
 use std::{
-    collections::{BTreeSet, HashMap},
-    convert::{TryFrom, TryInto},
-    sync::{Arc, Mutex},
+    collections::BTreeSet,
+    convert::TryFrom,
+    sync::Arc,
 };
 
 use futures::lock::Mutex as FutureMutex;
 use serde::Serialize;
 use serde_json::Value;
-use smallvec::SmallVec;
 
 use crate::{
     email::Envelope,
     error::{Error, ErrorKind, Result},
     jmap::{
         argument::Argument,
-        backend_mailbox::JmapMailbox,
         capabilities::*,
         deserialize_from_str,
         email::{EmailFilterCondition, EmailGet, EmailObject, EmailQuery},
         filters::Filter,
-        mailbox::{MailboxGet, MailboxObject},
         methods::{Get, GetResponse, MethodResponse, Query},
         objects::{Object, State},
         JmapConnection, Store,
     },
-    Flag, LazyCountSet, MailboxHash,
+    Flag, MailboxHash,
 };
 
 pub type UtcDate = String;
@@ -118,96 +115,6 @@ impl Request {
     }
 }
 
-pub async fn get_mailboxes(
-    conn: &mut JmapConnection,
-    request: Option<Request>,
-) -> Result<HashMap<MailboxHash, JmapMailbox>> {
-    let mut req = request.unwrap_or_else(|| Request::new(conn.request_no.clone()));
-    let mail_account_id = conn.session_guard().await?.mail_account_id()?;
-    let mailbox_get: MailboxGet =
-        MailboxGet::new(Get::<MailboxObject>::new().account_id(mail_account_id));
-    req.add_call(&mailbox_get).await;
-    let res_text = conn.send_request(serde_json::to_string(&req)?).await?;
-
-    let v: MethodResponse = deserialize_from_str(&res_text)?;
-    conn.store.online_status.update_timestamp(None).await;
-    let m = GetResponse::<MailboxObject>::try_from(v.last()?)?;
-    let GetResponse::<MailboxObject> {
-        list,
-        account_id,
-        state,
-        ..
-    } = m;
-    *conn.store.mailbox_state.lock().await = Some(state);
-    conn.last_method_response = Some(res_text);
-    // Is account set as `personal`? (`isPersonal` property). Then, even if
-    // `isSubscribed` is false on a mailbox, it should be regarded as
-    // subscribed.
-    let is_personal: bool = {
-        let session = conn.session_guard().await?;
-        session
-            .accounts
-            .get(&account_id)
-            .map(|acc| acc.is_personal)
-            .unwrap_or(false)
-    };
-    let mut ret: HashMap<MailboxHash, JmapMailbox> = list
-        .into_iter()
-        .map(|r| {
-            let MailboxObject {
-                id,
-                is_subscribed,
-                my_rights,
-                name,
-                parent_id,
-                role,
-                sort_order,
-                total_emails,
-                total_threads,
-                unread_emails,
-                unread_threads,
-            } = r;
-            let mut total_emails_set = LazyCountSet::default();
-            total_emails_set.set_not_yet_seen(total_emails.try_into().unwrap_or(0));
-            let total_emails = total_emails_set;
-            let mut unread_emails_set = LazyCountSet::default();
-            unread_emails_set.set_not_yet_seen(unread_emails.try_into().unwrap_or(0));
-            let unread_emails = unread_emails_set;
-            let hash = id.into_hash();
-            let parent_hash = parent_id.clone().map(|id| id.into_hash());
-            (
-                hash,
-                JmapMailbox {
-                    name: name.clone(),
-                    hash,
-                    path: name,
-                    children: Vec::new(),
-                    id,
-                    is_subscribed: is_subscribed || is_personal,
-                    my_rights,
-                    parent_id,
-                    parent_hash,
-                    role,
-                    usage: Default::default(),
-                    sort_order,
-                    total_emails: Arc::new(Mutex::new(total_emails)),
-                    total_threads,
-                    unread_emails: Arc::new(Mutex::new(unread_emails)),
-                    unread_threads,
-                    email_query_state: Arc::new(Mutex::new(None)),
-                },
-            )
-        })
-        .collect();
-    let cloned_keys = ret.keys().cloned().collect::<SmallVec<[MailboxHash; 24]>>();
-    for key in cloned_keys {
-        if let Some(parent_hash) = ret[&key].parent_hash {
-            ret.entry(parent_hash).and_modify(|e| e.children.push(key));
-        }
-    }
-    Ok(ret)
-}
-
 pub struct EmailFetcher {
     pub connection: Arc<FutureMutex<JmapConnection>>,
     pub store: Arc<Store>,
@@ -223,7 +130,6 @@ pub enum EmailFetchState {
 impl EmailFetcher {
     pub async fn must_update_state(
         conn: &JmapConnection,
-        mailbox_hash: MailboxHash,
         state: State<EmailObject>,
     ) -> Result<bool> {
         {
@@ -238,7 +144,7 @@ impl EmailFetcher {
                 debug!("{:?}: inserting state {}", EmailObject::NAME, &state);
                 *conn.store.email_state.lock().await = Some(state);
             } else if !is_equal {
-                if let Some(ev) = conn.email_changes(mailbox_hash).await? {
+                if let Some(ev) = conn.email_changed(Some(state)).await? {
                     conn.add_backend_event(ev);
                 }
             }
@@ -316,9 +222,8 @@ impl EmailFetcher {
 
                     let e = GetResponse::<EmailObject>::try_from(v.take_last()?)?;
                     let GetResponse::<EmailObject> { list, state, .. } = e;
-                    conn.last_method_response = Some(res_text);
 
-                    if Self::must_update_state(&conn, mailbox_hash, state).await? {
+                    if Self::must_update_state(&conn, state).await? {
                         state_updates += 1;
                         if state_updates > MAX_STATE_UPDATES {
                             return Err(Error::new(

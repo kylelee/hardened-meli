@@ -422,6 +422,49 @@ impl Context {
         })
     }
 
+    pub fn get_key(&self, secret: bool, fingerprint: &str) -> Result<Key> {
+        let cfingerprint = CString::new(fingerprint)?;
+        let mut key: *mut _gpgme_key = std::ptr::null_mut();
+        let error: gpgme_error_t = unsafe {
+            call!(&self.inner.lib, gpgme_get_key)(
+                self.inner.ptr.as_ptr(),
+                cfingerprint.as_ptr(),
+                &raw mut key,
+                secret.into(),
+            )
+        };
+        if error != 0 {
+            return match gpgme_err_code(error) {
+                Some(gpg_err_code_t::GPG_ERR_EOF) => Err(Error::new(format!(
+                    "libgpgme: No {}key found with key id {fingerprint}.",
+                    if secret { "secret " } else { "" }
+                ))
+                .set_kind(ErrorKind::NotFound)),
+                Some(gpg_err_code_t::GPG_ERR_INV_VALUE) => Err(Error::new(format!(
+                    "libgpgme: invalid value: {fingerprint} is not a valid fingerprint or keyid."
+                ))
+                .set_kind(ErrorKind::ValueError)),
+                Some(gpg_err_code_t::GPG_ERR_AMBIGUOUS_NAME) => Err(Error::new(format!(
+                    "libgpgme: ambiguous name: {fingerprint} is not a unique specifier for a key."
+                ))
+                .set_kind(ErrorKind::ValueError)),
+                Some(_) => Err(Error::from(gpgme_error_to_string(&self.inner.lib, error))
+                    .set_summary(format!("libgpgme error {error}"))),
+                None => Err(Error::from(gpgme_error_to_string(&self.inner.lib, error))
+                    .set_summary(format!("libgpgme error {error}"))),
+            };
+        }
+        let Some(ptr) = NonNull::new(key) else {
+            return Err(Error::new(format!(
+                "libgpgme: No key found with key id {fingerprint}."
+            ))
+            .set_kind(ErrorKind::NotFound));
+        };
+        let key = Key::new(KeyInner { ptr }, self.inner.lib.clone());
+
+        Ok(key)
+    }
+
     pub fn sign(
         &mut self,
         sign_keys: Vec<Key>,
@@ -833,4 +876,100 @@ fn gpgme_error_try(lib: &libloading::Library, error_code: gpgme_error_t) -> Resu
     }
     Err(Error::from(gpgme_error_to_string(lib, error_code))
         .set_summary(format!("libgpgme error {error_code}")))
+}
+
+use futures::future::BoxFuture;
+type ResultFuture<T> = crate::Result<BoxFuture<'static, crate::Result<T>>>;
+
+impl crate::email::pgp::PGPBackend for Context {
+    fn set_auto_key_locate(&mut self, val: LocateKey) -> Result<()> {
+        self.set_auto_key_locate(val)?;
+        Ok(())
+    }
+
+    fn get_auto_key_locate(&self) -> Result<LocateKey> {
+        self.get_auto_key_locate()
+    }
+
+    fn get_key(
+        &self,
+        secret: bool,
+        pattern: String,
+    ) -> ResultFuture<crate::email::pgp::Key> {
+        let ctx = self.clone();
+        Ok(Box::pin(async move {
+            Ok(ctx.get_key(secret, &pattern)?.into())
+        }))
+    }
+
+    fn verify(
+        &mut self,
+        signature: &[u8],
+        text: &[u8],
+    ) -> ResultFuture<SignaturesMetadata> {
+        let signature = self.new_data_mem(signature)?;
+        let text = self.new_data_mem(text)?;
+        let fut = self.verify(signature, text)?;
+        Ok(Box::pin(fut))
+    }
+
+    fn verify_cleartext(&mut self, text: &[u8]) -> ResultFuture<SignaturesMetadata> {
+        let text = self.new_data_mem(text)?;
+        let fut = self.verify_cleartext(text)?;
+        Ok(Box::pin(async move {
+            let (metadata, _plain) = fut.await?;
+            Ok(metadata)
+        }))
+    }
+
+    fn keylist(
+        &self,
+        secret: bool,
+        pattern: Option<String>,
+    ) -> ResultFuture<Vec<crate::email::pgp::Key>> {
+        let ctx = self.clone();
+        Ok(Box::pin(async move {
+            let keys = ctx.keylist(secret, pattern)?.await?;
+            Ok(keys.into_iter().map(Into::into).collect())
+        }))
+    }
+
+    fn sign(
+        &mut self,
+        sign_keys: Vec<crate::email::pgp::Key>,
+        text: &[u8],
+        is_binary: bool,
+    ) -> ResultFuture<(crate::email::pgp::NewSignature, Vec<u8>)> {
+        let text = self.new_data_mem(text)?;
+        let mut ctx = self.clone();
+        Ok(Box::pin(async move {
+            let mut gpg_sign_keys = vec![];
+            for sign_key in sign_keys {
+                gpg_sign_keys.push(ctx.get_key(true, &sign_key.fingerprint)?);
+            }
+            let (new_sig, bytes) = ctx.sign(gpg_sign_keys, text, is_binary)?.await?;
+            Ok((new_sig.into(), bytes))
+        }))
+    }
+
+    fn encrypt(&mut self, encrypt_keys: Vec<crate::email::pgp::Key>, plain: &[u8]) -> ResultFuture<Vec<u8>> {
+        let plain = self.new_data_mem(plain)?;
+        let mut ctx = self.clone();
+        Ok(Box::pin(async move {
+            let mut gpg_encrypt_keys = vec![];
+            for encrypt_key in encrypt_keys {
+                gpg_encrypt_keys.push(ctx.get_key(true, &encrypt_key.fingerprint)?);
+            }
+            ctx.encrypt(gpg_encrypt_keys, plain)?.await
+        }))
+    }
+
+    fn decrypt(
+        &mut self,
+        cipher: &[u8],
+    ) -> ResultFuture<(DecryptionMetadata, Vec<u8>)> {
+        let cipher = self.new_data_mem(cipher)?;
+        let fut = self.decrypt(cipher)?;
+        Ok(Box::pin(fut))
+    }
 }

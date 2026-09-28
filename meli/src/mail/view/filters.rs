@@ -60,6 +60,7 @@ pub struct FilterOutput {
 
 type FilterResult = std::result::Result<FilterOutput, (Error, Vec<u8>)>;
 
+#[allow(clippy::large_enum_variant)]
 pub enum ViewFilterContent {
     Running {
         job_id: JobId,
@@ -537,15 +538,15 @@ impl ViewFilter {
                     ..Self::new_attachment(&att, view_settings, context)?
                 });
             }
-            #[cfg(not(feature = "gpgme"))]
-            {
+            if view_settings.pgp_backend.instantiate().is_err() {
                 let unfiltered = att.decode(view_settings.charset.into()).to_vec();
                 return Ok(Self {
                     filter_invocation: String::new(),
                     content_type: att.content_type.clone(),
                     size: att.size(),
                     notice: Some(
-                        "Cannot verify signature: meli must be compiled with libgpgme support."
+                        "Cannot verify signature: no PGP backend is available. Configure \
+                         `pgp.backend` in your configuration."
                             .into(),
                     ),
                     headers: vec![],
@@ -564,77 +565,75 @@ impl ViewFilter {
                     id: ComponentId::default(),
                 });
             }
-            #[cfg(feature = "gpgme")]
-            {
-                for a in parts {
-                    if a.content_type == "application/pgp-signature" {
-                        let bytes = att.decode(Default::default()).to_vec();
-                        let verify_fut = {
-                            let a = Attachment {
-                                content_type: ContentType::Multipart {
-                                    kind: MultipartType::Mixed,
-                                    parts: parts.clone(),
-                                    parameters: parameters.clone(),
-                                    boundary: boundary.clone(),
-                                },
-                                ..att.clone()
-                            };
-                            let att = att.clone();
-                            async move {
-                                let result = crate::mail::pgp::verify(att)
-                                    .await
-                                    .and_then(crate::mail::pgp::signatures_into_error);
-                                let notice = match result {
-                                    Ok(None) => None,
-                                    Ok(Some(comment)) => {
-                                        Some(format!("Signature: {comment}").into())
-                                    }
-                                    Err(err) => Some(format!("Invalid signature: {err}").into()),
-                                };
-                                Ok(FilterOutput {
-                                    attachment: a,
-                                    raw: bytes,
-                                    notice,
-                                })
-                            }
-                        };
-                        let mut job_handle = context.main_loop_handler.job_executor.spawn(
-                            "gpg::verify".into(),
-                            verify_fut,
-                            IsAsync::Blocking,
-                        );
-                        let mut retval = Self {
-                            filter_invocation: "gpg::verify".into(),
-                            content_type: att.content_type.clone(),
-                            size: att.size(),
-                            notice: None,
-                            headers: vec![],
-                            body_text: ViewFilterContent::Filtered {
-                                inner: String::new(),
+            for a in parts {
+                if a.content_type == "application/pgp-signature" {
+                    let bytes = att.decode(Default::default()).to_vec();
+                    let att_clone = att.clone();
+                    let backend = view_settings.pgp_backend.instantiate()?;
+                    let verify_fut = {
+                        let a = Attachment {
+                            content_type: ContentType::Multipart {
+                                kind: MultipartType::Mixed,
+                                parts: parts.clone(),
+                                parameters: parameters.clone(),
+                                boundary: boundary.clone(),
                             },
-                            unfiltered: att.decode(Default::default()).to_vec(),
-                            event_handler: None,
-                            id: ComponentId::default(),
+                            ..att_clone.clone()
                         };
-                        if let Ok(Some(job_result)) = try_recv_timeout!(&mut job_handle.chan) {
-                            retval.body_text = ViewFilterContent::Running {
-                                job_id: job_handle.job_id,
-                                job_handle,
-                                view_settings: view_settings.clone(),
+                        async move {
+                            let result = crate::mail::pgp::verify(backend, att_clone)
+                                .await
+                                .and_then(crate::mail::pgp::signatures_into_error);
+                            let notice = match result {
+                                Ok(None) => None,
+                                Ok(Some(comment)) => {
+                                    Some(format!("Signature: {comment}").into())
+                                }
+                                Err(err) => Some(format!("Invalid signature: {err}").into()),
                             };
-                            retval.event_handler = None;
-                            retval.process_job_result(Ok(Some(job_result)), view_settings, context);
-                            return Ok(retval);
+                            Ok(FilterOutput {
+                                attachment: a,
+                                raw: bytes,
+                                notice,
+                            })
                         }
-                        return Ok(Self {
-                            body_text: ViewFilterContent::Running {
-                                job_id: job_handle.job_id,
-                                job_handle,
-                                view_settings: view_settings.clone(),
-                            },
-                            ..retval
-                        });
+                    };
+                    let mut job_handle = context.main_loop_handler.job_executor.spawn(
+                        "gpg::verify".into(),
+                        verify_fut,
+                        IsAsync::Blocking,
+                    );
+                    let mut retval = Self {
+                        filter_invocation: "gpg::verify".into(),
+                        content_type: att.content_type.clone(),
+                        size: att.size(),
+                        notice: None,
+                        headers: vec![],
+                        body_text: ViewFilterContent::Filtered {
+                            inner: String::new(),
+                        },
+                        unfiltered: att.decode(Default::default()).to_vec(),
+                        event_handler: None,
+                        id: ComponentId::default(),
+                    };
+                    if let Ok(Some(job_result)) = try_recv_timeout!(&mut job_handle.chan) {
+                        retval.body_text = ViewFilterContent::Running {
+                            job_id: job_handle.job_id,
+                            job_handle,
+                            view_settings: view_settings.clone(),
+                        };
+                        retval.event_handler = None;
+                        retval.process_job_result(Ok(Some(job_result)), view_settings, context);
+                        return Ok(retval);
                     }
+                    return Ok(Self {
+                        body_text: ViewFilterContent::Running {
+                            job_id: job_handle.job_id,
+                            job_handle,
+                            view_settings: view_settings.clone(),
+                        },
+                        ..retval
+                    });
                 }
             }
         } else if let ContentType::Multipart {
@@ -643,9 +642,10 @@ impl ViewFilter {
             ..
         } = att.content_type
         {
-            #[cfg(not(feature = "gpgme"))]
-            {
-                let msg = "Cannot decrypt: meli must be compiled with libgpgme support.";
+            if view_settings.pgp_backend.instantiate().is_err() {
+                let msg =
+                    "Cannot decrypt: no PGP backend is available. Configure `pgp.backend` \
+                     in your configuration.";
                 if let Some(Ok(mut res)) =
                     parts.iter().find_map(|part| {
                         match Self::new_attachment(part, view_settings, context) {
@@ -658,7 +658,7 @@ impl ViewFilter {
                         Some(ref mut notice) => {
                             let notice = std::mem::take(notice);
                             let mut notice = notice.into_owned();
-                            notice.push_str("\n");
+                            notice.push('\n');
                             notice.push_str(msg);
 
                             res.notice = Some(notice.into());
@@ -670,64 +670,61 @@ impl ViewFilter {
                     return Ok(res);
                 }
             }
-            #[cfg(feature = "gpgme")]
-            {
-                for a in parts {
-                    if a.content_type == "application/octet-stream" {
-                        let bytes = att.decode(Default::default()).to_vec();
-                        let att2 = att.clone();
-                        let decrypt_fut = async {
-                            let (_metadata, bytes) = crate::mail::pgp::decrypt(att2)
-                                .await
-                                .map_err(|err| (err, bytes))?;
-                            let attachment = AttachmentBuilder::new(&bytes).build();
-                            Ok(FilterOutput {
-                                attachment,
-                                raw: bytes,
-                                notice: Some("Decrypted content.".into()),
-                            })
+            for a in parts {
+                if a.content_type == "application/octet-stream" {
+                    let bytes = att.decode(Default::default()).to_vec();
+                    let att2 = att.clone();
+                    let backend = view_settings.pgp_backend.instantiate()?;
+                    let decrypt_fut = async {
+                        let (_metadata, bytes) = crate::mail::pgp::decrypt(backend, att2)
+                            .await
+                            .map_err(|err| (err, bytes))?;
+                        let attachment = AttachmentBuilder::new(&bytes).build();
+                        Ok(FilterOutput {
+                            attachment,
+                            raw: bytes,
+                            notice: Some("Decrypted content.".into()),
+                        })
+                    };
+                    let mut job_handle = context.main_loop_handler.job_executor.spawn(
+                        "gpg::decrypt".into(),
+                        decrypt_fut,
+                        IsAsync::Blocking,
+                    );
+                    let mut retval = Self {
+                        filter_invocation: "gpg::decrypt".into(),
+                        content_type: att.content_type.clone(),
+                        size: att.size(),
+                        notice: None,
+                        headers: vec![],
+                        body_text: ViewFilterContent::Filtered {
+                            inner: String::new(),
+                        },
+                        unfiltered: att.decode(Default::default()).to_vec(),
+                        event_handler: None,
+                        id: ComponentId::default(),
+                    };
+                    if let Ok(Some(job_result)) = try_recv_timeout!(&mut job_handle.chan) {
+                        retval.body_text = ViewFilterContent::Running {
+                            job_id: job_handle.job_id,
+                            job_handle,
+                            view_settings: view_settings.clone(),
                         };
-                        let mut job_handle = context.main_loop_handler.job_executor.spawn(
-                            "gpg::decrypt".into(),
-                            decrypt_fut,
-                            IsAsync::Blocking,
-                        );
-                        let mut retval = Self {
-                            filter_invocation: "gpg::decrypt".into(),
-                            content_type: att.content_type.clone(),
-                            size: att.size(),
-                            notice: None,
-                            headers: vec![],
-                            body_text: ViewFilterContent::Filtered {
-                                inner: String::new(),
-                            },
-                            unfiltered: att.decode(Default::default()).to_vec(),
-                            event_handler: None,
-                            id: ComponentId::default(),
-                        };
-                        if let Ok(Some(job_result)) = try_recv_timeout!(&mut job_handle.chan) {
-                            retval.body_text = ViewFilterContent::Running {
-                                job_id: job_handle.job_id,
-                                job_handle,
-                                view_settings: view_settings.clone(),
-                            };
-                            retval.event_handler = None;
-                            retval.process_job_result(Ok(Some(job_result)), view_settings, context);
-                            return Ok(retval);
-                        }
-                        return Ok(Self {
-                            body_text: ViewFilterContent::Running {
-                                job_id: job_handle.job_id,
-                                job_handle,
-                                view_settings: view_settings.clone(),
-                            },
-                            ..retval
-                        });
+                        retval.event_handler = None;
+                        retval.process_job_result(Ok(Some(job_result)), view_settings, context);
+                        return Ok(retval);
                     }
+                    return Ok(Self {
+                        body_text: ViewFilterContent::Running {
+                            job_id: job_handle.job_id,
+                            job_handle,
+                            view_settings: view_settings.clone(),
+                        },
+                        ..retval
+                    });
                 }
             }
         }
-        #[cfg(feature = "gpgme")]
         if let ContentType::Text {
             kind: Text::Plain, ..
         } = att.content_type
@@ -737,11 +734,18 @@ impl ViewFilter {
                 .trim_start()
                 .starts_with("-----BEGIN PGP MESSAGE-----")
                 && content.trim_end().ends_with("-----END PGP MESSAGE-----")
+                && view_settings.pgp_backend.instantiate().is_ok()
             {
                 let bytes = content.trim().to_string().into_bytes();
                 let att2 = att.clone();
+                let backend = match view_settings.pgp_backend.instantiate() {
+                    Ok(b) => b,
+                    Err(err) => {
+                        return Err(err);
+                    }
+                };
                 let decrypt_fut = async {
-                    let (_metadata, bytes) = crate::mail::pgp::decrypt(att2)
+                    let (_metadata, bytes) = crate::mail::pgp::decrypt(backend, att2)
                         .await
                         .map_err(|err| (err, bytes))?;
                     let attachment = AttachmentBuilder::new(&bytes).build();

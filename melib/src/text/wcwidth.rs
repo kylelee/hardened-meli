@@ -62,14 +62,11 @@ pub const fn wcwidth(ucs: char) -> Option<usize> {
     let ucs = ucs as u32;
     if bisearch(ucs, super::tables::ASCII) {
         Some(1)
-    } else if bisearch(ucs, super::tables::PRIVATE)
-        || bisearch(ucs, super::tables::NONPRINT)
-        || bisearch(ucs, super::tables::COMBINING)
-    {
+    } else if bisearch(ucs, super::tables::NONPRINT) || bisearch(ucs, super::tables::COMBINING) {
         None
     } else if bisearch(ucs, super::tables::DOUBLEWIDE) {
         Some(2)
-    } else if bisearch(ucs, super::tables::AMBIGUOUS) {
+    } else if bisearch(ucs, super::tables::AMBIGUOUS) || bisearch(ucs, super::tables::PRIVATE) {
         Some(1)
     } else if bisearch(ucs, super::tables::UNASSIGNED) || bisearch(ucs, super::tables::WIDENEDIN9) {
         Some(2)
@@ -121,5 +118,8 @@ mod tests {
         assert_eq!(wcswidth(&"𐼹𐼺𐼻𐼼𐼽".chars().collect::<Vec<_>>()), Some(5));
         // Sogdian alphabet
         assert_eq!(wcswidth(&"𐼹a𐼽b".chars().collect::<Vec<_>>()), Some(4));
+
+        // Private use area is ambiguous
+        assert_eq!(wcswidth(&"\u{F09B}".chars().collect::<Vec<_>>()), Some(1));
     }
 }

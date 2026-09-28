@@ -1466,3 +1466,91 @@ mod toggle_theme_ui {
         assert!(c.contains("foo = 1"), "other settings preserved");
     }
 }
+
+#[test]
+fn test_conf_tag_rename() {
+    use melib::TagHash;
+
+    use crate::conf::tags::TagName;
+
+    let t = TagHash(6222660804048278788);
+    let rename_map = indexmap::indexmap! {
+        TagName {
+            name: "$istrusted".to_string(),
+            hash: TagHash(17165945850818254125),
+        } => "trusted".to_string(),
+        TagName {
+            name: "$x-me-annot-2".to_string(),
+            hash: TagHash(6222660804048278788),
+        } => "meannot2".to_string(),
+    };
+
+    let tagname = TagName {
+        name: "$x-me-annot-2".to_string(),
+        hash: TagHash(6222660804048278788),
+    };
+    assert_eq!(rename_map.get(&t), rename_map.get(&tagname));
+    assert_eq!(&rename_map[&TagHash(17165945850818254125,)], "trusted");
+}
+
+#[cfg(test)]
+mod pgp_backend_choice_tests {
+    use serde::Deserialize;
+
+    use crate::conf::pgp::PGPBackendChoice;
+
+    /// Wraps `PGPBackendChoice` to enable deserialization through toml
+    /// `deserialize_any`. The inner `#[serde(default)]` field lets the
+    /// backend deserializer be invoked with no surrounding keys.
+    #[derive(Debug, Default, Deserialize)]
+    struct Wrapper {
+        #[serde(deserialize_with = "deserialize_choice")]
+        #[serde(default)]
+        backend: PGPBackendChoice,
+    }
+
+    fn deserialize_choice<'de, D>(deserializer: D) -> Result<PGPBackendChoice, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        PGPBackendChoice::deserialize(deserializer)
+    }
+
+    #[cfg(feature = "gpgme")]
+    #[test]
+    fn deserialize_gpgme_string() {
+        let parsed: Wrapper = toml::from_str(r#"backend = "gpgme""#).unwrap();
+        assert_eq!(parsed.backend, PGPBackendChoice::GpgME);
+    }
+
+    #[test]
+    fn deserialize_gpgme_wrong_string() {
+        let result: Result<Wrapper, _> = toml::from_str(r#"backend = "gpgmex""#);
+        let err = result.unwrap_err();
+        let s = err.to_string();
+        assert!(
+            s.contains("`gpgme`"),
+            "error message should mention the expected `gpgme` value, got: {s}",
+        );
+    }
+
+    #[test]
+    fn deserialize_cli_table() {
+        let parsed: Wrapper = toml::from_str(
+            r#"
+            [backend]
+            display_name = "custom"
+            scan_command = "/usr/bin/gpg --list-keys --json --no-default-keyring"
+            "#,
+        )
+        .unwrap();
+        let PGPBackendChoice::CLI(cli) = parsed.backend else {
+            panic!("expected CLI variant");
+        };
+        assert_eq!(cli.display_name, "custom");
+        assert_eq!(
+            cli.scan_command,
+            "/usr/bin/gpg --list-keys --json --no-default-keyring"
+        );
+    }
+}

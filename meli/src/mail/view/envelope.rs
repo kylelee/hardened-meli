@@ -28,7 +28,6 @@ use std::{
 use melib::utils::{shellexpand::ShellExpandTrait, xdg::query_default_app};
 
 use super::*;
-#[cfg(feature = "gpgme")]
 use crate::jobs::IsAsync;
 use crate::{command::actions::FileAction, ThreadEvent};
 
@@ -263,13 +262,23 @@ impl EnvelopeView {
     /// signed `text/plain` bodies: reuse melib's `extract_unverified_signature`
     /// instead of re-matching the armor prefix, so the decision stays in sync
     /// with the verification pipeline.
-    #[cfg(feature = "gpgme")]
+    ///
+    /// Only available when a PGP backend can be instantiated: gpgme if
+    /// compiled in, or any CLI backend configured via `pgp.backend`.
     fn is_cleartext_signature(a: &Attachment, view_settings: &ViewSettings) -> bool {
         view_settings.auto_verify_signatures.is_true()
             && matches!(
                 melib::email::pgp::extract_unverified_signature(a),
                 Ok(melib::email::pgp::UnverifiedSignature::Cleartext { .. })
             )
+    }
+
+    /// Whether a PGP backend can be instantiated for verifying or
+    /// decrypting in this build. The gpgme backend requires the
+    /// `gpgme` feature; the CLI backend is always available when a
+    /// script path is configured.
+    fn pgp_backend_available(view_settings: &ViewSettings) -> bool {
+        view_settings.pgp_backend.instantiate().is_ok()
     }
 
     fn attachment_to_display_helper(
@@ -304,14 +313,27 @@ impl EnvelopeView {
         } else if a.is_text() {
             let bytes = a.decode(view_settings.charset.into());
             let text = String::from_utf8_lossy(&bytes).to_string();
-            #[cfg(feature = "gpgme")]
-            if Self::is_cleartext_signature(a, view_settings) {
+            if Self::is_cleartext_signature(a, view_settings)
+                && Self::pgp_backend_available(view_settings)
+            {
                 // Route cleartext signed `text/plain` bodies through the same
                 // SignedPending -> SignedVerified pipeline as
                 // `multipart/signed`. The original armored text is displayed
                 // as-is; stripping the armor is deferred (FilterOutputMetadata
                 // debt, see SYNC.md).
-                let verify_fut = crate::mail::pgp::verify(a.clone());
+                let backend = match view_settings.pgp_backend.instantiate() {
+                    Ok(b) => b,
+                    Err(err) => {
+                        log::error!("Could not instantiate PGP backend: {err}");
+                        acc.push(AttachmentDisplay::InlineText {
+                            inner: Box::new(a.clone()),
+                            comment: None,
+                            text,
+                        });
+                        return;
+                    }
+                };
+                let verify_fut = crate::mail::pgp::verify(backend, a.clone());
                 let process_fut =
                     async move { crate::mail::pgp::signatures_into_error(verify_fut.await?) };
                 let handle = main_loop_handler.job_executor.spawn(
@@ -340,12 +362,6 @@ impl EnvelopeView {
                     text,
                 });
             }
-            #[cfg(not(feature = "gpgme"))]
-            acc.push(AttachmentDisplay::InlineText {
-                inner: Box::new(a.clone()),
-                comment: None,
-                text,
-            });
         } else if a.content_type == "message/rfc822" {
             let bytes = a.decode(view_settings.charset.into());
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -422,8 +438,54 @@ impl EnvelopeView {
                     });
                 }
                 MultipartType::Signed => {
-                    #[cfg(not(feature = "gpgme"))]
+                    if view_settings.auto_verify_signatures.is_true()
+                        && Self::pgp_backend_available(view_settings)
                     {
+                        let backend = match view_settings.pgp_backend.instantiate() {
+                            Ok(b) => b,
+                            Err(err) => {
+                                acc.push(AttachmentDisplay::SignedUnverified {
+                                    inner: Box::new(a.clone()),
+                                    display: vec![],
+                                });
+                                log::error!(
+                                    "Could not instantiate PGP backend: {err}"
+                                );
+                                return;
+                            }
+                        };
+                        let verify_fut = crate::mail::pgp::verify(backend, a.clone());
+                        let process_fut = async move {
+                            crate::mail::pgp::signatures_into_error(verify_fut.await?)
+                        };
+                        let handle = main_loop_handler.job_executor.spawn(
+                            "gpg::verify".into(),
+                            process_fut,
+                            IsAsync::Blocking,
+                        );
+                        active_jobs.insert(handle.job_id);
+                        main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::StatusEvent(
+                            StatusEvent::NewJob(handle.job_id),
+                        )));
+                        acc.push(AttachmentDisplay::SignedPending {
+                            inner: Box::new(a.clone()),
+                            job_id: handle.job_id,
+                            display: {
+                                let mut v = vec![];
+                                for p in parts {
+                                    Self::attachment_to_display_helper(
+                                        p,
+                                        main_loop_handler,
+                                        active_jobs,
+                                        &mut v,
+                                        view_settings,
+                                    );
+                                }
+                                v
+                            },
+                            handle,
+                        });
+                    } else {
                         acc.push(AttachmentDisplay::SignedUnverified {
                             inner: Box::new(a.clone()),
                             display: {
@@ -441,96 +503,51 @@ impl EnvelopeView {
                             },
                         });
                     }
-                    #[cfg(feature = "gpgme")]
-                    {
-                        if view_settings.auto_verify_signatures.is_true() {
-                            let verify_fut = crate::mail::pgp::verify(a.clone());
-                            let process_fut = async move {
-                                crate::mail::pgp::signatures_into_error(verify_fut.await?)
-                            };
-                            let handle = main_loop_handler.job_executor.spawn(
-                                "gpg::verify".into(),
-                                process_fut,
-                                IsAsync::Blocking,
-                            );
-                            active_jobs.insert(handle.job_id);
-                            main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::StatusEvent(
-                                StatusEvent::NewJob(handle.job_id),
-                            )));
-                            acc.push(AttachmentDisplay::SignedPending {
-                                inner: Box::new(a.clone()),
-                                job_id: handle.job_id,
-                                display: {
-                                    let mut v = vec![];
-                                    for p in parts {
-                                        Self::attachment_to_display_helper(
-                                            p,
-                                            main_loop_handler,
-                                            active_jobs,
-                                            &mut v,
-                                            view_settings,
-                                        );
-                                    }
-                                    v
-                                },
-                                handle,
-                            });
-                        } else {
-                            acc.push(AttachmentDisplay::SignedUnverified {
-                                inner: Box::new(a.clone()),
-                                display: {
-                                    let mut v = vec![];
-                                    for p in parts {
-                                        Self::attachment_to_display_helper(
-                                            p,
-                                            main_loop_handler,
-                                            active_jobs,
-                                            &mut v,
-                                            view_settings,
-                                        );
-                                    }
-                                    v
-                                },
-                            });
-                        }
-                    }
                 }
                 MultipartType::Encrypted => {
                     for part in parts {
                         if part.content_type == "application/octet-stream" {
-                            #[cfg(not(feature = "gpgme"))]
+                            if view_settings.auto_decrypt.is_true()
+                                && Self::pgp_backend_available(view_settings)
                             {
+                                let backend = match view_settings.pgp_backend.instantiate() {
+                                    Ok(b) => b,
+                                    Err(err) => {
+                                        acc.push(AttachmentDisplay::EncryptedFailed {
+                                            inner: Box::new(a.clone()),
+                                            error: err,
+                                        });
+                                        return;
+                                    }
+                                };
+                                let decrypt_fut =
+                                    crate::mail::pgp::decrypt(backend, a.clone());
+                                let handle = main_loop_handler.job_executor.spawn(
+                                    "gpg::decrypt".into(),
+                                    decrypt_fut,
+                                    IsAsync::Blocking,
+                                );
+                                active_jobs.insert(handle.job_id);
+                                main_loop_handler.send(ThreadEvent::UIEvent(
+                                    UIEvent::StatusEvent(StatusEvent::NewJob(handle.job_id)),
+                                ));
+                                acc.push(AttachmentDisplay::EncryptedPending {
+                                    inner: Box::new(a.clone()),
+                                    handle,
+                                });
+                            } else if Self::pgp_backend_available(view_settings) {
+                                acc.push(AttachmentDisplay::EncryptedFailed {
+                                    inner: Box::new(a.clone()),
+                                    error: Error::new("Undecrypted."),
+                                });
+                            } else {
                                 acc.push(AttachmentDisplay::EncryptedFailed {
                                     inner: Box::new(a.clone()),
                                     error: Error::new(
-                                        "Cannot decrypt: meli must be compiled with libgpgme \
-                                         support.",
+                                        "Cannot decrypt: no PGP backend available. Configure \
+                                         `pgp.backend` in your configuration.",
                                     ),
                                 });
-                            }
-                            #[cfg(feature = "gpgme")]
-                            {
-                                if view_settings.auto_decrypt.is_true() {
-                                    let decrypt_fut = crate::mail::pgp::decrypt(a.clone());
-                                    let handle = main_loop_handler.job_executor.spawn(
-                                        "gpg::decrypt".into(),
-                                        decrypt_fut,
-                                        IsAsync::Blocking,
-                                    );
-                                    active_jobs.insert(handle.job_id);
-                                    main_loop_handler.send(ThreadEvent::UIEvent(
-                                        UIEvent::StatusEvent(StatusEvent::NewJob(handle.job_id)),
-                                    ));
-                                    acc.push(AttachmentDisplay::EncryptedPending {
-                                        inner: Box::new(a.clone()),
-                                        handle,
-                                    });
-                                } else {
-                                    acc.push(AttachmentDisplay::EncryptedFailed {
-                                        inner: Box::new(a.clone()),
-                                        error: Error::new("Undecrypted."),
-                                    });
-                                }
                             }
                         }
                     }

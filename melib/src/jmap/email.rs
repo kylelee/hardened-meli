@@ -158,7 +158,7 @@ impl Id<EmailObject> {
 //      The date the Email was received by the message store.  This is the
 //      "internal date" in IMAP [RFC3501]./
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmailObject {
     #[serde(default)]
@@ -431,6 +431,24 @@ impl From<EmailObject> for crate::Envelope {
 
 impl From<&crate::Mail> for EmailObject {
     fn from(env: &crate::Mail) -> Self {
+        let keywords = {
+            use crate::email::Flag;
+            let mut keywords = IndexMap::new();
+            let flags = env.flags();
+            if flags.contains(Flag::SEEN) {
+                keywords.insert("$seen".into(), true);
+            }
+            if flags.contains(Flag::DRAFT) {
+                keywords.insert("$draft".into(), true);
+            }
+            if flags.contains(Flag::FLAGGED) {
+                keywords.insert("$flagged".into(), true);
+            }
+            if flags.contains(Flag::REPLIED) {
+                keywords.insert("$answered".into(), true);
+            }
+            keywords
+        };
         Self {
             id: Id::new_random(),
             blob_id: Id::new_random(),
@@ -450,7 +468,7 @@ impl From<&crate::Mail> for EmailObject {
             from: None,
             in_reply_to: None,
             references: None,
-            keywords: IndexMap::new(),
+            keywords,
             attached_emails: None,
             attachments: vec![],
             has_attachment: env.has_attachments,
@@ -466,7 +484,7 @@ impl From<&crate::Mail> for EmailObject {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmailBodyPart {
     #[serde(default)]

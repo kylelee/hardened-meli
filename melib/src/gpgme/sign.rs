@@ -90,6 +90,33 @@ impl NewSignature {
     }
 }
 
+impl From<NewSignature> for crate::email::pgp::NewSignature {
+    fn from(val: NewSignature) -> Self {
+        let hash_algorithm = match val.hash_algo {
+            Ok(HashAlgorithm::None) => crate::email::pgp::HashAlgorithm::None,
+            Ok(HashAlgorithm::MD5) => crate::email::pgp::HashAlgorithm::MD5,
+            Ok(HashAlgorithm::SHA1) => crate::email::pgp::HashAlgorithm::SHA1,
+            Ok(HashAlgorithm::RMD160) => crate::email::pgp::HashAlgorithm::RMD160,
+            Ok(HashAlgorithm::MD2) => crate::email::pgp::HashAlgorithm::MD2,
+            Ok(HashAlgorithm::TIGER) => crate::email::pgp::HashAlgorithm::TIGER,
+            Ok(HashAlgorithm::HAVAL) => crate::email::pgp::HashAlgorithm::HAVAL,
+            Ok(HashAlgorithm::SHA256) => crate::email::pgp::HashAlgorithm::SHA256,
+            Ok(HashAlgorithm::SHA384) => crate::email::pgp::HashAlgorithm::SHA384,
+            Ok(HashAlgorithm::SHA512) => crate::email::pgp::HashAlgorithm::SHA512,
+            Ok(HashAlgorithm::SHA224) => crate::email::pgp::HashAlgorithm::SHA224,
+            Ok(HashAlgorithm::MD4) => crate::email::pgp::HashAlgorithm::MD4,
+            Ok(HashAlgorithm::CRC32) => crate::email::pgp::HashAlgorithm::CRC32,
+            Ok(HashAlgorithm::CRC32RFC1510) => crate::email::pgp::HashAlgorithm::CRC32RFC1510,
+            Ok(HashAlgorithm::CRC24RFC2440) => crate::email::pgp::HashAlgorithm::CRC24RFC2440,
+            Err(_) => crate::email::pgp::HashAlgorithm::None,
+        };
+        Self {
+            fingerprint: val.fingerprint,
+            hash_algorithm,
+        }
+    }
+}
+
 pub struct NewSignaturesIter<'a> {
     lib: Arc<libloading::Library>,
     ptr: gpgme_new_signature_t,
