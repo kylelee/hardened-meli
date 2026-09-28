@@ -173,6 +173,17 @@ pub trait Component: std::fmt::Display + std::fmt::Debug + Send + Sync {
         None
     }
 
+    /// Which pane of the listing layouts holds the keyboard, reported by
+    /// [`Component::hint_focus`] for the status-bar hints segment. The
+    /// [`StatusBar`](crate::utilities::StatusBar) consumes this to trim or
+    /// extend its hints segment; containers like
+    /// [`Tabbed`](crate::utilities::Tabbed) forward whatever the active
+    /// child returns. Defaults to `None` for components that do not model
+    /// the listing layouts, which keeps the full hint list.
+    fn hint_focus(&self) -> Option<HintFocus> {
+        None
+    }
+
     fn attributes(&self) -> &'static ComponentAttr {
         &ComponentAttr::DEFAULT
     }
@@ -197,6 +208,20 @@ pub trait Component: std::fmt::Display + std::fmt::Debug + Send + Sync {
             .replies
             .push_back(UIEvent::ComponentUnrealize(self.id()));
     }
+}
+
+/// Which pane of the listing layouts holds the keyboard, reported by
+/// [`Component::hint_focus`] for the status-bar hints segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HintFocus {
+    /// Layout1: no view is open.
+    NoView,
+    /// A view is open but a list holds the keyboard: the grid, the
+    /// sidebar, or the thread list of the thread layout.
+    List,
+    /// The mail view holds the keyboard: the mail detail state of
+    /// layout2 (single-mail view) or layout4 (thread layout).
+    MailView,
 }
 
 impl Component for Box<dyn Component> {
@@ -242,6 +267,10 @@ impl Component for Box<dyn Component> {
 
     fn status_watch(&self) -> Option<(AccountHash, MailboxHash)> {
         (**self).status_watch()
+    }
+
+    fn hint_focus(&self) -> Option<HintFocus> {
+        (**self).hint_focus()
     }
 
     fn attributes(&self) -> &'static ComponentAttr {

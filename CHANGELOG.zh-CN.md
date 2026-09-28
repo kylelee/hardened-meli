@@ -16,6 +16,8 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+- 状态栏快捷键提示随 listing 布局与键盘焦点变化（计划 `statusbar-hints-per-layout`）：右段 hints 现按新增的 `Component::hint_focus()` trait 方法过滤（默认 `None`，`Tabbed` 转发活跃子组件的返回值，`Listing` 上报所在布局窗格）。layout1（无打开视图）删去 `Search` 提示；layout2/layout4 的邮件详情态（邮件视图持键盘）删去 `Scroll Up` / `Scroll Down` / `Focus Left` / `Focus Right` / `Search`，改为显示三个邮件动作——`Reply`（`envelope-view.reply`）、`Reply All`（`envelope-view.reply_to_all`）与 `Open in Tab`（`thread-view.open_in_new_tab`），`Quit` 恒为最后一项。各状态下按键行为不变，仅提示随之增减；提示与按键派发读同一份配置绑定，重绑快捷键后自动同步。
+
 - 底栏三段式重构（计划 `statusbar-gauge-spinner`）：底栏单行经 `Layout::horizontal` 切分为左状态段、中部 `LineGauge` 段、右 hints 段。中部 `LineGauge` 由焦点邮箱的 `MailboxStatus::Parsing(done, total)` 驱动，按 `done/total` 推进并显示 `Fetch N/T` 标签；右段从 `Component::shortcuts()` 实时聚合 `q:quit ?:toggle_help F5:refresh`（行窄时按 `…` / `...` 截断）。左段右缘新增后端 chip `[maildir]` / `[imap ✓]` / `[imap ✘]` 与焦点邮箱标签 `📩 INBOX:42`，均由 `context.accounts` 加新的 `StatusBar.focus: Option<(AccountHash, MailboxHash)>` 字段在 `draw` 时现算，不引入新 theme key。ASCII 终端以 `+`/`x` 替代 ✓/✘ 并去掉信封 emoji；中部 gauge 使用 `filled_symbol # / .` 与 `status.bar` 反色（与 Insert 模式指示器共用同一调色板分叉）。
 
 - 底栏数据通道。`StatusEvent` 新增 `FocusMailbox(AccountHash, MailboxHash)`，由当前 listing/树组件报告用户焦点；`Component` trait 新增 `status_watch()` 默认 `None`，`Listing` 覆写为返回光标 `(AccountHash, MailboxHash)`，`Tabbed` 转发活跃子组件的返回值。`StatusBar` 消费 `FocusMailbox` 记录焦点；同时新增**非消费**的 `MailboxUpdate((acc, mb))` 与 `AccountStatusChange(acc, _)` 事件臂，仅在事件 `AccountHash` 命中焦点账号时标脏，非焦点刷新不再触发底栏重绘。`Listing` 内 8 处、`Tabbed` 内 2 处 `UpdateStatus` 发送点统一收敛到一个 helper，同时发出字符串与结构化焦点事件。
@@ -37,6 +39,7 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 ### 变更（Changes）
 
 - 依赖治理：移除根 `Cargo.toml` 的 `[patch.crates-io]` 与 `vendor/crossterm/` 目录，crossterm 回归 crates.io 0.29.0 原版。原补丁防御的「未识别私有 CSI 卡死」改由删除无用启动查询（`CSI ? 2026 $ p` 同步输出支持探测，全代码库无消费者）+ 输入看门狗承担。离线构建改为依赖本地 cargo cache 预取（`cargo fetch`）。
+- `envelope-view.reply_to_all` 默认键由 `C-g` 改为 `C-a`（`reply` 保持 `r`，`reply_to_author` 保持 `C-r`）；底栏 `Reply All` 提示与邮件视图按键派发随同一配置绑定自动同步。
 
 ### 修复（Fixed）
 

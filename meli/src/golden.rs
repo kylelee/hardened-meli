@@ -2402,23 +2402,12 @@ fn statusbar_hints_follow_keybinding() {
          `<Up>`, got {row:?}"
     );
     assert!(row.contains("?:Help"), "got {row:?}");
-    // The default `listing.search` binding is a two-key group
-    // (`/` first, `F3` second), so the listing hint must surface the
-    // literal group text `(/|<F3>:Search)`, all ASCII.
+    // Layout1 (no view open) drops the Search group entirely: the
+    // default `listing.search` binding `(/|<F3>:Search)` must not
+    // render, even though the binding still exists and `/` still works.
     assert!(
-        row.contains(":Search)") && row.contains("(/|<F3>:Search)"),
-        "listing view must surface the default search group `(/|<F3>:Search)`, got {row:?}"
-    );
-    // Display order: search sits before the trailing quit hint.
-    let search_idx = row
-        .find(":Search)")
-        .expect("the search hint must be present on the listing status row");
-    let quit_idx = row
-        .find(":Quit)")
-        .expect("the quit hint must be present on the listing status row");
-    assert!(
-        search_idx < quit_idx,
-        "the search hint (`:Search)`) must precede quit (`:Quit)`), got {row:?}"
+        !row.contains(":Search)") && !row.contains("(/|<F3>:Search)"),
+        "layout1 must drop the search hint, got {row:?}"
     );
     // Rebind the listing section — the focused view's section wins
     // over the `general` catch-all even though both define `scroll_up`.
@@ -2485,6 +2474,199 @@ fn statusbar_hints_follow_view_section() {
         !row2.contains(":Search)"),
         "contact-list view must drop the Search hint (no binding), got {row2:?}"
     );
+}
+
+/// Wrap a fully driven `Listing` into `Tabbed` + `StatusBar` (the real
+/// app wiring), draw once and return the status row text.
+fn hints_row_for(ctx: &mut Context, listing: Listing) -> String {
+    let tabbed = Tabbed::new(vec![Box::new(listing)], ctx);
+    let mut status_bar = StatusBar::new(ctx, Box::new(tabbed));
+    status_bar.realize(None, ctx);
+    pump_replies(&mut status_bar, ctx);
+    let mut screen = golden_screen(ctx, 200, 24);
+    let area = screen.area();
+    status_bar.draw(screen.grid_mut(), area, ctx);
+    statusbar_row_text(screen.grid())
+}
+
+/// Hints follow the listing layout and keyboard focus: layout1 (no view
+/// open) drops the Search hint; layout2 with the keyboard on the grid
+/// and layout4's split state (the thread list holds the keyboard) keep
+/// the full list; the mail-detail state of layout2/layout4 (the mail
+/// view holds the keyboard) drops the scroll/focus/Search hints and
+/// surfaces the mail actions (`Reply`, `Reply All`, `Open in Tab`)
+/// before the trailing `Quit`.
+#[test]
+fn statusbar_hints_follow_layout_focus() {
+    // Layout1: no view open — Search dropped, everything else unchanged.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_golden_mails(&ctx, inbox_hash);
+        let listing = Listing::new(&mut ctx);
+        let row = hints_row_for(&mut ctx, listing);
+        for hint in [
+            "?:Help",
+            ":Scroll Up)",
+            ":Scroll Down)",
+            ":Focus Left)",
+            ":Focus Right)",
+            ":Quit)",
+        ] {
+            assert!(row.contains(hint), "layout1 must keep {hint}, got {row:?}");
+        }
+        assert!(
+            !row.contains(":Search)"),
+            "layout1 must drop the search hint, got {row:?}"
+        );
+    }
+
+    // Layout2, grid focus: a single-mail view is open but the keyboard
+    // stays on the grid — the hints are unchanged.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_solo_mail(&ctx, inbox_hash);
+        let mut listing = Listing::new(&mut ctx);
+        {
+            let mut scratch = golden_screen(&ctx, 80, 24);
+            let area = scratch.area();
+            open_entry_under_cursor(&mut listing, &mut ctx, scratch.grid_mut(), area);
+        }
+        let row = hints_row_for(&mut ctx, listing);
+        assert!(
+            row.contains(":Search)") && row.contains(":Scroll Up)"),
+            "layout2 grid focus must keep the full hints, got {row:?}"
+        );
+    }
+
+    // Layout2, mail focus: the keyboard moves onto the open single-mail
+    // view and the body is loaded, so the envelope-view bindings exist.
+    // The scroll/focus/Search hints are dropped and the three mail
+    // actions appear, with Quit still last.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_solo_mail(&ctx, inbox_hash);
+        let mut listing = Listing::new(&mut ctx);
+        let mut scratch = golden_screen(&ctx, 80, 24);
+        let area = scratch.area();
+        open_entry_under_cursor(&mut listing, &mut ctx, scratch.grid_mut(), area);
+        let mut event = UIEvent::Input(Key::Right);
+        assert!(
+            listing.process_event(&mut event, &mut ctx),
+            "focus_right must move the keyboard onto the open view"
+        );
+        pump_replies(&mut listing, &mut ctx);
+        listing.draw(scratch.grid_mut(), area, &mut ctx);
+        listing
+            .view_mut_for_tests()
+            .expect("single-mail view is open")
+            .load_expanded_entry_for_tests(GOLDEN_SOLO_MAIL.to_vec(), &mut ctx);
+        drop(scratch);
+        let row = hints_row_for(&mut ctx, listing);
+        for gone in [
+            ":Scroll Up)",
+            ":Scroll Down)",
+            ":Focus Left)",
+            ":Focus Right)",
+            ":Search)",
+        ] {
+            assert!(
+                !row.contains(gone),
+                "layout2 mail focus must drop {gone}, got {row:?}"
+            );
+        }
+        let quit_idx = row.rfind(":Quit)").expect("the quit hint must be present");
+        for (hint, idx) in [
+            (":Reply)", row.find(":Reply)")),
+            (":Reply All)", row.find(":Reply All)")),
+            (":Open in Tab)", row.find(":Open in Tab)")),
+        ] {
+            let idx = idx.unwrap_or_else(|| panic!("{hint} must be present, got {row:?}"));
+            assert!(
+                idx < quit_idx,
+                "{hint} must precede the trailing quit hint, got {row:?}"
+            );
+        }
+    }
+
+    // Layout4, split: a thread is open and `focus_right` entered the
+    // split state — the thread list holds the keyboard, hints unchanged.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_thread_mails(&ctx, inbox_hash);
+        let mut listing = Listing::new(&mut ctx);
+        {
+            let mut scratch = golden_screen(&ctx, 80, 24);
+            let area = scratch.area();
+            open_entry_under_cursor(&mut listing, &mut ctx, scratch.grid_mut(), area);
+            let mut event = UIEvent::Input(Key::Right);
+            assert!(
+                listing.process_event(&mut event, &mut ctx),
+                "focus_right must enter the split state over an open thread"
+            );
+            pump_replies(&mut listing, &mut ctx);
+            listing.draw(scratch.grid_mut(), area, &mut ctx);
+        }
+        let row = hints_row_for(&mut ctx, listing);
+        assert!(
+            row.contains(":Search)") && row.contains(":Scroll Up)"),
+            "layout4 split (thread-list focus) must keep the full hints, got {row:?}"
+        );
+    }
+
+    // Layout4, mail focus: a second `focus_right` opens the cursor
+    // selected mail inside the split; with the body loaded the hint set
+    // matches layout2's mail focus.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_thread_mails(&ctx, inbox_hash);
+        let mut listing = Listing::new(&mut ctx);
+        let mut scratch = golden_screen(&ctx, 80, 24);
+        let area = scratch.area();
+        open_entry_under_cursor(&mut listing, &mut ctx, scratch.grid_mut(), area);
+        for what in [
+            "focus_right must enter the split state over an open thread",
+            "focus_right must open the cursor selected mail in the split",
+        ] {
+            let mut event = UIEvent::Input(Key::Right);
+            assert!(listing.process_event(&mut event, &mut ctx), "{what}");
+            pump_replies(&mut listing, &mut ctx);
+            listing.draw(scratch.grid_mut(), area, &mut ctx);
+        }
+        listing
+            .view_mut_for_tests()
+            .expect("thread view is open")
+            .load_expanded_entry_for_tests(GOLDEN_REPLY_MAIL.to_vec(), &mut ctx);
+        drop(scratch);
+        let row = hints_row_for(&mut ctx, listing);
+        for gone in [
+            ":Scroll Up)",
+            ":Scroll Down)",
+            ":Focus Left)",
+            ":Focus Right)",
+            ":Search)",
+        ] {
+            assert!(
+                !row.contains(gone),
+                "layout4 mail focus must drop {gone}, got {row:?}"
+            );
+        }
+        assert!(
+            row.contains(":Reply)") && row.contains(":Reply All)") && row.contains(":Open in Tab)"),
+            "layout4 mail focus must surface the mail actions, got {row:?}"
+        );
+        let quit_idx = row.rfind(":Quit)").expect("the quit hint must be present");
+        assert!(
+            row.find(":Reply)").is_some_and(|idx| idx < quit_idx)
+                && row.find(":Reply All)").is_some_and(|idx| idx < quit_idx)
+                && row.find(":Open in Tab)").is_some_and(|idx| idx < quit_idx),
+            "the mail actions must precede the trailing quit hint, got {row:?}"
+        );
+    }
 }
 
 /// Layered quit: on a non-pinned tab (a composer opened via `Tab(New)`),
