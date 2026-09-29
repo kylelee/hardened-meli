@@ -175,11 +175,12 @@ pub trait Component: std::fmt::Display + std::fmt::Debug + Send + Sync {
 
     /// Which pane of the listing layouts holds the keyboard, reported by
     /// [`Component::hint_focus`] for the status-bar hints segment. The
-    /// [`StatusBar`](crate::utilities::StatusBar) consumes this to trim or
-    /// extend its hints segment; containers like
+    /// [`StatusBar`](crate::utilities::StatusBar) consumes this to pick
+    /// the per-layout wording — and visibility — of the scroll and
+    /// pane-switch hints; containers like
     /// [`Tabbed`](crate::utilities::Tabbed) forward whatever the active
-    /// child returns. Defaults to `None` for components that do not model
-    /// the listing layouts, which keeps the full hint list.
+    /// child returns. Defaults to `None` for components that do not
+    /// model the listing layouts, which keeps the default hint labels.
     fn hint_focus(&self) -> Option<HintFocus> {
         None
     }
@@ -214,12 +215,19 @@ pub trait Component: std::fmt::Display + std::fmt::Debug + Send + Sync {
 /// [`Component::hint_focus`] for the status-bar hints segment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HintFocus {
-    /// Layout1: no view is open.
+    /// Layout1 with the keyboard on the sidebar: the mailbox list.
+    Sidebar,
+    /// Layout1 with the keyboard on the mail grid, no view open.
     NoView,
-    /// A view is open but a list holds the keyboard: the grid, the
-    /// sidebar, or the thread list of the thread layout.
-    List,
-    /// The mail view holds the keyboard: the mail detail state of
+    /// Layout2: a single-mail view is open, the grid holds the
+    /// keyboard.
+    GridSingleMail,
+    /// Layout3: a thread view is open, the grid holds the keyboard.
+    GridThreads,
+    /// Layout4: the thread list of the split view (thread list | mail
+    /// detail) holds the keyboard.
+    ThreadList,
+    /// The mail detail holds the keyboard: the mail view state of
     /// layout2 (single-mail view) or layout4 (thread layout).
     MailView,
 }

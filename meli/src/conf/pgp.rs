@@ -308,10 +308,7 @@ impl<'de> Deserialize<'de> for PGPBackendChoice {
                 fmt.write_str(r#"either string "gpgme" or a CLI backend table"#)
             }
 
-            fn visit_str<E: de::Error>(
-                self,
-                value: &str,
-            ) -> std::result::Result<Self::Value, E> {
+            fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
                 self.visit_string(value.to_string())
             }
 
@@ -345,9 +342,8 @@ impl<'de> Deserialize<'de> for PGPBackendChoice {
             where
                 V: MapAccess<'de>,
             {
-                let cli: PGPBackendCLI = Deserialize::deserialize(
-                    de::value::MapAccessDeserializer::new(map),
-                )?;
+                let cli: PGPBackendCLI =
+                    Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 Ok(PGPBackendChoice::CLI(cli))
             }
         }

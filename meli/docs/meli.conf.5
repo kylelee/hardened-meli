@@ -1266,8 +1266,12 @@ scroll_up = "Up,k"
 .\"
 .sp
 Either key then triggers the action; more than two keys are rejected. The
-status bar renders both keys, e.g.
-.Em (Up|k:Scroll Up) Ns
+status bar renders both keys with the label of the focused listing pane,
+e.g.
+.Em (Up|k:Folder Up) Ns
+in the mailbox sidebar or
+.Em (Up|k:Maillist Up) Ns
+with the keyboard on the mail grid.
 .
 .Pp
 The navigation key group — the arrow keys and their vim counterparts

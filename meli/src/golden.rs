@@ -2325,7 +2325,9 @@ fn statusbar_hints_follow_keybinding() {
         "hint key glyphs must render in the theme highlight-selected color, got row {row:?}"
     );
     // The mock context is emoji-capable, so the up-arrow binding renders
-    // as the `⬆️` emoji icon rather than `<Up>`: `(⬆️|k:Scroll Up)`. The
+    // as the `⬆️` emoji icon rather than `<Up>`: `(⬆️|k:Folder Up)` (the
+    // listing's active tab starts on the layout1 sidebar, whose
+    // scenario label names the mailbox-tree action). The
     // in-group `|` of that group must be a plain span: normal status-bar
     // font color, no bold — only the key glyphs carry the highlight.
     // Locate the `|` immediately followed by `k` so the row's other `|`
@@ -2342,7 +2344,7 @@ fn statusbar_hints_follow_keybinding() {
                 && p.0 + 1 < screen.grid().cols
                 && screen.grid()[(p.0 + 1, p.1)].ch() == 'k'
         })
-        .expect("the `(⬆️|k:Scroll Up)` separator must be on the status row");
+        .expect("the `(⬆️|k:Folder Up)` separator must be on the status row");
     let (sep_col, sep_row) = row_cells[sep_idx];
     let k_col = (sep_col + 1, sep_row);
     // A `base + VS16` emoji-presentation cluster occupies the leading
@@ -2395,16 +2397,15 @@ fn statusbar_hints_follow_keybinding() {
     // `grid_row_text` concatenates each cell's `ch()`, so the VS16
     // cluster contributes the `⬆` base char followed by the empty
     // continuation cell's blank `ch()`; assert on the base char and the
-    // `|k:Scroll Up` tail rather than the exact joined string.
+    // `|k:Folder Up` tail rather than the exact joined string.
     assert!(
-        row.contains('⬆') && row.contains("|k:Scroll Up") && !row.contains("<Up>"),
-        "default hints must render the arrow as an emoji icon (`⬆` … `|k:Scroll Up`) and drop \
+        row.contains('⬆') && row.contains("|k:Folder Up") && !row.contains("<Up>"),
+        "default hints must render the arrow as an emoji icon (`⬆` … `|k:Folder Up`) and drop \
          `<Up>`, got {row:?}"
     );
     assert!(row.contains("?:Help"), "got {row:?}");
-    // Layout1 (no view open) drops the Search group entirely: the
-    // default `listing.search` binding `(/|<F3>:Search)` must not
-    // render, even though the binding still exists and `/` still works.
+    // Layout1's sidebar hides the Search group entirely: the default
+    // `listing.search` binding `(/|<F3>:Search)` must not
     assert!(
         !row.contains(":Search)") && !row.contains("(/|<F3>:Search)"),
         "layout1 must drop the search hint, got {row:?}"
@@ -2416,8 +2417,8 @@ fn statusbar_hints_follow_keybinding() {
     status_bar.draw(screen.grid_mut(), area, &mut ctx);
     let row = statusbar_row_text(screen.grid());
     assert!(
-        row.contains("(j:Scroll Up)") && !row.contains("Up:Scroll Up"),
-        "rebound listing.scroll_up must surface as `(j:Scroll Up)`, got {row:?}"
+        row.contains("(j:Folder Up)") && !row.contains("Up:Folder Up"),
+        "rebound listing.scroll_up must surface as `(j:Folder Up)`, got {row:?}"
     );
 }
 
@@ -2502,16 +2503,26 @@ fn hints_row_for(ctx: &mut Context, listing: Listing) -> String {
     statusbar_row_text(screen.grid())
 }
 
-/// Hints follow the listing layout and keyboard focus: layout1 (no view
-/// open) drops the Search hint; layout2 with the keyboard on the grid
-/// and layout4's split state (the thread list holds the keyboard) keep
-/// the full list; the mail-detail state of layout2/layout4 (the mail
-/// view holds the keyboard) drops the scroll/focus/Search hints and
-/// surfaces the mail actions (`Reply`, `Reply All`, `Open in Tab`)
-/// before the trailing `Quit`.
+/// Hints follow the listing layout and keyboard focus: the
+/// scenario-sensitive hints (`scroll_up`/`scroll_down`/`focus_left`/
+/// `focus_right`/`search`) are re-labelled per pane that holds the
+/// keyboard — layout1's sidebar names the mailbox-tree actions
+/// (`Folder Up`/`Folder Down`/`Open Mail`), layout2's and
+/// layout3's grid name the mail rows (`Maillist Up`/`Maillist Down`,
+/// with `Focus Content` vs `Focus Threads` distinguishing the
+/// single-mail view from the thread view), and layout4's thread list
+/// names the thread entries (`Thread Up`/`Thread Down`/
+/// `Focus Maillist`) — while layout1 (no view open) also drops the
+/// Search hint, and the mail-detail state of layout2/layout4 (the
+/// mail view holds the keyboard) drops the whole scroll/focus/Search
+/// group and surfaces the mail actions (`Reply`, `Reply All`, `Open
+/// in Tab`) before the trailing `Quit`.
 #[test]
 fn statusbar_hints_follow_layout_focus() {
-    // Layout1: no view open — Search dropped, everything else unchanged.
+    // Layout1, sidebar focus (`Listing::new` lands on the visible
+    // mailbox list): the scroll keys advertise the mailbox-tree
+    // actions and Focus Right opens the cursor entry directly; Search
+    // and Focus Left stay hidden.
     {
         let mut ctx = mock_context();
         let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
@@ -2520,22 +2531,34 @@ fn statusbar_hints_follow_layout_focus() {
         let row = hints_row_for(&mut ctx, listing);
         for hint in [
             "?:Help",
-            ":Scroll Up)",
-            ":Scroll Down)",
-            ":Focus Left)",
-            ":Focus Right)",
+            ":Folder Up)",
+            ":Folder Down)",
+            ":Open Mail)",
             ":Quit)",
         ] {
-            assert!(row.contains(hint), "layout1 must keep {hint}, got {row:?}");
+            assert!(
+                row.contains(hint),
+                "layout1 sidebar must keep {hint}, got {row:?}"
+            );
         }
-        assert!(
-            !row.contains(":Search)"),
-            "layout1 must drop the search hint, got {row:?}"
-        );
+        for absent in [
+            ":Search)",
+            ":Focus Left)",
+            ":Scroll Up)",
+            ":Scroll Down)",
+            ":Focus Right)",
+            ":Maillist Up)",
+        ] {
+            assert!(
+                !row.contains(absent),
+                "layout1 sidebar must not advertise {absent}, got {row:?}"
+            );
+        }
     }
 
     // Layout2, grid focus: a single-mail view is open but the keyboard
-    // stays on the grid — the hints are unchanged.
+    // stays on the grid — the scenario hints name the mail rows and
+    // the two pane switches.
     {
         let mut ctx = mock_context();
         let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
@@ -2547,9 +2570,22 @@ fn statusbar_hints_follow_layout_focus() {
             open_entry_under_cursor(&mut listing, &mut ctx, scratch.grid_mut(), area);
         }
         let row = hints_row_for(&mut ctx, listing);
+        for hint in [
+            ":Maillist Up)",
+            ":Maillist Down)",
+            ":Focus Box)",
+            ":Focus Content)",
+            ":Search)",
+        ] {
+            assert!(
+                row.contains(hint),
+                "layout2 grid focus must keep {hint}, got {row:?}"
+            );
+        }
         assert!(
-            row.contains(":Search)") && row.contains(":Scroll Up)"),
-            "layout2 grid focus must keep the full hints, got {row:?}"
+            !row.contains(":Focus Threads)"),
+            "layout2 grid focus must advertise Focus Content, not the thread layout's Focus \
+             Threads, got {row:?}"
         );
     }
 
@@ -2584,6 +2620,10 @@ fn statusbar_hints_follow_layout_focus() {
             ":Focus Left)",
             ":Focus Right)",
             ":Search)",
+            ":Maillist Up)",
+            ":Maillist Down)",
+            ":Focus Box)",
+            ":Focus Content)",
         ] {
             assert!(
                 !row.contains(gone),
@@ -2605,7 +2645,8 @@ fn statusbar_hints_follow_layout_focus() {
     }
 
     // Layout4, split: a thread is open and `focus_right` entered the
-    // split state — the thread list holds the keyboard, hints unchanged.
+    // split state — the thread list holds the keyboard and the
+    // scenario hints name the thread entries.
     {
         let mut ctx = mock_context();
         let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
@@ -2624,9 +2665,22 @@ fn statusbar_hints_follow_layout_focus() {
             listing.draw(scratch.grid_mut(), area, &mut ctx);
         }
         let row = hints_row_for(&mut ctx, listing);
+        for hint in [
+            ":Thread Up)",
+            ":Thread Down)",
+            ":Focus Maillist)",
+            ":Focus Content)",
+            ":Search)",
+        ] {
+            assert!(
+                row.contains(hint),
+                "layout4 split must keep {hint}, got {row:?}"
+            );
+        }
         assert!(
-            row.contains(":Search)") && row.contains(":Scroll Up)"),
-            "layout4 split (thread-list focus) must keep the full hints, got {row:?}"
+            !row.contains(":Maillist Up)") && !row.contains(":Focus Box)"),
+            "layout4 split (thread-list focus) must advertise the thread-list scenario labels, \
+             got {row:?}"
         );
     }
 
@@ -2662,6 +2716,10 @@ fn statusbar_hints_follow_layout_focus() {
             ":Focus Left)",
             ":Focus Right)",
             ":Search)",
+            ":Thread Up)",
+            ":Thread Down)",
+            ":Focus Maillist)",
+            ":Focus Content)",
         ] {
             assert!(
                 !row.contains(gone),
@@ -2679,6 +2737,209 @@ fn statusbar_hints_follow_layout_focus() {
                 && row.find(":Open in Tab)").is_some_and(|idx| idx < quit_idx),
             "the mail actions must precede the trailing quit hint, got {row:?}"
         );
+    }
+}
+
+/// The acceptance core of the per-layout hint wording: the *same*
+/// binding (`scroll_up`, `scroll_down`, `focus_left`, `focus_right`)
+/// must render different labels as the listing moves between
+/// layouts/focus states, and each state must not leak another state's
+/// label. Covers the sidebar and grid states of layout1, the grid
+/// states of layout2 (single-mail view) and layout3 (thread view —
+/// distinguished from layout2 by the `Focus Right` label), and
+/// layout4's thread list.
+#[test]
+fn statusbar_hints_labels_follow_layout_pane() {
+    // Layout1, sidebar: scrolling names the mailbox tree.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_golden_mails(&ctx, inbox_hash);
+        let listing = Listing::new(&mut ctx);
+        let row = hints_row_for(&mut ctx, listing);
+        for hint in [":Folder Up)", ":Folder Down)", ":Open Mail)"] {
+            assert!(
+                row.contains(hint),
+                "layout1 sidebar must show {hint}, got {row:?}"
+            );
+        }
+        for absent in [
+            ":Maillist Up)",
+            ":Thread Up)",
+            ":Focus Maillist)",
+            ":Focus Content)",
+            ":Focus Box)",
+        ] {
+            assert!(
+                !row.contains(absent),
+                "layout1 sidebar must not show {absent}, got {row:?}"
+            );
+        }
+    }
+
+    // Layout1, grid (no view open, keyboard on the mail rows):
+    // reachable by closing the view with the sidebar hidden — Right at
+    // the sidebar opens the cursor entry (layout2), the menu toggle
+    // hides the sidebar, and Left from the grid then closes the view
+    // while the keyboard stays on the grid. Scrolling now names the
+    // mail rows and `focus_right` opens the entry under the cursor.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_golden_mails(&ctx, inbox_hash);
+        let mut listing = Listing::new(&mut ctx);
+        {
+            let mut scratch = golden_screen(&ctx, 80, 24);
+            let area = scratch.area();
+            let mut event = UIEvent::Input(Key::Right);
+            assert!(
+                listing.process_event(&mut event, &mut ctx),
+                "focus_right at the sidebar must open the cursor entry"
+            );
+            pump_replies(&mut listing, &mut ctx);
+            listing.draw(scratch.grid_mut(), area, &mut ctx);
+            // The menu-visibility toggle arm mutates the flag without
+            // consuming the key, so no consumed-assert here.
+            let mut event = UIEvent::Input(Key::Char('`'));
+            listing.process_event(&mut event, &mut ctx);
+            pump_replies(&mut listing, &mut ctx);
+            listing.draw(scratch.grid_mut(), area, &mut ctx);
+            let mut event = UIEvent::Input(Key::Left);
+            assert!(
+                listing.process_event(&mut event, &mut ctx),
+                "focus_left must close the view and keep the keyboard on the grid"
+            );
+            pump_replies(&mut listing, &mut ctx);
+            listing.draw(scratch.grid_mut(), area, &mut ctx);
+        }
+        let row = hints_row_for(&mut ctx, listing);
+        for hint in [":Maillist Up)", ":Maillist Down)", ":Open Mail)"] {
+            assert!(
+                row.contains(hint),
+                "layout1 grid must show {hint}, got {row:?}"
+            );
+        }
+        for absent in [
+            ":Folder Up)",
+            ":Focus Maillist)",
+            ":Focus Box)",
+            ":Focus Content)",
+            ":Search)",
+        ] {
+            assert!(
+                !row.contains(absent),
+                "layout1 grid must not show {absent}, got {row:?}"
+            );
+        }
+    }
+
+    // Layout2, grid over a single mail: `focus_left`/`focus_right`
+    // address the view box and the mail content.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_solo_mail(&ctx, inbox_hash);
+        let mut listing = Listing::new(&mut ctx);
+        {
+            let mut scratch = golden_screen(&ctx, 80, 24);
+            let area = scratch.area();
+            open_entry_under_cursor(&mut listing, &mut ctx, scratch.grid_mut(), area);
+        }
+        let row = hints_row_for(&mut ctx, listing);
+        for hint in [
+            ":Maillist Up)",
+            ":Maillist Down)",
+            ":Focus Box)",
+            ":Focus Content)",
+        ] {
+            assert!(
+                row.contains(hint),
+                "layout2 grid must show {hint}, got {row:?}"
+            );
+        }
+        assert!(
+            !row.contains(":Focus Threads)") && !row.contains(":Open Mail)"),
+            "layout2 grid must not show layout3's Focus Threads nor layout1's Open Mail, got \
+             {row:?}"
+        );
+    }
+
+    // Layout3, grid over a thread: same scroll labels as layout2, but
+    // `focus_right` enters the thread list instead of the mail
+    // content — the one-glyph difference between the two grids.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_thread_mails(&ctx, inbox_hash);
+        let mut listing = Listing::new(&mut ctx);
+        {
+            let mut scratch = golden_screen(&ctx, 80, 24);
+            let area = scratch.area();
+            open_entry_under_cursor(&mut listing, &mut ctx, scratch.grid_mut(), area);
+        }
+        let row = hints_row_for(&mut ctx, listing);
+        for hint in [
+            ":Maillist Up)",
+            ":Maillist Down)",
+            ":Focus Box)",
+            ":Focus Threads)",
+        ] {
+            assert!(
+                row.contains(hint),
+                "layout3 grid must show {hint}, got {row:?}"
+            );
+        }
+        assert!(
+            !row.contains(":Focus Content)") && !row.contains(":Open Mail)"),
+            "layout3 grid must not show layout2's Focus Content nor layout1's Open Mail, got \
+             {row:?}"
+        );
+    }
+
+    // Layout4, thread list: scrolling names the thread entries;
+    // `focus_left` closes the mail pane back to the grid,
+    // `focus_right` hands the keyboard to the mail content.
+    {
+        let mut ctx = mock_context();
+        let (_account_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        insert_thread_mails(&ctx, inbox_hash);
+        let mut listing = Listing::new(&mut ctx);
+        {
+            let mut scratch = golden_screen(&ctx, 80, 24);
+            let area = scratch.area();
+            open_entry_under_cursor(&mut listing, &mut ctx, scratch.grid_mut(), area);
+            let mut event = UIEvent::Input(Key::Right);
+            assert!(
+                listing.process_event(&mut event, &mut ctx),
+                "focus_right must enter the split state over an open thread"
+            );
+            pump_replies(&mut listing, &mut ctx);
+            listing.draw(scratch.grid_mut(), area, &mut ctx);
+        }
+        let row = hints_row_for(&mut ctx, listing);
+        for hint in [
+            ":Thread Up)",
+            ":Thread Down)",
+            ":Focus Maillist)",
+            ":Focus Content)",
+        ] {
+            assert!(
+                row.contains(hint),
+                "layout4 thread list must show {hint}, got {row:?}"
+            );
+        }
+        for absent in [
+            ":Maillist Up)",
+            ":Maillist Down)",
+            ":Folder Up)",
+            ":Focus Box)",
+            ":Focus Threads)",
+        ] {
+            assert!(
+                !row.contains(absent),
+                "layout4 thread list must not show {absent}, got {row:?}"
+            );
+        }
     }
 }
 

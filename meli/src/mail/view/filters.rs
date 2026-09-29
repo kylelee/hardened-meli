@@ -586,9 +586,7 @@ impl ViewFilter {
                                 .and_then(crate::mail::pgp::signatures_into_error);
                             let notice = match result {
                                 Ok(None) => None,
-                                Ok(Some(comment)) => {
-                                    Some(format!("Signature: {comment}").into())
-                                }
+                                Ok(Some(comment)) => Some(format!("Signature: {comment}").into()),
                                 Err(err) => Some(format!("Invalid signature: {err}").into()),
                             };
                             Ok(FilterOutput {
@@ -643,8 +641,7 @@ impl ViewFilter {
         } = att.content_type
         {
             if view_settings.pgp_backend.instantiate().is_err() {
-                let msg =
-                    "Cannot decrypt: no PGP backend is available. Configure `pgp.backend` \
+                let msg = "Cannot decrypt: no PGP backend is available. Configure `pgp.backend` \
                      in your configuration.";
                 if let Some(Ok(mut res)) =
                     parts.iter().find_map(|part| {

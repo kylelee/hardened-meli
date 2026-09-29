@@ -666,35 +666,53 @@ impl StatusBar {
     ///
     /// 1. `general.toggle_help`         — label `Help`
     /// 2. `general.enter_command_mode`  — label `Command`
-    /// 3. `scroll_up`                   — label `Scroll Up`
-    /// 4. `scroll_down`                 — label `Scroll Down`
-    /// 5. `focus_left`                  — label `Focus Left`
-    /// 6. `focus_right`                 — label `Focus Right`
+    /// 3. `scroll_up`
+    /// 4. `scroll_down`
+    /// 5. `focus_left`
+    /// 6. `focus_right`
     /// 7. `send_mail`                   — label `Send Mail` (only on
     ///    views that expose a send binding, e.g. composing, immediately
     ///    before `close`)
     /// 8. `close`                       — label `Close View` (only on
     ///    sub-views that expose a close binding, e.g. composing)
-    /// 9. `search`                      — label `Search` (only on views
-    ///    that expose a `search` binding)
+    /// 9. `search`
     /// 10. `general.quit`               — label `Quit` (last, but only
     ///     when the focused view does not expose a `close` binding: a
     ///     view that carries its own Close View hint, such as composing,
     ///     hides Quit instead of advertising both)
     ///
-    /// The list is filtered by the focused listing pane reported by
-    /// [`Component::hint_focus`]: layout1 (no view open) drops the
-    /// `Search` hint; when the mail view holds the keyboard (the mail
-    /// detail state of the single-mail and thread layouts) the scroll
-    /// and focus hints plus `Search` are dropped and three mail actions
-    /// are appended — `reply`/`Reply` and `reply_to_all`/`Reply All`
-    /// (envelope-view bindings) and `open_in_new_tab`/`Open in Tab`
-    /// (thread-view binding). Any other focus keeps the list unchanged.
+    /// Entries 3–6 and 9 (the scroll, pane-switch and search keys) are
+    /// scenario-sensitive: their label — or whether they render at all
+    /// — comes from the focused listing pane reported by
+    /// [`Component::hint_focus`], looked up in
+    /// [`scenario_hint_labels`]: the same key is advertised with the
+    /// wording of the action it performs from the pane that holds the
+    /// keyboard.
+    ///
+    /// | focus            | scroll_up   | scroll_down   | focus_left     | focus_right    | search   |
+    /// |------------------|-------------|---------------|----------------|----------------|----------|
+    /// | `Sidebar`        | Folder Up   | Folder Down   | hidden         | Open Mail      | hidden   |
+    /// | `NoView`         | Maillist Up | Maillist Down | hidden         | Open Mail      | hidden   |
+    /// | `GridSingleMail` | Maillist Up | Maillist Down | Focus Box      | Focus Content  | Search   |
+    /// | `GridThreads`    | Maillist Up | Maillist Down | Focus Box      | Focus Threads  | Search   |
+    /// | `ThreadList`     | Thread Up   | Thread Down   | Focus Maillist | Focus Content  | Search   |
+    /// | `MailView`       | hidden      | hidden        | hidden         | hidden         | hidden   |
+    /// | `None`           | Scroll Up   | Scroll Down   | Focus Left     | Focus Right    | Search   |
+    ///
+    /// `MailView` (the mail detail state of the single-mail and thread
+    /// layouts) additionally appends three mail actions after the
+    /// surviving fixed hints — `reply`/`Reply` and
+    /// `reply_to_all`/`Reply All` (envelope-view bindings) and
+    /// `open_in_new_tab`/`Open in Tab` (thread-view binding). The
+    /// `None` row covers non-listing views (contacts, composing, ...)
+    /// and keeps the default labels. Every other entry (`Help`,
+    /// `Command`, `Send Mail`, `Close View`, `Quit` and the appended
+    /// mail actions) has one fixed label in all focuses.
     ///
     /// Bindings missing from the active view are skipped silently. Every
     /// key glyph comes from the *configured* binding (remapping a
     /// shortcut changes its hint); with the defaults the format is
-    /// `⌨️ (?:Help)(:/<M-x>:Command)(⬆️|k:Scroll Up)(⬇️|j:Scroll
+    /// `⌨️ (?:Help)(:/<M-x>:Command)(⬆️|k:Scroll
     /// Down)...(/|<F3>:Search)(<Esc>|q:Quit)` on emoji-capable terminals, where the four
     /// arrow keys render as emoji icons; terminals that are not
     /// emoji-capable (or are in `ascii_drawing` mode) keep the text form
@@ -740,9 +758,12 @@ impl StatusBar {
         };
         // Nine entries in fixed display order: help first (so it
         // survives narrow ellipsis), then scroll, then focus switches,
-        // then send mail and view close, then search. `quit` is appended
-        // after the hint-focus filtering below — and only when the view
-        // has no `close` binding — so it stays the final actionable hint.
+        // then send mail and view close, then search. The five
+        // scenario-sensitive names start from a placeholder label that
+        // the per-focus table below resolves; the rest carry their one
+        // fixed label. `quit` is appended after the hint-focus
+        // filtering below — and only when the view has no `close`
+        // binding — so it stays the final actionable hint.
         let mut pickers: Vec<(
             &'static str,
             Option<&crate::terminal::ShortcutKeys>,
@@ -754,34 +775,51 @@ impl StatusBar {
                 general.and_then(|m| m.get("enter_command_mode")),
                 "Command",
             ),
-            ("scroll_up", pick_key("scroll_up"), "Scroll Up"),
-            ("scroll_down", pick_key("scroll_down"), "Scroll Down"),
-            ("focus_left", pick_key("focus_left"), "Focus Left"),
-            ("focus_right", pick_key("focus_right"), "Focus Right"),
+            ("scroll_up", pick_key("scroll_up"), ""),
+            ("scroll_down", pick_key("scroll_down"), ""),
+            ("focus_left", pick_key("focus_left"), ""),
+            ("focus_right", pick_key("focus_right"), ""),
             ("send_mail", pick_key("send_mail"), "Send Mail"),
             ("close", pick_key("close"), "Close View"),
-            ("search", pick_key("search"), "Search"),
+            ("search", pick_key("search"), ""),
         ];
-        match hint_focus {
-            Some(HintFocus::NoView) => pickers.retain(|(name, _, _)| *name != "search"),
-            Some(HintFocus::MailView) => {
-                pickers.retain(|(name, _, _)| {
-                    !matches!(
-                        *name,
-                        "scroll_up" | "scroll_down" | "focus_left" | "focus_right" | "search"
-                    )
-                });
-                pickers.extend([
-                    ("reply", pick_key("reply"), "Reply"),
-                    ("reply_to_all", pick_key("reply_to_all"), "Reply All"),
-                    (
-                        "open_in_new_tab",
-                        pick_key("open_in_new_tab"),
-                        "Open in Tab",
-                    ),
-                ]);
+        // Re-label the scenario-sensitive names through the per-focus
+        // table: each pick keeps its configured binding but is
+        // advertised with the wording of the pane that holds the
+        // keyboard, and hidden table cells drop the pick outright.
+        // This subsumes the former hint-focus filtering — layout1
+        // hiding Search/Focus Left and the mail-detail state hiding
+        // the whole scroll/focus/Search group.
+        let scenario_labels = scenario_hint_labels(hint_focus);
+        pickers.retain_mut(|picker| {
+            let Some(column) = SCENARIO_HINT_NAMES
+                .iter()
+                .position(|name| *name == picker.0)
+            else {
+                // Fixed-label hint (Help, Command, Send Mail, Close
+                // View): unchanged in every focus.
+                return true;
+            };
+            match scenario_labels[column] {
+                Some(label) => {
+                    picker.2 = label;
+                    true
+                }
+                None => false,
             }
-            Some(HintFocus::List) | None => {}
+        });
+        // The mail-detail state appends its three mail actions after
+        // the surviving fixed hints.
+        if hint_focus == Some(HintFocus::MailView) {
+            pickers.extend([
+                ("reply", pick_key("reply"), "Reply"),
+                ("reply_to_all", pick_key("reply_to_all"), "Reply All"),
+                (
+                    "open_in_new_tab",
+                    pick_key("open_in_new_tab"),
+                    "Open in Tab",
+                ),
+            ]);
         }
         // Append the global `Quit` hint only when the focused view does
         // not expose its own `close` binding: a view that advertises
@@ -2040,6 +2078,89 @@ impl Component for Tabbed {
         for c in &self.children {
             c.realize(self.id().into(), context);
         }
+    }
+}
+
+/// The hint names whose label (and visibility) depends on which pane of
+/// the listing layouts holds the keyboard; every other hint has one
+/// fixed label in all focuses. The order doubles as the column order of
+/// [`scenario_hint_labels`].
+const SCENARIO_HINT_NAMES: [&str; 5] = [
+    "scroll_up",
+    "scroll_down",
+    "focus_left",
+    "focus_right",
+    "search",
+];
+
+/// Per-focus label table for the scenario-sensitive hints: one row per
+/// [`HintFocus`] pane (plus `None` for non-listing views), one column
+/// per [`SCENARIO_HINT_NAMES`] entry. `Some(label)` advertises the
+/// binding with that pane's wording — the same key names the action it
+/// performs from the pane that holds the keyboard — and `None` hides
+/// the hint in that focus.
+fn scenario_hint_labels(hint_focus: Option<HintFocus>) -> [Option<&'static str>; 5] {
+    match hint_focus {
+        // Non-listing views (contacts, composing, ...): default labels.
+        None => [
+            Some("Scroll Up"),
+            Some("Scroll Down"),
+            Some("Focus Left"),
+            Some("Focus Right"),
+            Some("Search"),
+        ],
+        // Layout1 sidebar: the scroll keys walk the mailbox tree; Focus
+        // Right adopts the selected mailbox and opens the cursor entry
+        // directly (a single mail → layout2, a thread → layout3); no
+        // view is open, so Search has nothing to search and Focus Left
+        // has no pane further left.
+        Some(HintFocus::Sidebar) => [
+            Some("Folder Up"),
+            Some("Folder Down"),
+            None,
+            Some("Open Mail"),
+            None,
+        ],
+        // Layout1 grid: the scroll keys walk the mail rows, Focus
+        // Right opens the entry under the cursor.
+        Some(HintFocus::NoView) => [
+            Some("Maillist Up"),
+            Some("Maillist Down"),
+            None,
+            Some("Open Mail"),
+            None,
+        ],
+        // Layout2 grid: Focus Left closes the single-mail view, Focus
+        // Right hands the keyboard to the mail content.
+        Some(HintFocus::GridSingleMail) => [
+            Some("Maillist Up"),
+            Some("Maillist Down"),
+            Some("Focus Box"),
+            Some("Focus Content"),
+            Some("Search"),
+        ],
+        // Layout3 grid: Focus Left closes the thread view, Focus Right
+        // enters the thread list of the split.
+        Some(HintFocus::GridThreads) => [
+            Some("Maillist Up"),
+            Some("Maillist Down"),
+            Some("Focus Box"),
+            Some("Focus Threads"),
+            Some("Search"),
+        ],
+        // Layout4 thread list: the scroll keys walk the thread entries,
+        // Focus Left closes the mail pane back to the grid, Focus
+        // Right hands the keyboard to the mail content.
+        Some(HintFocus::ThreadList) => [
+            Some("Thread Up"),
+            Some("Thread Down"),
+            Some("Focus Maillist"),
+            Some("Focus Content"),
+            Some("Search"),
+        ],
+        // Mail detail: the whole scenario group is hidden; the mail
+        // actions appended in `hints_metrics` take over.
+        Some(HintFocus::MailView) => [None, None, None, None, None],
     }
 }
 

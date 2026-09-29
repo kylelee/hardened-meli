@@ -1644,10 +1644,7 @@ impl Account {
                         match backend_res {
                             Ok(fut) => match fut.await {
                                 Ok(ret) => {
-                                    if should_scan_local_on_empty_remote(
-                                        Some(&ret),
-                                        &search_term,
-                                    ) {
+                                    if should_scan_local_on_empty_remote(Some(&ret), &search_term) {
                                         // The remote round trip succeeded but
                                         // returned nothing for a non-ASCII
                                         // term, which is not trustworthy
