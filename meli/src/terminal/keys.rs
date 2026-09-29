@@ -60,6 +60,14 @@ pub enum Key {
     /// Note that certain keys may not be modifiable with `ctrl`, due to
     /// limitations of terminals.
     Ctrl(char),
+    /// Ctrl and Alt modified character.
+    ///
+    /// Only distinguishable from [`Key::Ctrl`]/[`Key::Alt`] alone on
+    /// terminals that honor the kitty/CSI-u keyboard protocol: meli pushes
+    /// its disambiguate flag on startup, and such terminals report the
+    /// full modifier set for e.g. Ctrl-Alt-Enter. Legacy terminals fold
+    /// the combination onto `ESC` + key, i.e. [`Key::Alt`].
+    CtrlAlt(char),
     /// Null byte.
     Null,
     /// Esc key.
@@ -114,8 +122,12 @@ impl std::fmt::Display for Key {
             Self::Char('\t') => write!(f, "Tab"),
             Self::Char('\n') => write!(f, "Enter"),
             Self::Char(c) => write!(f, "{c}"),
+            Self::Alt('\n') => write!(f, "M-Enter"),
             Self::Alt(c) => write!(f, "M-{c}"),
+            Self::Ctrl('\n') => write!(f, "C-Enter"),
             Self::Ctrl(c) => write!(f, "C-{c}"),
+            Self::CtrlAlt('\n') => write!(f, "C-M-Enter"),
+            Self::CtrlAlt(c) => write!(f, "C-M-{c}"),
             Self::Paste(_) => write!(f, "Pasted buf"),
             Self::Null => write!(f, "Null byte"),
             Self::Esc => write!(f, "Esc"),
@@ -179,8 +191,8 @@ impl PartialEq<Key> for &Key {
 }
 
 /// Parse a single key token from its configuration string form, e.g.
-/// `"Up"`, `"F5"`, `"C-c"`, `"M-x"`, `"Esc"`, `"Enter"` or a single
-/// character.
+/// `"Up"`, `"F5"`, `"C-c"`, `"M-x"`, `"C-M-x"`, `"C-M-Enter"`, `"Esc"`,
+/// `"Enter"` or a single character.
 ///
 /// This is the parsing backend shared by [`Key`]'s and
 /// [`ShortcutKeys`]'s `Deserialize` implementations.
@@ -224,6 +236,19 @@ pub fn parse_key(s: &str) -> Result<Key, String> {
             Err(format!(
                 "`{}` should be a lowercase and alphanumeric character instead.",
                 &s[2..]
+            ))
+        }
+        "C-M-Enter" | "C-M-enter" => Ok(Key::CtrlAlt('\n')),
+        s if s.starts_with("C-M-") && s.len() == 5 => {
+            let c = s.as_bytes()[4] as char;
+
+            if c.is_lowercase() || c.is_numeric() {
+                return Ok(Key::CtrlAlt(c));
+            }
+
+            Err(format!(
+                "`{}` should be a lowercase and alphanumeric character instead.",
+                &s[4..]
             ))
         }
         s if s.starts_with("C-") && s.len() == 3 => {
@@ -302,6 +327,9 @@ impl Serialize for Key {
             Self::F(n) => serializer.serialize_str(&format!("F{n}")),
             Self::Alt(c) => serializer.serialize_str(&format!("M-{c}")),
             Self::Ctrl(c) => serializer.serialize_str(&format!("C-{c}")),
+            // The named Enter form round-trips: `parse_key` accepts it.
+            Self::CtrlAlt('\n') => serializer.serialize_str("C-M-Enter"),
+            Self::CtrlAlt(c) => serializer.serialize_str(&format!("C-M-{c}")),
             Self::Null => serializer.serialize_str("Null"),
             Self::Mouse(mev) => mev.serialize(serializer),
             Self::Paste(s) => serializer.serialize_str(s),
@@ -333,7 +361,11 @@ impl ShortcutKeys {
     }
 
     /// The configuration string form of a single key (the inverse of
-    /// [`parse_key`]).
+    /// [`parse_key`]), except for `Ctrl('\n')`, which renders as the
+    /// readable `C-Enter` — a form `parse_key` does not accept, since
+    /// the config syntax has no way to express Ctrl-Enter.
+    /// `CtrlAlt('\n')` renders as `C-M-Enter`, a named form `parse_key`
+    /// does accept, so it round-trips.
     fn key_to_config_string(k: &Key) -> String {
         match k {
             // `Key`'s `Display` renders this as `Space`, which does not
@@ -490,6 +522,10 @@ fn test_key_serde() {
     assert_tokens(&Key::Ctrl('a'), &[Token::Str("C-a")]);
     assert_tokens(&Key::Ctrl('1'), &[Token::Str("C-1")]);
     assert_tokens(&Key::Alt('a'), &[Token::Str("M-a")]);
+    assert_tokens(&Key::CtrlAlt('a'), &[Token::Str("C-M-a")]);
+    // The default `composing.send_mail` binding round-trips through its
+    // named form.
+    assert_tokens(&Key::CtrlAlt('\n'), &[Token::Str("C-M-Enter")]);
     assert_tokens(&Key::F(1), &[Token::Str("F1")]);
     assert_tokens(&Key::F(12), &[Token::Str("F12")]);
 
@@ -509,6 +545,10 @@ fn test_key_serde() {
     );
     assert_de_tokens_error::<Key>(
         &[Token::Str("M-V")],
+        "`V` should be a lowercase and alphanumeric character instead.",
+    );
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("C-M-V")],
         "`V` should be a lowercase and alphanumeric character instead.",
     );
     assert_de_tokens_error::<Key>(
@@ -599,6 +639,15 @@ fn test_hint_display() {
     assert_eq!(Key::Delete.hint_display(false), "<Delete>");
     assert_eq!(Key::Insert.hint_display(false), "<Insert>");
     assert_eq!(Key::F(5).hint_display(false), "<F5>");
+    // Ctrl-Enter / Alt-Enter keep the modifier convention with the word
+    // form of the Enter key instead of a raw newline.
+    assert_eq!(Key::Ctrl('\n').hint_display(false), "<C-Enter>");
+    assert_eq!(Key::Ctrl('\n').to_string(), "C-Enter");
+    assert_eq!(Key::Alt('\n').hint_display(false), "<M-Enter>");
+    assert_eq!(Key::Alt('\n').to_string(), "M-Enter");
+    assert_eq!(Key::CtrlAlt('\n').hint_display(false), "<C-M-Enter>");
+    assert_eq!(Key::CtrlAlt('\n').to_string(), "C-M-Enter");
+    assert_eq!(Key::CtrlAlt('x').hint_display(false), "<C-M-x>");
     assert_eq!(Key::Ctrl('c').hint_display(false), "<C-c>");
     assert_eq!(Key::Alt('x').hint_display(false), "<M-x>");
     // Whitespace control keys have word forms and count as placeholders.
@@ -644,7 +693,10 @@ fn test_hint_display() {
     assert_eq!(Key::Char('\n').hint_display(true), "<Enter>");
     assert_eq!(Key::F(5).hint_display(true), "<F5>");
     assert_eq!(Key::Ctrl('c').hint_display(true), "<C-c>");
+    assert_eq!(Key::CtrlAlt('\n').hint_display(true), "<C-M-Enter>");
     assert_eq!(Key::Alt('x').hint_display(true), "<M-x>");
+    assert_eq!(Key::Ctrl('\n').hint_display(true), "<C-Enter>");
+    assert_eq!(Key::Alt('\n').hint_display(true), "<M-Enter>");
     assert_eq!(Key::Home.hint_display(true), "<Home>");
     assert_eq!(Key::PageUp.hint_display(true), "<PageUp>");
     // The flag is threaded through the iterator to each bound key.

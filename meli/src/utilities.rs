@@ -670,11 +670,17 @@ impl StatusBar {
     /// 4. `scroll_down`                 — label `Scroll Down`
     /// 5. `focus_left`                  — label `Focus Left`
     /// 6. `focus_right`                 — label `Focus Right`
-    /// 7. `close`                       — label `Close View` (only on
+    /// 7. `send_mail`                   — label `Send Mail` (only on
+    ///    views that expose a send binding, e.g. composing, immediately
+    ///    before `close`)
+    /// 8. `close`                       — label `Close View` (only on
     ///    sub-views that expose a close binding, e.g. composing)
-    /// 8. `search`                      — label `Search` (only on views
+    /// 9. `search`                      — label `Search` (only on views
     ///    that expose a `search` binding)
-    /// 9. `general.quit`                — label `Quit` (always last)
+    /// 10. `general.quit`               — label `Quit` (last, but only
+    ///     when the focused view does not expose a `close` binding: a
+    ///     view that carries its own Close View hint, such as composing,
+    ///     hides Quit instead of advertising both)
     ///
     /// The list is filtered by the focused listing pane reported by
     /// [`Component::hint_focus`]: layout1 (no view open) drops the
@@ -732,11 +738,11 @@ impl StatusBar {
             }
             None
         };
-        // Eight entries in fixed display order: help first (so it
+        // Nine entries in fixed display order: help first (so it
         // survives narrow ellipsis), then scroll, then focus switches,
-        // then view close, then search. `quit` is appended after the
-        // hint-focus filtering below so it stays the final actionable
-        // hint.
+        // then send mail and view close, then search. `quit` is appended
+        // after the hint-focus filtering below — and only when the view
+        // has no `close` binding — so it stays the final actionable hint.
         let mut pickers: Vec<(
             &'static str,
             Option<&crate::terminal::ShortcutKeys>,
@@ -752,6 +758,7 @@ impl StatusBar {
             ("scroll_down", pick_key("scroll_down"), "Scroll Down"),
             ("focus_left", pick_key("focus_left"), "Focus Left"),
             ("focus_right", pick_key("focus_right"), "Focus Right"),
+            ("send_mail", pick_key("send_mail"), "Send Mail"),
             ("close", pick_key("close"), "Close View"),
             ("search", pick_key("search"), "Search"),
         ];
@@ -776,7 +783,19 @@ impl StatusBar {
             }
             Some(HintFocus::List) | None => {}
         }
-        pickers.push(("quit", general.and_then(|m| m.get("quit")), "Quit"));
+        // Append the global `Quit` hint only when the focused view does
+        // not expose its own `close` binding: a view that advertises
+        // Close View (composing, via `composing.close`) supersedes Quit,
+        // while views without a close binding (listing, mail, ...) keep
+        // the trailing Quit hint. The check runs on the filtered pickers
+        // and requires the binding to have resolved, so a `close` field
+        // left unbound does not hide Quit.
+        let has_close_hint = pickers
+            .iter()
+            .any(|(name, key, _)| *name == "close" && key.is_some());
+        if !has_close_hint {
+            pickers.push(("quit", general.and_then(|m| m.get("quit")), "Quit"));
+        }
         let entries: Vec<(&crate::terminal::ShortcutKeys, &'static str)> = pickers
             .iter()
             .filter_map(|(_, key, label)| key.as_ref().copied().map(|k| (k, *label)))

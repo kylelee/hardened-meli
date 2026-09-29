@@ -30,7 +30,11 @@
 //! - `Enter` maps to <code>[Key::Char]('\n')</code> and `Tab` to
 //!   <code>[Key::Char]('\t')</code>.
 //! - `Ctrl`/`Alt` modified characters map to [`Key::Ctrl`] (lowercased, since
-//!   control bytes are case-insensitive on the wire) / [`Key::Alt`].
+//!   control bytes are case-insensitive on the wire) / [`Key::Alt`];
+//!   `Ctrl`+`Alt` together maps to [`Key::CtrlAlt`] (lowercased) — reachable
+//!   now that meli pushes the kitty/CSI-u disambiguate flag at startup, so
+//!   terminals honoring it report the full modifier set for e.g.
+//!   Ctrl-Alt-Enter instead of folding it onto `Enter+ALT`.
 //! - `KeyEventKind::Press` and `KeyEventKind::Repeat` are accepted;
 //!   `KeyEventKind::Release` is dropped (`None`).
 //! - Modifier combinations the legacy parser could not handle (e.g.
@@ -187,12 +191,24 @@ fn named(key: Key, modifiers: KeyModifiers) -> Option<Key> {
 
 /// Translate a character-ish key code (`Char`/`Enter`/`Tab`): `CONTROL`
 /// maps to `Ctrl` with the character lowercased (control bytes are
-/// case-insensitive on the wire), then `ALT` to `Alt`; anything else
-/// (`SHIFT` alone, `SUPER`/`HYPER`/`META` which cannot arrive in legacy
-/// mode) passes the character through unchanged.
+/// case-insensitive on the wire), `CONTROL`+`ALT` together to `CtrlAlt`
+/// (also lowercased), `ALT` alone to `Alt`; anything else (`SHIFT` alone,
+/// `SUPER`/`HYPER`/`META` which cannot arrive in legacy mode) passes the
+/// character through unchanged.
+///
+/// `CtrlAlt('\n')` — Ctrl-M-Enter, the default `composing.send_mail` —
+/// only arrives from terminals honoring the kitty/CSI-u disambiguate
+/// flag meli pushes at startup: they report the full `CONTROL`+`ALT`
+/// modifier set instead of folding the combination onto `ESC` + `Enter`
+/// (`Alt('\n')`), which legacy terminals send and which is no longer
+/// bound to sending.
 fn modified_char(c: char, modifiers: KeyModifiers) -> Option<Key> {
     if modifiers.contains(KeyModifiers::CONTROL) {
-        Some(Key::Ctrl(c.to_ascii_lowercase()))
+        if modifiers.contains(KeyModifiers::ALT) {
+            Some(Key::CtrlAlt(c.to_ascii_lowercase()))
+        } else {
+            Some(Key::Ctrl(c.to_ascii_lowercase()))
+        }
     } else if modifiers.contains(KeyModifiers::ALT) {
         Some(Key::Alt(c))
     } else {
@@ -222,6 +238,53 @@ pub fn translate_mouse_event(ev: CrosstermMouseEvent) -> Option<Key> {
     }))
 }
 
+/// Map a meli [`Key`] onto the backend-agnostic
+/// [`ratatui_textarea::Input`].
+///
+/// This is the public, enhanced version of the mapping the command palette
+/// used to keep private: the arrow/editing keys the palette needed plus the
+/// navigation keys (and `Esc`) a multi-line body editor needs. Unmapped keys
+/// (mouse, F-keys, Insert, Null, …) become `Input::default()`
+/// ([`ratatui_textarea::Key::Null`]), which the textarea ignores.
+///
+/// Two translations are deliberate:
+/// - meli has no `Tab` variant, so `Char('\t')` becomes
+///   [`ratatui_textarea::Key::Tab`]; a raw `Char('\t')` would be ignored by
+///   the textarea and never trigger `insert_tab`.
+/// - `Char('\n')`/`Char('\r')` stay `Char`: the textarea's `input()` treats
+///   them exactly like `Enter`.
+pub fn key_to_textarea_input(key: &Key) -> ratatui_textarea::Input {
+    use ratatui_textarea::{Input, Key as TextAreaKey};
+    let (key, ctrl, alt) = match key {
+        // meli carries Tab as `Char('\t')`; the textarea only recognizes
+        // `Key::Tab`.
+        Key::Char('\t') => (TextAreaKey::Tab, false, false),
+        Key::Char(c) => (TextAreaKey::Char(*c), false, false),
+        Key::Alt(c) => (TextAreaKey::Char(*c), false, true),
+        Key::Ctrl(c) => (TextAreaKey::Char(*c), true, false),
+        Key::CtrlAlt(c) => (TextAreaKey::Char(*c), true, true),
+        Key::Backspace => (TextAreaKey::Backspace, false, false),
+        Key::Delete => (TextAreaKey::Delete, false, false),
+        Key::Home => (TextAreaKey::Home, false, false),
+        Key::End => (TextAreaKey::End, false, false),
+        Key::Left => (TextAreaKey::Left, false, false),
+        Key::Right => (TextAreaKey::Right, false, false),
+        Key::Up => (TextAreaKey::Up, false, false),
+        Key::Down => (TextAreaKey::Down, false, false),
+        Key::PageUp => (TextAreaKey::PageUp, false, false),
+        Key::PageDown => (TextAreaKey::PageDown, false, false),
+        // The textarea uses Esc to clear its selection.
+        Key::Esc => (TextAreaKey::Esc, false, false),
+        _ => return Input::default(),
+    };
+    Input {
+        key,
+        ctrl,
+        alt,
+        shift: false,
+    }
+}
+
 /// Encode a meli [`Key`] as the raw byte sequence a terminal sends for it.
 ///
 /// Reproduces the stream that the pre-migration reader yielded for the
@@ -229,7 +292,8 @@ pub fn translate_mouse_event(ev: CrosstermMouseEvent) -> Option<Key> {
 /// their raw control bytes, `Alt(c)` as `ESC c`, arrows/editing keys as
 /// CSI/SS3 sequences, `F(1..=4)` as `ESC O P..S`, `F(5..=12)` as
 /// `CSI 15,17..21,23,24 ~`, mouse events in SGR form and pastes wrapped in
-/// bracketed-paste markers.
+/// bracketed-paste markers. `CtrlAlt(c)` encodes as `ESC` + the control
+/// byte, the `Alt` prefix around the `Ctrl` encoding.
 ///
 /// Legacy ambiguity notes (same as the wire format itself): `Ctrl('i')`,
 /// `Ctrl('j')` and `Ctrl('m')` share bytes with `Tab`, `Ctrl+J` and `Enter`;
@@ -276,6 +340,13 @@ pub fn encode_key(key: &Key) -> Vec<u8> {
             buf
         }
         Key::Ctrl(c) => vec![ctrl_byte(*c)],
+        Key::CtrlAlt(c) => {
+            // The Alt-style `ESC` prefix around the `Ctrl` control byte —
+            // what a terminal sends for Ctrl-Alt-`c` in legacy mode — so
+            // the embedded terminal receives the same bytes a legacy
+            // terminal would have delivered.
+            vec![0x1b, ctrl_byte(*c)]
+        }
         Key::Null => vec![0x00],
         Key::Esc => vec![0x1b],
         Key::Mouse(mouse_event) => encode_mouse_event(mouse_event),
@@ -638,13 +709,7 @@ pub fn blit_buffer_to_cellbuffer_at(src: &RatatuiBuffer, dst: &mut CellBuffer, a
                 continue;
             }
             let cell_width = symbol.cell_width() as usize;
-            d.overwrite(
-                symbol.chars().next().unwrap_or(' '),
-                fg,
-                bg,
-                attrs,
-                false,
-            );
+            d.overwrite(symbol.chars().next().unwrap_or(' '), fg, bg, attrs, false);
             if cell_width >= 2 {
                 covered = cell_width - 1;
                 covered_style = (fg, bg, attrs);
@@ -999,20 +1064,28 @@ mod tests {
                 key_mod(KeyCode::Enter, KeyModifiers::CONTROL),
                 Some(Key::Ctrl('\n')),
             ),
+            // Enter + CONTROL + ALT maps onto CtrlAlt('\n') — Ctrl-M-Enter:
+            // kitty/CSI-u terminals report the full modifier set (legacy
+            // terminals fold it onto `ESC` + `Enter`, i.e. Enter+ALT above,
+            // which is no longer bound to sending).
+            (
+                "Enter+CONTROL+ALT",
+                key_mod(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::ALT),
+                Some(Key::CtrlAlt('\n')),
+            ),
             (
                 "Tab+CONTROL",
                 key_mod(KeyCode::Tab, KeyModifiers::CONTROL),
                 Some(Key::Ctrl('\t')),
             ),
-            // CONTROL takes precedence over ALT (legacy terminals cannot
-            // express the combination anyway).
+            // CONTROL and ALT together map onto CtrlAlt (lowercased).
             (
                 "Char_x+CONTROL+ALT",
                 key_mod(
                     KeyCode::Char('x'),
                     KeyModifiers::CONTROL | KeyModifiers::ALT,
                 ),
-                Some(Key::Ctrl('x')),
+                Some(Key::CtrlAlt('x')),
             ),
             // SHIFT is folded into the char case by crossterm's parser.
             (
@@ -1218,6 +1291,99 @@ mod tests {
         );
     }
 
+    /// meli `Key` → `ratatui_textarea::Input`: the palette mappings plus the
+    /// body-editor additions (Up/Down, `Char('\t')`→`Tab`, Esc) and the
+    /// unmapped-key fallback to `Input::default()`.
+    #[test]
+    fn key_to_textarea_input_matrix() {
+        use ratatui_textarea::{Input, Key as TextAreaKey};
+
+        fn ta(key: TextAreaKey, ctrl: bool, alt: bool) -> Input {
+            Input {
+                key,
+                ctrl,
+                alt,
+                shift: false,
+            }
+        }
+
+        let cases: Vec<(&str, Key, Input)> = vec![
+            (
+                "Char('a')",
+                Key::Char('a'),
+                ta(TextAreaKey::Char('a'), false, false),
+            ),
+            (
+                "Char('\\n')",
+                Key::Char('\n'),
+                ta(TextAreaKey::Char('\n'), false, false),
+            ),
+            (
+                "Char('\\r')",
+                Key::Char('\r'),
+                ta(TextAreaKey::Char('\r'), false, false),
+            ),
+            (
+                "Char('\\t')_becomes_Tab",
+                Key::Char('\t'),
+                ta(TextAreaKey::Tab, false, false),
+            ),
+            (
+                "Alt('x')",
+                Key::Alt('x'),
+                ta(TextAreaKey::Char('x'), false, true),
+            ),
+            (
+                "Ctrl('w')",
+                Key::Ctrl('w'),
+                ta(TextAreaKey::Char('w'), true, false),
+            ),
+            (
+                "Backspace",
+                Key::Backspace,
+                ta(TextAreaKey::Backspace, false, false),
+            ),
+            ("Delete", Key::Delete, ta(TextAreaKey::Delete, false, false)),
+            ("Home", Key::Home, ta(TextAreaKey::Home, false, false)),
+            ("End", Key::End, ta(TextAreaKey::End, false, false)),
+            ("Left", Key::Left, ta(TextAreaKey::Left, false, false)),
+            ("Right", Key::Right, ta(TextAreaKey::Right, false, false)),
+            ("Up", Key::Up, ta(TextAreaKey::Up, false, false)),
+            ("Down", Key::Down, ta(TextAreaKey::Down, false, false)),
+            ("PageUp", Key::PageUp, ta(TextAreaKey::PageUp, false, false)),
+            (
+                "PageDown",
+                Key::PageDown,
+                ta(TextAreaKey::PageDown, false, false),
+            ),
+            ("Esc", Key::Esc, ta(TextAreaKey::Esc, false, false)),
+            // Unmapped keys fall back to `Input::default()` (Key::Null).
+            ("Null_unmapped", Key::Null, Input::default()),
+            ("Insert_unmapped", Key::Insert, Input::default()),
+            ("F(1)_unmapped", Key::F(1), Input::default()),
+            (
+                "Paste_unmapped",
+                Key::Paste("hi".to_string()),
+                Input::default(),
+            ),
+            (
+                "Mouse_unmapped",
+                Key::Mouse(MouseEvent::Press(MouseButton::Left, 1, 1)),
+                Input::default(),
+            ),
+        ];
+        for (name, meli, expected) in &cases {
+            let got = key_to_textarea_input(meli);
+            println!("case key_to_textarea_input_matrix[{name}]: {meli:?} -> {got:?} (want {expected:?})");
+            assert_eq!(got, *expected, "case {name} failed for {meli:?}");
+        }
+        assert_eq!(Input::default().key, TextAreaKey::Null);
+        println!(
+            "key_to_textarea_input_matrix: {} cases checked",
+            cases.len()
+        );
+    }
+
     /// Whole-`Event` translation: key/mouse/paste collapse to
     /// `BridgeEvent::Key`, resize is surfaced distinctly, the rest is ignored.
     #[test]
@@ -1335,6 +1501,10 @@ mod tests {
             ("Ctrl('5')", Key::Ctrl('5'), &[0x1d]),
             ("Ctrl('6')", Key::Ctrl('6'), &[0x1e]),
             ("Ctrl('7')", Key::Ctrl('7'), &[0x1f]),
+            // CtrlAlt wraps the control byte in the Alt-style ESC prefix;
+            // Ctrl-M-Enter is `ESC` + `0x0a`.
+            ("CtrlAlt('\\n')", Key::CtrlAlt('\n'), b"\x1b\n"),
+            ("CtrlAlt('x')", Key::CtrlAlt('x'), &[0x1b, 0x18]),
             // NUL ambiguity: the legacy parser decoded 0x00 as `Key::Null`,
             // so these three collide on the wire (documented in `encode_key`).
             ("Null", Key::Null, &[0x00]),
@@ -1435,12 +1605,12 @@ mod tests {
                     KeyCode::Char('q'),
                     KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
                 ),
-                Some(Key::Ctrl('q')),
+                Some(Key::CtrlAlt('q')),
             ),
             (
                 "Char('a')+ALL_MODIFIERS",
                 key_mod(KeyCode::Char('a'), KeyModifiers::all()),
-                Some(Key::Ctrl('a')),
+                Some(Key::CtrlAlt('a')),
             ),
             (
                 "BackTab+CONTROL",

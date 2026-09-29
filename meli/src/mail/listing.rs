@@ -1738,6 +1738,13 @@ impl Component for Listing {
                     // the pre-reconcile sidebar cursor and restore it below.
                     let previous_menu_cursor = self.menu_cursor_pos;
                     let previous_coordinates = self.component.coordinates();
+                    // Whether the current account's sidebar had no mailbox
+                    // rows yet: at startup `Listing::new` runs before the
+                    // backend's async mailbox listing completes, so the
+                    // entries are empty until the reconcile below rebuilds
+                    // them.
+                    let sidebar_entries_were_empty =
+                        self.accounts[account_index].entries.is_empty();
                     self.change_account(context, /* keep_view */ true);
                     // The reconcile rebuilt the sidebar entries and re-pointed
                     // the grid. If the grid landed on another mailbox (the entry
@@ -1773,6 +1780,26 @@ impl Component for Listing {
                     } else {
                         previous_menu_cursor
                     };
+                    // Startup default mailbox: when this reconcile
+                    // populated a sidebar that had no mailbox rows yet (the
+                    // backend's mailbox listing arrived after launch), the
+                    // clamp above parks the pre-listing selection on the
+                    // account row. Launch must land on the account's
+                    // default mailbox (the first folder, INBOX) instead —
+                    // the same anchor navigation uses on an account switch
+                    // — so the sidebar highlights the default mailbox and
+                    // the first `focus_right` opens the mail list, not the
+                    // account status page.
+                    if sidebar_entries_were_empty
+                        && !self.accounts[account_index].entries.is_empty()
+                    {
+                        if let Some(idx) = context.accounts[&*account_hash]
+                            .default_mailbox()
+                            .and_then(|h| self.accounts[account_index].entry_by_hash(h))
+                        {
+                            self.menu_cursor_pos.menu = MenuEntryCursor::Mailbox(idx);
+                        }
+                    }
                     match previous_focus {
                         // `close_view` may land the keyboard on the grid;
                         // handing the focus back to the sidebar must take the
@@ -5086,6 +5113,83 @@ mod listing_menu_tests {
             listing.focus,
             ListingFocus::Menu,
             "the startup account reconcile must not steal the keyboard from the sidebar"
+        );
+    }
+
+    /// Real startup: `Listing::new` runs before the backend's async
+    /// mailbox-listing job completes, so the account has no mailboxes yet
+    /// and construction cannot land on the default mailbox. What follows is
+    /// the remote-account event sequence: the connect/online status change
+    /// lands first (still no mailboxes), then the mailbox listing completes
+    /// (`AccountStatusChange` "Loaded mailboxes."). Once the sidebar entry
+    /// list goes from empty to populated, the selection must land on the
+    /// default mailbox (the first folder, INBOX): the sidebar highlight on
+    /// the INBOX row and the grid pointing at INBOX — not on the account
+    /// row, where a subsequent `focus_right` would open the account status
+    /// page instead of the mail list.
+    #[test]
+    fn startup_async_mailboxes_lands_on_default_mailbox() {
+        let mut ctx = mock_context();
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        let mut listing = Listing::new(&mut ctx);
+        assert!(
+            listing.accounts[0].entries.is_empty(),
+            "precondition: mailboxes have not been listed yet at construction"
+        );
+
+        // The connect/online status change lands while the mailbox listing
+        // job is still running (`JobRequest::IsOnline` always emits
+        // `AccountStatusChange`, see `Account::poll`).
+        listing.process_event(
+            &mut UIEvent::AccountStatusChange(account_hash, None),
+            &mut ctx,
+        );
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+
+        // The mailbox listing completes: the account gets its folders and
+        // the watcher reports the change.
+        let (account_hash, inbox_hash, _archive) = register_two_mailboxes(&mut ctx);
+        listing.process_event(
+            &mut UIEvent::AccountStatusChange(account_hash, Some("Loaded mailboxes.".into())),
+            &mut ctx,
+        );
+        for _ in 0..8 {
+            let replies = ctx.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut ev in replies {
+                listing.process_event(&mut ev, &mut ctx);
+            }
+        }
+
+        assert_eq!(
+            listing.menu_cursor_pos.menu,
+            MenuEntryCursor::Mailbox(0),
+            "the startup sidebar highlight must sit on the default mailbox (INBOX), \
+             not on the account row"
+        );
+        assert_eq!(
+            listing.cursor_pos.menu,
+            MenuEntryCursor::Mailbox(0),
+            "after the startup mailbox-listing reconcile the cursor must be on INBOX"
+        );
+        assert_eq!(
+            listing.component.coordinates(),
+            (account_hash, inbox_hash),
+            "the grid must open the default mailbox (INBOX)"
+        );
+        assert!(
+            !matches!(listing.component, ListingComponent::Offline(_)),
+            "the main pane must show the INBOX listing, not the offline placeholder"
         );
     }
 

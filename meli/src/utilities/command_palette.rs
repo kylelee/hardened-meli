@@ -334,7 +334,8 @@ impl CommandPalette {
                 self.refresh();
             }
             key => {
-                self.textarea().input(key_to_input(key));
+                self.textarea()
+                    .input(crate::terminal::ratatui_bridge::key_to_textarea_input(key));
                 self.refresh();
             }
         }
@@ -552,34 +553,6 @@ fn highlight_spans(
         ));
     }
     spans
-}
-
-/// Map a meli [`Key`] onto the backend-agnostic
-/// [`ratatui_textarea::Input`]. Unmapped keys (mouse, F-keys, Insert,
-/// Null, …) become `Input::default()` (`Key::Null`), which the textarea
-/// ignores.
-fn key_to_input(key: &Key) -> ratatui_textarea::Input {
-    use ratatui_textarea::{Input, Key as TextAreaKey};
-    let (key, ctrl, alt) = match key {
-        Key::Char(c) => (TextAreaKey::Char(*c), false, false),
-        Key::Alt(c) => (TextAreaKey::Char(*c), false, true),
-        Key::Ctrl(c) => (TextAreaKey::Char(*c), true, false),
-        Key::Backspace => (TextAreaKey::Backspace, false, false),
-        Key::Delete => (TextAreaKey::Delete, false, false),
-        Key::Home => (TextAreaKey::Home, false, false),
-        Key::End => (TextAreaKey::End, false, false),
-        Key::Left => (TextAreaKey::Left, false, false),
-        Key::Right => (TextAreaKey::Right, false, false),
-        Key::PageUp => (TextAreaKey::PageUp, false, false),
-        Key::PageDown => (TextAreaKey::PageDown, false, false),
-        _ => return Input::default(),
-    };
-    Input {
-        key,
-        ctrl,
-        alt,
-        shift: false,
-    }
 }
 
 #[cfg(test)]

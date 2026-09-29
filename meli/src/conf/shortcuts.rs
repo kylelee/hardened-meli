@@ -237,7 +237,7 @@ shortcut_key_values! { "general",
 shortcut_key_values! { "composing",
     pub struct ComposingShortcuts {
         edit |> "Edit." |> ShortcutKeys::single(Key::Char('e')),
-        send_mail |> "Deliver draft to mailer." |> ShortcutKeys::single(Key::Char('s')),
+        send_mail |> "Deliver draft to mailer." |> ShortcutKeys::single(Key::CtrlAlt('\n')),
         close |> "Close composer tab." |> ShortcutKeys::single(Key::Esc),
         scroll_up |> "Change field focus." |> ShortcutKeys::double(Key::Up, Key::Char('k')),
         scroll_down |> "Change field focus." |> ShortcutKeys::double(Key::Down, Key::Char('j')),
