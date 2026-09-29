@@ -34,6 +34,11 @@ rusty_fork_test! {
     fn test_smtp_transaction() {
         tests::run_smtp_transaction();
     }
+
+    #[test]
+    fn test_smtp_transaction_rcpt_rejected() {
+        tests::run_smtp_transaction_rcpt_rejected();
+    }
 }
 
 pub mod server {
@@ -83,6 +88,9 @@ pub mod server {
     pub struct ServerState {
         pub mails: Vec<QueuedMail>,
         pub stored: Vec<(String, Envelope)>,
+        /// `RCPT TO` addresses that must be rejected, mapped to the full reply
+        /// text that the server sends after the `550` code.
+        pub rcpt_rejections: Vec<(String, String)>,
     }
 
     impl ServerState {
@@ -200,6 +208,7 @@ pub mod server {
             let state = Arc::new(Mutex::new(ServerState {
                 mails: vec![],
                 stored: vec![],
+                rcpt_rejections: vec![],
             }));
             Self {
                 tcp_listener,
@@ -219,6 +228,18 @@ pub mod server {
                     .write_all(
                         format!("{} {}\r\n", reply_code.value(), reply_code.as_str()).as_bytes(),
                     )
+                    .await
+                    .unwrap();
+                tcp_stream.flush().await.unwrap();
+            }
+
+            async fn write_reply_code_with_text(
+                tcp_stream: &mut Async<TcpStream>,
+                reply_code: ReplyCode,
+                text: &str,
+            ) {
+                tcp_stream
+                    .write_all(format!("{} {}\r\n", reply_code.value(), text).as_bytes())
                     .await
                     .unwrap();
                 tcp_stream.flush().await.unwrap();
@@ -275,14 +296,26 @@ pub mod server {
                             write_reply_code(&mut tcp_stream, reply_code).await;
                         }
                         "RCPT" => {
-                            let reply_code = state.lock().unwrap().rcpt(
-                                rest.strip_prefix("TO:<")
-                                    .unwrap()
-                                    .trim_end()
-                                    .strip_suffix(">")
-                                    .unwrap(),
-                            );
-                            write_reply_code(&mut tcp_stream, reply_code).await;
+                            let to = rest
+                                .strip_prefix("TO:<")
+                                .unwrap()
+                                .trim_end()
+                                .strip_suffix(">")
+                                .unwrap();
+                            let rejection_text = state
+                                .lock()
+                                .unwrap()
+                                .rcpt_rejections
+                                .iter()
+                                .find(|(addr, _)| addr == to)
+                                .map(|(_, text)| text.clone());
+                            if let Some(text) = rejection_text {
+                                write_reply_code_with_text(&mut tcp_stream, ReplyCode::_550, &text)
+                                    .await;
+                            } else {
+                                let reply_code = state.lock().unwrap().rcpt(to);
+                                write_reply_code(&mut tcp_stream, reply_code).await;
+                            }
                         }
                         "DATA\r\n" => {
                             let reply_code = state.lock().unwrap().data_start();
@@ -438,6 +471,63 @@ hello world.
             assert_eq!(stored[1].0, "myself@example.com");
             assert_eq!(stored[2].0, "bjorn@example.com");
         }
+        server_event_sender
+            .unbounded_send(ServerEvent::Quit)
+            .unwrap();
+    }
+
+    /// Run an SMTP transaction where the mock server rejects one `RCPT TO` with
+    /// a custom `550` reply text, and assert the propagated error names both
+    /// the offending command (with the rejected address) and the numeric
+    /// reply code.
+    pub fn run_smtp_transaction_rcpt_rejected() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let (server_event_sender, server_event_receiver) = unbounded();
+        let server = SmtpServer::new(server_event_receiver);
+        server.state.lock().unwrap().rcpt_rejections = vec![(
+            "invalid@example.com".to_string(),
+            "Mailbox not found or access denied".to_string(),
+        )];
+
+        let smtp_server_conf = SmtpServerConf {
+            hostname: Secret::Value(server.addr.ip().to_string()),
+            port: server.addr.port(),
+            envelope_from: "user@example.com".into(),
+            auth: SmtpAuth::None,
+            security: SmtpSecurity::None,
+            extensions: Default::default(),
+        };
+        let _smtp_handle = thread::spawn(move || block_on(server.serve()));
+        let new_mail = r#"From: "some name" <some@example.com>
+To: "me" <invalid@example.com>
+Subject: RE: your e-mail
+Message-ID: <h2g7f.z0gy2pgaen5m@example.com>
+Content-Type: text/plain
+
+hello world.
+"#;
+        let mut connection = block_on(SmtpConnection::new_connection(smtp_server_conf)).unwrap();
+        let err = block_on(connection.mail_transaction(
+            new_mail,
+            /* tos */
+            Some(&[Address::new(None::<&str>, "invalid@example.com")]),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("RCPT TO:<invalid@example.com>"),
+            "error should name the rejected recipient: {err}"
+        );
+        assert!(
+            err.contains("550"),
+            "error should contain the numeric reply code: {err}"
+        );
+        assert!(
+            err.contains("Mailbox not found or access denied"),
+            "error should contain the server reply text: {err}"
+        );
+        // The transaction failed mid-way; QUIT lets the mock server thread exit.
+        block_on(connection.quit()).unwrap();
         server_event_sender
             .unbounded_send(ServerEvent::Quit)
             .unwrap();

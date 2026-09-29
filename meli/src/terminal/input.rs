@@ -559,8 +559,12 @@ fn open_nonblocking_tty() -> Option<OwnedFd> {
 /// [`encode_key`], so the `ThreadEvent::Input((Key, Vec<u8>))` contract keeps
 /// receiving the same bytes the previous reader produced. Terminal
 /// resizes arrive as `Event::Resize` (crossterm watches `SIGWINCH`) and are
-/// forwarded through the `resize` callback; no kitty keyboard-enhancement
-/// flags are pushed, only legacy sequences are expected.
+/// forwarded through the `resize` callback. While the alternate screen is
+/// active, meli pushes the kitty/CSI-u keyboard-enhancement disambiguate
+/// flag (see `Screen::switch_to_alternate_screen`), so terminals honoring
+/// it report modifier combinations like Ctrl-M-Enter distinctly; the Esc
+/// key alone still arrives as a bare 0x1b byte because only the
+/// disambiguate flag is enabled.
 ///
 /// # Loop structure
 ///

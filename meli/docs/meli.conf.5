@@ -1241,6 +1241,10 @@ Shortcuts can take the following values:
 .It
 .Em C-char
 .It
+.Em C-M-char Ns
+, and the named
+.Em C-M-Enter
+.It
 .Em char
 .El
 .sp
@@ -1564,7 +1568,25 @@ Edit mail.
 .Pq Em e \" default value
 .It Ic send_mail
 Deliver draft to mailer
-.Pq Em s \" default value
+.Pq Em C-M-Enter \" default value
+.Pp
+Ctrl\-M\-Enter is distinguishable because
+.Nm
+pushes the kitty/CSI\-u keyboard disambiguate flag on startup: terminals that
+honor it report M\-Enter and Ctrl\-M\-Enter as distinct sequences. On terminals
+that ignore the flag the combination cannot reach
+.Nm
+at all, and M\-Enter is no longer bound to sending; rebind
+.Ic send_mail
+to another key on such terminals.
+Note that terminal multiplexers such as
+.Xr tmux 1
+do not pass this protocol through to the programs running inside them by
+default; enable it in the multiplexer's own configuration (e.g. tmux's
+extended\-keys or passthrough options), or the combination still cannot
+reach
+.Nm Ns
+\&.
 .It Ic close
 Close composer tab.
 .Pq Em Esc \" default value

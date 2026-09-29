@@ -54,6 +54,9 @@ pub mod pgp;
 pub mod edit_attachments;
 use edit_attachments::*;
 
+mod editor;
+use editor::BodyEditor;
+
 pub mod hooks;
 
 #[cfg(feature = "gpgme")]
@@ -132,6 +135,9 @@ pub struct Composer {
     draft: Draft,
     form: FormWidget<bool, HeaderName>,
 
+    /// Built-in body editor, active while `mode` is `ViewMode::EditBody`.
+    editor: BodyEditor,
+
     mode: ViewMode,
 
     embedded_pty: Option<EmbeddedPty>,
@@ -161,6 +167,7 @@ enum ViewMode {
         widget: Box<EditAttachments>,
     },
     Edit,
+    EditBody,
     EmbeddedPty,
     SelectRecipients(UIDialog<Address>),
     #[cfg(feature = "gpgme")]
@@ -221,6 +228,7 @@ impl Composer {
                 hooks::EMPTYDRAFTWARN,
             ],
             form,
+            editor: BodyEditor::new(context),
             mode: ViewMode::Edit,
             #[cfg(feature = "gpgme")]
             pgp_state: pgp::GpgComposeState::default(),
@@ -653,6 +661,50 @@ To: {}
                 *v = vn.as_str().to_string();
             }
         }
+    }
+
+    /// Refresh the draft from the form fields, run the compose hooks
+    /// (reporting their errors as notifications) and open the `send
+    /// mail?` confirmation dialog. This is the single send entry point
+    /// shared by the `composing.send_mail` shortcut and the built-in
+    /// body editor's Ctrl-M-Enter binding; the actual submission only
+    /// starts once the user confirms the dialog.
+    fn start_send_confirmation(&mut self, context: &mut Context) {
+        self.update_draft();
+
+        {
+            let Self {
+                ref mut hooks,
+                ref mut draft,
+                ..
+            } = self;
+
+            // Collect errors in a vector because filter_map borrows context
+            let errors = hooks
+                .iter_mut()
+                .filter_map(|h| h(context, draft).err())
+                .collect::<Vec<_>>();
+            for err in errors {
+                context.replies.push_back(UIEvent::Notification {
+                    title: None,
+                    source: None,
+                    body: err.to_string().into(),
+                    kind: None,
+                });
+            }
+        }
+        self.mode = ViewMode::Send {
+            widget: UIConfirmationDialog::new(
+                "send mail?",
+                vec![(true, "yes".to_string()), (false, "no".to_string())],
+                /* only one choice */
+                true,
+                Some(Box::new(move |id: ComponentId, result: bool| {
+                    Some(UIEvent::FinishedUIDialog(id, Box::new(result)))
+                })),
+                context,
+            ),
+        };
     }
 
     fn update_form(&mut self, context: &Context) {
@@ -1182,8 +1234,17 @@ impl Component for Composer {
             let scroll_up_shortcut = &shortcuts[Shortcuts::COMPOSING]["scroll_up"];
             let field_shortcut = Key::Char('\n');
             let edit_shortcut = &shortcuts[Shortcuts::COMPOSING]["edit"];
-            grid.write_string(
-                &format!(
+            let header = if matches!(self.mode, ViewMode::EditBody) {
+                format!(
+                    "COMPOSING {} [EDITING BODY — Esc: back]",
+                    if self.reply_context.is_some() {
+                        "REPLY"
+                    } else {
+                        "MESSAGE"
+                    }
+                )
+            } else {
+                format!(
                     "COMPOSING {} [scroll down: {}, scroll up: {}, edit fields: {}, edit body: {}]",
                     if self.reply_context.is_some() {
                         "REPLY"
@@ -1194,7 +1255,10 @@ impl Component for Composer {
                     scroll_up_shortcut,
                     field_shortcut,
                     edit_shortcut
-                ),
+                )
+            };
+            grid.write_string(
+                &header,
                 highlight_attr.fg,
                 highlight_attr.bg,
                 highlight_attr.attrs,
@@ -1299,16 +1363,43 @@ impl Component for Composer {
         self.form.draw(grid, header_area, context);
 
         self.draw_attachments(grid, attachment_area, context);
-        if self.pager.size().0 > body_area.width() {
-            self.pager.set_initialised(false);
+        match self.mode {
+            ViewMode::EditBody => {
+                grid.clear_area(body_area, theme_default);
+                self.editor.draw(grid, body_area, context);
+            }
+            _ => {
+                if self.dirty {
+                    // Force clean pager area, because if body height is less than body_area it will
+                    // might leave draw artifacts in the remaining area.
+                    grid.clear_area(body_area, theme_default);
+                    self.pager.set_dirty(true);
+                }
+                let pager_area = if self.mode.is_edit() && body_area.height() >= 3 {
+                    // Discoverable entry point into the built-in body editor: a dim
+                    // one-line hint followed by a blank separator row, with the
+                    // pager drawing in the remaining rows. The hint is rewritten
+                    // on every draw, so it is idempotent and never depends on a
+                    // prior dirty clear.
+                    grid.write_string(
+                        "(Enter to write body, after that, Ctrl-M-Enter to send mail)",
+                        theme_default.fg,
+                        theme_default.bg,
+                        theme_default.attrs | Attr::DIM,
+                        body_area.nth_row(0),
+                        None,
+                        None,
+                    );
+                    body_area.skip_rows(2)
+                } else {
+                    body_area
+                };
+                if self.pager.size().0 > pager_area.width() {
+                    self.pager.set_initialised(false);
+                }
+                self.pager.draw(grid, pager_area, context);
+            }
         }
-        if self.dirty {
-            // Force clean pager area, because if body height is less than body_area it will
-            // might leave draw artifacts in the remaining area.
-            grid.clear_area(body_area, theme_default);
-            self.pager.set_dirty(true);
-        }
-        self.pager.draw(grid, body_area, context);
 
         if self.dirty && matches!(self.focus, Focus::Body) {
             grid.change_theme(
@@ -1324,6 +1415,7 @@ impl Component for Composer {
 
         match self.mode {
             ViewMode::Edit | ViewMode::EmbeddedPty => {}
+            ViewMode::EditBody => {}
             ViewMode::EditAttachments { ref mut widget } => {
                 (EditAttachmentsRefMut {
                     inner: widget,
@@ -1491,6 +1583,75 @@ impl Component for Composer {
             return true;
         }
         match (&mut self.mode, &mut event) {
+            // Built-in body editor: while active the textarea owns the
+            // keymap, so every `Input`/`InsertInput` types text and the
+            // composing shortcuts (`e`/`s`/`j`/`k`/…) stay disabled.
+            (ViewMode::EditBody, UIEvent::Input(Key::Esc) | UIEvent::InsertInput(Key::Esc)) => {
+                self.mode = ViewMode::Edit;
+                self.pager.update_from_str(self.draft.body(), Some(77));
+                // Reply to the entry-time Insert claim: the editor no
+                // longer owns the keyboard.
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+                self.set_dirty(true);
+                return true;
+            }
+            // While the app is in Insert mode the main loop turns Esc into
+            // a broadcast `ChangeMode(Normal)` instead of an `Input`: treat
+            // it as the editor's exit key. Return false so the StatusBar
+            // still sees the same event and refreshes its mode indicator
+            // (mirroring the form widget's text-input exit).
+            (ViewMode::EditBody, UIEvent::ChangeMode(UIMode::Normal)) => {
+                if self.editor.take_modified() {
+                    self.draft.set_body(self.editor.text());
+                    self.has_changes = true;
+                }
+                self.mode = ViewMode::Edit;
+                self.pager.update_from_str(self.draft.body(), Some(77));
+                self.set_dirty(true);
+                return false;
+            }
+            (
+                ViewMode::EditBody,
+                UIEvent::Input(Key::Ctrl('c')) | UIEvent::InsertInput(Key::Ctrl('c')),
+            ) => {
+                // Never trap the user: let the global abort/quit path see it.
+                return false;
+            }
+            // Ctrl-M-Enter sends from inside the editor, keeping the
+            // promise of the pager's body hint. The key is hard-coded
+            // like the Enter entry below: the editor is a text surface,
+            // so a rebound `send_mail` character shortcut must keep
+            // typing text here instead of sending.
+            (
+                ViewMode::EditBody,
+                UIEvent::Input(Key::CtrlAlt('\n')) | UIEvent::InsertInput(Key::CtrlAlt('\n')),
+            ) => {
+                // Sync the editor buffer into the draft before sending,
+                // then refresh the pager so the confirmation view shows
+                // the text that is about to be submitted.
+                if self.editor.take_modified() {
+                    self.draft.set_body(self.editor.text());
+                    self.has_changes = true;
+                }
+                self.pager.update_from_str(self.draft.body(), Some(77));
+                self.start_send_confirmation(context);
+                // The editor is gone and the confirmation dialog needs
+                // Normal-mode key routing: hand the keyboard back.
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+                return true;
+            }
+            (ViewMode::EditBody, UIEvent::Input(_) | UIEvent::InsertInput(_)) => {
+                if self.editor.process_event(event, context) && self.editor.take_modified() {
+                    self.draft.set_body(self.editor.text());
+                    self.has_changes = true;
+                }
+                self.set_dirty(true);
+                return true;
+            }
             (ViewMode::Edit, _) => {
                 if self.pager.process_event(event, context) {
                     return true;
@@ -1860,41 +2021,7 @@ impl Component for Composer {
                 if shortcut!(key == shortcuts[Shortcuts::COMPOSING]["send_mail"])
                     && self.mode.is_edit() =>
             {
-                self.update_draft();
-
-                {
-                    let Self {
-                        ref mut hooks,
-                        ref mut draft,
-                        ..
-                    } = self;
-
-                    // Collect errors in a vector because filter_map borrows context
-                    let errors = hooks
-                        .iter_mut()
-                        .filter_map(|h| h(context, draft).err())
-                        .collect::<Vec<_>>();
-                    for err in errors {
-                        context.replies.push_back(UIEvent::Notification {
-                            title: None,
-                            source: None,
-                            body: err.to_string().into(),
-                            kind: None,
-                        });
-                    }
-                }
-                self.mode = ViewMode::Send {
-                    widget: UIConfirmationDialog::new(
-                        "send mail?",
-                        vec![(true, "yes".to_string()), (false, "no".to_string())],
-                        /* only one choice */
-                        true,
-                        Some(Box::new(move |id: ComponentId, result: bool| {
-                            Some(UIEvent::FinishedUIDialog(id, Box::new(result)))
-                        })),
-                        context,
-                    ),
-                };
+                self.start_send_confirmation(context);
                 return true;
             }
             UIEvent::Input(ref key)
@@ -2304,6 +2431,27 @@ impl Component for Composer {
                 context
                     .replies
                     .push_back(UIEvent::ChangeMode(UIMode::Normal));
+                self.set_dirty(true);
+                return true;
+            }
+            // Enter on the focused body opens the built-in editor. The key is
+            // hard-coded like the top bar's `edit fields` hint; no new
+            // configuration is added.
+            UIEvent::Input(Key::Char('\n'))
+                if self.mode.is_edit() && matches!(self.focus, Focus::Body) =>
+            {
+                // Reload from the draft every time: an external editor or a
+                // hook may have changed the body while we were away.
+                self.editor.load(self.draft.body());
+                self.mode = ViewMode::EditBody;
+                // The editor is a text surface: claim the global Insert
+                // mode so the main loop routes every key — including the
+                // `enter_command_mode` ones like `:` — to the editor as
+                // text input instead of intercepting them for the command
+                // palette.
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Insert));
                 self.set_dirty(true);
                 return true;
             }
@@ -2765,6 +2913,12 @@ impl Component for Composer {
                     || self.form.is_dirty()
             }
             ViewMode::Edit => self.dirty || self.pager.is_dirty() || self.form.is_dirty(),
+            ViewMode::EditBody => {
+                self.editor.is_dirty()
+                    || self.dirty
+                    || self.pager.is_dirty()
+                    || self.form.is_dirty()
+            }
             ViewMode::Discard(_, ref widget) => {
                 widget.is_dirty() || self.pager.is_dirty() || self.form.is_dirty()
             }
@@ -2806,6 +2960,9 @@ impl Component for Composer {
                 widget.set_dirty(value);
             }
             ViewMode::Edit => {}
+            ViewMode::EditBody => {
+                self.editor.set_dirty(value);
+            }
             ViewMode::EmbeddedPty => {
                 if let Some(pty) = self.embedded_pty.as_ref() {
                     if let Ok(mut guard) = pty.try_lock() {
@@ -2820,6 +2977,21 @@ impl Component for Composer {
                 })
                 .set_dirty(value);
             }
+        }
+    }
+
+    fn unrealize(&self, context: &mut Context) {
+        context.unrealized.insert(self.id());
+        context
+            .replies
+            .push_back(UIEvent::ComponentUnrealize(self.id()));
+        // The body editor holds the global Insert mode while active; any
+        // teardown path (tab kill, app shutdown) must hand the keyboard
+        // back so the app can never be left stuck in Insert mode.
+        if matches!(self.mode, ViewMode::EditBody) {
+            context
+                .replies
+                .push_back(UIEvent::ChangeMode(UIMode::Normal));
         }
     }
 
@@ -3590,8 +3762,10 @@ mod tests {
             },
         );
 
-        let mut ev =
-            UIEvent::FinishedUIDialog(widget_id, Box::new(Some(Vec::<melib::email::pgp::Key>::new())));
+        let mut ev = UIEvent::FinishedUIDialog(
+            widget_id,
+            Box::new(Some(Vec::<melib::email::pgp::Key>::new())),
+        );
         assert!(composer.process_event(&mut ev, &mut ctx));
         assert!(
             composer.has_changes,
@@ -4138,6 +4312,441 @@ exit 0
             got, expected,
             "editor stdin log differs from the encode_key byte matrix (note: Ctrl-z must NOT \
              appear; meli consumes it)"
+        );
+    }
+
+    /// Render a `CellBuffer` as newline-separated text for content assertions.
+    fn dump_grid(grid: &crate::terminal::cells::CellBuffer) -> String {
+        let mut out = String::new();
+        for y in 0..grid.rows {
+            for x in 0..grid.cols {
+                out.push(grid.get(x, y).map(|c| c.ch()).unwrap_or(' '));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Move the composer focus onto the body by feeding `Down`, like a user
+    /// walking the form fields.
+    fn focus_compose_body(composer: &mut Composer, ctx: &mut Context) {
+        for _ in 0..8 {
+            if matches!(composer.focus, Focus::Body) {
+                return;
+            }
+            let mut ev = UIEvent::Input(Key::Down);
+            composer.process_event(&mut ev, ctx);
+        }
+        panic!("could not focus the compose body");
+    }
+
+    /// Feed pending context replies back into `composer` (like the main
+    /// loop drains them) and return every requested `UIMode` switch.
+    fn drain_replies(composer: &mut Composer, context: &mut Context) -> Vec<UIMode> {
+        let mut modes = Vec::new();
+        for _ in 0..8 {
+            let replies = context.replies();
+            if replies.is_empty() {
+                break;
+            }
+            for mut event in replies {
+                if let UIEvent::ChangeMode(mode) = event {
+                    modes.push(mode);
+                    continue;
+                }
+                let _ = composer.process_event(&mut event, context);
+            }
+        }
+        modes
+    }
+
+    /// Enter on the focused body opens the built-in editor; typed characters
+    /// sync into the draft on every keystroke, and Esc returns to the pager
+    /// view showing the edited body.
+    #[test]
+    fn enter_builtin_editor_types_and_syncs_draft() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        let _ = ctx.replies();
+
+        focus_compose_body(&mut composer, &mut ctx);
+
+        // Enter opens the built-in editor.
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::EditBody));
+
+        for c in ['h', 'i', '\n', 'x'] {
+            let mut ev = UIEvent::Input(Key::Char(c));
+            assert!(composer.process_event(&mut ev, &mut ctx));
+        }
+        assert_eq!(composer.draft.body(), "hi\nx");
+        assert!(composer.has_changes, "typing must mark the draft changed");
+        assert!(matches!(composer.mode, ViewMode::EditBody));
+
+        // Esc returns to the pager view, which now shows the typed body.
+        let mut ev = UIEvent::Input(Key::Esc);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::Edit));
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        let dump = dump_grid(screen.grid());
+        assert!(
+            dump.contains("hi"),
+            "edited body must render; grid:\n{dump}"
+        );
+    }
+
+    /// Entering the built-in body editor claims the global Insert mode, so
+    /// single-character command shortcuts — above all `:` — type text
+    /// instead of opening the command palette, and no
+    /// `ChangeMode(Command)` is ever requested from inside the editor.
+    #[test]
+    fn edit_body_insert_mode_types_colons_as_text() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+
+        focus_compose_body(&mut composer, &mut ctx);
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::EditBody));
+        let modes = drain_replies(&mut composer, &mut ctx);
+        assert_eq!(
+            modes,
+            vec![UIMode::Insert],
+            "entering the body editor must claim Insert mode"
+        );
+
+        // In Insert mode the main loop delivers every key as InsertInput:
+        // `:` must land in the body, never in the command palette.
+        for c in [':', 'w', 'q', '!', ':'] {
+            let mut ev = UIEvent::InsertInput(Key::Char(c));
+            assert!(composer.process_event(&mut ev, &mut ctx));
+        }
+        assert_eq!(composer.draft.body(), ":wq!:");
+        assert!(matches!(composer.mode, ViewMode::EditBody));
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            !replies
+                .iter()
+                .any(|ev| matches!(ev, UIEvent::ChangeMode(UIMode::Command))),
+            "typing ':' must not request Command mode: {replies:?}"
+        );
+    }
+
+    /// Leaving the body editor restores the app's Normal mode: the
+    /// direct-dispatch Esc path replies with `ChangeMode(Normal)`, and the
+    /// main loop's Insert-mode Esc translation (a broadcast
+    /// `ChangeMode(Normal)`) closes the editor, syncs the draft into the
+    /// pager and stays visible to the `StatusBar`.
+    #[test]
+    fn edit_body_exit_restores_normal_mode() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        // Render plain lines as typed (no format=flowed reflow) so the
+        // single unterminated body line is actually drawn by the pager.
+        ctx.settings.composing.format_flowed = false;
+        let mut composer = realized_composer(&mut ctx);
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+
+        focus_compose_body(&mut composer, &mut ctx);
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        let _ = drain_replies(&mut composer, &mut ctx);
+
+        for c in ['h', 'i'] {
+            let mut ev = UIEvent::InsertInput(Key::Char(c));
+            assert!(composer.process_event(&mut ev, &mut ctx));
+        }
+
+        // The direct Esc path leaves the editor and replies Normal mode.
+        let mut ev = UIEvent::Input(Key::Esc);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::Edit));
+        let modes = drain_replies(&mut composer, &mut ctx);
+        assert_eq!(
+            modes,
+            vec![UIMode::Normal],
+            "Esc must hand the keyboard back"
+        );
+
+        // Re-enter, then exit via the main loop's Esc translation: the
+        // broadcast ChangeMode(Normal) must close the editor, sync the
+        // draft and leave the event unconsumed for the StatusBar.
+        focus_compose_body(&mut composer, &mut ctx);
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        let _ = drain_replies(&mut composer, &mut ctx);
+        for c in ['o', 'k'] {
+            let mut ev = UIEvent::InsertInput(Key::Char(c));
+            assert!(composer.process_event(&mut ev, &mut ctx));
+        }
+        let mut ev = UIEvent::ChangeMode(UIMode::Normal);
+        assert!(
+            !composer.process_event(&mut ev, &mut ctx),
+            "the ChangeMode event must stay visible to the StatusBar"
+        );
+        assert!(matches!(composer.mode, ViewMode::Edit));
+        // Re-entry reloads the draft into a fresh textarea whose cursor
+        // sits at the text start, so "ok" lands before the reloaded
+        // "hi"; what matters here is that the broadcast exit keeps the
+        // draft synced with the editor buffer.
+        assert_eq!(
+            composer.draft.body(),
+            "okhi",
+            "the broadcast exit must keep the draft synced"
+        );
+
+        // The pager shows the synced body after the broadcast exit.
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        let dump = dump_grid(screen.grid());
+        assert!(
+            dump.contains("okhi"),
+            "synced body must render; grid:\n{dump}"
+        );
+    }
+
+    /// While the built-in editor is active the composing shortcut letters
+    /// (`e`/`s`/`j`/`k`) are text, not actions: no external editor fork and no
+    /// process request are produced.
+    #[test]
+    fn builtin_editor_swallows_shortcut_letters() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        let _ = ctx.replies();
+
+        focus_compose_body(&mut composer, &mut ctx);
+
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::EditBody));
+
+        for c in ['e', 's', 'j', 'k'] {
+            let mut ev = UIEvent::Input(Key::Char(c));
+            assert!(composer.process_event(&mut ev, &mut ctx));
+        }
+        assert!(composer.draft.body().contains("esjk"));
+        assert!(matches!(composer.mode, ViewMode::EditBody));
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            !replies
+                .iter()
+                .any(|ev| matches!(ev, UIEvent::Fork(_) | UIEvent::ProcessRequest { .. })),
+            "shortcut letters must not spawn an editor or a process: {replies:?}"
+        );
+    }
+
+    /// Ctrl-M-Enter inside the built-in body editor sends: the editor
+    /// buffer is synced into the draft and the same `send mail?`
+    /// confirmation the `send_mail` shortcut opens appears. The key is
+    /// consumed and nothing is forked or submitted before the user
+    /// confirms the dialog, so this exercises the trigger only.
+    #[test]
+    fn ctrl_m_enter_in_edit_body_sends() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        let _ = ctx.replies();
+
+        focus_compose_body(&mut composer, &mut ctx);
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::EditBody));
+
+        for c in ['h', 'i'] {
+            let mut ev = UIEvent::Input(Key::Char(c));
+            assert!(composer.process_event(&mut ev, &mut ctx));
+        }
+
+        let mut ev = UIEvent::Input(Key::CtrlAlt('\n'));
+        assert!(
+            composer.process_event(&mut ev, &mut ctx),
+            "Ctrl-M-Enter must be consumed by the composer"
+        );
+        assert_eq!(
+            composer.draft.body(),
+            "hi",
+            "the editor buffer must be synced into the draft before sending"
+        );
+        assert!(
+            matches!(composer.mode, ViewMode::Send { .. }),
+            "Ctrl-M-Enter must open the send confirmation dialog, got {:?}",
+            composer.mode
+        );
+
+        // The `InsertInput` form of the key (insert-mode pass-through)
+        // must trigger the same path: back in the editor, retype and
+        // send again via InsertInput.
+        composer.mode = ViewMode::EditBody;
+        let mut ev = UIEvent::InsertInput(Key::CtrlAlt('\n'));
+        assert!(
+            composer.process_event(&mut ev, &mut ctx),
+            "InsertInput Ctrl-M-Enter must be consumed by the composer"
+        );
+        assert!(matches!(composer.mode, ViewMode::Send { .. }));
+
+        // Opening the confirmation must not fork or submit anything: the
+        // draft only leaves the process after the user confirms. Leaving
+        // the editor must also hand the keyboard back so the dialog
+        // receives Normal-mode `Input` keys.
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies
+                .iter()
+                .any(|ev| matches!(ev, UIEvent::ChangeMode(UIMode::Normal))),
+            "Ctrl-M-Enter must restore Normal mode for the send dialog: {replies:?}"
+        );
+        assert!(
+            !replies
+                .iter()
+                .any(|ev| matches!(ev, UIEvent::Fork(_) | UIEvent::ProcessRequest { .. })),
+            "opening the send confirmation must not spawn a process: {replies:?}"
+        );
+    }
+
+    /// The built-in editor entry is body-only: Enter with header focus keeps
+    /// the existing field-editing behavior and never switches the mode.
+    #[test]
+    fn enter_requires_body_focus() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        assert!(matches!(composer.focus, Focus::Headers));
+
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(
+            matches!(composer.mode, ViewMode::Edit),
+            "header Enter must not enter the body editor"
+        );
+    }
+
+    /// The plain body view advertises the built-in editor with a dim hint at
+    /// the top of the body area.
+    #[test]
+    fn body_hint_shown_in_edit_mode() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        assert!(matches!(composer.mode, ViewMode::Edit));
+
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        let _ = ctx.replies();
+
+        let dump = dump_grid(screen.grid());
+        assert!(
+            dump.contains("(Enter to write body, after that, Ctrl-M-Enter to send mail)"),
+            "Edit mode must hint at the built-in body editor; grid:\n{dump}"
+        );
+    }
+
+    /// The hint is an Edit-mode affordance only: it disappears while the
+    /// built-in editor owns the body area, and returns together with the edited
+    /// text once Esc goes back to the pager view.
+    #[test]
+    fn body_hint_hidden_in_edit_body_and_returns_with_body() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        // Render plain lines as typed (no format=flowed reflow), so a short
+        // unterminated body line like `hi` is actually drawn by the pager.
+        ctx.settings.composing.format_flowed = false;
+        let mut composer = realized_composer(&mut ctx);
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        let _ = ctx.replies();
+
+        focus_compose_body(&mut composer, &mut ctx);
+        let mut ev = UIEvent::Input(Key::Char('\n'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::EditBody));
+
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        let dump = dump_grid(screen.grid());
+        assert!(
+            !dump.contains("(Enter to write body, after that, Ctrl-M-Enter to send mail)"),
+            "the hint must not show while editing the body; grid:\n{dump}"
+        );
+
+        for c in ['h', 'i'] {
+            let mut ev = UIEvent::Input(Key::Char(c));
+            assert!(composer.process_event(&mut ev, &mut ctx));
+        }
+        let mut ev = UIEvent::Input(Key::Esc);
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        assert!(matches!(composer.mode, ViewMode::Edit));
+
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        let dump = dump_grid(screen.grid());
+        assert!(
+            dump.contains("(Enter to write body, after that, Ctrl-M-Enter to send mail)"),
+            "the hint must return after leaving the editor; grid:\n{dump}"
+        );
+        assert!(
+            dump.contains("hi"),
+            "the edited body must render together with the hint; grid:\n{dump}"
+        );
+    }
+
+    /// The hint row is separated from the body by exactly one blank row, so the
+    /// hint reads as chrome rather than as part of the draft.
+    #[test]
+    fn body_hint_separated_from_body_by_blank_row() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        // Render plain lines as typed (no format=flowed reflow), so the single
+        // unterminated draft line is actually drawn by the pager.
+        ctx.settings.composing.format_flowed = false;
+        let mut composer = realized_composer(&mut ctx);
+        composer.draft.set_body("QUOTEDLINE".to_string());
+
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        let _ = ctx.replies();
+
+        let dump = dump_grid(screen.grid());
+        let lines: Vec<&str> = dump.lines().collect();
+        let hint_line = lines
+            .iter()
+            .position(|line| {
+                line.contains("(Enter to write body, after that, Ctrl-M-Enter to send mail)")
+            })
+            .unwrap_or_else(|| panic!("body hint must be drawn; grid:\n{dump}"));
+        let quoted_line = lines
+            .iter()
+            .position(|line| line.contains("QUOTEDLINE"))
+            .unwrap_or_else(|| panic!("draft body must be drawn; grid:\n{dump}"));
+        assert!(
+            quoted_line > hint_line,
+            "the draft body must render below the hint; grid:\n{dump}"
+        );
+
+        let between: Vec<&&str> = lines[hint_line + 1..quoted_line]
+            .iter()
+            .filter(|line| {
+                !line.contains("(Enter to write body, after that, Ctrl-M-Enter to send mail)")
+                    && !line.contains("QUOTEDLINE")
+            })
+            .collect();
+        assert_eq!(
+            between.len(),
+            1,
+            "hint and draft body must be separated by exactly one blank line; grid:\n{dump}"
+        );
+        assert!(
+            between[0].trim().is_empty(),
+            "the separating line must be blank; grid:\n{dump}"
         );
     }
 }

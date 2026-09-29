@@ -2422,10 +2422,12 @@ fn statusbar_hints_follow_keybinding() {
 }
 
 /// `UT7b`: hint pickers only render for fields the focused view exposes.
-/// On the composing view, `composing.close` exists, so the hint must
-/// include `(Esc:Close View)`; on the contact-list view, `focus_left`
-/// is not in `ContactListShortcuts`, so `Focus Left` must not
-/// appear in the hint.
+/// On the composing view, `composing.send_mail` and `composing.close`
+/// exist, so the hint must include `(<C-M-Enter>:Send Mail)` and
+/// `(<Esc>:Close View)` — and, because the view carries its own close
+/// binding, must not also append the global `:Quit)` hint. On the
+/// contact-list view, `focus_left` is not in `ContactListShortcuts`, so
+/// `Focus Left` must not appear in the hint.
 #[test]
 fn statusbar_hints_follow_view_section() {
     let mut ctx = mock_context();
@@ -2441,8 +2443,19 @@ fn statusbar_hints_follow_view_section() {
     status_bar.draw(screen.grid_mut(), area, &mut ctx);
     let row = statusbar_row_text(screen.grid());
     assert!(
+        row.contains("(<C-M-Enter>:Send Mail)"),
+        "composing view must surface `composing.send_mail` as `(<C-M-Enter>:Send Mail)`, got {row:?}"
+    );
+    assert!(
         row.contains("(<Esc>:Close View)"),
         "composing view must surface `composing.close` as `(<Esc>:Close View)`, got {row:?}"
+    );
+    // The composing view supplies its own close binding, so the global
+    // Quit hint must be suppressed: `Esc` here closes the composer tab,
+    // it does not quit meli.
+    assert!(
+        !row.contains(":Quit)"),
+        "composing view must hide the Quit hint while it exposes Close View, got {row:?}"
     );
     // Composing exposes no `search` binding and `general` has none
     // either, so the Search hint must be silently skipped.

@@ -244,6 +244,13 @@ impl Default for SmtpExtensionSupport {
     }
 }
 
+/// Prefix an SMTP error's summary with the command that produced it, so the
+/// user can tell which step of the transaction failed and for which recipient.
+fn add_command_context(command: String, mut err: Error) -> Error {
+    err.summary = format!("{command} failed: {}", err.summary).into();
+    err
+}
+
 /// SMTP client session object.
 ///
 /// See module-wide documentation.
@@ -582,7 +589,7 @@ impl SmtpConnection {
     /// Sends mail
     pub async fn mail_transaction(&mut self, mail: &str, tos: Option<&[Address]>) -> Result<()> {
         let mut res = String::with_capacity(8 * 1024);
-        let mut pipelining_queue: SmallVec<[ExpectedReplyCode; 16]> = SmallVec::new();
+        let mut pipelining_queue: SmallVec<[(ExpectedReplyCode, String); 16]> = SmallVec::new();
         let mut pipelining_results: SmallVec<[Result<ReplyCode>; 16]> = SmallVec::new();
         let mut prdr_results: SmallVec<[Result<ReplyCode>; 16]> = SmallVec::new();
         let dsn_notify = self.server_conf.extensions.dsn_notify.clone();
@@ -599,9 +606,8 @@ impl SmtpConnection {
         let mut current_command: SmallVec<[&[u8]; 16]> = SmallVec::new();
         //first step in the procedure is the MAIL command.
         // `MAIL FROM:<reverse-path> [SP <mail-parameters> ] <CRLF>`
-        current_command.push(b"MAIL FROM:<");
-        if !envelope_from.is_empty() {
-            current_command.push(envelope_from.trim().as_bytes());
+        let mail_from_addr: &str = if !envelope_from.is_empty() {
+            envelope_from.trim()
         } else {
             if envelope.from().is_empty() || envelope.from()[0].get_email().is_empty() {
                 return Err(Error::new(
@@ -616,8 +622,10 @@ impl SmtpConnection {
                      client settings",
                 ));
             }
-            current_command.push(envelope.from()[0].get_email().trim().as_bytes());
-        }
+            envelope.from()[0].get_email().trim()
+        };
+        current_command.push(b"MAIL FROM:<");
+        current_command.push(mail_from_addr.as_bytes());
         current_command.push(b">");
         if self.server_conf.extensions.prdr {
             current_command.push(b" PRDR");
@@ -629,11 +637,13 @@ impl SmtpConnection {
         }
         self.send_command(&current_command).await?;
         current_command.clear();
+        let mail_from_label = format!("MAIL FROM:<{mail_from_addr}>");
         if !self.server_conf.extensions.pipelining {
             self.read_lines(&mut res, Some((ReplyCode::_250, &[])))
-                .await?;
+                .await
+                .map_err(|err| add_command_context(mail_from_label, err))?;
         } else {
-            pipelining_queue.push(Some((ReplyCode::_250, &[])));
+            pipelining_queue.push((Some((ReplyCode::_250, &[])), mail_from_label));
         }
         //The second step in the procedure is the RCPT command. This step of the
         // procedure can be repeated any number of times. If accepted, the SMTP
@@ -666,11 +676,13 @@ impl SmtpConnection {
                     //`RCPT TO:<forward-path> [ SP <rcpt-parameters> ] <CRLF>`
                     // If accepted, the SMTP server returns a "250 OK" reply and stores the
                     // forward-path.
+                    let rcpt_label = format!("RCPT TO:<{}>", $mailbox.get_email().trim());
                     if !self.server_conf.extensions.pipelining {
                         self.read_lines(&mut res, Some((ReplyCode::_250, &[])))
-                            .await?;
+                            .await
+                            .map_err(|err| add_command_context(rcpt_label, err))?;
                     } else {
-                        pipelining_queue.push(Some((ReplyCode::_250, &[])));
+                        pipelining_queue.push((Some((ReplyCode::_250, &[])), rcpt_label));
                     }
                 }};
             }
@@ -708,8 +720,11 @@ impl SmtpConnection {
             // RCPT TO commands worked. If the DATA command was properly
             // rejected the client SMTP can just issue RSET, but if the DATA
             // command was accepted the client SMTP should send a single dot.
-            for expected_reply_code in pipelining_queue {
-                let reply = self.read_lines(&mut res, expected_reply_code).await?;
+            for (expected_reply_code, command) in pipelining_queue {
+                let reply = self
+                    .read_lines(&mut res, expected_reply_code)
+                    .await
+                    .map_err(|err| add_command_context(command, err))?;
                 pipelining_results.push(reply.into());
             }
 
@@ -719,7 +734,8 @@ impl SmtpConnection {
             // successfully received and stored, the SMTP-receiver sends a "250
             // OK" reply.
             self.read_lines(&mut res, Some((ReplyCode::_354, &[])))
-                .await?;
+                .await
+                .map_err(|err| add_command_context("DATA".to_string(), err))?;
 
             //Before sending a line of mail text, the SMTP client checks the first
             // character of the line.If it is a period, one additional period is
@@ -754,7 +770,8 @@ impl SmtpConnection {
                     },
                 )),
             )
-            .await?
+            .await
+            .map_err(|err| add_command_context("DATA (message submission)".to_string(), err))?
             .code;
         // PRDR extension only:
         if reply_code == ReplyCode::_353 {
@@ -1009,7 +1026,12 @@ pub struct Reply<'s> {
 impl<'s> From<Reply<'s>> for Result<ReplyCode> {
     fn from(val: Reply<'s>) -> Self {
         if val.code.is_err() {
-            Err(Error::new(val.lines.join("\n")).set_summary(val.code.as_str()))
+            Err(Error::new(
+                format!("{} {}", val.code.value(), val.lines.join("\n"))
+                    .trim()
+                    .to_string(),
+            )
+            .set_summary(val.code.as_str()))
         } else {
             Ok(val.code)
         }

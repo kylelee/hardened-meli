@@ -30,6 +30,7 @@ use melib::{log, uuid};
 use crossterm::{
     cursor::{Hide, MoveTo, MoveToColumn, Show},
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
     queue,
     style::{
         Attribute, Color as CrosstermColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
@@ -434,6 +435,10 @@ impl Screen<Tty> {
             restore_wraparound = RestoreWraparoundMode,
         )
         .unwrap();
+        // Pop the kitty/CSI-u disambiguate flag pushed on alternate-screen
+        // entry, so the terminal returns to its legacy encoding (and, on
+        // panics, the unwind drop of `State` lands here too).
+        queue!(stdout, PopKeyboardEnhancementFlags).expect("Could not write to stdout");
         if mouse {
             queue!(stdout, DisableMouseCapture).expect("Could not write to stdout");
             write!(stdout, "{}", DisableAlternateScrollMode).expect("Could not write to stdout");
@@ -474,6 +479,18 @@ impl Screen<Tty> {
         )
         .unwrap();
         queue!(stdout, DisableLineWrap).unwrap();
+        // Push only the disambiguate flag of the kitty/CSI-u keyboard
+        // protocol: modern terminals then report modifier combinations
+        // like Ctrl-M-Enter distinctly instead of folding them onto
+        // legacy sequences, while release events and report-all modes
+        // stay off so `Esc` alone still arrives as a single 0x1b byte.
+        // Terminals that do not implement the protocol ignore this.
+        // `switch_to_main_screen` pops it on every exit path.
+        queue!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .unwrap();
         if self.display.mouse {
             queue!(stdout, EnableMouseCapture).unwrap();
             write!(stdout, "{}", EnableAlternateScrollMode).unwrap();
