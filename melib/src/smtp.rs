@@ -43,6 +43,7 @@
 //!     },
 //!     envelope_from: String::new(),
 //!     extensions: SmtpExtensionSupport::default(),
+//!     timeout: 60,
 //!     auth: SmtpAuth::Auto {
 //!         username: Secret::Value("l15".into()),
 //!         password: Secret::Evaluate {
@@ -192,6 +193,16 @@ pub struct SmtpServerConf {
     pub security: SmtpSecurity,
     #[serde(default)]
     pub extensions: SmtpExtensionSupport,
+    /// Timeout for establishing the TCP connection, in seconds. A value of
+    /// `0` means no timeout, mirroring the per-account IMAP/NNTP `timeout`
+    /// setting.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
+/// Default value for [`SmtpServerConf::timeout`].
+const fn default_timeout() -> u64 {
+    60
 }
 
 //example: "SIZE 52428800", "8BITMIME", "PIPELINING", "CHUNKING", "PRDR",
@@ -264,6 +275,13 @@ pub struct SmtpConnection {
 impl SmtpConnection {
     /// Performs connection and if configured: TLS negotiation and SMTP AUTH
     pub async fn new_connection(mut server_conf: SmtpServerConf) -> Result<Self> {
+        // Budget for the TCP connect attempts; `0` disables it, mirroring
+        // the per-account IMAP/NNTP `timeout` setting.
+        let connect_timeout = if server_conf.timeout == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_secs(server_conf.timeout))
+        };
         let path = server_conf
             .hostname
             .value_with_timeout(std::time::Duration::new(4, 0))
@@ -288,10 +306,7 @@ impl SmtpConnection {
 
                 let addr = (path.as_str(), server_conf.port);
                 let mut socket = {
-                    let conn = Connection::new_tcp(tcp_stream_connect(
-                        addr,
-                        Some(std::time::Duration::new(4, 0)),
-                    )?);
+                    let conn = Connection::new_tcp(tcp_stream_connect(addr, connect_timeout)?);
                     #[cfg(feature = "smtp-trace")]
                     let conn = conn.trace(true).with_id("smtp");
 
@@ -382,10 +397,7 @@ impl SmtpConnection {
             SmtpSecurity::None => {
                 let addr = (path.as_str(), server_conf.port);
                 let mut ret = AsyncWrapper::new({
-                    let conn = Connection::new_tcp(tcp_stream_connect(
-                        addr,
-                        Some(std::time::Duration::new(4, 0)),
-                    )?);
+                    let conn = Connection::new_tcp(tcp_stream_connect(addr, connect_timeout)?);
                     #[cfg(feature = "smtp-trace")]
                     {
                         conn.trace(true).with_id("smtp")
@@ -1441,5 +1453,65 @@ mod tests {
             parse_auth_mechanisms("AUTH PLAIN LOGIN").collect::<Vec<_>>(),
             vec!["PLAIN", "LOGIN"]
         );
+    }
+    /// `timeout` is optional and defaults to 60 seconds; an explicit value
+    /// overrides it. The TCP connect budget in `new_connection` is derived
+    /// from this field instead of a hardcoded duration.
+    #[test]
+    fn test_smtp_server_conf_timeout_serde_default() {
+        let conf: SmtpServerConf = toml::from_str(
+            r#"
+hostname = "smtp.example.com"
+port = 465
+auth = { type = "auto", username = "user", password = "dummy-secret" }
+security = { type = "tls" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(conf.timeout, 60);
+
+        let conf: SmtpServerConf = toml::from_str(
+            r#"
+hostname = "smtp.example.com"
+port = 465
+timeout = 5
+auth = { type = "auto", username = "user", password = "dummy-secret" }
+security = { type = "tls" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(conf.timeout, 5);
+    }
+
+    /// `new_connection` must bound its TCP connect attempts by the
+    /// configured `timeout` instead of the old hardcoded 4-second budget:
+    /// 192.0.2.1 is RFC 5737 TEST-NET-1 (SYNs are silently dropped and no
+    /// traffic is generated), so a 1-second budget must fail the call well
+    /// before 4 seconds. Sandboxed environments without routes fail even
+    /// earlier; both errors are acceptable outcomes.
+    #[test]
+    fn test_smtp_new_connection_uses_configured_timeout() {
+        cap_test_utils::assert_completes_within(10, || {
+            let conf = SmtpServerConf {
+                hostname: Secret::Value("192.0.2.1".into()),
+                port: 9,
+                envelope_from: String::new(),
+                auth: SmtpAuth::None,
+                security: SmtpSecurity::None,
+                extensions: SmtpExtensionSupport::default(),
+                timeout: 1,
+            };
+            let started = std::time::Instant::now();
+            let result = smol::block_on(SmtpConnection::new_connection(conf));
+            assert!(
+                result.is_err(),
+                "a TEST-NET address cannot accept connections: {result:?}"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(4),
+                "connect budget must come from `timeout` (1s), took {elapsed:?}",
+                elapsed = started.elapsed()
+            );
+        });
     }
 }
