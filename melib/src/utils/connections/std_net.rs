@@ -23,6 +23,12 @@ use std::{
 use polling::{Event, Poller};
 use socket2::{Domain, SockAddr, Socket};
 
+/// Interval between the starts of consecutive connection attempts, per
+/// RFC 8305's recommended stagger: while an earlier attempt is still
+/// pending, the next candidate address must get a head start instead of
+/// waiting for the first attempt to reach a verdict.
+const CONNECTION_ATTEMPT_STAGGER: Duration = Duration::from_millis(250);
+
 /// Opens a TCP connection to a remote host.
 ///
 /// If `addr` yields multiple addresses, `connect` uses the algorithm
@@ -32,6 +38,10 @@ use socket2::{Domain, SockAddr, Socket};
 /// connect.
 pub fn connect<A: ToSocketAddrs>(addr: A, timeout: Option<Duration>) -> Result<TcpStream> {
     let mut happy = HappyEyeballs::new()?;
+    // DNS resolution is not part of the connection budget: the clock starts
+    // only after the candidate addresses have been resolved, since a slow
+    // resolver would otherwise eat into the time left for the TCP attempts.
+    let addrs = prepare_addresses(addr)?;
     let start = Instant::now();
     let timeout_left = || -> Result<Option<Duration>> {
         let Some(v) = timeout else {
@@ -42,17 +52,23 @@ pub fn connect<A: ToSocketAddrs>(addr: A, timeout: Option<Duration>) -> Result<T
         )?))
     };
 
-    for a in prepare_addresses(addr)? {
+    for a in addrs {
         match happy.add(a.into(), Domain::for_address(a)) {
             AddOutcome::Connected(tcp) => return Ok(tcp),
             AddOutcome::Error => continue,
             AddOutcome::InProgress => (),
         }
-        if let Some(sock) = happy.poll_once(timeout_left()?)? {
+        // Cap this wait at the stagger interval so the next candidate
+        // address starts racing this one, instead of a single black-holed
+        // first address consuming the whole budget (RFC 8305).
+        let staggered = timeout_left()?.map(|left| left.min(CONNECTION_ATTEMPT_STAGGER));
+        if let Some(sock) = happy.poll_once(staggered)? {
             return Ok(sock);
         }
     }
 
+    // All candidate addresses have been initiated; drain the in-flight
+    // attempts with whatever budget is left.
     while !happy.is_empty() {
         if let Some(sock) = happy.poll_once(timeout_left()?)? {
             return Ok(sock);
@@ -384,5 +400,86 @@ mod tests {
             connect(empty, None).unwrap_err().kind(),
             std::io::ErrorKind::InvalidInput
         );
+    }
+
+    /// RFC 5737 TEST-NET addresses: reserved for documentation and never
+    /// routable, so connecting to them silently drops SYNs without
+    /// generating any traffic; they stand in for black-holed addresses.
+    const BLACKHOLED_V4_A: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const BLACKHOLED_V4_B: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+
+    /// A loopback port that currently has no listener, so connecting to it
+    /// is refused immediately with `ECONNREFUSED`.
+    fn unused_port_v4() -> u16 {
+        let (listener, _, port) = listen(Ipv4Addr::LOCALHOST);
+        drop(listener);
+        port
+    }
+
+    /// Happy Eyeballs regression test: when the first candidate address is
+    /// black-holed, the staggered attempts must still reach the live
+    /// address within the budget. The old serial implementation waited the
+    /// whole budget on the first address and then timed out.
+    #[test]
+    fn test_connections_std_net_connect_blackholed_first_address() {
+        let (_serve, addr, port) = serve_4();
+        let saddrs = [
+            SocketAddr::new(IpAddr::V4(BLACKHOLED_V4_A), 9),
+            SocketAddr::new(addr, port),
+        ];
+        let started = std::time::Instant::now();
+        let mut data = String::new();
+        connect(&saddrs[..], Some(Duration::from_secs(3)))
+            .unwrap()
+            .read_to_string(&mut data)
+            .unwrap();
+        assert_eq!(data, format!("{addr}"));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "second address must win within the budget, took {elapsed:?}",
+            elapsed = started.elapsed()
+        );
+    }
+
+    /// When every candidate address is black-holed, `connect` must return
+    /// an error once the budget is spent instead of panicking or waiting
+    /// far beyond it. (In fully sandboxed environments without routes the
+    /// socket call fails even earlier with a network-unreachable error;
+    /// both outcomes are acceptable.)
+    #[test]
+    fn test_connections_std_net_connect_all_blackholed_is_err() {
+        let saddrs = [
+            SocketAddr::new(IpAddr::V4(BLACKHOLED_V4_A), 9),
+            SocketAddr::new(IpAddr::V4(BLACKHOLED_V4_B), 9),
+        ];
+        let started = std::time::Instant::now();
+        let result = connect(&saddrs[..], Some(Duration::from_millis(500)));
+        assert!(
+            result.is_err(),
+            "no black-holed address can possibly accept: {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "must not wait far beyond the budget, took {elapsed:?}",
+            elapsed = started.elapsed()
+        );
+    }
+
+    /// A connection refused on the first candidate address must not derail
+    /// the attempt on the next one.
+    #[test]
+    fn test_connections_std_net_connect_refused_then_success() {
+        let refused_port = unused_port_v4();
+        let (_serve, addr, port) = serve_4();
+        let saddrs = [
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), refused_port),
+            SocketAddr::new(addr, port),
+        ];
+        let mut data = String::new();
+        connect(&saddrs[..], Some(Duration::from_secs(3)))
+            .unwrap()
+            .read_to_string(&mut data)
+            .unwrap();
+        assert_eq!(data, format!("{addr}"));
     }
 }

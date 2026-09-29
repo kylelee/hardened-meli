@@ -426,23 +426,7 @@ impl Screen<Tty> {
             return;
         };
         let mouse = self.display.mouse;
-        queue!(stdout, LeaveAlternateScreen, Show, DisableBracketedPaste,)
-            .expect("Could not write to stdout");
-        write!(
-            stdout,
-            "{restore_title}{restore_wraparound}",
-            restore_title = RestoreWindowTitleIconFromStack,
-            restore_wraparound = RestoreWraparoundMode,
-        )
-        .unwrap();
-        // Pop the kitty/CSI-u disambiguate flag pushed on alternate-screen
-        // entry, so the terminal returns to its legacy encoding (and, on
-        // panics, the unwind drop of `State` lands here too).
-        queue!(stdout, PopKeyboardEnhancementFlags).expect("Could not write to stdout");
-        if mouse {
-            queue!(stdout, DisableMouseCapture).expect("Could not write to stdout");
-            write!(stdout, "{}", DisableAlternateScrollMode).expect("Could not write to stdout");
-        }
+        write_leave_alternate_screen(stdout, mouse);
         self.flush();
         if let Err(err) = terminal::disable_raw_mode() {
             log::warn!("Error while disabling raw mode: {err}");
@@ -456,45 +440,11 @@ impl Screen<Tty> {
             240 * 80,
             Box::new(std::io::stdout()) as Box<dyn std::io::Write>,
         );
-
-        write!(stdout, "{}", SaveWindowTitleIconToStack).unwrap();
-        queue!(
-            stdout,
-            EnterAlternateScreen,
-            Hide,
-            Clear(ClearType::All),
-            MoveTo(0, 0),
-            EnableBracketedPaste
-        )
-        .unwrap();
-        write!(
-            stdout,
-            "{save_wraparound}{window_title}",
-            save_wraparound = SaveWraparoundMode,
-            window_title = if let Some(ref title) = context.settings.terminal.window_title {
-                format!("\x1b]2;{title}\x07")
-            } else {
-                String::new()
-            }
-        )
-        .unwrap();
-        queue!(stdout, DisableLineWrap).unwrap();
-        // Push only the disambiguate flag of the kitty/CSI-u keyboard
-        // protocol: modern terminals then report modifier combinations
-        // like Ctrl-M-Enter distinctly instead of folding them onto
-        // legacy sequences, while release events and report-all modes
-        // stay off so `Esc` alone still arrives as a single 0x1b byte.
-        // Terminals that do not implement the protocol ignore this.
-        // `switch_to_main_screen` pops it on every exit path.
-        queue!(
-            stdout,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        )
-        .unwrap();
-        if self.display.mouse {
-            queue!(stdout, EnableMouseCapture).unwrap();
-            write!(stdout, "{}", EnableAlternateScrollMode).unwrap();
-        }
+        write_enter_alternate_screen(
+            &mut stdout,
+            self.display.mouse,
+            context.settings.terminal.window_title.as_deref(),
+        );
 
         self.display.stdout = Some(stdout);
         self.flush();
@@ -729,6 +679,92 @@ impl Screen<Tty> {
 fn write_startup_queries(out: &mut impl Write) {
     write!(out, "{}", QueryBackground.as_ref()).expect("Could not write to stdout");
     write!(out, "{}", QueryForeground.as_ref()).expect("Could not write to stdout");
+}
+
+/// Pops every kitty/CSI-u keyboard-enhancement stack entry before meli
+/// pushes its own: a child run between two alternate-screen sessions
+/// (`$EDITOR` via `UIEvent::ProcessRequest`) may exit without popping
+/// what it pushed, and pushing onto a non-empty stack would leak entries
+/// across `$EDITOR` round trips. Popping more entries than the stack
+/// holds resets the flags (per spec), so this is safe on an empty stack.
+const KEYBOARD_MODE_DRAIN: &str = "\x1b[<99u";
+
+/// Write the escape sequences that hand the alternate screen back to the
+/// host terminal ([`Screen::switch_to_main_screen`]), in wire order.
+///
+/// The kitty/CSI-u keyboard-enhancement flags must be popped *while the
+/// alternate screen is still active*: the protocol requires terminals to
+/// keep separate flag stacks for the main and alternate screens, so a pop
+/// emitted after `LeaveAlternateScreen` would act on the *main* screen's
+/// stack and leave the alternate screen's entry behind. A child that then
+/// uses the alternate screen itself (`emacs -nw` enters it on startup)
+/// inherits the leftover disambiguate flag: every `ctrl`+`key` press is
+/// delivered as a `CSI u` sequence instead of the legacy control byte,
+/// and programs without kitty-protocol support lose all their `C-`
+/// shortcuts.
+fn write_leave_alternate_screen(out: &mut impl Write, mouse: bool) {
+    queue!(out, PopKeyboardEnhancementFlags).expect("Could not write to stdout");
+    queue!(out, LeaveAlternateScreen, Show, DisableBracketedPaste,)
+        .expect("Could not write to stdout");
+    write!(
+        out,
+        "{restore_title}{restore_wraparound}",
+        restore_title = RestoreWindowTitleIconFromStack,
+        restore_wraparound = RestoreWraparoundMode,
+    )
+    .unwrap();
+    if mouse {
+        queue!(out, DisableMouseCapture).expect("Could not write to stdout");
+        write!(out, "{}", DisableAlternateScrollMode).expect("Could not write to stdout");
+    }
+}
+
+/// Write the escape sequences that claim the alternate screen
+/// ([`Screen::switch_to_alternate_screen`]), in wire order.
+///
+/// Only the disambiguate flag of the kitty/CSI-u keyboard protocol is
+/// pushed: modern terminals then report modifier combinations like
+/// Ctrl-M-Enter distinctly instead of folding them onto legacy sequences,
+/// while release events and report-all modes stay off so `Esc` alone
+/// still arrives as a single 0x1b byte. Terminals that do not implement
+/// the protocol ignore it, and [`write_leave_alternate_screen`] pops it
+/// on every exit path.
+fn write_enter_alternate_screen(out: &mut impl Write, mouse: bool, window_title: Option<&str>) {
+    write!(out, "{}", SaveWindowTitleIconToStack).unwrap();
+    queue!(
+        out,
+        EnterAlternateScreen,
+        Hide,
+        Clear(ClearType::All),
+        MoveTo(0, 0),
+        EnableBracketedPaste
+    )
+    .unwrap();
+    write!(
+        out,
+        "{save_wraparound}{window_title}",
+        save_wraparound = SaveWraparoundMode,
+        window_title = if let Some(title) = window_title {
+            format!("\x1b]2;{title}\x07")
+        } else {
+            String::new()
+        },
+    )
+    .unwrap();
+    queue!(out, DisableLineWrap).unwrap();
+    // Drain stack entries a child may have left behind, then push ours so
+    // the stack depth stays exactly one however often the screen is
+    // re-entered.
+    write!(out, "{KEYBOARD_MODE_DRAIN}").unwrap();
+    queue!(
+        out,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+    .unwrap();
+    if mouse {
+        queue!(out, EnableMouseCapture).unwrap();
+        write!(out, "{}", EnableAlternateScrollMode).unwrap();
+    }
 }
 
 /// Total time budget for the synchronous startup terminal palette queries.
@@ -1796,6 +1832,72 @@ mod tests {
         // be revived: its late replies stall the input parser.
         let needle = b"\x1b[?2026$p";
         assert!(!out.windows(needle.len()).any(|w| w == needle));
+    }
+
+    /// The kitty/CSI-u flags must be popped while the alternate screen is
+    /// still active: terminals keep one flag stack per screen, and a pop
+    /// emitted after `LeaveAlternateScreen` would miss the alternate
+    /// screen's entry. `emacs -nw` enters the alternate screen itself, so
+    /// a leftover disambiguate entry made every `C-` binding in it dead
+    /// (its `C-x C-c` arrived as `CSI u` sequences stock Emacs cannot
+    /// parse), and meli stayed blocked in `Child::wait` forever.
+    #[test]
+    fn test_leave_alternate_screen_pops_keyboard_mode_before_leaving() {
+        fn positions(out: &[u8]) -> (usize, usize) {
+            let pop = out
+                .windows(5)
+                .position(|w| w == b"\x1b[<1u")
+                .expect("PopKeyboardEnhancementFlags must be emitted");
+            let leave = out
+                .windows(8)
+                .position(|w| w == b"\x1b[?1049l")
+                .expect("LeaveAlternateScreen must be emitted");
+            (pop, leave)
+        }
+
+        for mouse in [false, true] {
+            let mut out = Vec::new();
+            write_leave_alternate_screen(&mut out, mouse);
+            let (pop, leave) = positions(&out);
+            assert!(
+                pop < leave,
+                "keyboard-enhancement flags must pop while the alternate \
+                 screen is still active: {out:?}"
+            );
+        }
+    }
+
+    /// Entering the alternate screen must leave the keyboard-enhancement
+    /// stack with exactly one entry: drain any leftover a child pushed,
+    /// then push meli's own disambiguate flag, both after the screen
+    /// switch so they act on the alternate screen's stack.
+    #[test]
+    fn test_enter_alternate_screen_resyncs_keyboard_mode_stack() {
+        for mouse in [false, true] {
+            let mut out = Vec::new();
+            write_enter_alternate_screen(&mut out, mouse, None);
+            let enter = out
+                .windows(8)
+                .position(|w| w == b"\x1b[?1049h")
+                .expect("EnterAlternateScreen must be emitted");
+            let drain = out
+                .windows(KEYBOARD_MODE_DRAIN.len())
+                .position(|w| w == KEYBOARD_MODE_DRAIN.as_bytes())
+                .expect("the stack drain must be emitted");
+            let push = out
+                .windows(5)
+                .position(|w| w == b"\x1b[>1u")
+                .expect("PushKeyboardEnhancementFlags must be emitted");
+            assert!(
+                enter < drain && drain < push,
+                "drain and push must act on the alternate screen's stack: {out:?}"
+            );
+            assert_eq!(
+                out.windows(5).filter(|w| *w == b"\x1b[>1u").count(),
+                1,
+                "exactly one flags entry must be pushed: {out:?}"
+            );
+        }
     }
 
     #[test]
