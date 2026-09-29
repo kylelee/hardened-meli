@@ -16,6 +16,9 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+
+- 状态栏提示文字按布局场景化（计划 `statusbar-layout-hints`）：场景敏感提示（`Scroll Up` / `Scroll Down` / `Focus Left` / `Focus Right` / `Search`）改为按细化后的 `Component::hint_focus()`（`Sidebar`、`NoView`、`GridSingleMail`、`GridThreads`、`ThreadList`、`MailView`）查标签表，同一按键按持键盘窗格显示对应动作文字：layout1 侧栏为 `Folder Up` / `Folder Down` / `Focus Maillist`，layout1 网格为 `Maillist Up` / `Maillist Down` / `Open Mail`，layout2/layout3 网格为 `Maillist Up` / `Maillist Down` / `Focus Box` 加 `Focus Content`（单邮件视图）或 `Focus Threads`（线程视图），layout4 线程列表为 `Thread Up` / `Thread Down` / `Focus Maillist` / `Focus Content`。邮件详情态（邮件动作）与非 listing 视图（默认标签）保持不变，按键行为亦不变，仅提示文字变化。
+
 - 状态栏快捷键提示随 listing 布局与键盘焦点变化（计划 `statusbar-hints-per-layout`）：右段 hints 现按新增的 `Component::hint_focus()` trait 方法过滤（默认 `None`，`Tabbed` 转发活跃子组件的返回值，`Listing` 上报所在布局窗格）。layout1（无打开视图）删去 `Search` 提示；layout2/layout4 的邮件详情态（邮件视图持键盘）删去 `Scroll Up` / `Scroll Down` / `Focus Left` / `Focus Right` / `Search`，改为显示三个邮件动作——`Reply`（`envelope-view.reply`）、`Reply All`（`envelope-view.reply_to_all`）与 `Open in Tab`（`thread-view.open_in_new_tab`），`Quit` 恒为最后一项。各状态下按键行为不变，仅提示随之增减；提示与按键派发读同一份配置绑定，重绑快捷键后自动同步。
 
 - 底栏三段式重构（计划 `statusbar-gauge-spinner`）：底栏单行经 `Layout::horizontal` 切分为左状态段、中部 `LineGauge` 段、右 hints 段。中部 `LineGauge` 由焦点邮箱的 `MailboxStatus::Parsing(done, total)` 驱动，按 `done/total` 推进并显示 `Fetch N/T` 标签；右段从 `Component::shortcuts()` 实时聚合 `q:quit ?:toggle_help F5:refresh`（行窄时按 `…` / `...` 截断）。左段右缘新增后端 chip `[maildir]` / `[imap ✓]` / `[imap ✘]` 与焦点邮箱标签 `📩 INBOX:42`，均由 `context.accounts` 加新的 `StatusBar.focus: Option<(AccountHash, MailboxHash)>` 字段在 `draw` 时现算，不引入新 theme key。ASCII 终端以 `+`/`x` 替代 ✓/✘ 并去掉信封 emoji；中部 gauge 使用 `filled_symbol # / .` 与 `status.bar` 反色（与 Insert 模式指示器共用同一调色板分叉）。

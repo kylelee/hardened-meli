@@ -57,7 +57,10 @@ use crate::{
 };
 
 /// Decrypts a `multipart/encrypted` or a cleartext encrypted message.
-pub async fn decrypt(backend: PGPBackendInstance, a: Attachment) -> Result<(DecryptionMetadata, Vec<u8>)> {
+pub async fn decrypt(
+    backend: PGPBackendInstance,
+    a: Attachment,
+) -> Result<(DecryptionMetadata, Vec<u8>)> {
     let Attachment {
         content_type:
             ContentType::Multipart {
@@ -134,9 +137,7 @@ pub fn verify(
                 }
 
                 let mut backend = backend;
-                let result = backend
-                    .verify(signature.body().trim(), &signed_part)?
-                    .await;
+                let result = backend.verify(signature.body().trim(), &signed_part)?.await;
                 {
                     let mut lck = cache.lock().unwrap();
                     lck.insert(attachment_hash, result.clone());
@@ -217,129 +218,38 @@ pub fn sign_filter(
     default_key: Option<String>,
     mut sign_keys: Vec<Key>,
 ) -> Result<impl FnOnce(AttachmentBuilder) -> crate::mail::AttachmentBoxFuture + Send> {
-    Ok(move |a: AttachmentBuilder| -> crate::mail::AttachmentBoxFuture {
-        Box::pin(async move {
-            let mut backend = choice.instantiate()?;
-            if let Some(default_key) = default_key {
-                backend.set_auto_key_locate(LocateKey::LOCAL)?;
-                let keys = backend.keylist(false, Some(default_key.clone()))?.await?;
-                if keys.is_empty() {
-                    return Err(Error::new(format!(
-                        "Could not locate sign key with ID `{default_key}`"
-                    )));
-                }
-                sign_keys.extend(keys);
-            }
-            if sign_keys.is_empty() {
-                return Err(Error::new(
-                    "No key was selected for signing; please select one.",
-                ));
-            }
-            let a: Attachment = a.into();
-            let signed_data = melib_pgp::convert_attachment_to_rfc_spec(a.into_raw().as_bytes());
-            let (sig_metadata, sig_bytes) = backend
-                .sign(sign_keys, &signed_data, false)?
-                .await?;
-            let sig_attachment =
-                Attachment::new(ContentType::PGPSignature, Default::default(), sig_bytes);
-            let a: AttachmentBuilder = a.into();
-            let parts = vec![a, sig_attachment.into()];
-            let boundary = ContentType::make_boundary(&parts);
-
-            let micalg = sig_metadata.micalg().into_bytes();
-            Ok(Attachment::new(
-                ContentType::Multipart {
-                    boundary: boundary.into_bytes(),
-                    kind: MultipartType::Signed,
-                    parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
-                    parameters: vec![
-                        (b"micalg".into(), micalg),
-                        (b"protocol".into(), b"\"application/pgp-signature\"".into()),
-                    ],
-                },
-                Default::default(),
-                vec![],
-            )
-            .into())
-        })
-    })
-}
-
-pub fn encrypt_filter(
-    choice: PGPBackendChoice,
-    encrypt_for_self: Option<melib::Address>,
-    default_sign_key: Option<String>,
-    mut sign_keys: Option<Vec<Key>>,
-    default_encrypt_key: Option<String>,
-    mut encrypt_keys: Vec<Key>,
-) -> Result<impl FnOnce(AttachmentBuilder) -> crate::mail::AttachmentBoxFuture + Send> {
-    Ok(move |a: AttachmentBuilder| -> crate::mail::AttachmentBoxFuture {
-        Box::pin(async move {
-            let mut backend = choice.instantiate()?;
-            if let Some(default_key) = default_sign_key {
-                backend.set_auto_key_locate(LocateKey::LOCAL)?;
-                let keys = backend.keylist(true, Some(default_key.clone()))?.await?;
-                if keys.is_empty() {
-                    return Err(Error::new(format!(
-                        "Could not locate sign key with ID `{default_key}`"
-                    )));
-                }
-                if let Some(ref mut sign_keys) = sign_keys {
+    Ok(
+        move |a: AttachmentBuilder| -> crate::mail::AttachmentBoxFuture {
+            Box::pin(async move {
+                let mut backend = choice.instantiate()?;
+                if let Some(default_key) = default_key {
+                    backend.set_auto_key_locate(LocateKey::LOCAL)?;
+                    let keys = backend.keylist(false, Some(default_key.clone()))?.await?;
+                    if keys.is_empty() {
+                        return Err(Error::new(format!(
+                            "Could not locate sign key with ID `{default_key}`"
+                        )));
+                    }
                     sign_keys.extend(keys);
-                } else {
-                    sign_keys = Some(keys);
                 }
-            }
-            if let Some(ref sign_keys) = sign_keys {
                 if sign_keys.is_empty() {
                     return Err(Error::new(
                         "No key was selected for signing; please select one.",
                     ));
                 }
-            }
-            if let Some(default_key) = default_encrypt_key {
-                backend.set_auto_key_locate(LocateKey::LOCAL)?;
-                let keys = backend.keylist(false, Some(default_key.clone()))?.await?;
-                if keys.is_empty() {
-                    return Err(Error::new(format!(
-                        "Could not locate encryption key with ID `{default_key}`"
-                    )));
-                }
-                encrypt_keys.extend(keys);
-            }
-            if encrypt_keys.is_empty() {
-                return Err(Error::new(
-                    "No key was selected for encryption; please select one.",
-                ));
-            }
-            if let Some(encrypt_for_self) = encrypt_for_self {
-                backend.set_auto_key_locate(LocateKey::LOCAL)?;
-                let keys = backend
-                    .keylist(false, Some(encrypt_for_self.to_string()))?
-                    .await?;
-                if keys.is_empty() {
-                    return Err(Error::new(format!(
-                        "Could not locate personal encryption key for address \
-                         `{encrypt_for_self}`"
-                    )));
-                }
-                for key in keys {
-                    if !encrypt_keys.contains(&key) {
-                        encrypt_keys.push(key);
-                    }
-                }
-            }
-            let a: Attachment = if let Some(sign_keys) = sign_keys {
                 let a: Attachment = a.into();
-                let data = melib_pgp::convert_attachment_to_rfc_spec(a.into_raw().as_bytes());
-                let (sig_metadata, sig_bytes) = backend.sign(sign_keys, &data, false)?.await?;
+                let signed_data =
+                    melib_pgp::convert_attachment_to_rfc_spec(a.into_raw().as_bytes());
+                let (sig_metadata, sig_bytes) =
+                    backend.sign(sign_keys, &signed_data, false)?.await?;
                 let sig_attachment =
                     Attachment::new(ContentType::PGPSignature, Default::default(), sig_bytes);
                 let a: AttachmentBuilder = a.into();
                 let parts = vec![a, sig_attachment.into()];
                 let boundary = ContentType::make_boundary(&parts);
+
                 let micalg = sig_metadata.micalg().into_bytes();
-                Attachment::new(
+                Ok(Attachment::new(
                     ContentType::Multipart {
                         boundary: boundary.into_bytes(),
                         kind: MultipartType::Signed,
@@ -352,43 +262,141 @@ pub fn encrypt_filter(
                     Default::default(),
                     vec![],
                 )
-            } else {
-                a.into()
-            };
-            let data = a.into_raw().into_bytes();
+                .into())
+            })
+        },
+    )
+}
 
-            let enc_attachment = {
-                let mut a = Attachment::new(
-                    ContentType::OctetStream {
-                        name: None,
-                        parameters: vec![],
+pub fn encrypt_filter(
+    choice: PGPBackendChoice,
+    encrypt_for_self: Option<melib::Address>,
+    default_sign_key: Option<String>,
+    mut sign_keys: Option<Vec<Key>>,
+    default_encrypt_key: Option<String>,
+    mut encrypt_keys: Vec<Key>,
+) -> Result<impl FnOnce(AttachmentBuilder) -> crate::mail::AttachmentBoxFuture + Send> {
+    Ok(
+        move |a: AttachmentBuilder| -> crate::mail::AttachmentBoxFuture {
+            Box::pin(async move {
+                let mut backend = choice.instantiate()?;
+                if let Some(default_key) = default_sign_key {
+                    backend.set_auto_key_locate(LocateKey::LOCAL)?;
+                    let keys = backend.keylist(true, Some(default_key.clone()))?.await?;
+                    if keys.is_empty() {
+                        return Err(Error::new(format!(
+                            "Could not locate sign key with ID `{default_key}`"
+                        )));
+                    }
+                    if let Some(ref mut sign_keys) = sign_keys {
+                        sign_keys.extend(keys);
+                    } else {
+                        sign_keys = Some(keys);
+                    }
+                }
+                if let Some(ref sign_keys) = sign_keys {
+                    if sign_keys.is_empty() {
+                        return Err(Error::new(
+                            "No key was selected for signing; please select one.",
+                        ));
+                    }
+                }
+                if let Some(default_key) = default_encrypt_key {
+                    backend.set_auto_key_locate(LocateKey::LOCAL)?;
+                    let keys = backend.keylist(false, Some(default_key.clone()))?.await?;
+                    if keys.is_empty() {
+                        return Err(Error::new(format!(
+                            "Could not locate encryption key with ID `{default_key}`"
+                        )));
+                    }
+                    encrypt_keys.extend(keys);
+                }
+                if encrypt_keys.is_empty() {
+                    return Err(Error::new(
+                        "No key was selected for encryption; please select one.",
+                    ));
+                }
+                if let Some(encrypt_for_self) = encrypt_for_self {
+                    backend.set_auto_key_locate(LocateKey::LOCAL)?;
+                    let keys = backend
+                        .keylist(false, Some(encrypt_for_self.to_string()))?
+                        .await?;
+                    if keys.is_empty() {
+                        return Err(Error::new(format!(
+                            "Could not locate personal encryption key for address \
+                         `{encrypt_for_self}`"
+                        )));
+                    }
+                    for key in keys {
+                        if !encrypt_keys.contains(&key) {
+                            encrypt_keys.push(key);
+                        }
+                    }
+                }
+                let a: Attachment = if let Some(sign_keys) = sign_keys {
+                    let a: Attachment = a.into();
+                    let data = melib_pgp::convert_attachment_to_rfc_spec(a.into_raw().as_bytes());
+                    let (sig_metadata, sig_bytes) = backend.sign(sign_keys, &data, false)?.await?;
+                    let sig_attachment =
+                        Attachment::new(ContentType::PGPSignature, Default::default(), sig_bytes);
+                    let a: AttachmentBuilder = a.into();
+                    let parts = vec![a, sig_attachment.into()];
+                    let boundary = ContentType::make_boundary(&parts);
+                    let micalg = sig_metadata.micalg().into_bytes();
+                    Attachment::new(
+                        ContentType::Multipart {
+                            boundary: boundary.into_bytes(),
+                            kind: MultipartType::Signed,
+                            parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
+                            parameters: vec![
+                                (b"micalg".into(), micalg),
+                                (b"protocol".into(), b"\"application/pgp-signature\"".into()),
+                            ],
+                        },
+                        Default::default(),
+                        vec![],
+                    )
+                } else {
+                    a.into()
+                };
+                let data = a.into_raw().into_bytes();
+
+                let enc_attachment = {
+                    let mut a = Attachment::new(
+                        ContentType::OctetStream {
+                            name: None,
+                            parameters: vec![],
+                        },
+                        Default::default(),
+                        backend.encrypt(encrypt_keys, &data)?.await?,
+                    );
+                    a.content_disposition =
+                        ContentDisposition::from(br#"attachment; filename="msg.asc""#);
+                    a
+                };
+                let mut a: AttachmentBuilder = AttachmentBuilder::new(b"Version: 1\n");
+
+                a.set_content_type_from_bytes(b"application/pgp-encrypted");
+                a.set_content_disposition(ContentDisposition::from(b"attachment"));
+                let parts = vec![a, enc_attachment.into()];
+                let boundary = ContentType::make_boundary(&parts);
+                Ok(Attachment::new(
+                    ContentType::Multipart {
+                        boundary: boundary.into_bytes(),
+                        kind: MultipartType::Encrypted,
+                        parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
+                        parameters: vec![(
+                            b"protocol".into(),
+                            b"\"application/pgp-encrypted\"".into(),
+                        )],
                     },
                     Default::default(),
-                    backend.encrypt(encrypt_keys, &data)?.await?,
-                );
-                a.content_disposition =
-                    ContentDisposition::from(br#"attachment; filename="msg.asc""#);
-                a
-            };
-            let mut a: AttachmentBuilder = AttachmentBuilder::new(b"Version: 1\n");
-
-            a.set_content_type_from_bytes(b"application/pgp-encrypted");
-            a.set_content_disposition(ContentDisposition::from(b"attachment"));
-            let parts = vec![a, enc_attachment.into()];
-            let boundary = ContentType::make_boundary(&parts);
-            Ok(Attachment::new(
-                ContentType::Multipart {
-                    boundary: boundary.into_bytes(),
-                    kind: MultipartType::Encrypted,
-                    parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
-                    parameters: vec![(b"protocol".into(), b"\"application/pgp-encrypted\"".into())],
-                },
-                Default::default(),
-                vec![],
-            )
-            .into())
-        })
-    })
+                    vec![],
+                )
+                .into())
+            })
+        },
+    )
 }
 
 impl PGPBackendChoice {
@@ -416,9 +424,7 @@ impl PGPBackendChoice {
 /// Owned, `'static` PGP backend instance.
 pub enum PGPBackendInstance {
     #[cfg(feature = "gpgme")]
-    GpgME {
-        ctx: GpgmeContext,
-    },
+    GpgME { ctx: GpgmeContext },
     CLI {
         auto_key_locate: LocateKey,
         cli: PGPBackendCLI,
@@ -477,24 +483,21 @@ impl PGPBackend for PGPBackendInstance {
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .output()
-                            .chain_err_summary(|| {
-                                format!("Could not launch {get_key_command}")
-                            })?;
+                            .chain_err_summary(|| format!("Could not launch {get_key_command}"))?;
                         if !output.status.success() {
-                            return Err(format!(
-                                "{get_key_command} exited with {output:?}"
-                            )
-                            .into());
+                            return Err(format!("{get_key_command} exited with {output:?}").into());
                         }
                         if let Ok(err) = serde_json::from_slice::<String>(&output.stdout) {
                             return Err(err.into());
                         }
-                        Ok(serde_json::from_slice::<Key>(&output.stdout).map_err(|err| {
-                            format!(
-                                "Could not deserialize key response from \
+                        Ok(
+                            serde_json::from_slice::<Key>(&output.stdout).map_err(|err| {
+                                format!(
+                                    "Could not deserialize key response from \
                                  {get_key_command}: {err}"
-                            )
-                        })?)
+                                )
+                            })?,
+                        )
                     })
                     .await
                 }))
@@ -525,14 +528,9 @@ impl PGPBackend for PGPBackendInstance {
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .output()
-                            .chain_err_summary(|| {
-                                format!("Could not launch {verify_command}")
-                            })?;
+                            .chain_err_summary(|| format!("Could not launch {verify_command}"))?;
                         if !output.status.success() {
-                            return Err(format!(
-                                "{verify_command} exited with {output:?}"
-                            )
-                            .into());
+                            return Err(format!("{verify_command} exited with {output:?}").into());
                         }
                         if let Ok(err) = serde_json::from_slice::<String>(&output.stdout) {
                             return Err(err.into());
@@ -574,14 +572,9 @@ impl PGPBackend for PGPBackendInstance {
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .output()
-                            .chain_err_summary(|| {
-                                format!("Could not launch {verify_command}")
-                            })?;
+                            .chain_err_summary(|| format!("Could not launch {verify_command}"))?;
                         if !output.status.success() {
-                            return Err(format!(
-                                "{verify_command} exited with {output:?}"
-                            )
-                            .into());
+                            return Err(format!("{verify_command} exited with {output:?}").into());
                         }
                         if let Ok(err) = serde_json::from_slice::<String>(&output.stdout) {
                             return Err(err.into());
@@ -629,24 +622,21 @@ impl PGPBackend for PGPBackendInstance {
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .output()
-                            .chain_err_summary(|| {
-                                format!("Could not launch {keylist_command}")
-                            })?;
+                            .chain_err_summary(|| format!("Could not launch {keylist_command}"))?;
                         if !output.status.success() {
-                            return Err(format!(
-                                "{keylist_command} exited with {output:?}"
-                            )
-                            .into());
+                            return Err(format!("{keylist_command} exited with {output:?}").into());
                         }
                         if let Ok(err) = serde_json::from_slice::<String>(&output.stdout) {
                             return Err(err.into());
                         }
-                        Ok(serde_json::from_slice::<Vec<Key>>(&output.stdout).map_err(|err| {
-                            format!(
-                                "Could not deserialize keys response from {keylist_command}: \
+                        Ok(
+                            serde_json::from_slice::<Vec<Key>>(&output.stdout).map_err(|err| {
+                                format!(
+                                    "Could not deserialize keys response from {keylist_command}: \
                                  {err}"
-                            )
-                        })?)
+                                )
+                            })?,
+                        )
                     })
                     .await
                 }))
@@ -687,32 +677,29 @@ impl PGPBackend for PGPBackendInstance {
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .output()
-                            .chain_err_summary(|| {
-                                format!("Could not launch {sign_command}")
-                            })?;
+                            .chain_err_summary(|| format!("Could not launch {sign_command}"))?;
                         if !output.status.success() {
-                            return Err(format!(
-                                "{sign_command} exited with {output:?}"
-                            )
-                            .into());
+                            return Err(format!("{sign_command} exited with {output:?}").into());
                         }
                         if let Ok(err) = serde_json::from_slice::<String>(&output.stdout) {
                             return Err(err.into());
                         }
                         use serde::de::Deserialize;
-                        Ok(serde_json::from_slice::<[serde_json::Value; 2]>(&output.stdout)
-                            .and_then(|[n, b]| {
-                                Ok((
-                                    melib::email::pgp::NewSignature::deserialize(n)?,
-                                    <Vec<u8>>::deserialize(b)?,
-                                ))
-                            })
-                            .map_err(|err| {
-                                format!(
-                                    "Could not deserialize new signature response from \
+                        Ok(
+                            serde_json::from_slice::<[serde_json::Value; 2]>(&output.stdout)
+                                .and_then(|[n, b]| {
+                                    Ok((
+                                        melib::email::pgp::NewSignature::deserialize(n)?,
+                                        <Vec<u8>>::deserialize(b)?,
+                                    ))
+                                })
+                                .map_err(|err| {
+                                    format!(
+                                        "Could not deserialize new signature response from \
                                      {sign_command}: {err}"
-                                )
-                            })?)
+                                    )
+                                })?,
+                        )
                     })
                     .await
                 }))
@@ -745,24 +732,21 @@ impl PGPBackend for PGPBackendInstance {
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .output()
-                            .chain_err_summary(|| {
-                                format!("Could not launch {encrypt_command}")
-                            })?;
+                            .chain_err_summary(|| format!("Could not launch {encrypt_command}"))?;
                         if !output.status.success() {
-                            return Err(format!(
-                                "{encrypt_command} exited with {output:?}"
-                            )
-                            .into());
+                            return Err(format!("{encrypt_command} exited with {output:?}").into());
                         }
                         if let Ok(err) = serde_json::from_slice::<String>(&output.stdout) {
                             return Err(err.into());
                         }
-                        Ok(serde_json::from_slice::<Vec<u8>>(&output.stdout).map_err(|err| {
-                            format!(
-                                "Could not deserialize encryption response from \
+                        Ok(
+                            serde_json::from_slice::<Vec<u8>>(&output.stdout).map_err(|err| {
+                                format!(
+                                    "Could not deserialize encryption response from \
                                  {encrypt_command}: {err}"
-                            )
-                        })?)
+                                )
+                            })?,
+                        )
                     })
                     .await
                 }))
@@ -770,10 +754,7 @@ impl PGPBackend for PGPBackendInstance {
         }
     }
 
-    fn decrypt(
-        &mut self,
-        cipher: &[u8],
-    ) -> ResultFuture<(DecryptionMetadata, Vec<u8>)> {
+    fn decrypt(&mut self, cipher: &[u8]) -> ResultFuture<(DecryptionMetadata, Vec<u8>)> {
         match self {
             #[cfg(feature = "gpgme")]
             Self::GpgME { ctx } => PGPBackend::decrypt(ctx, cipher),
@@ -794,14 +775,9 @@ impl PGPBackend for PGPBackendInstance {
                             .stdout(Stdio::piped())
                             .stderr(Stdio::piped())
                             .output()
-                            .chain_err_summary(|| {
-                                format!("Could not launch {decrypt_command}")
-                            })?;
+                            .chain_err_summary(|| format!("Could not launch {decrypt_command}"))?;
                         if !output.status.success() {
-                            return Err(format!(
-                                "{decrypt_command} exited with {output:?}"
-                            )
-                            .into());
+                            return Err(format!("{decrypt_command} exited with {output:?}").into());
                         }
                         if let Ok(err) = serde_json::from_slice::<String>(&output.stdout) {
                             return Err(err.into());

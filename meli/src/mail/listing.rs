@@ -3283,15 +3283,30 @@ impl Component for Listing {
             return None;
         }
         let Some(view) = self.view.as_ref() else {
-            return Some(HintFocus::NoView);
+            // Layout1: the sidebar or the grid holds the keyboard.
+            return Some(if matches!(self.focus, ListingFocus::Menu) {
+                HintFocus::Sidebar
+            } else {
+                HintFocus::NoView
+            });
         };
-        if self.focus == ListingFocus::View
-            && matches!(view.thread_view_focus(), ThreadViewFocus::MailView)
-        {
-            Some(HintFocus::MailView)
+        Some(if self.focus == ListingFocus::View {
+            if matches!(view.thread_view_focus(), ThreadViewFocus::MailView) {
+                // The mail detail of layout2 (single mail) or layout4.
+                HintFocus::MailView
+            } else {
+                // Layout4's split state: the thread list holds the
+                // keyboard.
+                HintFocus::ThreadList
+            }
+        } else if view.is_single_mail() {
+            // Layout2: single-mail view open, the grid holds the
+            // keyboard.
+            HintFocus::GridSingleMail
         } else {
-            Some(HintFocus::List)
-        }
+            // Layout3: thread view open, the grid holds the keyboard.
+            HintFocus::GridThreads
+        })
     }
 
     fn children(&self) -> IndexMap<ComponentId, &dyn Component> {

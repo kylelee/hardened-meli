@@ -448,9 +448,7 @@ impl EnvelopeView {
                                     inner: Box::new(a.clone()),
                                     display: vec![],
                                 });
-                                log::error!(
-                                    "Could not instantiate PGP backend: {err}"
-                                );
+                                log::error!("Could not instantiate PGP backend: {err}");
                                 return;
                             }
                         };
@@ -520,17 +518,16 @@ impl EnvelopeView {
                                         return;
                                     }
                                 };
-                                let decrypt_fut =
-                                    crate::mail::pgp::decrypt(backend, a.clone());
+                                let decrypt_fut = crate::mail::pgp::decrypt(backend, a.clone());
                                 let handle = main_loop_handler.job_executor.spawn(
                                     "gpg::decrypt".into(),
                                     decrypt_fut,
                                     IsAsync::Blocking,
                                 );
                                 active_jobs.insert(handle.job_id);
-                                main_loop_handler.send(ThreadEvent::UIEvent(
-                                    UIEvent::StatusEvent(StatusEvent::NewJob(handle.job_id)),
-                                ));
+                                main_loop_handler.send(ThreadEvent::UIEvent(UIEvent::StatusEvent(
+                                    StatusEvent::NewJob(handle.job_id),
+                                )));
                                 acc.push(AttachmentDisplay::EncryptedPending {
                                     inner: Box::new(a.clone()),
                                     handle,
