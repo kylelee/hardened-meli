@@ -49,7 +49,7 @@ use melib::{
 use crate::command::actions::AccountAction;
 use crate::{
     conf::{data_types::SearchBackend, AccountConf, FileMailboxConf},
-    jobs::{IsAsync, JobId, JoinHandle},
+    jobs::{IsAsync, JobId},
     types::{ForkedProcess, NotificationType, UIEvent},
     MainLoopHandler, StatusEvent, ThreadEvent,
 };
@@ -1193,97 +1193,6 @@ impl Account {
             },
         );
         Ok(())
-    }
-
-    pub fn send(
-        &mut self,
-        message: String,
-        send_mail: crate::conf::composing::SendMail,
-        #[allow(unused_variables)] complete_in_background: bool,
-    ) -> Result<Option<JoinHandle<Result<()>>>> {
-        use std::{
-            io::Write,
-            process::{Command, Stdio},
-        };
-
-        use crate::conf::composing::SendMail;
-        match send_mail {
-            SendMail::ShellCommand(ref command) => {
-                if command.is_empty() {
-                    return Err(Error::new(
-                        "send_mail shell command configuration value is empty",
-                    ));
-                }
-                let mut msmtp = Command::new("sh")
-                    .args(["-c", command])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start mailer command");
-                {
-                    let stdin = msmtp.stdin.as_mut().expect("failed to open stdin");
-                    stdin
-                        .write_all(message.as_bytes())
-                        .expect("Failed to write to stdin");
-                }
-                let output = msmtp.wait().expect("Failed to wait on mailer");
-                if output.success() {
-                    log::trace!("Message sent.");
-                } else {
-                    let error_message = if let Some(exit_code) = output.code() {
-                        format!(
-                            "Could not send e-mail using `{command}`: Process exited with \
-                             {exit_code}"
-                        )
-                    } else {
-                        format!(
-                            "Could not send e-mail using `{command}`: Process was killed by signal"
-                        )
-                    };
-                    log::error!("{}", error_message);
-                    return Err(Error::new(error_message).set_summary("Message not sent."));
-                }
-                Ok(None)
-            }
-            #[cfg(feature = "smtp")]
-            SendMail::Smtp(conf) => {
-                let handle = self.main_loop_handler.job_executor.spawn(
-                    "smtp".into(),
-                    async move {
-                        let mut smtp_connection =
-                            melib::smtp::SmtpConnection::new_connection(conf).await?;
-                        smtp_connection.mail_transaction(&message, None).await
-                    },
-                    IsAsync::Async,
-                );
-                if complete_in_background {
-                    self.insert_job(handle.job_id, JobRequest::SendMessageBackground { handle });
-                    return Ok(None);
-                } else {
-                    self.insert_job(handle.job_id, JobRequest::SendMessage);
-                }
-                Ok(Some(handle))
-            }
-            SendMail::ServerSubmission => {
-                if self.backend_capabilities.supports_submission {
-                    let job =
-                        self.backend
-                            .lock()
-                            .unwrap()
-                            .submit(message.into_bytes(), None, None)?;
-
-                    let handle = self.main_loop_handler.job_executor.spawn(
-                        "server-submission".into(),
-                        job,
-                        self.is_async(),
-                    );
-                    self.insert_job(handle.job_id, JobRequest::SendMessageBackground { handle });
-                    return Ok(None);
-                }
-                Err(Error::new("Server does not support submission.")
-                    .set_summary("Message not sent."))
-            }
-        }
     }
 
     pub fn send_async(
