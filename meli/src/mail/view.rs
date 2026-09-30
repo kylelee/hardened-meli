@@ -35,7 +35,10 @@ use melib::{
 use smallvec::SmallVec;
 
 use super::*;
-use crate::{accounts::JobRequest, jobs::JobId};
+use crate::{
+    accounts::JobRequest,
+    jobs::{IsAsync, JobId},
+};
 
 mod utils;
 pub use utils::*;
@@ -493,21 +496,35 @@ impl MailView {
                         .main_identity_address()
                         .to_string(),
                 );
-                if let Err(err) = super::compose::send_draft(
-                    ToggleFlag::False,
+                match super::compose::send_draft_async(
+                    #[cfg(feature = "gpgme")]
+                    super::compose::pgp::GpgComposeState::default(),
                     context,
                     coordinates.0,
                     draft,
                     SpecialUsageMailbox::Sent,
                     Flag::SEEN,
-                    true,
                 ) {
-                    context.replies.push_back(UIEvent::Notification {
-                        title: Some("Couldn't send unsubscribe e-mail".into()),
-                        source: None,
-                        body: err.to_string().into(),
-                        kind: Some(NotificationType::Error(err.kind)),
-                    });
+                    Ok(job) => {
+                        let handle = context.main_loop_handler.job_executor.spawn(
+                            "compose::submit".into(),
+                            job,
+                            IsAsync::Blocking,
+                        );
+                        context
+                            .replies
+                            .push_back(UIEvent::StatusEvent(StatusEvent::NewJob(
+                                handle.job_id,
+                            )));
+                    }
+                    Err(err) => {
+                        context.replies.push_back(UIEvent::Notification {
+                            title: Some("Couldn't send unsubscribe e-mail".into()),
+                            source: None,
+                            body: err.to_string().into(),
+                            kind: Some(NotificationType::Error(err.kind)),
+                        });
+                    }
                 }
             }
             UnsubscribeAction::OpenUrl(url_arg) => {
