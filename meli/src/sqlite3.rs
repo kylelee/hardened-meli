@@ -35,7 +35,10 @@ use melib::{
         Query::{self, *},
     },
     smol,
-    utils::sqlite3::{rusqlite::params, DatabaseDescription},
+    utils::sqlite3::{
+        rusqlite::{params, OptionalExtension},
+        DatabaseDescription,
+    },
     Error, Result, ResultIntoError, SortField, SortOrder,
 };
 
@@ -151,9 +154,30 @@ impl AccountCache {
     }
 
     pub async fn insert(
+        acc_name: Arc<str>,
         envelope: Envelope,
         backend: Arc<Mutex<Box<dyn MailBackend>>>,
+    ) -> Result<()> {
+        Self::store(acc_name, None, envelope, backend).await
+    }
+
+    /// Replace an existing cached envelope (e.g. after a rename event)
+    /// instead of the remove + insert dance, keeping the row's identity in
+    /// one transaction.
+    pub async fn update(
         acc_name: Arc<str>,
+        old_hash: EnvelopeHash,
+        envelope: Envelope,
+        backend: Arc<Mutex<Box<dyn MailBackend>>>,
+    ) -> Result<()> {
+        Self::store(acc_name, Some(old_hash), envelope, backend).await
+    }
+
+    async fn store(
+        acc_name: Arc<str>,
+        old_hash: Option<EnvelopeHash>,
+        envelope: Envelope,
+        backend: Arc<Mutex<Box<dyn MailBackend>>>,
     ) -> Result<()> {
         let db_desc = DatabaseDescription {
             identifier: Some(acc_name.to_string().into()),
@@ -203,6 +227,22 @@ impl AccountCache {
                     ))
                 })??
             };
+            if let Some(old_hash) = old_hash {
+                if let Err(err) = tx.execute(
+                    "DELETE FROM envelopes WHERE hash = ?",
+                    params![old_hash.to_be_bytes().to_vec()],
+                ) {
+                    drop(tx);
+                    log::error!(
+                        "Failed to update envelope {}: {err}",
+                        envelope.message_id()
+                    );
+                    return Err(Error::new(format!(
+                        "Failed to update envelope {} {err}",
+                        envelope.message_id()
+                    )));
+                }
+            }
             if let Err(err) = tx
                 .execute(
                     "INSERT OR REPLACE INTO envelopes (account_id, hash, date, _from, _to, cc, \
@@ -261,12 +301,68 @@ impl AccountCache {
                 conn.transaction_with_behavior(melib::rusqlite::TransactionBehavior::Immediate)?;
             if let Err(err) = tx.execute(
                 "DELETE FROM envelopes WHERE hash = ?",
-                params![env_hash.to_be_bytes().to_vec(),],
+                params![env_hash.to_be_bytes().to_vec()],
             ) {
                 drop(tx);
                 log::error!("Failed to remove envelope {env_hash}: {err}");
                 return Err(Error::new(format!(
                     "Failed to remove envelope {env_hash}: {err}"
+                )));
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Update the hash of an envelope in place; if the new hash already has
+    /// a row, drop the old one instead of overwriting it.
+    pub async fn rename(
+        acc_name: Arc<str>,
+        old_hash: EnvelopeHash,
+        new_hash: EnvelopeHash,
+    ) -> Result<()> {
+        let db_desc = DatabaseDescription {
+            identifier: Some(acc_name.to_string().into()),
+            ..DB.clone()
+        };
+        let db_path = db_desc.db_path()?;
+        if !db_path.exists() {
+            return Err(Error::new(format!(
+                "Database hasn't been initialised. Run `reindex {acc_name}` command"
+            )));
+        }
+
+        smol::unblock(move || {
+            let mut conn = db_desc.open_or_create_db()?;
+            let tx =
+                conn.transaction_with_behavior(melib::rusqlite::TransactionBehavior::Immediate)?;
+            let already_exists = {
+                let mut stmt = tx.prepare("SELECT 1 FROM envelopes WHERE hash = ?")?;
+                stmt.query_row(params![new_hash.to_be_bytes().to_vec()], |_| Ok(()))
+                    .optional()?
+                    .is_some()
+            };
+            let result = if already_exists {
+                tx.execute(
+                    "DELETE FROM envelopes WHERE hash = ?",
+                    params![old_hash.to_be_bytes().to_vec()],
+                )
+            } else {
+                tx.execute(
+                    "UPDATE envelopes SET hash = ? WHERE hash = ?",
+                    params![
+                        new_hash.to_be_bytes().to_vec(),
+                        old_hash.to_be_bytes().to_vec()
+                    ],
+                )
+            };
+            if let Err(err) = result {
+                drop(tx);
+                log::error!("Failed to rename envelope {old_hash} to {new_hash}: {err}");
+                return Err(Error::new(format!(
+                    "Failed to rename envelope {old_hash} to {new_hash}: {err}"
                 )));
             }
             tx.commit()?;
