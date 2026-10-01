@@ -24,7 +24,10 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use melib::{email::mailto::Mailto, Flag, SortField, SortOrder};
+use melib::{
+    email::{mailto::Mailto, MessageID},
+    Flag, SortField, SortOrder,
+};
 
 use crate::components::{Component, ComponentId};
 
@@ -56,6 +59,12 @@ pub enum ListingAction {
     MoveTo(MailboxPath),
     MoveToOtherAccount(AccountName, MailboxPath),
     Import(PathBuf, MailboxPath),
+    PublicInboxImport {
+        thread: bool,
+        account: AccountName,
+        mailbox_path: MailboxPath,
+        message_id: MessageID,
+    },
     ExportMbox(Option<melib::mbox::MboxFormat>, PathBuf),
     Delete,
     OpenInNewTab,

@@ -422,3 +422,69 @@ fn test_command_parser_mail_action_disambiguation() {
         Compose(ComposeAction::Forward)
     );
 }
+
+#[test]
+fn test_command_parser_public_inbox_import() {
+    use melib::email::MessageID;
+
+    // Unquoted arguments.
+    let (rest, parsed) =
+        parser::public_inbox_import(b"public-inbox import foo bar message@example.com").unwrap();
+    assert_eq!(rest, b"");
+    assert!(
+        matches!(
+            parsed,
+            Ok(Action::Listing(ListingAction::PublicInboxImport {
+                thread,
+                ref account,
+                ref mailbox_path,
+                ref message_id,
+            })) if (thread, account.as_str(), mailbox_path.as_str(), message_id)
+                == (false, "foo", "bar", &MessageID::new("message@example.com"))
+        ),
+        "{:?}",
+        parsed
+    );
+    // Quoted arguments and bracketed message ID, thread variant.
+    let (rest, parsed) =
+        parser::public_inbox_import(b"public-inbox import-thread foo \"bar\" <message@example.com>")
+            .unwrap();
+    assert_eq!(rest, b"");
+    assert!(
+        matches!(
+            parsed,
+            Ok(Action::Listing(ListingAction::PublicInboxImport {
+                thread,
+                ref account,
+                ref mailbox_path,
+                ref message_id,
+            })) if (thread, account.as_str(), mailbox_path.as_str(), message_id)
+                == (true, "foo", "bar", &MessageID::new("message@example.com"))
+        ),
+        "{:?}",
+        parsed
+    );
+    // Unknown subcommand must report the two possible values.
+    let (rest, parsed) =
+        parser::public_inbox_import(b"public-inbox import-foo foo bar <message@example.com>")
+            .unwrap();
+    assert_eq!(rest, b"");
+    assert_eq!(
+        parsed.unwrap_err().to_string(),
+        "Bad value/argument: import-foo. Possible values are: import, import-thread"
+    );
+    // Routed through the general command parser as well.
+    assert_eq!(
+        parse_command(b"public-inbox import foo bar <message@example.com>").unwrap(),
+        Action::Listing(ListingAction::PublicInboxImport {
+            thread: false,
+            account: "foo".to_string(),
+            mailbox_path: "bar".to_string(),
+            message_id: MessageID::new("<message@example.com>"),
+        }),
+    );
+    // Missing arguments fail to parse.
+    assert!(parse_command(b"public-inbox import foo").is_err());
+    // Trailing junk after the message ID fails to parse.
+    assert!(parse_command(b"public-inbox import foo bar <m@example.com> baz").is_err());
+}

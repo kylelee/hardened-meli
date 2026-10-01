@@ -826,9 +826,8 @@ pub trait MailListingTrait: ListingTrait {
                 ListingAction::SendToTrash => {
                     use melib::backends::SpecialUsageMailbox;
 
-                    let Some(trash_mbox_hash) = account
-                        .special_use_mailbox(SpecialUsageMailbox::Trash)
-                        .or_else(|| account.special_use_mailbox(SpecialUsageMailbox::Junk))
+                    let Some(trash_mbox_hash) =
+                        account.special_use_mailbox(SpecialUsageMailbox::Trash)
                     else {
                         context.replies.push_back(UIEvent::Notification {
                             title: Some("Could not send mail to trash".into()),
@@ -2391,6 +2390,154 @@ impl Component for Listing {
                                     kind: Some(NotificationType::Error(err.kind)),
                                 });
                             }
+                            return true;
+                        }
+                        Action::Listing(ListingAction::PublicInboxImport {
+                            thread,
+                            account,
+                            mailbox_path,
+                            message_id,
+                        }) => {
+                            let (a, m): (AccountHash, MailboxHash) = match context
+                                .accounts
+                                .iter()
+                                .position(|(_, acc)| acc.name() == account)
+                                .ok_or_else(|| {
+                                    Error::new(format!("Account {account} was not found."))
+                                        .set_kind(ErrorKind::NotFound)
+                                })
+                                .and_then(|account_index| {
+                                    Ok((
+                                        context.accounts[account_index].hash,
+                                        context.accounts[account_index]
+                                            .mailbox_by_path(mailbox_path)?,
+                                    ))
+                                }) {
+                                Ok((a, m)) => (a, m),
+                                Err(err) => {
+                                    context.replies.push_back(UIEvent::Notification {
+                                        title: None,
+                                        source: Some(err),
+                                        body: "Could not import e-mail from public-inbox".into(),
+                                        kind: Some(NotificationType::Error(ErrorKind::None)),
+                                    });
+                                    return true;
+                                }
+                            };
+                            let (sender, mut receiver) = crate::jobs::oneshot::channel::<Vec<Mail>>();
+                            #[cfg(not(feature = "http"))]
+                            let fut = async move {
+                                _ = sender;
+                                Err(Error::new(
+                                    "meli is not compiled with HTTP support (required for \
+                                     accessing public-inbox)",
+                                )
+                                .set_kind(ErrorKind::NotSupported))
+                            };
+                            #[cfg(feature = "http")]
+                            let fut = {
+                                let thread = *thread;
+                                let message_id = message_id.clone();
+                                async move {
+                                    use melib::utils::patch_retrieve::{
+                                        PatchSource, PublicInboxHTTP,
+                                    };
+                                    let lore = PublicInboxHTTP::new("https://lore.kernel.org")?;
+                                    if thread {
+                                        let msgs = lore.fetch_thread("all", message_id)?.await?;
+                                        _ = sender.send(msgs);
+                                    } else {
+                                        let msg = lore.fetch("all", message_id)?.await?;
+                                        _ = sender.send(vec![msg]);
+                                    }
+                                    Ok(())
+                                }
+                            };
+                            let handle = context.main_loop_handler.job_executor.spawn(
+                                "public-inbox-import".into(),
+                                fut,
+                                IsAsync::Async,
+                            );
+                            let on_finish = CallbackFn(Box::new({
+                                move |context: &mut Context| {
+                                    let Ok(Some(msgs)) = receiver.try_recv() else {
+                                        return;
+                                    };
+                                    if msgs.is_empty() {
+                                        return;
+                                    }
+                                    let question = format!(
+                                        "Import {num} e-mail{plural}?",
+                                        num = msgs.len(),
+                                        plural = if msgs.len() == 1 { "" } else { "s" }
+                                    );
+                                    let on_confirm_cb = Box::new(
+                                        move |_: ComponentId, result: bool| {
+                                            if !result {
+                                                return None;
+                                            }
+                                            Some(UIEvent::Callback(CallbackFn(Box::new(
+                                                move |context: &mut Context| {
+                                                    let Some(account) =
+                                                        context.accounts.get_mut(&a)
+                                                    else {
+                                                        return;
+                                                    };
+                                                    for msg in msgs {
+                                                        if let Err(err) =
+                                                            account.save(&msg.bytes, m, None)
+                                                        {
+                                                            context.replies.push_back(
+                                                                UIEvent::Notification {
+                                                                    title: None,
+                                                                    source: Some(err),
+                                                                    body: "Could not import \
+                                                                           e-mail from \
+                                                                           public-inbox"
+                                                                        .into(),
+                                                                    kind: Some(
+                                                                        NotificationType::Error(
+                                                                            ErrorKind::None,
+                                                                        ),
+                                                                    ),
+                                                                },
+                                                            );
+                                                            return;
+                                                        }
+                                                    }
+                                                },
+                                            ))))
+                                        },
+                                    );
+                                    context.replies.push_back(UIEvent::GlobalUIDialog {
+                                        value: Box::new(UIConfirmationDialog::new(
+                                            question,
+                                            vec![
+                                                (true, "yes".to_string()),
+                                                (false, "no".to_string()),
+                                            ],
+                                            true,
+                                            Some(on_confirm_cb),
+                                            context,
+                                        )),
+                                        parent: None,
+                                    });
+                                }
+                            }));
+                            context.accounts[&a].insert_job(
+                                handle.job_id,
+                                JobRequest::Generic {
+                                    name: format!(
+                                        "{message_id}{thread} import",
+                                        thread = if *thread { " thread " } else { "" }
+                                    )
+                                    .into(),
+                                    handle,
+                                    on_finish: Some(on_finish),
+                                    log_level: LogLevel::INFO,
+                                },
+                            );
+
                             return true;
                         }
                         Action::Listing(a @ ListingAction::SetSeen)
@@ -5790,6 +5937,77 @@ mod listing_menu_tests {
         .expect("bare term must scan")
         .envelopes;
         assert_eq!(results.len(), 1, "bare term must match the solo subject");
+    }
+
+    /// Regression: searching on top of an existing filter must search the
+    /// whole mailbox, not just the rows the previous filter left on screen.
+    /// The first search narrows the visible row set to the solo mail; the
+    /// second search must still reach the chain root outside it.
+    #[test]
+    fn filter_on_top_of_filter_searches_whole_mailbox() {
+        for style in [
+            IndexStyle::Conversations,
+            IndexStyle::Compact,
+            IndexStyle::Plain,
+            IndexStyle::Threaded,
+        ] {
+            let mut ctx = mock_context();
+            let mut listing = pane_chain_setup(&mut ctx);
+            listing.set_index_style(style, &mut ctx);
+
+            let theme_default = crate::conf::value(&ctx, "theme_default");
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            assert!(screen.resize(80, 24));
+            let area = screen.area();
+            // Draw once so the freshly switched component has its rows/state
+            // initialized before filtering.
+            listing.set_dirty(true);
+            listing.draw(screen.grid_mut(), area, &mut ctx);
+
+            let account_hash = *ctx.accounts.iter().next().unwrap().0;
+            let sort = (melib::SortField::Date, melib::SortOrder::Desc);
+            let (_account_hash, mailbox_hash) = listing.component.coordinates();
+
+            // First search: only the solo mail matches; the row set shrinks
+            // to its thread.
+            let results = futures::executor::block_on(
+                ctx.accounts[&account_hash]
+                    .search("from:s@x.example", false, sort, mailbox_hash)
+                    .expect("first query must parse"),
+            )
+            .expect("first query must scan")
+            .envelopes;
+            assert_eq!(results.len(), 1, "{style:?}: solo precondition");
+            listing.component.filter("from:s@x.example".to_string(), results, &ctx);
+            listing.draw(screen.grid_mut(), area, &mut ctx);
+
+            // Second search: the chain root is not in the narrowed row set,
+            // yet the search must still find it in the mailbox.
+            let results = futures::executor::block_on(
+                ctx.accounts[&account_hash]
+                    .search("from:a@b.example", false, sort, mailbox_hash)
+                    .expect("second query must parse"),
+            )
+            .expect("second query must scan")
+            .envelopes;
+            assert_eq!(results.len(), 1, "{style:?}: root precondition");
+            listing.component.filter("from:a@b.example".to_string(), results, &ctx);
+            listing.draw(screen.grid_mut(), area, &mut ctx);
+
+            let rendered: String = (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| screen.grid()[(x, y)].ch())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                rendered.contains("1 results for `from:a@b.example`"),
+                "{style:?}: a search on top of a filter must cover the whole \
+                 mailbox, not the previous filter's row set; screen was:\n{rendered}"
+            );
+        }
     }
 
     /// Layout2 grid ⇄ mail view with Left/Right; Left from the grid closes
