@@ -1164,3 +1164,48 @@ fn test_jmap_wrong_method_name_is_protocol_error() {
         ErrorKind::ProtocolError
     );
 }
+
+/// The account-level `trace` option must parse and default to off: it
+/// replaced the per-protocol protocol-dump cargo features as the switch for
+/// protocol-level connection dumps.
+#[test]
+fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
+    use super::JmapServerConf;
+    use crate::AccountSettings;
+
+    let account = AccountSettings {
+        name: "test".to_string(),
+        root_mailbox: String::new(),
+        format: "jmap".to_string(),
+        identity: "user@example.com".to_string(),
+        extra_identities: vec![],
+        read_only: false,
+        display_name: None,
+        subscribed_mailboxes: vec![],
+        mailboxes: indexmap::indexmap! {},
+        manual_refresh: false,
+        extra: indexmap::indexmap! {
+            "server_url".to_string() => "https://jmap.example.com".to_string(),
+            "server_username".to_string() => "user".to_string(),
+            "server_password".to_string() => "password".to_string(),
+        },
+    };
+
+    // Absent `trace` defaults to off.
+    let conf = JmapServerConf::new(&account).unwrap();
+    assert!(!conf.trace);
+
+    // `trace = true` is accepted and stored.
+    let mut account = account.clone();
+    account
+        .extra
+        .insert("trace".to_string(), "true".to_string());
+    let conf = JmapServerConf::new(&account).unwrap();
+    assert!(conf.trace);
+
+    // Invalid values are rejected.
+    account
+        .extra
+        .insert("trace".to_string(), "not-a-bool".to_string());
+    assert!(JmapServerConf::new(&account).is_err());
+}

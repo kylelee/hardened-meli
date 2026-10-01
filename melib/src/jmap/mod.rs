@@ -140,6 +140,7 @@ pub struct JmapServerConf {
     pub server_username: String,
     pub server_password: String,
     pub use_token: bool,
+    pub trace: bool,
     pub danger_accept_invalid_certs: bool,
     pub timeout: Option<Duration>,
 }
@@ -212,6 +213,7 @@ impl JmapServerConf {
             server_username: get_conf_val!(s["server_username"], String, "a string")?,
             server_password: s.server_password()?,
             use_token,
+            trace: get_conf_val!(s["trace"], false, "true or false")?,
             danger_accept_invalid_certs: get_conf_val!(
                 s["danger_accept_invalid_certs"],
                 false,
@@ -1709,6 +1711,7 @@ impl JmapType {
         get_conf_val!(s["server_username"])?;
 
         get_conf_val!(s["use_token"], false, "true or false")?;
+        get_conf_val!(s["trace"], false, "true or false")?;
         // either of these two needed
         get_conf_val!(s["server_password"])
             .or_else(|_| get_conf_val!(s["server_password_command"]))?;
