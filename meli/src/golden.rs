@@ -1007,6 +1007,7 @@ fn stale_listing_row_is_skipped_without_fabricating_content() {
         *account
             .collection
             .get_mailbox(inbox_hash)
+            .expect("golden corpus mailbox exists")
             .iter()
             .next()
             .unwrap()
@@ -1488,7 +1489,8 @@ fn golden_two_mail_thread_view(
     let thread_group = {
         let threads = context.accounts[&account_hash]
             .collection
-            .get_threads(mailbox_hash);
+            .get_threads(mailbox_hash)
+            .expect("test fixture inserted mail into the mailbox threads");
         threads.find_group(threads.envelope_to_thread[&root_hash])
     };
     ThreadView::new(
@@ -3276,6 +3278,7 @@ fn statusbar_counts_from_collection() {
         account
             .collection
             .get_mailbox(inbox_hash)
+            .expect("golden corpus mailbox exists")
             .iter()
             .copied()
             .find(|h| {
@@ -3326,6 +3329,7 @@ fn statusbar_counts_from_collection() {
         account
             .collection
             .get_mailbox(inbox_hash)
+            .expect("golden corpus mailbox exists")
             .iter()
             .copied()
             .find(|h| {
@@ -3422,6 +3426,7 @@ fn statusbar_counts_initial_fetch_absorbed() {
         account
             .collection
             .get_mailbox(inbox_hash)
+            .expect("golden corpus mailbox exists")
             .iter()
             .copied()
             .find(|h| {

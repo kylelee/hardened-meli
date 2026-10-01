@@ -380,7 +380,7 @@ fn test_sqlite3_reindex() {
             .clone()
             .into_iter()
             .collect::<HashSet<EnvelopeHash>>(),
-        *collection.get_mailbox(root_mailbox_hash)
+        *collection.get_mailbox(root_mailbox_hash).expect("mailbox")
     );
     eprintln_ok();
     eprint_step!(
@@ -414,6 +414,7 @@ fn test_sqlite3_reindex() {
             .collect::<HashSet<EnvelopeHash>>(),
         collection
             .get_mailbox(root_mailbox_hash)
+            .expect("mailbox")
             .clone()
             .into_iter()
             .filter_map(|env_hash| collection.get_env(env_hash).map(|env| (*env).clone()))
