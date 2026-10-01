@@ -92,7 +92,7 @@ impl Contacts {
 
     pub fn with_account(s: &crate::conf::AccountSettings) -> Self {
         let mut ret = Self::new(s.name.clone());
-        if let Some(mutt_alias_file) = s.extra.get("mutt_alias_file") {
+        if let Some(mutt_alias_file) = s.extra.get("mutt_alias_file").and_then(|v| v.as_str()) {
             match std::fs::read_to_string(Path::new(mutt_alias_file).expand())
                 .map_err(|err| err.to_string())
                 .and_then(|contents| {

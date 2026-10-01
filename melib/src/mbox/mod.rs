@@ -1252,7 +1252,7 @@ impl MailBackend for MboxType {
 
 macro_rules! get_conf_val {
     ($s:ident[$var:literal]) => {
-        $s.extra.get($var).ok_or_else(|| {
+        $s.extra.get($var).and_then(|v| v.as_str()).ok_or_else(|| {
             Error::new(format!(
                 "Configuration error ({}): mbox backend requires the field `{}` set",
                 $s.name.as_str(),
@@ -1263,6 +1263,7 @@ macro_rules! get_conf_val {
     ($s:ident[$var:literal], $default:expr) => {
         $s.extra
             .get($var)
+            .and_then(|v| v.as_str())
             .map(|v| {
                 <_>::from_str(v).map_err(|e| {
                     Error::new(format!(
@@ -1352,14 +1353,14 @@ impl MboxType {
         );
         /* Look for other mailboxes */
         for (k, f) in s.mailboxes.iter() {
-            let Some(path_str) = f.extra.get("path") else {
+            let Some(path_str) = f.extra.get("path").map(String::as_str) else {
                 return Err(Error::new(format!(
                     "mbox mailbox configuration entry \"{k}\" should have a \"path\" value set \
                      pointing to an mbox file."
                 )));
             };
-            let format = if let Some(format_str) = f.extra.get("format") {
-                if format_str.as_str() == "auto" {
+            let format = if let Some(format_str) = f.extra.get("format").map(String::as_str) {
+                if format_str == "auto" {
                     MboxFormat::default()
                 } else {
                     MboxFormat::from_str(format_str).wrap_err(|| {
@@ -1421,17 +1422,27 @@ impl MboxType {
     pub fn validate_config(s: &mut AccountSettings) -> Result<()> {
         macro_rules! get_conf_val {
             ($s:ident[$var:literal]) => {
-                $s.extra.swap_remove($var).ok_or_else(|| {
-                    Error::new(format!(
-                        "Configuration error ({}): mbox backend requires the field `{}` set",
-                        $s.name.as_str(),
-                        $var
-                    ))
-                })
+                $s.extra
+                    .swap_remove($var)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "Configuration error ({}): mbox backend requires the field `{}` set",
+                            $s.name.as_str(),
+                            $var
+                        ))
+                    })
             };
             ($s:ident[$var:literal], $default:expr) => {
                 $s.extra
                     .swap_remove($var)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => None,
+                    })
                     .map(|v| {
                         <_>::from_str(&v).map_err(|e| {
                             Error::new(format!(
