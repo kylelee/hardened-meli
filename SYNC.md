@@ -38,6 +38,58 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## Sync log
 
+## 2026-10-01 21:30 (UTC+8)
+
+- Method: semantic port on seven parallel worktree branches (batch 1: `t1-mailcap`, `t3-notmuch`, `t4-melib-fixes`, `t5-trace-flag`, `t6-listing-compose`, `t7-contrib-gpg`; batch 2 after batch-1 merge: `t2-secret`)
+- Upstream range: `bb6d5916..253ba7dd` (40 commits; 6 SKIPped/partial — see table)
+- Merge commits: `96c35621` (t7), `c7e0745c` (t1), `9cfbcd80` (t6), `eb44b9ac` (t4), `bf84926b` (t3), `1b568f27` (t5), `0fcd631d` (t2)
+- Conflicts: `meli/src/mail/listing/conversations.rs` `filter()` only — combined t4's `get_threads` Option-ization with t6's counter-tuple reduction (restriction removal)
+- Acceptance fixes during merge: `e5c9b3c0` + `ac9dc1a7` (clippy 1.98 new-lint compliance), `9a33ac65` (list-unsubscribe test realigned with the async `send_draft_async` job path — stale assertion pre-existing on `5a04bc0d`, reproduced on detached base), `92f06575` (extra fields moved from `serde_json::Map` + `preserve_order` feature to `IndexMap` — the feature had silently changed JMAP wire key order and broke `test_jmap_query`; upstream uses `IndexMap` without the feature), plus the `decl_version_map` doc example updated for `v0_10_0`
+- Verification: `make check`, `make lint`, `make test` all green (all features, 0 warnings)
+
+| Local commit | Upstream commit | Kind | Type | Notes |
+| --- | --- | --- | --- | --- |
+| `705de33c` | `0d4b0bf9` | port+deviation | refactor(meli) | `ProcessRequest` struct + `temporary_files: Vec<Arc<File>>`; fork keeps the files alive until after `result_cb` (upstream's wildcard binding drops them before the process runs) |
+| `f8c11e21` | `c8cad6fb` | port | fix(meli) | exit-status check on the `spawn: None` branch; the `spawn: Some` branch was already in the fork |
+| `31f87da4` | `253ba7dd` | port+deviation | feat(meli) | full RFC 1524 mailcap engine (all fields, `MailcapParser`, `run_candidates`, upstream test suite); fork hardening replayed: POSIX single-quote shell quoting for every substituted value (`%t`, `%{param}`, paths), unknown `%` sequences → `Error` (upstream panics), nametemplate bounds bug fixed, malformed entries skipped individually (upstream skips the whole label) |
+| `e61a8b1f` | `2309c167` | port | fix(meli) | `sanitize_filename` narrows punctuation stripping to `!"'/\`; boundary tests added |
+| `3646287b` | `2ca62c90` | port | refactor(melib) | `Drop` moved to `DbPointer` (owns `Arc<NotmuchLibrary>`), `DbConnection` is `Clone`; debug_assert `expect` panic paths removed |
+| `035223be` | `05a08b6c` | port+deviation | fix(melib) | refresh diffs current vs snapshot tags/existence → precise `RefreshEvent`s; `LazyCountSet` counters; fork deviation: `mailboxes.get()+continue` instead of map-index panic, `let-else` Err returns in set_flags/NotmuchOp |
+| `f3f8fa42` | `0d7e1532` | port+deviation | refactor(melib) | `MailboxCounters` single mutex for imap+notmuch; fork's cache-first paging, ghost cleanup and watch compensation preserved; jmap/maildir/nntp double-lock sites NOT migrated (deferred — see debt) |
+| `b612ca4c` | `57e60bec` | port | fix(melib) | notmuch search terms combined with `AND` (upstream #766) |
+| `4ba5328e` | `09c6d05c` | port | perf(melib) | fetch chunk 250→1000 |
+| `934b8838` | `3a19fe2e` | port | refactor(melib) | `ignore_not_found` promoted to `melib::error` |
+| `dacdd4b3` | `ee38e475` | port+deviation | perf(meli) | `AccountCache::update`/rename in place; insert/update share a private `store()` helper; fork's `account_id` hardening kept, `?` chains instead of upstream `unwrap` |
+| `4695f051` | `d45ea5fe` | port+deviation | fix(melib) | `get_mailbox`/`get_threads` return `Option` (fork's `get_env` already did); upstream's compose/view signature refactor not needed (fork already adapted) |
+| `23d930f2` | `34e40e0e` | port+deviation | fix(melib) | maildir user actions emit events directly; fork's "no filesystem IO under the cache lock" discipline and concurrent-modification reconcile preserved |
+| `8715f27a` | `6429fccc`+`d75d3be8` | **2:1** port+deviation | feat(conf) | per-account `trace` replaces `{imap,jmap,nntp,smtp}-trace` features; fork keeps `debug-tracing` (./log/) and `to_str!`; connection-id logging follows fork's scheme; `test_trace_redact_*` redaction suite stays green |
+| `4f4153b1` | `e4565617` | port | fix(meli) | Junk no longer a Trash fallback |
+| `ca826d98` | `2b86929b` | port | fix(meli) | search over a filter hits the whole mailbox (fork had the same bug in all four listing kinds); `filter_on_top_of_filter_searches_whole_mailbox` regression test, red-verified |
+| `c39d9313` | `2d7fa2fa` | port+deviation | feat(command) | `public-inbox import`/`import-thread` from lore.kernel.org; fork parser is byte-oriented, confirmation flows via `UIEvent::Callback` (fork dialogs lack a context-taking done_fn), palette + docs + parser tests |
+| `492f72eb` | `7fe6cc1e`+`0ef78a0d`+`78eb0d5e`+`bb17a5bc` | **4:1** port | feat(compose) | multi-address autocomplete (parse valid prefix, complete last segment, dedupe), `Contacts::search` → `Card`, `From<Card> for Address`, fields submodule + `test_compose_address_complete` port |
+| `ab257c5a` | `a7c98b05`+`547f600e` | **2:1** port+deviation | fix(contrib) | Python 3.9 compat + stderr in error JSON; deviation: upstream's rewritten `hash_algo = str(other)` NameError bug fixed (`str(hash_algo)`) |
+| `d7fb255a` | `f6ddf9a4` | port | feat(melib) | `ExtraSetting` trait (+`Secret::prepopulate`) |
+| `a0ced034` | `97a08539` | port+deviation | feat(conf) | extra fields as values; acceptance fix `92f06575` settled on `IndexMap<String, serde_json::Value>` (upstream's shape) after `serde_json::Map` + `preserve_order` broke JMAP wire key order |
+| `ecba109b` | `254cee97` | port+deviation | feat(melib) | `Secret` for all server personal fields, resolved at the last moment before auth bytes; fork's password-command error hygiene moved into `Secret::value`; oauth2 validation equivalent; `server_password_command` rejected at validate with migration hint |
+| `b9434a12` | `483f0629` | port+deviation | feat(meli) | `ServerPasswordCommand` migration hung on new `v0_10_0` (fork's `v0_9_0` is released and content-diverges from upstream's); `is_applicable` via `get_included_configs` + raw contains; crate version bumped to 0.10.0 |
+| — | `266b918a` | **SKIP** | refactor(ui) | Selector done-callback context — fork dialogs rewritten (UI) |
+| — | `59ffaaeb` | **SKIP** | refactor | `RowsState` generic removal — pure internal, fork listing rewritten |
+| — | `facc045c` | **SKIP** | refactor | `to_str!` removal — fork's tolerant IMAP parser still uses it |
+| — | `9ff2e38e` | **SKIP** | fix | `change_log_level` max-level — fork already has it (with explanatory comment) |
+| — | `41b547c6` | **SKIP** | test | mock-config TRACE — fork test infra differs |
+| — | `63894a9c` | **SKIP** | test | `new_mock` env reset — fork has its own hermetic XDG helpers per test |
+| — | `05dde1d2` | **partial SKIP** | chore | obsolete-macro half subsumed by the `d75d3be8` port; fork keeps the `debug-tracing` cargo feature (./log/ file logging) — docs updated to describe both layers |
+
+- Debt register (carried over + new):
+  - FilterOutputMetadata not ported (decryption recipients / per-filter signature status display) — align on fork's SignedVerified pipeline within 1-2 syncs *(from 2026-09-14)*
+  - filters.rs ViewFilter path does not trigger cleartext verification *(from 2026-09-14)*
+  - imap test-infra fork: upstream imap test commits must be reimplemented *(from 2026-09-14)*
+  - sqlite3 search backend ignores raw_search (upstream quirk, verbatim) *(from 2026-09-14)*
+  - Upstream command-completion framework not ported; watch future upstream `meli/src/command/**` commits for non-UI fixes *(from 2026-09-28)*
+  - `mailbox_changed` SSE branch implemented but not exercised by the mock server *(from 2026-09-28)*
+  - jmap/maildir/nntp double-lock counters not migrated to `MailboxCounters` (upstream `0d7e1532` touched them too; fork deferred to keep this sync's blast radius at backends+imap+notmuch) *(new 2026-10-01)*
+  - `test_jmap_watch` flaked once under full-suite parallel load (SSE mock deadline sensitivity); deterministic in isolation and in the jmap suite — revisit if CI flakes *(new 2026-10-01)*
+
 ## 2026-09-28 03:47 (UTC+8)
 
 - Method: semantic port on four parallel worktree branches (`t1-melib-conf-fixes` small melib/conf fixes, `t2-pgp-backends` PGP backends, `t3-jmap-eventsource` JMAP push, `t4-compose-notify-fixes` compose/notify fixes)

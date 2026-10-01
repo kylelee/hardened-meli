@@ -38,6 +38,58 @@ git fetch upstream
 
 ## 同步记录
 
+## 2026-10-01 21:30 (UTC+8)
+
+- 同步方式：七个并行 worktree 分支语义移植（批次一：`t1-mailcap`、`t3-notmuch`、`t4-melib-fixes`、`t5-trace-flag`、`t6-listing-compose`、`t7-contrib-gpg`；批次一合并后批次二：`t2-secret`）
+- 上游区间：`bb6d5916..253ba7dd`（40 个提交；6 个 SKIP/部分跳过——见下表）
+- 合并提交：`96c35621`（t7）、`c7e0745c`（t1）、`9cfbcd80`（t6）、`eb44b9ac`（t4）、`bf84926b`（t3）、`1b568f27`（t5）、`0fcd631d`（t2）
+- 冲突：仅 `meli/src/mail/listing/conversations.rs` 的 `filter()`——t4 的 `get_threads` Option 化与 t6 的计数元组精简（限制移除）合并
+- 合并期验收修复：`e5c9b3c0` + `ac9dc1a7`（clippy 1.98 新增规则合规）、`9a33ac65`（退订测试对齐异步 `send_draft_async` job 路径——旧断言为 `5a04bc0d` 上的存量问题，已在 detached 基线复现）、`92f06575`（extra 字段由 `serde_json::Map` + `preserve_order` 特性改为 `IndexMap`——该特性悄悄改变了 JMAP 线上键序并破坏 `test_jmap_query`；上游本就用 `IndexMap` 且不开该特性）、`decl_version_map` 文档示例补 `v0_10_0` 条目
+- 验证：`make check`、`make lint`、`make test` 全绿（全 feature，0 告警）
+
+| 本地提交 | 上游提交 | 类别 | 类型 | 说明 |
+| --- | --- | --- | --- | --- |
+| `705de33c` | `0d4b0bf9` | port+deviation | refactor(meli) | `ProcessRequest` 结构体 + `temporary_files`；fork 让文件存活到 `result_cb` 之后（上游通配绑定在进程运行前就 drop） |
+| `f8c11e21` | `c8cad6fb` | port | fix(meli) | `spawn: None` 分支补退出码检查；`spawn: Some` 分支 fork 本就有 |
+| `31f87da4` | `253ba7dd` | port+deviation | feat(meli) | RFC 1524 完整引擎（全字段、`MailcapParser`、`run_candidates`、上游测试套）；重放 fork 加固：全部替换值 POSIX 单引号 shell 引用、未知 `%` 序列返回 `Error`（上游 panic）、nametemplate 越界修正、坏条目逐条跳过（上游跳整个 label） |
+| `e61a8b1f` | `2309c167` | port | fix(meli) | `sanitize_filename` 标点清洗收窄为 `!"'/\`；补边界测试 |
+| `3646287b` | `2ca62c90` | port | refactor(melib) | `Drop` 移到 `DbPointer`（持 `Arc<NotmuchLibrary>`），`DbConnection` 可 `Clone`；顺带消除 debug_assert expect panic 路径 |
+| `035223be` | `05a08b6c` | port+deviation | fix(melib) | refresh 对比新旧 tags/存在性发精确 `RefreshEvent`；`LazyCountSet` 计数；偏差：`mailboxes.get()+continue` 替代 map 索引 panic、set_flags/NotmuchOp 用 let-else 返错 |
+| `f3f8fa42` | `0d7e1532` | port+deviation | refactor(melib) | imap+notmuch 单锁 `MailboxCounters`；fork 的 cache-first 分页、ghost 清理、watch 补偿保留；jmap/maildir/nntp 双锁站点未迁移（见债务） |
+| `b612ca4c` | `57e60bec` | port | fix(melib) | notmuch 搜索词 `AND` 组合（上游 #766） |
+| `4ba5328e` | `09c6d05c` | port | perf(melib) | 抓取分块 250→1000 |
+| `934b8838` | `3a19fe2e` | port | refactor(melib) | `ignore_not_found` 提为 `melib::error` 公共函数 |
+| `dacdd4b3` | `ee38e475` | port+deviation | perf(meli) | `AccountCache::update`/rename 原地更新；insert/update 共享私有 `store()`；保留 fork `account_id` 加固，`?` 链替代上游 `unwrap` |
+| `4695f051` | `d45ea5fe` | port+deviation | fix(melib) | `get_mailbox`/`get_threads` Option 化（fork `get_env` 已是）；上游 compose/view 签名重构不需要（fork 已适配） |
+| `23d930f2` | `34e40e0e` | port+deviation | fix(melib) | maildir 用户操作直发事件；保留「缓存锁下不做文件系统 IO」纪律与并发修改对账 |
+| `8715f27a` | `6429fccc`+`d75d3be8` | **2:1** port+deviation | feat(conf) | 账户级 `trace` 替代四个 -trace 特性；fork 保留 `debug-tracing`（./log/）与 `to_str!`；连接 id 日志沿用 fork 方案；`test_trace_redact_*` 脱敏套件保持绿 |
+| `4f4153b1` | `e4565617` | port | fix(meli) | Trash 不再回退 Junk |
+| `ca826d98` | `2b86929b` | port | fix(meli) | 过滤态再搜索查全邮箱（fork 四种 listing 同病）；回归测试 `filter_on_top_of_filter_searches_whole_mailbox` 红绿验证 |
+| `c39d9313` | `2d7fa2fa` | port+deviation | feat(command) | `public-inbox import`/`import-thread`（lore.kernel.org）；fork parser 字节流签名、确认经 `UIEvent::Callback`（fork 对话框 done_fn 无 context 参数）、补全表+文档+parser 测试 |
+| `492f72eb` | `7fe6cc1e`+`0ef78a0d`+`78eb0d5e`+`bb17a5bc` | **4:1** port | feat(compose) | 多地址补全（解析合法前缀、仅补末段、去重）、`Contacts::search` 返 `Card`、`From<Card> for Address`、fields 子模块与 `test_compose_address_complete` |
+| `ab257c5a` | `a7c98b05`+`547f600e` | **2:1** port+deviation | fix(contrib) | Python 3.9 兼容 + 错误 JSON stderr；偏差：修复上游 `hash_algo = str(other)` 的 NameError bug（改 `str(hash_algo)`） |
+| `d7fb255a` | `f6ddf9a4` | port | feat(melib) | `ExtraSetting` trait（+`Secret::prepopulate`） |
+| `a0ced034` | `97a08539` | port+deviation | feat(conf) | extra 值化；验收修复 `92f06575` 定型为 `IndexMap<String, serde_json::Value>`（上游形态）——`serde_json::Map` + `preserve_order` 曾破坏 JMAP 线上键序 |
+| `ecba109b` | `254cee97` | port+deviation | feat(melib) | 全部 server 个人字段 `Secret` 化、认证字节组装前最后刻求值；fork 的密码命令错误卫生迁入 `Secret::value`；oauth2 等价校验；`server_password_command` 校验期拒绝并提示迁移 |
+| `b9434a12` | `483f0629` | port+deviation | feat(meli) | `ServerPasswordCommand` 迁移挂新 `v0_10_0`（fork `v0_9_0` 已发布且与上游内容不同）；`is_applicable` 用 `get_included_configs` + raw contains；crate 版本升至 0.10.0 |
+| — | `266b918a` | **SKIP** | refactor(ui) | Selector 回调传 context——fork 对话框已重写（UI） |
+| — | `59ffaaeb` | **SKIP** | refactor | RowsState 去泛型——纯内部重构，fork listing 已重写 |
+| — | `facc045c` | **SKIP** | refactor | 删 `to_str!`——fork 容错 IMAP 解析器仍在用 |
+| — | `9ff2e38e` | **SKIP** | fix | `change_log_level` 设 max level——fork 已有（带注释） |
+| — | `41b547c6` | **SKIP** | test | mock 配置 TRACE——fork 测试基建不同 |
+| — | `63894a9c` | **SKIP** | test | `new_mock` 环境重置——fork 每测试自有 hermetic XDG 助手 |
+| — | `05dde1d2` | **部分 SKIP** | chore | 过时宏部分由 `d75d3be8` 移植覆盖；fork 保留 `debug-tracing` cargo 特性（./log/ 落盘）——文档已更新为双层说明 |
+
+- 债务登记（承接 + 新增）：
+  - FilterOutputMetadata 未移植（解密收件人/逐过滤器签名状态展示）——在 1-2 个同步周期内对齐 fork 的 SignedVerified 管线 *(自 2026-09-14)*
+  - filters.rs ViewFilter 路径不触发明文验证 *(自 2026-09-14)*
+  - imap 测试基建分叉：上游 imap 测试提交需重实现 *(自 2026-09-14)*
+  - sqlite3 搜索后端忽略 raw_search（上游怪癖，原样保留）*(自 2026-09-14)*
+  - 上游命令补全框架未移植；关注后续上游 `meli/src/command/**` 提交中的非 UI 修复 *(自 2026-09-28)*
+  - `mailbox_changed` SSE 分支已实现但 mock 服务器未覆盖 *(自 2026-09-28)*
+  - jmap/maildir/nntp 双锁计数未迁移到 `MailboxCounters`（上游 `0d7e1532` 也改了它们；fork 为控制本轮影响面仅做 backends+imap+notmuch）*(新增 2026-10-01)*
+  - `test_jmap_watch` 在全量并行负载下出现过一次抖动（SSE mock 截止时间敏感）；单独与整套运行均确定性通过——若 CI 抖动再回头 *(新增 2026-10-01)*
+
 ## 2026-09-28 03:47 (UTC+8)
 
 - 同步方式：四个并行 worktree 分支语义移植（`t1-melib-conf-fixes` melib/conf 小修复、`t2-pgp-backends` PGP 后端、`t3-jmap-eventsource` JMAP 推送、`t4-compose-notify-fixes` compose/notify 修复）
