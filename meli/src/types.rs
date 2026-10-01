@@ -326,6 +326,18 @@ impl std::fmt::Display for NotificationType {
 }
 
 #[derive(Debug)]
+pub struct ProcessRequest {
+    pub owner: ComponentId,
+    pub command: std::process::Command,
+    pub spawn: Option<SpawnInteractionFn>,
+    pub result_cb: ProcessResultFn,
+    /// Temporary files that must outlive the spawned process and its
+    /// [`ProcessRequest`] callback. They are dropped together with the event
+    /// once it has been fully handled.
+    pub temporary_files: Vec<Arc<File>>,
+}
+
+#[derive(Debug)]
 pub enum UIEvent {
     /// Request to exit the application, emitted when the quit binding
     /// is not consumed by any focused sub-view (layered quit: views
@@ -338,12 +350,7 @@ pub enum UIEvent {
     EmbeddedInput((Key, Vec<u8>)),
     Resize,
     Fork(ForkedProcess),
-    ProcessRequest {
-        owner: ComponentId,
-        command: std::process::Command,
-        spawn: Option<SpawnInteractionFn>,
-        result_cb: ProcessResultFn,
-    },
+    ProcessRequest(Box<ProcessRequest>),
     ChangeMailbox(usize),
     ChangeMode(UIMode),
     Command(String),
