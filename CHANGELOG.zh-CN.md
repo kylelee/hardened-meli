@@ -16,6 +16,21 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+- mailcap RFC 1524 完整实现（上游 `253ba7dd` + `0d4b0bf9` + `c8cad6fb` + `2309c167`，语义移植；修上游 #556）：`MailcapEntry` 解析全部 RFC 字段（`compose`/`composetyped`/`print`/`edit`/`test=`、`copiousoutput`、`needsterminal`、`nametemplate`、`textualnewlines`），展开 `%s`/`%t`/`%n`/`%F`/`%{param}`（含 multipart `%F` 子部件文件展开），执行 `test=` 探测程序，并管理处理器生命周期：`UIEvent::ProcessRequest` 改为携带 `temporary_files` 的结构体（`Arc<File>` 句柄存活至结果回调结束再释放以清理临时文件），`spawn: None` 路径同样检查非零退出/信号终止。fork 偏差：所有替换值（`%t`、`%{param}`、路径）经 fork 的 POSIX 单引号 shell 引用而非上游裸拼接；未知 `%` 序列返回 `Error` 而非 panic；坏条目逐条跳过。`sanitize_filename` 标点清洗收窄为 `!"'/\`，`@` 与点号在附件文件名中保留。
+
+- 运行时账户级协议跟踪（上游 `6429fccc` + `d75d3be8`）：账户设置 `trace = true`（IMAP/JMAP/NNTP 的 `extra`、SMTP `send_mail` 表）即可开启协议级连接转储，无需重编译——`{imap,jmap,nntp,smtp}-trace` 四个 cargo 特性移除。fork 自有 `debug-tracing` 特性不变（管 `./log/` 落盘）；melib 残留 `debug!` 宏删除、调用迁移到 `log::debug!`/`log::trace!`，`to_str!` 保留（QQ-Mail 容错 IMAP 解析器在用）。trace 凭据脱敏（`test_trace_redact_*`）保留并扩展。
+
+- 全部 server 个人配置字段接受 `Secret`（上游 `f6ddf9a4` + `97a08539` + `254cee97` + `483f0629`；修上游 #448）：`server_username`、`server_hostname`、`server_password`、`server_url`（按后端）接受字符串或 `{ command = "..." }`——由此支持如 `server_username_command`。账户 `extra` 字段反序列化为 `IndexMap<String, serde_json::Value>`（任意 TOML 值、保留配置文件顺序；不启用 serde_json `preserve_order`，JMAP 线上键序不变）。明文仅在认证字节组装前最后一刻求值，绝不进 trace/日志/错误信息；fork 加固过的密码命令执行（错误不泄 stdout）移入 `Secret::value`。**破坏性变更**：`server_password_command` 在校验期即拒绝并指向新语法；新增 `v0.10.0` 版本迁移（`ServerPasswordCommand`）自动改写存量配置，crate 版本升至 `0.10.0`。
+
+- `public-inbox import` / `public-inbox import-thread` 命令（上游 `2d7fa2fa`）：按 Message-ID 从 lore.kernel.org 拉取单封邮件或整线程导入账户邮箱（保存前确认对话框）；已登记进命令面板补全表。
+
+- 撰写页地址自动补全支持多地址（上游 `78eb0d5e` + `7fe6cc1e` + `0ef78a0d` + `bb17a5bc`）：已合法的地址前缀先解析（`email::parser::address::mailbox`），仅对正在输入的末段做补全，过滤已录入地址，结果携带已输入前缀。`Contacts::search` 返回 `Card`，`Card` 可转换为 `Address`。
+
+- `sqlite3::AccountCache::update`（上游 `ee38e475`）：单封邮件的索引更新（如 flag 变更）原地 UPDATE，不再删除+重插。
+
+- `MailboxCounters`（上游 `0d7e1532`）：IMAP 与 notmuch 邮箱计数合并为单互斥锁（`{unseen, total: LazyCountSet}`），消除 unseen/total 锁序死锁一类问题；fork 的 cache-first 抓取分页在其上保留。
+
+
 
 - 状态栏提示文字按布局场景化（计划 `statusbar-layout-hints`）：场景敏感提示（`Scroll Up` / `Scroll Down` / `Focus Left` / `Focus Right` / `Search`）改为按细化后的 `Component::hint_focus()`（`Sidebar`、`NoView`、`GridSingleMail`、`GridThreads`、`ThreadList`、`MailView`）查标签表，同一按键按持键盘窗格显示对应动作文字：layout1 侧栏为 `Folder Up` / `Folder Down` / `Focus Maillist`，layout1 网格为 `Maillist Up` / `Maillist Down` / `Open Mail`，layout2/layout3 网格为 `Maillist Up` / `Maillist Down` / `Focus Box` 加 `Focus Content`（单邮件视图）或 `Focus Threads`（线程视图），layout4 线程列表为 `Thread Up` / `Thread Down` / `Focus Maillist` / `Focus Content`。邮件详情态（邮件动作）与非 listing 视图（默认标签）保持不变，按键行为亦不变，仅提示文字变化。
 
@@ -41,10 +56,26 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 变更（Changes）
 
+- notmuch 整修（上游 `2ca62c90` + `05a08b6c` + `57e60bec` + `09c6d05c`）：`Drop`（close+destroy）从 `DbConnection` 移到 `DbPointer`，连接可自由克隆；`refresh` 改为对比当前与快照的 tags/存在性并发出精确 `RefreshEvent`（检测 flag 变化、计数精确增减、重建快照索引）；搜索词组合用 `AND` 而非 notmuch 同前缀隐式 `OR`（修上游 #766）；抓取分块 250→1000。
+
+- maildir 用户主动操作（设 flag/删除/改名）完成后直接发出后端事件（上游 `34e40e0e`），不再依赖 notify watcher 观察文件系统；fork 的「缓存锁下不做文件系统 IO」纪律保留。
+
+
 - 依赖治理：移除根 `Cargo.toml` 的 `[patch.crates-io]` 与 `vendor/crossterm/` 目录，crossterm 回归 crates.io 0.29.0 原版。原补丁防御的「未识别私有 CSI 卡死」改由删除无用启动查询（`CSI ? 2026 $ p` 同步输出支持探测，全代码库无消费者）+ 输入看门狗承担。离线构建改为依赖本地 cargo cache 预取（`cargo fetch`）。
 - `envelope-view.reply_to_all` 默认键由 `C-g` 改为 `C-a`（`reply` 保持 `r`，`reply_to_author` 保持 `C-r`）；底栏 `Reply All` 提示与邮件视图按键派发随同一配置绑定自动同步。
 
 ### 修复（Fixed）
+
+- 过滤态下再次搜索作用于全邮箱（上游 `2b86929b`）：四种 listing 此前都把新搜索结果限制在上一次过滤存活的行集内；新增回归测试 `filter_on_top_of_filter_searches_whole_mailbox`（旧代码上验证为红）。
+
+- 无 Trash 文件夹时不再回退用 Junk（上游 `e4565617`）——Junk 是垃圾邮件专用；「无 Trash 文件夹」提示保留。
+
+- `Collection` 获取器 Option 化（上游 `d45ea5fe`）：`get_mailbox`/`get_threads` 在邮箱被并发移除时不再 panic，账户调用点改为跳过。`ignore_not_found` 提升为 `melib::error` 公共函数（上游 `3a19fe2e`）。
+
+- gpg CLI 后端脚本：Python 3.9 兼容与错误 JSON 中正确的 `stderr`（上游 `a7c98b05` + `547f600e`），并修复上游 `gpg_sign.py` 未知哈希算法分支引用未定义 match 绑定的 bug。
+
+- 退订确认测试对齐异步发送路径（`send_draft_async` 的 job 派发即确定性发送证据，断言恰好一次）——修正退订发送路径收口后遗留的同步通知断言。
+
 
 - IMAP 离线缓存遍历改为按行分页，消除 163/Coremail 的刷新风暴（状态栏图标常转）：`CacheFirst`/`FromCache` 抓取阶段原先按 UID 空间做 `max_uid -= batch_size` 步进，在长寿服务器的稀疏 UID 空间（`UIDVALIDITY = 1`、`uidnext` 达 10^8-10^9、真实邮件只有少量）下一次抓取要迭代数千个几乎全空的缓存窗口——每个窗口都是一次瞬时 sqlite 查询并发出一个 `MailboxUpdate` payload——状态栏邮箱图标因此永久转个不停（日志证据：四个邮箱整场会话合计约每分钟 5 万个 `MailboxUpdate`，每次抓取约 600 个瞬时 `fetch-mailbox-continued` chunk）。`ImapCache::envelopes` 现按 `ORDER BY uid DESC LIMIT ?` 返回最新 `batch_size` 行并附带本页最低 UID（隔离区占位行随同页窗口一并服务），两个阶段的下一页都推进到 `最低 UID − 1`，页面为空或抵达 UID 1 即结束：无论 UID 空间多稀疏，遍历只需 `O(缓存行数 / batch_size)` 次查询，首次抓取数秒内完成，之后只做增量同步（验收目标：刷新完成后安静，仅剩定时 watch/IDLE）。
 
@@ -85,6 +116,8 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 <!-- ### 打包（Packaging） -->
 
 ### 杂项（Miscellaneous Tasks）
+
+- 与上游 meli 完全同步（截至 **2026-10-01，上游 HEAD `253ba7dd`**）：上游区间 `bb6d5916..253ba7dd`（40 个提交）在七个并行 worktree 任务上语义移植——mailcap RFC 1524 重写与进程管理、`Secret` 凭据字段与 `v0.10.0` 迁移、运行时 `trace` 账户开关、notmuch refresh/AND 搜索链、maildir 直发事件、`public-inbox import`、撰写页多地址补全及十项小修（逐提交记账见 [SYNC.zh-CN.md](./SYNC.zh-CN.md)）。刻意跳过：`266b918a`（Selector 回调传 context——fork 对话框已重写）、`59ffaaeb`（RowsState 去泛型——纯内部重构，fork listing 已重写）、`facc045c`（删 `to_str!`——fork 容错 IMAP 解析器仍在用）、`9ff2e38e`（`change_log_level` 设 max level——fork 已修）、`41b547c6`/`63894a9c`（mock 上下文 TRACE/环境重置测试基建——fork 自有 hermetic XDG 助手）、`05dde1d2` 部分（fork 保留 `debug-tracing` 特性管 `./log/` 落盘，仅适用其过时宏部分）。已通过 `make check`、`make lint`、`make test`（全 feature 全绿）。
 
 - 核对确认与上游 meli 完全同步（截至 2026-09-15）：上游 HEAD `3d7eb2c5` 自 2026-09-14 同步 `4f2414a3..3d7eb2c5` 以来无新提交（见 [SYNC.zh-CN.md](./SYNC.zh-CN.md)）。
 - 与上游 meli 完全同步（截至 2026-09-28）：上游区间 `3d7eb2c5..bb6d5916`（22 个提交）在四个并行 worktree 上语义移植——PGP 可插拔后端、JMAP EventSource 推送及八个修复/重构提交（逐提交记账见 [SYNC.zh-CN.md](./SYNC.zh-CN.md)）。刻意跳过：命令补全框架重构 `a041bc90`（fork 自有命令面板 + nucleo 模糊匹配已覆盖并更优）、`ListingTrait::select` 纯内部重构 `03e1f5de`（无外部调用方）、上游 CI 移除 cargo-derivefmt 的 `0eaae124`（fork CI 为绿且保留该步骤）、`quote` 升级 `45a5d376`（fork 已在 1.0.47）。已通过 `make check`、`make lint`、`make test`（全 feature 全绿）。
