@@ -413,6 +413,7 @@ pub mod tests {
             auth: SmtpAuth::None,
             security: SmtpSecurity::None,
             extensions: Default::default(),
+            trace: true,
             timeout: 60,
         };
         let _smtp_handle = thread::spawn(move || block_on(server.serve()));
@@ -497,6 +498,7 @@ hello world.
             auth: SmtpAuth::None,
             security: SmtpSecurity::None,
             extensions: Default::default(),
+            trace: true,
             timeout: 60,
         };
         let _smtp_handle = thread::spawn(move || block_on(server.serve()));

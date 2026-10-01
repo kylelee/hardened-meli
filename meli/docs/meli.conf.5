@@ -442,6 +442,12 @@ if
 is set.
 .Pc
 .Pq Em true \" default value
+.It Ic trace Ar boolean
+.Pq Em optional
+Log protocol communications with the server on the
+.Em trace
+logging level.
+.Pq Em false \" default value
 .It Ic danger_accept_invalid_certs Ar boolean
 .Pq Em optional
 Do not validate
@@ -724,6 +730,12 @@ Use instead of
 Authenticate using the API Bearer token method.
 If enabled, the token value must be provided as the configured password.
 .Pq Em false \" default value
+.It Ic trace Ar boolean
+.Pq Em optional
+Log protocol communications with the server on the
+.Em trace
+logging level.
+.Pq Em false \" default value
 .It Ic danger_accept_invalid_certs Ar boolean
 .Pq Em optional
 Do not validate
@@ -803,6 +815,12 @@ Server password
 .Pq Em optional
 require authentication in every case
 .Pq Em true \" default value
+.It Ic trace Ar boolean
+.Pq Em optional
+Log protocol communications with the server on the
+.Em trace
+logging level.
+.Pq Em false \" default value
 .It Ic use_tls Ar boolean
 .Pq Em optional
 Connect with
@@ -2568,6 +2586,12 @@ extensions if they are advertised by the server.
 .Sx SmtpExtensions
 subsection
 .Pc
+.It Ic trace Ar boolean
+.Pq Em optional
+Log protocol communications with the server on the
+.Em trace
+logging level.
+.Pq Em false \" default value
 .It Ic timeout Ar integer
 .Pq Em optional
 Timeout to use for server connections in seconds.

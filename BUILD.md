@@ -90,9 +90,6 @@ cargo run
 There is a debug/tracing log feature that can be enabled by using the flag `--feature debug-tracing` after uncommenting the features in `Cargo.toml`.
 The logs are printed in stderr when the env var `MELI_DEBUG_STDERR` is defined, thus you can run `meli` with a redirection (i.e `2> log`).
 
-To trace network and protocol communications you can enable the following features:
-
-- `imap-trace`
-- `jmap-trace`
-- `nntp-trace`
-- `smtp-trace`
+To trace network and protocol communications you can enable the `trace = true`
+option in the account's extra settings (IMAP, JMAP, NNTP) or in the
+`composing.send_mail` SMTP settings.

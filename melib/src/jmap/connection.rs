@@ -507,7 +507,7 @@ impl JmapConnection {
                 .await?
                 .text()
                 .await?;
-            if cfg!(feature = "jmap-trace") {
+            if self.server_conf.trace {
                 log::trace!("email_since_state(): response {res_text:?}");
             }
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -615,11 +615,11 @@ impl JmapConnection {
     }
 
     pub async fn send_request(&self, request: String) -> Result<String> {
-        if cfg!(feature = "jmap-trace") {
+        if self.server_conf.trace {
             log::trace!("send_request(): request {:?}", request);
         }
         let res_text = self.post_async(None, request).await?.text().await?;
-        if cfg!(feature = "jmap-trace") {
+        if self.server_conf.trace {
             log::trace!("send_request(): response {:?}", res_text);
         }
         let _: MethodResponse = match deserialize_from_str(&res_text) {
@@ -693,7 +693,7 @@ impl JmapConnection {
         let mut request_url = url.clone();
         let mut redirects_followed = 0_usize;
         let mut resp = loop {
-            let resp = if cfg!(feature = "jmap-trace") {
+            let resp = if self.server_conf.trace {
                 let res = self.client.get_async(request_url.as_str()).await;
                 log::trace!("get_async(): url `{}` response {:?}", request_url, res);
                 res?
@@ -753,7 +753,7 @@ impl JmapConnection {
         request: T,
     ) -> Result<isahc::Response<isahc::AsyncBody>> {
         let request: Vec<u8> = request.into();
-        if cfg!(feature = "jmap-trace") {
+        if self.server_conf.trace {
             log::trace!(
                 "post_async(): request {:?}",
                 String::from_utf8_lossy(&request)
@@ -776,6 +776,9 @@ impl JmapConnection {
                     .post_async(request_url.as_str(), request.clone())
                     .await?
             };
+            if self.server_conf.trace {
+                log::trace!("post_async(): response {resp:?}",);
+            }
             let next_url = match self.redirect_target(&original_url, &request_url, &resp) {
                 Ok(None) => break resp,
                 Ok(Some(next_url)) => next_url,

@@ -96,7 +96,7 @@ impl ImapConnection {
                     .map(|i| i.len() < TryInto::<usize>::try_into(n).unwrap())
                     .unwrap_or(true)
                 {
-                    debug!(
+                    log::debug!(
                         "Received expunge {} but mailbox msn index is {:?}",
                         n,
                         self.uid_store.msn_index.lock().unwrap().get(&mailbox_hash)
@@ -504,7 +504,7 @@ impl ImapConnection {
                                     .lock()
                                     .unwrap()
                                     .insert((mailbox_hash, uid), envelope.hash());
-                                debug!(
+                                log::debug!(
                                     "Create event {} {} {}",
                                     envelope.hash(),
                                     envelope.subject(),
@@ -520,11 +520,7 @@ impl ImapConnection {
                         Ok(events.try_into().ok())
                     }
                     Err(err) => {
-                        debug!(
-                            "UID SEARCH RECENT err: {}\nresp: {}",
-                            err,
-                            to_str!(&response)
-                        );
+                        log::debug!("UID SEARCH RECENT err: {err}\nresp: {}", to_str!(&response));
                         Ok(None)
                     }
                 }
@@ -566,13 +562,15 @@ impl ImapConnection {
                                 return Ok(None);
                             }
                             Err(e) => {
-                                debug!("SEARCH error failed: {}", e);
-                                debug!(to_str!(&response));
+                                log::debug!(
+                                    "SEARCH error failed: {e}. Response: {}",
+                                    to_str!(&response)
+                                );
                                 return Ok(None);
                             }
                         }
                     };
-                    debug!("fetch uid {} {:?}", uid, flags);
+                    log::debug!("fetch uid {} {:?}", uid, flags);
                     if let Some(env_hash) = {
                         let temp = self
                             .uid_store
