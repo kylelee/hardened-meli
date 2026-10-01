@@ -179,13 +179,18 @@ fn test_conf_config_parse() {
     let err = FileSettings::validate(new_file.path.clone(), true).unwrap_err();
     assert_eq!(
         err.summary.as_ref(),
-        "Unrecognised configuration values: {\"index_style\": \"Compact\"}"
+        "Unrecognised configuration values: {\"index_style\": String(\"Compact\")}"
     );
 
     /* Test IMAP config */
 
     let new_file = ConfigFile::new(IMAP_CONFIG, &tempdir).unwrap();
-    FileSettings::validate(new_file.path.clone(), true).expect("could not parse IMAP config");
+    // The legacy `server_password_command` is now consumed by the IMAP
+    // validator (with a clear error if it ends up unused); the v0.10.0
+    // migration rewrites it to `server_password = { command = "..." }`.
+    // Here we just check the bare config still parses.
+    FileSettings::validate(new_file.path.clone(), true)
+        .expect("could not parse IMAP config");
 
     /* Test sample config */
 

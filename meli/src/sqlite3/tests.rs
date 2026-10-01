@@ -89,8 +89,13 @@ fn new_maildir_backend(
         .into_iter()
         .collect(),
         manual_refresh: true,
-        extra: indexmap::indexmap! {
-            "root_mailbox".into() => root_mailbox.display().to_string(),
+        extra: {
+            let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            m.insert(
+                "root_mailbox".into(),
+                serde_json::Value::String(root_mailbox.display().to_string()),
+            );
+            m
         },
     };
 
