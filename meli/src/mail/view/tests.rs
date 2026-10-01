@@ -40,7 +40,7 @@ use crate::{
     types::{Link, LinkKind, UIEvent},
     utilities::{Tabbed, UIDialog},
     view::{EnvelopeView, ViewFilter, ViewFilterContent, ViewOptions, ViewSettings},
-    AccountHash, Context, EnvelopeHash, MailboxHash,
+    AccountHash, Context, EnvelopeHash, MailboxHash, StatusEvent,
 };
 
 /// Insert an envelope with a `List-Unsubscribe: <mailto:…>` header into the
@@ -68,12 +68,17 @@ hello\r\n";
     (account_hash, mailbox_hash, env_hash)
 }
 
-/// Returns `true` if any reply is a notification produced by attempting to send
-/// an unsubscribe e-mail (the mock account's `send_mail` command is `false`,
-/// so a send attempt deterministically fails with a notification).
+/// Returns `true` if any reply evidences that the send path was invoked for
+/// the unsubscribe e-mail. The send path is asynchronous (`send_draft_async`
+/// spawns a job and pushes `NewJob`; the completion notification only lands
+/// when the main loop processes the finished job), so the job spawn itself is
+/// the deterministic evidence, next to any synchronous failure notification
+/// (the mock account's `send_mail` is an empty command, which fails inside
+/// the job).
 fn has_send_evidence(replies: &[UIEvent]) -> bool {
     replies.iter().any(|ev| {
         matches!(ev, UIEvent::Notification { title: Some(t), .. } if t.to_lowercase().contains("unsubscribe"))
+            || matches!(ev, UIEvent::StatusEvent(StatusEvent::NewJob(_)))
     })
 }
 
@@ -185,6 +190,14 @@ fn list_unsubscribe_confirm_sends_after_dialog() {
     assert!(
         has_send_evidence(&replies),
         "send path must be invoked after confirmation, got: {replies:?}"
+    );
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|ev| matches!(ev, UIEvent::StatusEvent(StatusEvent::NewJob(_))))
+            .count(),
+        1,
+        "confirming must spawn the unsubscribe send job exactly once, got: {replies:?}"
     );
     assert!(view.unsubscribe_dialog.is_none());
     assert!(view.pending_unsubscribe.is_none());
