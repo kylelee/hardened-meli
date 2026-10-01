@@ -237,9 +237,9 @@ impl EventSourceConnection {
                     // cross-origin ones, so the SSE request must not let isahc
                     // re-send credentials to an arbitrary redirect target.
                     .redirect_policy(RedirectPolicy::None);
+                // Resolve Secret -> plaintext at the wire boundary; never log it.
+                let password_value = self.server_conf.server_password.value()?;
                 request = if self.server_conf.use_token {
-                    // Resolve Secret -> plaintext at the wire boundary.
-                    let password_value = self.server_conf.server_password.value()?;
                     request
                         .authentication(isahc::auth::Authentication::none())
                         .header(
@@ -247,7 +247,6 @@ impl EventSourceConnection {
                             format!("Bearer {}", password_value),
                         )
                 } else {
-                    let password_value = self.server_conf.server_password.value()?;
                     request
                         .authentication(isahc::auth::Authentication::basic())
                         .credentials(isahc::auth::Credentials::new(

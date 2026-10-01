@@ -98,9 +98,10 @@ impl JmapConnection {
         } else {
             client
         };
+        // Resolve Secret -> plaintext only at the moment we need it, right
+        // before assembling the auth credentials; never log it.
+        let password_value = server_conf.server_password.value()?;
         let client = if server_conf.use_token {
-            // Resolve Secret -> plaintext only at the moment we need it.
-            let password_value = server_conf.server_password.value()?;
             client
                 .authentication(isahc::auth::Authentication::none())
                 .default_header(
@@ -108,8 +109,6 @@ impl JmapConnection {
                     format!("Bearer {}", password_value),
                 )
         } else {
-            // Fork Fork policy: never log the Secret; resolve just-in-time.
-            let password_value = server_conf.server_password.value()?;
             client
                 .authentication(isahc::auth::Authentication::basic())
                 .credentials(isahc::auth::Credentials::new(

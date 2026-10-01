@@ -84,9 +84,7 @@ impl ServerPasswordCommand {
                 // verbose mode; never echo the command (it can be sensitive)
                 // back to the user.
                 let pass = pass.as_str().ok_or_else(|| {
-                    format!(
-                        "Expected string value for server_password_command field, got: {pass}"
-                    )
+                    format!("Expected string value for server_password_command field, got: {pass}")
                 })?;
                 new_entry.insert("command", pass.into());
             }
@@ -269,8 +267,8 @@ server_password = "hunter2"
             "expected the imap2 entry to be converted; got:\n{out}"
         );
         assert!(
-            out.contains("server_password_command") == false
-                || out.contains("server_password_command = \"false\"") == false
+            !out.contains("server_password_command")
+                || !out.contains("server_password_command = \"false\"")
                 || out.matches("server_password_command").count() == 1,
             "expected server_password_command entries to be transformed; got:\n{out}"
         );

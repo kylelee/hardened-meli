@@ -953,17 +953,15 @@ impl NntpType {
         get_conf_val!(s["server_hostname"])?;
         get_conf_val!(s["server_username"], String::new())?;
         if !s.extra.contains_key("server_password_command") {
-            if !s.extra.contains_key("server_password") {
-                // No password at all; that's allowed when require_auth is
-                // false. Mark it as a known key so the tail check doesn't
-                // complain.
-                keys.insert("server_password");
-            } else {
+            if s.extra.contains_key("server_password") {
                 // Validate Secret shape (string OR inline table) and consume
                 // the key so it doesn't trip the unrecognised-keys tail.
                 if let Some(value) = s.extra.swap_remove("server_password") {
                     if let serde_json::Value::Object(_) = &value {
-                        let _ = <crate::conf::Secret as crate::conf::ExtraSetting>::deserialize_extra(&value)
+                        let _ =
+                            <crate::conf::Secret as crate::conf::ExtraSetting>::deserialize_extra(
+                                &value,
+                            )
                             .map_err(|err| {
                                 Error::new(format!(
                                     "{}: `server_password` object is not a valid Secret: {err}",
@@ -973,8 +971,10 @@ impl NntpType {
                             })?;
                     }
                 }
-                keys.insert("server_password");
             }
+            // Whether absent (allowed when require_auth is false) or present,
+            // mark the key as known so the tail check doesn't complain.
+            keys.insert("server_password");
         } else if s.extra.contains_key("server_password") {
             return Err(Error::new(format!(
                 "{}: both server_password and server_password_command are set, cannot choose",
