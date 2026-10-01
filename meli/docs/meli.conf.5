@@ -412,7 +412,7 @@ example:
 .Qq mail.example.com
 .It Ic server_username Ar String
 Server username
-.It Ic server_password Ar String
+.It Ic server_password Ar Secret
 .Pq Em optional
 Server password, as a literal string or as an inline table with a
 .Em command
@@ -558,9 +558,9 @@ support
 Use
 .Em OAUTH2
 authentication.
-Can only be used with
-.Ic server_password_command
-which should return a base64-encoded
+Can be used with
+.Ic server_password
+that returns a base64-encoded
 .Em OAUTH2
 token ready to be passed to
 .Em IMAP Ns
@@ -687,7 +687,7 @@ and follow the instructions.
 Note down the refresh token.
 .It
 In
-.Ic server_password_command
+.Ic server_password
 enter a command like this
 .Pq after adjusting binary paths and credentials Ns
 :
@@ -709,7 +709,7 @@ format = "imap"
 server_hostname='imap.gmail.com'
 server_username="username@gmail.com"
 use_oauth2 = true
-server_password_command = "TOKEN=$(py...th2_string --quiet --access_token=$TOKEN"
+server_password = { command = "TOKEN=$(py...th2_string --quiet --access_token=$TOKEN" }
 server_port="993"
 listing.index_style = "Conversations"
 identity = "username@gmail.com"
@@ -731,7 +731,7 @@ example:
 .Qq https://mail.example.com
 .It Ic server_username Ar String
 Server username
-.It Ic server_password Ar String
+.It Ic server_password Ar Secret
 .Pq Em optional
 Server password / Bearer token, as a literal string or as an inline table
 with a
@@ -822,7 +822,7 @@ example:
 .Qq nntp.example.com
 .It Ic server_username Ar String
 Server username
-.It Ic server_password Ar String
+.It Ic server_password Ar Secret
 .Pq Em optional
 Server password, as a literal string or as an inline table with a
 .Em command
