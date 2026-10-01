@@ -602,9 +602,11 @@ impl ImapStream {
         };
         if matches!(server_conf.protocol, ImapProtocol::ManageSieve) {
             ret.read_response(&mut res).await?;
+            // Resolve Secret right before use, mirroring the IMAP SASL path.
+            let password_value = server_conf.server_password.value()?;
             let credentials = format!(
                 "\0{}\0{}",
-                server_conf.server_username, server_conf.server_password
+                server_conf.server_username, password_value
             );
             ret.send_command(CommandBody::authenticate(AuthMechanism::Plain))
                 .await?;
@@ -718,9 +720,13 @@ impl ImapStream {
                     ))
                     .set_kind(ErrorKind::Authentication));
                 }
+                // Resolve Secret -> plaintext only at the moment we need to
+                // send it. Fork policy: do not pass the Secret through a
+                // trace/log path; evaluate, send, drop.
+                let password_value = server_conf.server_password.value()?;
                 if has_sasl_ir {
                     let xoauth2 = base64
-                        .decode(&server_conf.server_password)
+                        .decode(&password_value)
                         .chain_err_summary(|| {
                             "Could not decode `server_password` from base64. Is the value correct?"
                         })
@@ -734,8 +740,7 @@ impl ImapStream {
                     ret.send_command(CommandBody::authenticate(AuthMechanism::XOAuth2))
                         .await?;
                     ret.wait_for_continuation_request().await?;
-                    ret.send_literal(server_conf.server_password.as_bytes())
-                        .await?;
+                    ret.send_literal(password_value.as_bytes()).await?;
                 }
             }
             ImapProtocol::IMAP {
@@ -765,9 +770,10 @@ impl ImapStream {
                 .iter()
                 .any(|cap| cap.eq_ignore_ascii_case(b"AUTH=PLAIN")) =>
             {
+                let password_value = server_conf.server_password.value()?;
                 let credentials = format!(
                     "\0{}\0{}",
-                    server_conf.server_username, server_conf.server_password
+                    server_conf.server_username, password_value
                 );
                 if has_sasl_ir {
                     ret.send_command(CommandBody::authenticate_with_ir(
@@ -797,7 +803,8 @@ impl ImapStream {
                 }
                 let username = AString::try_from(server_conf.server_username.as_str())
                     .chain_err_kind(ErrorKind::Bug)?;
-                let password = AString::try_from(server_conf.server_password.as_str())
+                let password_value = server_conf.server_password.value()?;
+                let password = AString::try_from(password_value.as_str())
                     .chain_err_kind(ErrorKind::Bug)?;
 
                 ret.send_command(CommandBody::Login {
@@ -2352,7 +2359,7 @@ mod tests {
             let server_conf = ImapServerConf {
                 server_hostname: "localhost".to_string(),
                 server_username: String::new(),
-                server_password: String::new(),
+                server_password: crate::conf::Secret::Value(String::new()),
                 server_port: 143,
                 use_starttls: false,
                 use_tls: false,

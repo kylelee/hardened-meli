@@ -61,7 +61,7 @@ impl ManageSieveConnection {
     ) -> Result<Self> {
         let server_hostname = get_conf_val!(s["server_hostname"])?;
         let server_username = get_conf_val!(s["server_username"])?;
-        let server_password = get_conf_val!(s["server_password"])?;
+        let server_password = s.server_password_field()?;
         let server_port = get_conf_val!(s["server_port"], 4190)?;
         let trace: bool = get_conf_val!(s["trace"], false)?;
         let danger_accept_invalid_certs: bool =
@@ -75,7 +75,7 @@ impl ManageSieveConnection {
         let server_conf = ImapServerConf {
             server_hostname: server_hostname.to_string(),
             server_username: server_username.to_string(),
-            server_password: server_password.to_string(),
+            server_password,
             server_port,
             use_starttls: true,
             use_tls: true,

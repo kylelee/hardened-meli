@@ -58,7 +58,7 @@ pub type UID = usize;
 
 macro_rules! get_conf_val {
     ($s:ident[$var:literal]) => {
-        $s.extra.get($var).ok_or_else(|| {
+        $s.extra.get($var).and_then(|v| v.as_str()).ok_or_else(|| {
             Error::new(format!(
                 "{}: NNTP connection requires the field `{}` set",
                 $s.name.as_str(),
@@ -70,6 +70,7 @@ macro_rules! get_conf_val {
     ($s:ident[$var:literal], $default:expr) => {
         $s.extra
             .get($var)
+            .and_then(|v| v.as_str())
             .map(|v| {
                 <_>::from_str(v).map_err(|e| {
                     Error::new(format!(
@@ -118,7 +119,10 @@ fn newnews_since_timestamp(latest_article: crate::UnixTimestamp) -> crate::UnixT
 pub struct NntpServerConf {
     pub server_hostname: String,
     pub server_username: String,
-    pub server_password: String,
+    /// Password. Carried as a [`Secret`] (upstream port of #448) so the
+    /// inline-table `{ command = "..." }` form and the literal form share
+    /// one type. Resolved at the wire boundary.
+    pub server_password: crate::conf::Secret,
     pub server_port: u16,
     pub use_starttls: bool,
     pub use_tls: bool,
@@ -730,9 +734,11 @@ impl NntpType {
                 || s.extra.contains_key("server_password")
                 || s.extra.contains_key("server_password_command")
             {
-                s.server_password()?
+                s.server_password_field()?
             } else {
-                get_conf_val!(s["server_password"], String::new())?
+                // Unauthenticated server: use a fresh empty Secret so the
+                // wire path never has to special-case Option<String>.
+                crate::conf::Secret::Value(String::new())
             },
             require_auth,
             trace,
@@ -893,19 +899,29 @@ impl NntpType {
         macro_rules! get_conf_val {
             ($s:ident[$var:literal]) => {{
                 keys.insert($var);
-                $s.extra.swap_remove($var).ok_or_else(|| {
-                    Error::new(format!(
-                        "{}: NNTP connection requires the field `{}` set",
-                        $s.name.as_str(),
-                        $var
-                    ))
-                    .set_kind(ErrorKind::Configuration)
-                })
+                $s.extra
+                    .swap_remove($var)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "{}: NNTP connection requires the field `{}` set",
+                            $s.name.as_str(),
+                            $var
+                        ))
+                        .set_kind(ErrorKind::Configuration)
+                    })
             }};
             ($s:ident[$var:literal], $default:expr) => {{
                 keys.insert($var);
                 $s.extra
                     .swap_remove($var)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => None,
+                    })
                     .map(|v| {
                         <_>::from_str(&v).map_err(|e| {
                             Error::new(format!(
@@ -937,7 +953,28 @@ impl NntpType {
         get_conf_val!(s["server_hostname"])?;
         get_conf_val!(s["server_username"], String::new())?;
         if !s.extra.contains_key("server_password_command") {
-            get_conf_val!(s["server_password"], String::new())?;
+            if !s.extra.contains_key("server_password") {
+                // No password at all; that's allowed when require_auth is
+                // false. Mark it as a known key so the tail check doesn't
+                // complain.
+                keys.insert("server_password");
+            } else {
+                // Validate Secret shape (string OR inline table) and consume
+                // the key so it doesn't trip the unrecognised-keys tail.
+                if let Some(value) = s.extra.swap_remove("server_password") {
+                    if let serde_json::Value::Object(_) = &value {
+                        let _ = <crate::conf::Secret as crate::conf::ExtraSetting>::deserialize_extra(&value)
+                            .map_err(|err| {
+                                Error::new(format!(
+                                    "{}: `server_password` object is not a valid Secret: {err}",
+                                    s.name.as_str(),
+                                ))
+                                .set_kind(ErrorKind::Configuration)
+                            })?;
+                    }
+                }
+                keys.insert("server_password");
+            }
         } else if s.extra.contains_key("server_password") {
             return Err(Error::new(format!(
                 "{}: both server_password and server_password_command are set, cannot choose",
@@ -945,7 +982,9 @@ impl NntpType {
             ))
             .set_kind(ErrorKind::Configuration));
         }
-        let _ = get_conf_val!(s["server_password_command"]);
+        // Consume server_password_command so it doesn't trip the
+        // unrecognised-keys tail check.
+        let _ = s.extra.swap_remove("server_password_command");
         let server_port = get_conf_val!(s["server_port"], 119)?;
         let use_tls = get_conf_val!(s["use_tls"], server_port == 563)?;
         let use_starttls = get_conf_val!(s["use_starttls"], server_port != 563)?;
@@ -1158,7 +1197,7 @@ mod tests {
     /// for protocol-level connection dumps.
     #[test]
     fn test_conf_trace_option_parses_and_defaults_to_false() {
-        let account_with = |extra: indexmap::IndexMap<String, String>| AccountSettings {
+        let account_with = |extra: serde_json::Map<String, serde_json::Value>| AccountSettings {
             name: "test".to_string(),
             root_mailbox: String::new(),
             format: "nntp".to_string(),
@@ -1174,10 +1213,14 @@ mod tests {
             extra,
         };
         let base = || {
-            indexmap::indexmap! {
-                "server_hostname".to_string() => "news.example.com".to_string(),
-                "store_flags_locally".to_string() => "false".to_string(),
+            let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            for (k, v) in [
+                ("server_hostname", "news.example.com"),
+                ("store_flags_locally", "false"),
+            ] {
+                m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
             }
+            m
         };
         let event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
 
@@ -1188,14 +1231,20 @@ mod tests {
 
         // `trace = true` is accepted and stored.
         let mut extra = base();
-        extra.insert("trace".to_string(), "true".to_string());
+        extra.insert(
+            "trace".to_string(),
+            serde_json::Value::String("true".to_string()),
+        );
         let account = account_with(extra);
         let nntp = NntpType::new(&account, Default::default(), event_consumer).unwrap();
         assert!(nntp.server_conf.trace);
 
         // Invalid values are rejected by validation.
         let mut extra = base();
-        extra.insert("trace".to_string(), "not-a-bool".to_string());
+        extra.insert(
+            "trace".to_string(),
+            serde_json::Value::String("not-a-bool".to_string()),
+        );
         let mut account = account_with(extra);
         assert!(NntpType::validate_config(&mut account).is_err());
     }

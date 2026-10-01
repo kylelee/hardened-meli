@@ -221,9 +221,9 @@ fn test_conn(origin_port: u16, use_token: bool) -> JmapConnection {
         server_url: Url::parse(&format!("http://127.0.0.1:{origin_port}")).unwrap(),
         server_username: BASIC_USER.to_string(),
         server_password: if use_token {
-            TOKEN.to_string()
+            melib::conf::Secret::Value(TOKEN.to_string())
         } else {
-            BASIC_PASS.to_string()
+            melib::conf::Secret::Value(BASIC_PASS.to_string())
         },
         use_token,
         trace: false,

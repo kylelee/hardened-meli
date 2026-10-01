@@ -238,18 +238,21 @@ impl EventSourceConnection {
                     // re-send credentials to an arbitrary redirect target.
                     .redirect_policy(RedirectPolicy::None);
                 request = if self.server_conf.use_token {
+                    // Resolve Secret -> plaintext at the wire boundary.
+                    let password_value = self.server_conf.server_password.value()?;
                     request
                         .authentication(isahc::auth::Authentication::none())
                         .header(
                             http::header::AUTHORIZATION,
-                            format!("Bearer {}", self.server_conf.server_password),
+                            format!("Bearer {}", password_value),
                         )
                 } else {
+                    let password_value = self.server_conf.server_password.value()?;
                     request
                         .authentication(isahc::auth::Authentication::basic())
                         .credentials(isahc::auth::Credentials::new(
                             &self.server_conf.server_username,
-                            &self.server_conf.server_password,
+                            &password_value,
                         ))
                 };
                 if let Some(ref id) = self.last_event_id {
