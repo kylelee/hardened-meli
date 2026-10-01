@@ -159,14 +159,14 @@ fn new_maildir_backend(
         indexmap::indexmap! {}
     };
     let extra = if with_root_mailbox {
-        let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
         m.insert(
             "root_mailbox".to_string(),
             serde_json::Value::String(root_mailbox.display().to_string()),
         );
         m
     } else {
-        serde_json::Map::new()
+        indexmap::IndexMap::new()
     };
 
     let account_conf = melib::AccountSettings {

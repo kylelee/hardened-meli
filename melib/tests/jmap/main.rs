@@ -948,7 +948,6 @@ pub mod server {
                 }
             }
         }
-
     }
 }
 
@@ -1024,13 +1023,30 @@ mod tests {
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
             extra: {
-                let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                    indexmap::IndexMap::new();
 
-                m.insert("server_url".to_string(), serde_json::Value::String(format!("http://{}:{}", local_addr.ip(), local_addr.port())));
-                m.insert("server_username".to_string(), serde_json::Value::String("user".to_string()));
-                m.insert("server_password".to_string(), serde_json::Value::String("password".to_string()));
-                m.insert("use_token".to_string(), serde_json::Value::String("true".to_string()));
-            
+                m.insert(
+                    "server_url".to_string(),
+                    serde_json::Value::String(format!(
+                        "http://{}:{}",
+                        local_addr.ip(),
+                        local_addr.port()
+                    )),
+                );
+                m.insert(
+                    "server_username".to_string(),
+                    serde_json::Value::String("user".to_string()),
+                );
+                m.insert(
+                    "server_password".to_string(),
+                    serde_json::Value::String("password".to_string()),
+                );
+                m.insert(
+                    "use_token".to_string(),
+                    serde_json::Value::String("true".to_string()),
+                );
+
                 m
             },
         };
@@ -1250,13 +1266,30 @@ hello world.
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
             extra: {
-                let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                    indexmap::IndexMap::new();
 
-                m.insert("server_url".to_string(), serde_json::Value::String(format!("http://{}:{}", local_addr.ip(), local_addr.port())));
-                m.insert("server_username".to_string(), serde_json::Value::String("user".to_string()));
-                m.insert("server_password".to_string(), serde_json::Value::String("password".to_string()));
-                m.insert("use_token".to_string(), serde_json::Value::String("true".to_string()));
-            
+                m.insert(
+                    "server_url".to_string(),
+                    serde_json::Value::String(format!(
+                        "http://{}:{}",
+                        local_addr.ip(),
+                        local_addr.port()
+                    )),
+                );
+                m.insert(
+                    "server_username".to_string(),
+                    serde_json::Value::String("user".to_string()),
+                );
+                m.insert(
+                    "server_password".to_string(),
+                    serde_json::Value::String("password".to_string()),
+                );
+                m.insert(
+                    "use_token".to_string(),
+                    serde_json::Value::String("true".to_string()),
+                );
+
                 m
             },
         };

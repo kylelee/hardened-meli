@@ -224,7 +224,7 @@ impl DotAddressable for FileAccount {
                     "refresh_command" => self.refresh_command.lookup(field, tail),
                     "conf_override" => self.conf_override.lookup(field, tail),
                     "extra" => {
-                        // `extra` is now a serde_json::Map<String, Value>;
+                        // `extra` is now an IndexMap<String, serde_json::Value>;
                         // look up by key, return the raw value as TOML.
                         // `field` here is `&&str` (from `match *field { ... }`
                         // destructuring one level of `&Option<&str>`); we

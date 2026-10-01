@@ -223,7 +223,7 @@ pub struct FileAccount {
     #[serde(flatten)]
     #[serde(
         deserialize_with = "extra_settings",
-        skip_serializing_if = "serde_json::Map::is_empty"
+        skip_serializing_if = "IndexMap::is_empty"
     )]
     /// Use custom deserializer to convert any given value (eg `bool`, number,
     /// table) to `serde_json::Value`, mirroring upstream's value-typed
@@ -231,7 +231,7 @@ pub struct FileAccount {
     /// what lets `server_password = { command = "..." }` (the new Secret
     /// inline-table syntax from upstream 254cee97) round-trip into the
     /// `Secret` type used by the connection layer.
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 impl FileAccount {
@@ -937,6 +937,8 @@ impl Settings {
 }
 
 mod deserializers {
+    use indexmap::IndexMap;
+
     use serde::{de, Deserialize, Deserializer};
 
     pub(in crate::conf) fn non_empty_opt_string<'de, D, T: std::convert::From<Option<String>>>(
@@ -996,7 +998,7 @@ mod deserializers {
     /// similar value configurations can be carried through.
     pub(in crate::conf) fn extra_settings<'de, D>(
         deserializer: D,
-    ) -> std::result::Result<serde_json::Map<String, serde_json::Value>, D::Error>
+    ) -> std::result::Result<IndexMap<String, serde_json::Value>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1005,7 +1007,7 @@ mod deserializers {
         struct AnyValueVisitor;
 
         impl<'de> serde::de::Visitor<'de> for AnyValueVisitor {
-            type Value = serde_json::Map<String, serde_json::Value>;
+            type Value = IndexMap<String, serde_json::Value>;
 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str("a map of configuration values")
@@ -1015,7 +1017,7 @@ mod deserializers {
             where
                 M: serde::de::MapAccess<'de>,
             {
-                let mut out = serde_json::Map::new();
+                let mut out = IndexMap::new();
                 while let Some((k, v)) = access.next_entry::<String, serde_json::Value>()? {
                     out.insert(k, v);
                 }

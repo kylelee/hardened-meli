@@ -52,9 +52,12 @@ pub use field_types::*;
 pub trait ExtraSetting: serde::de::DeserializeOwned {
     fn deserialize_extra(value: &serde_json::Value) -> Result<Self> {
         serde::de::Deserialize::deserialize(value.clone()).map_err(|err| {
-            Error::new(format!("could not deserialize value as {}", std::any::type_name::<Self>()))
-                .set_source(Some(crate::src_err_arc_wrap! { err }))
-                .set_kind(ErrorKind::Configuration)
+            Error::new(format!(
+                "could not deserialize value as {}",
+                std::any::type_name::<Self>()
+            ))
+            .set_source(Some(crate::src_err_arc_wrap! { err }))
+            .set_kind(ErrorKind::Configuration)
         })
     }
 }
@@ -116,7 +119,7 @@ pub struct AccountSettings {
     #[serde(default)]
     pub manual_refresh: bool,
     #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 impl AccountSettings {
@@ -245,15 +248,15 @@ impl AccountSettings {
             _ = self.extra.swap_remove("notmuch_address_book_query");
         }
         {
-            if let Some(mutt_alias_file) = self
-                .extra
-                .swap_remove("mutt_alias_file")
-                .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s),
-                    serde_json::Value::Bool(b) => Some(b.to_string()),
-                    serde_json::Value::Number(n) => Some(n.to_string()),
-                    _ => None,
-                })
+            if let Some(mutt_alias_file) =
+                self.extra
+                    .swap_remove("mutt_alias_file")
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        serde_json::Value::Bool(b) => Some(b.to_string()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    })
             {
                 let path = Path::new(&mutt_alias_file).expand();
 

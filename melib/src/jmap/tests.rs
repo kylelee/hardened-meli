@@ -1185,7 +1185,7 @@ fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
         mailboxes: indexmap::indexmap! {},
         manual_refresh: false,
         extra: {
-            let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
             for (k, v) in [
                 ("server_url", "https://jmap.example.com"),
                 ("server_username", "user"),
@@ -1203,9 +1203,10 @@ fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
 
     // `trace = true` is accepted and stored.
     let mut account = account;
-    account
-        .extra
-        .insert("trace".to_string(), serde_json::Value::String("true".to_string()));
+    account.extra.insert(
+        "trace".to_string(),
+        serde_json::Value::String("true".to_string()),
+    );
     let conf = JmapServerConf::new(&account).unwrap();
     assert!(conf.trace);
 

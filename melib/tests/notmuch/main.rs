@@ -193,7 +193,7 @@ other_email=test2@example.com;test3@example.com
         } else {
             indexmap::indexmap! {}
         };
-        let mut extra: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        let mut extra: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
 
         if with_root_mailbox {
             extra.insert(
