@@ -1603,12 +1603,14 @@ impl State {
                 self.process_realizations();
                 return;
             }
-            UIEvent::ProcessRequest {
-                owner,
-                mut command,
-                spawn,
-                result_cb,
-            } => {
+            UIEvent::ProcessRequest(process_request) => {
+                let ProcessRequest {
+                    owner,
+                    mut command,
+                    spawn,
+                    result_cb,
+                    temporary_files,
+                } = *process_request;
                 log::trace!(
                     "Executing: {:?} {:?}",
                     command.get_program(),
@@ -1662,6 +1664,10 @@ impl State {
                         });
                     }
                 }
+                // The temporary files must not be deleted before the process
+                // has run and its result callback has completed; drop them
+                // here, together with the handled request.
+                drop(temporary_files);
                 return;
             }
             _ => {}
