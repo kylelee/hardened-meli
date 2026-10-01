@@ -159,11 +159,14 @@ fn new_maildir_backend(
         indexmap::indexmap! {}
     };
     let extra = if with_root_mailbox {
-        indexmap::indexmap! {
-            "root_mailbox".into() => root_mailbox.display().to_string(),
-        }
+        let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        m.insert(
+            "root_mailbox".to_string(),
+            serde_json::Value::String(root_mailbox.display().to_string()),
+        );
+        m
     } else {
-        indexmap::indexmap! {}
+        serde_json::Map::new()
     };
 
     let account_conf = melib::AccountSettings {
@@ -938,7 +941,10 @@ fn dead_port_imap_account_conf(account_name: &str, dead_port: u16) -> crate::con
         ("server_password", "null".to_string()),
         ("use_tls", "false".to_string()),
     ] {
-        account_conf.account.extra.insert(key.to_string(), value);
+        account_conf
+            .account
+            .extra
+            .insert(key.to_string(), serde_json::Value::String(value));
     }
     account_conf.conf.format = "imap".to_string();
     account_conf
