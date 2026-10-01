@@ -2,6 +2,7 @@
  * meli - configuration module.
  *
  * Copyright 2017 Manos Pitsidianakis
+ * Copyright 2026 Kyle Lee
  *
  * This file is part of meli.
  *
@@ -22,7 +23,7 @@
 //! Basic mail account configuration to use with
 //! [`backends`](./backends/index.html)
 
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 
 use indexmap::IndexMap;
 
@@ -38,6 +39,59 @@ mod field_types;
 mod tests;
 
 pub use field_types::*;
+
+/// Trait for types that can be deserialized from an `extra` configuration
+/// value.
+///
+/// Each backend's `validate_config` method pulls values out of
+/// [`AccountSettings::extra`] (a `serde_json::Value` map) and validates them
+/// per-backend. The default implementation defers to `serde_json`'s
+/// `Deserialize`, which is what enables the new Secret-typed configuration
+/// fields (`server_password = "literal"` and `server_password = { command =
+/// "..." }`).
+pub trait ExtraSetting: serde::de::DeserializeOwned {
+    fn deserialize_extra(value: &serde_json::Value) -> Result<Self> {
+        serde::de::Deserialize::deserialize(value.clone()).map_err(|err| {
+            Error::new(format!("could not deserialize value as {}", std::any::type_name::<Self>()))
+                .set_source(Some(crate::src_err_arc_wrap! { err }))
+                .set_kind(ErrorKind::Configuration)
+        })
+    }
+}
+
+impl<'a> ExtraSetting for Cow<'a, str> {}
+impl ExtraSetting for String {}
+impl ExtraSetting for field_types::Secret {}
+impl ExtraSetting for bool {}
+
+macro_rules! impl_extra_setting_from_str {
+    ($($t:ty),*$(,)?) => {
+        $(impl ExtraSetting for $t {
+            fn deserialize_extra(v: &serde_json::Value) -> Result<Self> {
+                serde::de::Deserialize::deserialize(v.clone())
+                    .or_else(|err| {
+                        if let Ok(s) = serde::de::Deserialize::deserialize(v.clone()) {
+                            let s: Cow<'_, str> = s;
+                            if let Ok(v) = <$t as std::str::FromStr>::from_str(s.as_ref()) {
+                                return Ok(v);
+                            }
+                        }
+                        Err(err)
+                    })
+                    .map_err(|err| {
+                        Error::new(format!(
+                            "could not deserialize value as {}",
+                            std::any::type_name::<Self>()
+                        ))
+                        .set_source(Some(crate::src_err_arc_wrap! { err }))
+                        .set_kind(ErrorKind::Configuration)
+                    })
+            }
+        })*
+    };
+}
+
+impl_extra_setting_from_str! { u16, u64 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AccountSettings {
@@ -62,7 +116,7 @@ pub struct AccountSettings {
     #[serde(default)]
     pub manual_refresh: bool,
     #[serde(flatten)]
-    pub extra: IndexMap<String, String>,
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl AccountSettings {
@@ -93,51 +147,82 @@ impl AccountSettings {
     }
 
     pub fn vcard_folder(&self) -> Option<&str> {
-        self.extra.get("vcard_folder").map(String::as_str)
+        self.extra.get("vcard_folder").and_then(|v| v.as_str())
     }
 
     pub fn notmuch_address_book_query(&self) -> Option<&str> {
         self.extra
             .get("notmuch_address_book_query")
-            .map(String::as_str)
+            .and_then(|v| v.as_str())
     }
 
-    /// Get the server password, either directly from the `server_password`
-    /// settings value, or by running the `server_password_command` and reading
-    /// the output.
-    pub fn server_password(&self) -> Result<String> {
-        if let Some(cmd) = self.extra.get("server_password_command") {
-            let output = std::process::Command::new("sh")
-                .args(["-c", cmd])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()?;
+    /// Look up an `extra` value as a string slice.
+    ///
+    /// Returns `None` if the key is absent or the value is not a string.
+    /// The upstream port stores non-string values (e.g. Secret inline
+    /// tables) under `extra`, and callers that want a string must opt in
+    /// via this helper.
+    pub fn extra_str(&self, key: &str) -> Option<&str> {
+        self.extra.get(key).and_then(|v| v.as_str())
+    }
 
-            if output.status.success() {
-                Ok(std::str::from_utf8(&output.stdout)?.trim_end().to_string())
-            } else {
-                Err(Error::new(format!(
-                    "({}) server_password_command `{}` returned {}: {}",
-                    self.name,
-                    cmd,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                )))
-            }
-        } else if let Some(pass) = self.extra.get("server_password") {
-            Ok(pass.to_owned())
-        } else {
-            Err(Error::new(
-                "Configuration error: connection requires either server_password or \
-                 server_password_command",
+    /// Look up an `extra` value as a raw [`serde_json::Value`].
+    pub fn extra_value(&self, key: &str) -> Option<&serde_json::Value> {
+        self.extra.get(key)
+    }
+
+    /// Resolve the server password to a [`Secret`] suitable for the
+    /// connection layer.
+    ///
+    /// The legacy `server_password_command = "..."` syntax is detected and
+    /// rejected with a migration hint pointing at
+    /// `server_password = { command = "..." }`.
+    pub fn server_password_field(&self) -> Result<field_types::Secret> {
+        if self.extra.contains_key("server_password_command") {
+            return Err(Error::new(format!(
+                "({}) `server_password_command` is no longer supported; use `server_password \
+                 = {{ command = \"...\" }}` instead. Run the version migration offered on \
+                 startup to update existing configurations.",
+                self.name,
             ))
+            .set_kind(ErrorKind::Configuration));
+        }
+        match self.extra.get("server_password") {
+            Some(serde_json::Value::String(s)) => Ok(field_types::Secret::Value(s.clone())),
+            Some(v @ serde_json::Value::Object(_)) => {
+                serde_json::from_value(v.clone()).map_err(|err| {
+                    Error::new(format!(
+                        "({}) could not parse `server_password` object as a Secret",
+                        self.name,
+                    ))
+                    .set_source(Some(crate::src_err_arc_wrap! { err }))
+                    .set_kind(ErrorKind::Configuration)
+                })
+            }
+            Some(_) => Err(Error::new(format!(
+                "({}) `server_password` must be a string or `{{ command = \"...\" }}` table",
+                self.name,
+            ))
+            .set_kind(ErrorKind::Configuration)),
+            None => Err(Error::new(
+                "Configuration error: connection requires `server_password` (string or \
+                 `{ command = \"...\" }` table)",
+            )),
         }
     }
 
     pub fn validate_config(&mut self) -> Result<()> {
         {
-            if let Some(folder) = self.extra.swap_remove("vcard_folder") {
+            if let Some(folder) = self
+                .extra
+                .swap_remove("vcard_folder")
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    serde_json::Value::Bool(b) => Some(b.to_string()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                })
+            {
                 let path = Path::new(&folder).expand();
 
                 if !matches!(path.try_exists(), Ok(true)) {
@@ -160,7 +245,16 @@ impl AccountSettings {
             _ = self.extra.swap_remove("notmuch_address_book_query");
         }
         {
-            if let Some(mutt_alias_file) = self.extra.swap_remove("mutt_alias_file") {
+            if let Some(mutt_alias_file) = self
+                .extra
+                .swap_remove("mutt_alias_file")
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    serde_json::Value::Bool(b) => Some(b.to_string()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                })
+            {
                 let path = Path::new(&mutt_alias_file).expand();
 
                 if !matches!(path.try_exists(), Ok(true)) {

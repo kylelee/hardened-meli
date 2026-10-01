@@ -346,7 +346,7 @@ impl NotmuchDb {
         event_consumer: BackendEventConsumer,
     ) -> Result<Box<Self>> {
         let mut dlpath = Cow::Borrowed(Self::DEFAULT_DYLIB_NAME);
-        let custom_dlpath = if let Some(lib_path) = s.extra.get("library_file_path") {
+        let custom_dlpath = if let Some(lib_path) = s.extra.get("library_file_path").and_then(|v| v.as_str()) {
             let expanded_path = Path::new(lib_path).expand();
             let expanded_path_string = expanded_path.display().to_string();
             dlpath = if &expanded_path_string != lib_path
@@ -424,12 +424,12 @@ impl NotmuchDb {
             .set_kind(ErrorKind::Configuration));
         }
         let mut mailboxes = HashMap::with_capacity(s.mailboxes.len());
-        let mut parents: Vec<(MailboxHash, &str)> = Vec::with_capacity(s.mailboxes.len());
+        let mut parents: Vec<(MailboxHash, String)> = Vec::with_capacity(s.mailboxes.len());
         for (k, f) in s.mailboxes.iter() {
-            if let Some(query_str) = f.extra.get("query") {
+            if let Some(query_str) = f.extra.get("query").map(String::as_str) {
                 let hash = MailboxHash::from_bytes(k.as_bytes());
-                if let Some(parent) = f.extra.get("parent") {
-                    parents.push((hash, parent));
+                if let Some(parent) = f.extra.get("parent").map(String::as_str) {
+                    parents.push((hash, parent.to_string()));
                 }
                 mailboxes.insert(
                     hash,
@@ -530,18 +530,33 @@ impl NotmuchDb {
 
         let account_name = s.name.to_string();
         if let Some(lib_path) = s.extra.swap_remove("library_file_path") {
-            let expanded_path = Path::new(&lib_path).expand();
-            if (!Path::new(&lib_path).try_exists().unwrap_or(false)
-                || Path::new(&lib_path).is_dir())
+            // Convert serde_json::Value to PathBuf via String when it is one,
+            // so that non-string values surface as a clear configuration error
+            // rather than silently coercing.
+            let lib_path_pb = match lib_path {
+                serde_json::Value::String(s) => std::path::PathBuf::from(s),
+                other => {
+                    return Err(Error::new(format!(
+                        "Notmuch `library_file_path` setting must be a string for account {}, \
+                         got: {other}",
+                        s.name
+                    ))
+                    .set_kind(ErrorKind::Configuration));
+                }
+            };
+            let expanded_path = Path::new(&lib_path_pb).expand();
+            if (!Path::new(&lib_path_pb).try_exists().unwrap_or(false)
+                || Path::new(&lib_path_pb).is_dir())
                 && !Path::new(&expanded_path).try_exists().unwrap_or(false)
                 || Path::new(&expanded_path).is_dir()
             {
                 return Err(Error::new(format!(
-                    "Notmuch `library_file_path` setting value `{lib_path}` for account {} does \
+                    "Notmuch `library_file_path` setting value `{}` for account {} does \
                      not exist or is a directory.",
+                    lib_path_pb.display(),
                     s.name
                 ))
-                .set_related_path(Some(lib_path))
+                .set_related_path(Some(lib_path_pb))
                 .set_kind(ErrorKind::Configuration));
             }
         }

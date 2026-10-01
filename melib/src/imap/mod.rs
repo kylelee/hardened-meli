@@ -118,7 +118,12 @@ pub struct EnvelopeCache {
 pub struct ImapServerConf {
     pub server_hostname: String,
     pub server_username: String,
-    pub server_password: String,
+    /// Password / token. Carried as a [`Secret`] so that inline-table
+    /// `{ command = "..." }` form (upstream port of #448) and the legacy
+    /// literal-string form both deserialize into one type. The connection
+    /// layer calls [`Secret::value`] right before the SASL exchange so the
+    /// plaintext never lingers in memory.
+    pub server_password: crate::conf::Secret,
     pub server_port: u16,
     pub use_starttls: bool,
     pub use_tls: bool,
@@ -149,17 +154,21 @@ type Capabilities = indexmap::IndexSet<Box<[u8]>>;
 #[macro_export]
 macro_rules! get_conf_val {
     ($s:ident[$var:literal]) => {
-        $s.extra.get($var).ok_or_else(|| {
-            Error::new(format!(
-                "Configuration error ({}): IMAP connection requires the field `{}` set",
-                $s.name.as_str(),
-                $var
-            ))
-        })
+        $s.extra
+            .get($var)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "Configuration error ({}): IMAP connection requires the field `{}` set",
+                    $s.name.as_str(),
+                    $var
+                ))
+            })
     };
     ($s:ident[$var:literal], $default:expr) => {
         $s.extra
             .get($var)
+            .and_then(|v| v.as_str())
             .map(|v| {
                 <_>::from_str(v).map_err(|e| {
                     Error::new(format!(
@@ -1455,15 +1464,15 @@ impl ImapType {
             && !s.extra.contains_key("server_password")
         {
             return Err(Error::new(format!(
-                "({}) `use_oauth2` use requires either `server_password` set or \
-                 `server_password_command` set with a command that returns an OAUTH2 token. \
-                 Consult documentation for guidance.",
+                "({}) `use_oauth2` use requires `server_password` set (literal OAUTH2 bearer \
+                 token, or `{{ command = \"...\" }}` table that returns one). Consult \
+                 documentation for guidance.",
                 s.name,
             ))
             .set_kind(ErrorKind::Configuration));
         }
 
-        let server_password = s.server_password()?;
+        let server_password = s.server_password_field()?;
         let server_port = get_conf_val!(s["server_port"], 143)?;
         let use_tls = get_conf_val!(s["use_tls"], true)?;
         let use_starttls = use_tls && get_conf_val!(s["use_starttls"], server_port != 993)?;
@@ -1806,18 +1815,28 @@ impl ImapType {
         macro_rules! get_conf_val {
             ($s:ident[$var:literal]) => {{
                 keys.insert($var);
-                $s.extra.swap_remove($var).ok_or_else(|| {
-                    Error::new(format!(
-                        "Configuration error ({}): IMAP connection requires the field `{}` set",
-                        $s.name.as_str(),
-                        $var
-                    ))
-                })
+                $s.extra
+                    .swap_remove($var)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "Configuration error ({}): IMAP connection requires the field `{}` set",
+                            $s.name.as_str(),
+                            $var
+                        ))
+                    })
             }};
             ($s:ident[$var:literal], $default:expr) => {{
                 keys.insert($var);
                 $s.extra
                     .swap_remove($var)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => None,
+                    })
                     .map(|v| {
                         <_>::from_str(&v).map_err(|e| {
                             Error::new(format!(
@@ -1841,15 +1860,42 @@ impl ImapType {
             && !s.extra.contains_key("server_password")
         {
             return Err(Error::new(format!(
-                "({}) `use_oauth2` use requires either `server_password` set or \
-                 `server_password_command` set with a command that returns an OAUTH2 token. \
-                 Consult documentation for guidance.",
+                "({}) `use_oauth2` use requires either `server_password` set (literal OAUTH2 \
+                 bearer token, or `{{ command = \"...\" }}` returning one) set. Consult \
+                 documentation for guidance.",
                 s.name,
             ))
             .set_kind(ErrorKind::Configuration));
         }
         if !s.extra.contains_key("server_password_command") {
-            get_conf_val!(s["server_password"])?;
+            // server_password can be a string literal OR `{ command = "..." }`
+            // inline table that deserializes to a Secret.
+            if !s.extra.contains_key("server_password") {
+                return Err(Error::new(format!(
+                    "Configuration error ({}): IMAP connection requires `server_password` set \
+                     (string or `{{ command = \"...\" }}` table)",
+                    s.name.as_str(),
+                ))
+                .set_kind(ErrorKind::Configuration));
+            }
+            // Validate the inline-table form early so failures are reported
+            // here rather than later at connection time. Use swap_remove so
+            // the key doesn't end up in the unrecognised-keys tail check.
+            if let Some(value) = s.extra.swap_remove("server_password") {
+                if let serde_json::Value::Object(_) = &value {
+                    let _ = <crate::conf::Secret as crate::conf::ExtraSetting>::deserialize_extra(
+                        &value,
+                    )
+                    .map_err(|err| {
+                        Error::new(format!(
+                            "({}) `server_password` object is not a valid Secret: {err}",
+                            s.name.as_str(),
+                        ))
+                        .set_kind(ErrorKind::Configuration)
+                    })?;
+                }
+            }
+            keys.insert("server_password");
         } else if s.extra.contains_key("server_password") {
             return Err(Error::new(format!(
                 "Configuration error ({}): both server_password and server_password_command are \
@@ -1858,7 +1904,10 @@ impl ImapType {
             ))
             .set_kind(ErrorKind::Configuration));
         }
-        let _ = get_conf_val!(s["server_password_command"]);
+        // Consume server_password_command so it doesn't end up in the
+        // "Unrecognised configuration values" tail check. It is rejected
+        // during actual validation below with a migration hint.
+        let _ = s.extra.swap_remove("server_password_command");
         get_conf_val!(s["server_port"], 143)?;
         let use_tls = get_conf_val!(s["use_tls"], true)?;
         let use_starttls = get_conf_val!(s["use_starttls"], false)?;
@@ -1913,6 +1962,7 @@ impl ImapType {
             .keys()
             .map(String::as_str)
             .collect::<HashSet<&str>>();
+        let _diff = extra_keys.difference(&keys).collect::<Vec<&&str>>();
         let diff = extra_keys.difference(&keys).collect::<Vec<&&str>>();
         if !diff.is_empty() {
             return Err(Error::new(format!(
@@ -1943,7 +1993,7 @@ mod tests {
     /// for protocol-level connection dumps.
     #[test]
     fn test_conf_trace_option_parses_and_defaults_to_false() {
-        let account_with = |extra: indexmap::IndexMap<String, String>| AccountSettings {
+        let account_with = |extra: serde_json::Map<String, serde_json::Value>| AccountSettings {
             name: "test".to_string(),
             root_mailbox: "INBOX".to_string(),
             format: "imap".to_string(),
@@ -1957,15 +2007,19 @@ mod tests {
             extra,
         };
         let base = || {
-            indexmap::indexmap! {
-                "server_hostname".to_string() => "localhost".to_string(),
-                "server_username".to_string() => "user".to_string(),
-                "server_password".to_string() => "password".to_string(),
-                "use_tls".to_string() => "false".to_string(),
-                "use_starttls".to_string() => "false".to_string(),
-                "offline_cache".to_string() => "false".to_string(),
-                "use_connection_pool".to_string() => "false".to_string(),
+            let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            for (k, v) in [
+                ("server_hostname", "localhost"),
+                ("server_username", "user"),
+                ("server_password", "password"),
+                ("use_tls", "false"),
+                ("use_starttls", "false"),
+                ("offline_cache", "false"),
+                ("use_connection_pool", "false"),
+            ] {
+                m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
             }
+            m
         };
         let event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
 
@@ -1976,14 +2030,20 @@ mod tests {
 
         // `trace = true` is accepted and stored.
         let mut extra = base();
-        extra.insert("trace".to_string(), "true".to_string());
+        extra.insert(
+            "trace".to_string(),
+            serde_json::Value::String("true".to_string()),
+        );
         let account = account_with(extra);
         let imap = ImapType::new(&account, Default::default(), event_consumer).unwrap();
         assert!(imap.server_conf.trace);
 
         // Invalid values are rejected by validation.
         let mut extra = base();
-        extra.insert("trace".to_string(), "not-a-bool".to_string());
+        extra.insert(
+            "trace".to_string(),
+            serde_json::Value::String("not-a-bool".to_string()),
+        );
         let mut account = account_with(extra);
         assert!(ImapType::validate_config(&mut account).is_err());
     }

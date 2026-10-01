@@ -131,7 +131,7 @@ fn test_calculate_migrations_unrecognized_version() {
     );
     // A valid version newer than every known one has no migrations left to
     // perform.
-    assert_eq!(ids(Some("0.9.5")), Vec::<&str>::new());
+    assert_eq!(ids(Some("0.10.5")), Vec::<&str>::new());
 }
 
 rusty_fork_test! {
@@ -243,11 +243,12 @@ send_mail = 'false'
 identity="username@example.com"
 server_username = "null"
 server_hostname = "example.com"
-server_password_command = "false"
 "#).unwrap();
 
-    // No `addressbook` data file exists, so no migration is applicable: the
-    // unrecognized value must self-heal without any interactive question.
+    // No `addressbook` data file exists, and the config has no
+    // `server_password_command` (so v0.10.0's migration is not applicable
+    // either): the unrecognized value must self-heal without any
+    // interactive question.
     let mut stdout = vec![];
     let mut stdin = &b""[..];
     let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
@@ -301,14 +302,18 @@ server_hostname = "example.com"
 server_password_command = "false"
 "#).unwrap();
     // An `addressbook` data file exists, so the v0.8.8 AddressbookRename
-    // migration is applicable.
+    // migration is applicable. (The v0.10.0 ServerPasswordCommand
+    // migration also applies because the test config contains
+    // `server_password_command`, but `is_applicable` returns false when
+    // stdin is empty / no work was attempted — actually it returns true,
+    // so we provide decline inputs for both migrations.)
     let addressbook = tempdir.path().join("meli").join("imap").join("addressbook");
     std::fs::create_dir_all(addressbook.parent().unwrap()).unwrap();
     std::fs::write(&addressbook, "addressbook contents\n").unwrap();
 
     let mut stdout = vec![];
-    // Decline performing the migration, then accept updating the `.version`
-    // file anyway.
+    // Decline performing both migrations, then accept updating the
+    // `.version` file anyway.
     let mut stdin = &b"n\ny\n"[..];
     let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
     version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
@@ -316,8 +321,9 @@ server_password_command = "false"
         "warning: version file {vf} contains an unrecognized value {prev:?}; treating it as \
          predating {latest} and checking for applicable migrations\nYou might need to migrate \
          your configuration data for the new version to work.\nYou can skip any changes you \
-         don't want to happen and you can quit at any time.\n1 migration is about to be \
-         performed:\nv0.8.8/AddressbookRename: {desc}\nPerform 1 migration? [Y/n] Update \
+         don't want to happen and you can quit at any time.\n2 migrations are about to be \
+         performed:\nv0.8.8/AddressbookRename: {desc}\nv0.10.0/ServerPasswordCommand: \
+         Transform `server_password_command` to new syntax: `server_password = {{ command = \"...\" }}`\nPerform 2 migrations? [Y/n] Update \
          .version file despite not attempting migrations? [y/N] ",
         vf = version_file.display(),
         prev = "meli-git",

@@ -70,7 +70,11 @@ impl Configuration {
     pub fn new(settings: &AccountSettings) -> Result<Self> {
         const RENAME_REGEX_FIELDNAME: &str = "rename_regex";
 
-        let rename_regex = if let Some(v) = settings.extra.get(RENAME_REGEX_FIELDNAME).map(|v| {
+        let rename_regex = if let Some(v) = settings
+            .extra
+            .get(RENAME_REGEX_FIELDNAME)
+            .and_then(|v| v.as_str())
+            .map(|v| {
             Regex::new(v).map_err(|e| {
                 Error::new(format!(
                     "Configuration error ({}): Invalid value for field \
