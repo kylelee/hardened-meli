@@ -130,16 +130,6 @@ impl From<CachedImapMailbox> for ImapMailbox {
     }
 }
 
-/// Helper function for ignoring cache misses with
-/// `.or_else(ignore_not_found)?`.
-#[inline(always)]
-pub fn ignore_not_found(err: Error) -> Result<()> {
-    if matches!(err.kind, ErrorKind::NotFound) {
-        return Ok(());
-    }
-    Err(err)
-}
-
 pub trait ImapCache: Send + std::fmt::Debug {
     fn reset(&mut self) -> Result<()>;
     fn mailbox_state(&mut self, mailbox_hash: MailboxHash) -> Result<Option<CachedState>>;

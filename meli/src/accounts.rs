@@ -728,24 +728,10 @@ impl Account {
             }
             RefreshEventKind::Rename(old_hash, new_hash) => {
                 log::trace!("rename {} to {}", old_hash, new_hash);
-                if !self.collection.rename(old_hash, new_hash, mailbox_hash) {
-                    ui_events.push(UIEvent::EnvelopeRename(old_hash, new_hash));
-                    return;
-                }
                 #[cfg(feature = "sqlite3")]
-                if let Some(env) = {
-                    let temp = self
-                        .collection
-                        .envelopes
-                        .read()
-                        .unwrap()
-                        .get(&new_hash)
-                        .cloned();
+                self.rename_cached_env(old_hash, new_hash);
 
-                    temp
-                } {
-                    self.update_cached_env(env, Some(old_hash));
-                }
+                self.collection.rename(old_hash, new_hash, mailbox_hash);
                 ui_events.push(UIEvent::EnvelopeRename(old_hash, new_hash));
             }
             RefreshEventKind::Create(envelope) => {
@@ -754,7 +740,8 @@ impl Account {
                     && self
                         .collection
                         .get_mailbox(mailbox_hash)
-                        .contains(&env_hash)
+                        .map(|m| m.contains(&env_hash))
+                        .unwrap_or(false)
                 {
                     return;
                 }
@@ -771,9 +758,9 @@ impl Account {
                     let handle = self.main_loop_handler.job_executor.spawn(
                         "sqlite3::insert".into(),
                         crate::sqlite3::AccountCache::insert(
+                            self.name.clone(),
                             (*envelope).clone(),
                             self.backend.clone(),
-                            self.name.clone(),
                         ),
                         crate::sqlite3::AccountCache::is_async(),
                     );
@@ -810,7 +797,9 @@ impl Account {
                 }
 
                 {
-                    let threads = self.collection.get_threads(mailbox_hash);
+                    let Some(threads) = self.collection.get_threads(mailbox_hash) else {
+                        return;
+                    };
                     let Some(thread_node_hash) = threads.envelope_to_thread_node.get(&env_hash)
                     else {
                         return;
@@ -876,7 +865,9 @@ impl Account {
                 }
 
                 let thread_hash = {
-                    let threads = self.collection.get_threads(mailbox_hash);
+                    let Some(threads) = self.collection.get_threads(mailbox_hash) else {
+                        return;
+                    };
                     let Some(thread_node_hash) = threads.envelope_to_thread_node.get(&env_hash)
                     else {
                         return;

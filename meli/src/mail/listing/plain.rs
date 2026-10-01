@@ -189,17 +189,16 @@ impl MailListingTrait for PlainListing {
                 return;
             }
         }
-        self.local_collection = context.accounts[&self.cursor_pos.0]
-            .collection
-            .get_mailbox(self.cursor_pos.1)
-            .iter()
-            .cloned()
-            .collect();
         let env_lck = context.accounts[&self.cursor_pos.0]
             .collection
             .envelopes
             .read()
             .unwrap();
+        self.local_collection = context.accounts[&self.cursor_pos.0]
+            .collection
+            .get_mailbox(self.cursor_pos.1)
+            .map(|envs| envs.iter().cloned().collect())
+            .unwrap_or_default();
         let sort = self.sort;
         self.local_collection.sort_by(|a, b| match sort {
             (SortField::Date, SortOrder::Desc) => {
@@ -253,7 +252,23 @@ impl MailListingTrait for PlainListing {
         items: Box<dyn Iterator<Item = ThreadHash>>,
     ) {
         let account = &context.accounts[&self.cursor_pos.0];
-        let threads = account.collection.get_threads(self.cursor_pos.1);
+        self.length = 0;
+        let Some(threads) = account.collection.get_threads(self.cursor_pos.1) else {
+            self.redraw_list(context, Box::new(std::iter::empty()));
+            let message: String = account[&self.new_cursor_pos.1].status();
+            _ = self.data_columns.columns[0].resize_with_context(message.len(), 1, context);
+            let area = self.data_columns.columns[0].area();
+            self.data_columns.columns[0].grid_mut().write_string(
+                message.as_str(),
+                self.color_cache.theme_default.fg,
+                self.color_cache.theme_default.bg,
+                self.color_cache.theme_default.attrs,
+                area,
+                None,
+                None,
+            );
+            return;
+        };
         let roots = items
             .filter_map(|r| threads.groups[&r].root().map(|r| r.root))
             .collect::<_>();
@@ -818,20 +833,14 @@ impl PlainListing {
         .grapheme_width();
         let mut itoa_buffer = itoa::Buffer::new();
         for i in iter {
-            if !context.accounts[&self.cursor_pos.0].contains_key(i)
-                || !threads.envelope_to_thread.contains_key(&i)
-            {
-                //let mailbox = &account[&self.cursor_pos.1];
-                //log::debug!("key = {}", i);
-                //log::debug!(
-                //    "name = {} {}",
-                //    mailbox.name(),
-                //    context.accounts[&self.cursor_pos.0].name()
-                //);
-                //log::debug!("{:#?}", context.accounts);
-
+            let Some(thread) = threads
+                .as_ref()
+                .and_then(|t| t.envelope_to_thread.get(&i))
+                .copied()
+            else {
+                // Row's thread is gone from the mailbox threads; skip it.
                 continue;
-            }
+            };
             let Some(envelope) = context.accounts[&self.cursor_pos.0].collection.get_env(i) else {
                 // Stale entry: the envelope was removed after the `contains_key`
                 // check above (or `i` is not in the collection at all). Skip the
@@ -902,12 +911,8 @@ impl PlainListing {
             min_width.4 = min_width.4.max(
                 entry_strings.subject.grapheme_width() + 1 + entry_strings.tags.grapheme_width(),
             ); /* tags + subject */
-            self.rows.insert_thread(
-                threads.envelope_to_thread[&i],
-                (threads.envelope_to_thread[&i], i),
-                smallvec::smallvec![i],
-                entry_strings,
-            );
+            self.rows
+                .insert_thread(thread, (thread, i), smallvec::smallvec![i], entry_strings);
 
             self.length += 1;
         }
@@ -1349,11 +1354,10 @@ impl PlainListing {
             Ok(result) => {
                 super::notify_if_search_degraded(context, &result);
                 let account = &context.accounts[&self.cursor_pos.0];
-                let threads = account.collection.get_threads(self.cursor_pos.1);
+                let Some(threads) = account.collection.get_threads(self.cursor_pos.1) else {
+                    return;
+                };
                 for env_hash in result.envelopes {
-                    if !account.collection.contains_key(&env_hash) {
-                        continue;
-                    }
                     let Some(env_thread_node_hash) = threads.envelope_to_thread_node.get(&env_hash)
                     else {
                         continue;
@@ -1888,16 +1892,6 @@ impl Component for PlainListing {
                 self.set_dirty(true);
             }
             UIEvent::EnvelopeRename(ref old_hash, ref new_hash) => {
-                let account = &context.accounts[&self.cursor_pos.0];
-                if !account.collection.contains_key(new_hash)
-                    || !account
-                        .collection
-                        .get_mailbox(self.cursor_pos.1)
-                        .contains(new_hash)
-                {
-                    return false;
-                }
-
                 self.rows.rename_env(*old_hash, *new_hash);
                 for h in self.filtered_selection.iter_mut() {
                     if *h == *old_hash {
@@ -1915,16 +1909,6 @@ impl Component for PlainListing {
                 }
             }
             UIEvent::EnvelopeUpdate(ref env_hash) => {
-                let account = &context.accounts[&self.cursor_pos.0];
-                if !account.collection.contains_key(env_hash)
-                    || !account
-                        .collection
-                        .get_mailbox(self.cursor_pos.1)
-                        .contains(env_hash)
-                {
-                    return false;
-                }
-
                 self.rows.row_updates.push(*env_hash);
                 self.set_dirty(true);
             }

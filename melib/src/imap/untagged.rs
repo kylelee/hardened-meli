@@ -33,7 +33,7 @@ use crate::{
             generate_envelope_hash, FetchResponse, ImapLineSplit, RequiredResponses,
             UntaggedResponse,
         },
-        sync::cache::{ignore_not_found, ImapCache},
+        sync::cache::ImapCache,
         ImapConnection, MailboxSelection, UID,
     },
 };

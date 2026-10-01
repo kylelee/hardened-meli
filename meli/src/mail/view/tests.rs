@@ -1011,7 +1011,8 @@ fn two_mail_thread_view(context: &mut Context, focus: ThreadViewFocus) -> Thread
     let thread_group = {
         let threads = context.accounts[&account_hash]
             .collection
-            .get_threads(mailbox_hash);
+            .get_threads(mailbox_hash)
+            .expect("test fixture inserted mail into the mailbox threads");
         threads.find_group(threads.envelope_to_thread[&root_hash])
     };
     ThreadView::new(
@@ -1164,7 +1165,8 @@ fn enter_with_open_dialog_confirms_instead_of_new_tab() {
     let thread_group = {
         let threads = ctx.accounts[&account_hash]
             .collection
-            .get_threads(mailbox_hash);
+            .get_threads(mailbox_hash)
+            .expect("test fixture inserted mail into the mailbox threads");
         threads.find_group(threads.envelope_to_thread[&env_hash])
     };
     let mut view = ThreadView::new(
