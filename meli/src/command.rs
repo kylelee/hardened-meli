@@ -29,7 +29,7 @@ use melib::{
     nom::{
         self,
         branch::alt,
-        bytes::complete::{is_a, is_not, tag, take_until},
+        bytes::complete::{is_a, is_not, tag, take_until, take_while},
         character::complete::{digit1, not_line_ending},
         combinator::{map, map_res},
         error::Error as NomError,
@@ -131,6 +131,10 @@ define_commands!([
                 { tags: ["import "],
                   desc: "import FILESYSTEM_PATH MAILBOX_PATH",
                   parser: parser::import
+                },
+                { tags: ["public-inbox import ", "public-inbox import-thread "],
+                  desc: "public-inbox [import/import-thread] ACCOUNT_NAME MAILBOX_PATH MESSAGE_ID",
+                  parser: parser::public_inbox_import
                 },
                  { tags: ["close"],
                    desc: "close non-sticky tabs",

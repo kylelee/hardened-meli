@@ -609,6 +609,14 @@ Refresh the current mailbox.
 Set seen status of message.
 .It Cm import Ar FILEPATH Ar MAILBOX_PATH
 Import mail from file into given mailbox.
+.It Cm public\-inbox import Ar ACCOUNT Ar MAILBOX_PATH Ar MESSAGE_ID
+Retrieve an e-mail from
+.Lk https://lore.kernel.org
+with a specific message ID and import it.
+.It Cm public\-inbox import\-thread Ar ACCOUNT Ar MAILBOX_PATH Ar MESSAGE_ID
+Retrieve a thread from
+.Lk https://lore.kernel.org
+containing a specific message ID and import it.
 .It Cm copyto, moveto Ar MAILBOX_PATH
 Copy or move to other mailbox.
 .It Cm copyto, moveto Ar ACCOUNT Ar MAILBOX_PATH
