@@ -2,6 +2,7 @@
  * meli - configuration module.
  *
  * Copyright 2017 Manos Pitsidianakis
+ * Copyright 2026 Kyle Lee
  *
  * This file is part of meli.
  *
@@ -22,7 +23,7 @@
 //! Basic mail account configuration to use with
 //! [`backends`](./backends/index.html)
 
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 
 use indexmap::IndexMap;
 
@@ -38,6 +39,59 @@ mod field_types;
 mod tests;
 
 pub use field_types::*;
+
+/// Trait for types that can be deserialized from an `extra` configuration
+/// value.
+///
+/// Each backend's `validate_config` method pulls values out of
+/// [`AccountSettings::extra`] (a `serde_json::Value` map) and validates them
+/// per-backend. The default implementation defers to `serde_json`'s
+/// `Deserialize`, which is what enables the new Secret-typed configuration
+/// fields (`server_password = "literal"` and `server_password = { command =
+/// "..." }`).
+pub trait ExtraSetting: serde::de::DeserializeOwned {
+    fn deserialize_extra(value: &serde_json::Value) -> Result<Self> {
+        serde::de::Deserialize::deserialize(value.clone()).map_err(|err| {
+            Error::new(format!("could not deserialize value as {}", std::any::type_name::<Self>()))
+                .set_source(Some(crate::src_err_arc_wrap! { err }))
+                .set_kind(ErrorKind::Configuration)
+        })
+    }
+}
+
+impl<'a> ExtraSetting for Cow<'a, str> {}
+impl ExtraSetting for String {}
+impl ExtraSetting for field_types::Secret {}
+impl ExtraSetting for bool {}
+
+macro_rules! impl_extra_setting_from_str {
+    ($($t:ty),*$(,)?) => {
+        $(impl ExtraSetting for $t {
+            fn deserialize_extra(v: &serde_json::Value) -> Result<Self> {
+                serde::de::Deserialize::deserialize(v.clone())
+                    .or_else(|err| {
+                        if let Ok(s) = serde::de::Deserialize::deserialize(v.clone()) {
+                            let s: Cow<'_, str> = s;
+                            if let Ok(v) = <$t as std::str::FromStr>::from_str(s.as_ref()) {
+                                return Ok(v);
+                            }
+                        }
+                        Err(err)
+                    })
+                    .map_err(|err| {
+                        Error::new(format!(
+                            "could not deserialize value as {}",
+                            std::any::type_name::<Self>()
+                        ))
+                        .set_source(Some(crate::src_err_arc_wrap! { err }))
+                        .set_kind(ErrorKind::Configuration)
+                    })
+            }
+        })*
+    };
+}
+
+impl_extra_setting_from_str! { u16, u64 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AccountSettings {
