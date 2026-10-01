@@ -223,7 +223,23 @@ impl DotAddressable for FileAccount {
                     "manual_refresh" => self.manual_refresh.lookup(field, tail),
                     "refresh_command" => self.refresh_command.lookup(field, tail),
                     "conf_override" => self.conf_override.lookup(field, tail),
-                    "extra" => self.extra.lookup(field, tail),
+                    "extra" => {
+                        // `extra` is now a serde_json::Map<String, Value>;
+                        // look up by key, return the raw value as TOML.
+                        // `field` here is `&&str` (from `match *field { ... }`
+                        // destructuring one level of `&Option<&str>`); we
+                        // already matched on the outer Option, so it's safe
+                        // to unwrap to `&str`.
+                        let key: &str = *field;
+                        match self.extra.get(key) {
+                            Some(v) => Ok(toml::Value::try_from(v)
+                                .map_err(|err| err.to_string())?
+                                .to_string()),
+                            None => Err(Error::new(format!(
+                                "extra has no key named {key}"
+                            ))),
+                        }
+                    }
                     other => Err(Error::new(format!(
                         "{parent_field} has no field named {other}"
                     ))),
@@ -251,7 +267,19 @@ impl DotAddressable for melib::AccountSettings {
                     "subscribed_mailboxes" => self.subscribed_mailboxes.lookup(field, tail),
                     "mailboxes" => self.mailboxes.lookup(field, tail),
                     "manual_refresh" => self.manual_refresh.lookup(field, tail),
-                    "extra" => self.extra.lookup(field, tail),
+                    "extra" => {
+                        // See the matching `extra` arm above in the
+                        // FileAccount impl; same pattern applies here.
+                        let key: &str = *field;
+                        match self.extra.get(key) {
+                            Some(v) => Ok(toml::Value::try_from(v)
+                                .map_err(|err| err.to_string())?
+                                .to_string()),
+                            None => Err(Error::new(format!(
+                                "extra has no key named {key}"
+                            ))),
+                        }
+                    }
                     other => Err(Error::new(format!(
                         "{parent_field} has no field named {other}"
                     ))),

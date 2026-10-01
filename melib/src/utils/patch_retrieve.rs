@@ -69,13 +69,24 @@ mod nttp {
 
     impl PublicInboxNNTP {
         fn nntp_connection(&self, list: &str) -> Result<Box<NntpType>> {
-            let mut extra = indexmap::indexmap! {
-                "server_hostname".into() => self.server_hostname.clone(),
-                "require_auth".into() => false.to_string(),
-                "store_flags_locally".into() => false.to_string(),
-            };
+            let mut extra: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            extra.insert(
+                "server_hostname".into(),
+                serde_json::Value::String(self.server_hostname.clone()),
+            );
+            extra.insert(
+                "require_auth".into(),
+                serde_json::Value::Bool(false),
+            );
+            extra.insert(
+                "store_flags_locally".into(),
+                serde_json::Value::Bool(false),
+            );
             if let Some(port) = self.port {
-                extra.insert("server_port".to_string(), port.to_string());
+                extra.insert(
+                    "server_port".to_string(),
+                    serde_json::Value::Number(port.into()),
+                );
             }
             let groupname = Self::groupname(list);
             let event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));

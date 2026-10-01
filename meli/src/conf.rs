@@ -223,11 +223,15 @@ pub struct FileAccount {
     #[serde(flatten)]
     #[serde(
         deserialize_with = "extra_settings",
-        skip_serializing_if = "IndexMap::is_empty"
+        skip_serializing_if = "serde_json::Map::is_empty"
     )]
     /// Use custom deserializer to convert any given value (eg `bool`, number,
-    /// etc) to `String`.
-    pub extra: IndexMap<String, String>,
+    /// table) to `serde_json::Value`, mirroring upstream's value-typed
+    /// `extra` field (see `melib::conf::AccountSettings::extra`). This is
+    /// what lets `server_password = { command = "..." }` (the new Secret
+    /// inline-table syntax from upstream 254cee97) round-trip into the
+    /// `Secret` type used by the connection layer.
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl FileAccount {
@@ -964,6 +968,7 @@ mod deserializers {
     }
 
     use toml::Value;
+    #[allow(dead_code)]
     fn any_of<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
     where
         D: Deserializer<'de>,
@@ -982,21 +987,43 @@ mod deserializers {
         Ok(ret)
     }
 
-    use indexmap::IndexMap;
+    /// Deserialize `extra` fields into a `serde_json::Map<String, Value>`,
+    /// keeping numbers/booleans/objects intact (upstream 97a08539 design).
+    ///
+    /// The legacy fork-side behaviour coerced any non-string value to a
+    /// `String`; the upstream port widens that to a full `serde_json::Value`
+    /// so `server_password = { command = "..." }` (Secret inline table) and
+    /// similar value configurations can be carried through.
     pub(in crate::conf) fn extra_settings<'de, D>(
         deserializer: D,
-    ) -> std::result::Result<IndexMap<String, String>, D::Error>
+    ) -> std::result::Result<serde_json::Map<String, serde_json::Value>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        /* Why is this needed? If the user gives a configuration value such as key =
-         * true, the parsing will fail since it expects string values. We
-         * want to accept key = true as well as key = "true". */
-        #[derive(Deserialize)]
-        struct Wrapper(#[serde(deserialize_with = "any_of")] String);
+        // Use a Visitor that accepts any JSON value per key, so strings,
+        // booleans, numbers, and inline tables all flow through.
+        struct AnyValueVisitor;
 
-        let v = <IndexMap<String, Wrapper>>::deserialize(deserializer)?;
-        Ok(v.into_iter().map(|(k, Wrapper(v))| (k, v)).collect())
+        impl<'de> serde::de::Visitor<'de> for AnyValueVisitor {
+            type Value = serde_json::Map<String, serde_json::Value>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map of configuration values")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut out = serde_json::Map::new();
+                while let Some((k, v)) = access.next_entry::<String, serde_json::Value>()? {
+                    out.insert(k, v);
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_map(AnyValueVisitor)
     }
 }
 
