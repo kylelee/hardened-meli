@@ -171,47 +171,6 @@ impl AccountSettings {
         self.extra.get(key)
     }
 
-    /// Get the server password, either directly from the `server_password`
-    /// settings value, or by running the `server_password_command` and reading
-    /// the output.
-    ///
-    /// New code should call [`Self::server_password_field`] and use
-    /// [`Secret::value`] instead so that the new
-    /// `server_password = { command = "..." }` inline-table form works.
-    #[deprecated(since = "0.10.0", note = "Use AccountSettings::server_password_field")]
-    pub fn server_password(&self) -> Result<String> {
-        if let Some(cmd) = self.extra_str("server_password_command") {
-            // Fork hardening (carried over): error message never contains
-            // command stdout (which would be the password itself); stderr is
-            // bounded by the program producing it.
-            let output = std::process::Command::new("sh")
-                .args(["-c", cmd])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()?;
-
-            if output.status.success() {
-                Ok(std::str::from_utf8(&output.stdout)?.trim_end().to_string())
-            } else {
-                Err(Error::new(format!(
-                    "({}) server_password_command `{}` returned {}: {}",
-                    self.name,
-                    cmd,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                )))
-            }
-        } else if let Some(pass) = self.extra_str("server_password") {
-            Ok(pass.to_owned())
-        } else {
-            Err(Error::new(
-                "Configuration error: connection requires either server_password or \
-                 server_password_command",
-            ))
-        }
-    }
-
     /// Resolve the server password to a [`Secret`] suitable for the
     /// connection layer.
     ///
