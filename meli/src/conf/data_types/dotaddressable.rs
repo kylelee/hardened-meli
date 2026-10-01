@@ -230,14 +230,12 @@ impl DotAddressable for FileAccount {
                         // destructuring one level of `&Option<&str>`); we
                         // already matched on the outer Option, so it's safe
                         // to unwrap to `&str`.
-                        let key: &str = *field;
+                        let key: &str = field;
                         match self.extra.get(key) {
                             Some(v) => Ok(toml::Value::try_from(v)
                                 .map_err(|err| err.to_string())?
                                 .to_string()),
-                            None => Err(Error::new(format!(
-                                "extra has no key named {key}"
-                            ))),
+                            None => Err(Error::new(format!("extra has no key named {key}"))),
                         }
                     }
                     other => Err(Error::new(format!(
@@ -270,14 +268,12 @@ impl DotAddressable for melib::AccountSettings {
                     "extra" => {
                         // See the matching `extra` arm above in the
                         // FileAccount impl; same pattern applies here.
-                        let key: &str = *field;
+                        let key: &str = field;
                         match self.extra.get(key) {
                             Some(v) => Ok(toml::Value::try_from(v)
                                 .map_err(|err| err.to_string())?
                                 .to_string()),
-                            None => Err(Error::new(format!(
-                                "extra has no key named {key}"
-                            ))),
+                            None => Err(Error::new(format!("extra has no key named {key}"))),
                         }
                     }
                     other => Err(Error::new(format!(
