@@ -226,6 +226,7 @@ fn test_conn(origin_port: u16, use_token: bool) -> JmapConnection {
             BASIC_PASS.to_string()
         },
         use_token,
+        trace: false,
         danger_accept_invalid_certs: false,
         timeout: Some(Duration::from_secs(5)),
     };

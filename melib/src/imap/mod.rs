@@ -122,6 +122,7 @@ pub struct ImapServerConf {
     pub server_port: u16,
     pub use_starttls: bool,
     pub use_tls: bool,
+    pub trace: bool,
     pub danger_accept_invalid_certs: bool,
     pub protocol: ImapProtocol,
     pub timeout: Option<Duration>,
@@ -1463,6 +1464,7 @@ impl ImapType {
         let server_port = get_conf_val!(s["server_port"], 143)?;
         let use_tls = get_conf_val!(s["use_tls"], true)?;
         let use_starttls = use_tls && get_conf_val!(s["use_starttls"], server_port != 993)?;
+        let trace = get_conf_val!(s["trace"], false)?;
         let danger_accept_invalid_certs: bool =
             get_conf_val!(s["danger_accept_invalid_certs"], false)?;
         #[cfg(feature = "sqlite3")]
@@ -1509,6 +1511,7 @@ impl ImapType {
             server_port,
             use_tls,
             use_starttls,
+            trace,
             danger_accept_invalid_certs,
             protocol: ImapProtocol::IMAP {
                 extension_use: ImapExtensionUse {
@@ -1863,6 +1866,7 @@ impl ImapType {
             )));
         }
         get_conf_val!(s["danger_accept_invalid_certs"], false)?;
+        get_conf_val!(s["trace"], false)?;
         #[cfg(feature = "sqlite3")]
         get_conf_val!(s["offline_cache"], true)?;
         #[cfg(not(feature = "sqlite3"))]
@@ -1930,6 +1934,56 @@ impl ImapType {
 
 #[cfg(test)]
 mod tests {
+    /// The account-level `trace` option must parse and default to off: it
+    /// replaced the per-protocol protocol-dump cargo features as the switch
+    /// for protocol-level connection dumps.
+    #[test]
+    fn test_conf_trace_option_parses_and_defaults_to_false() {
+        let account_with = |extra: indexmap::IndexMap<String, String>| AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: "INBOX".to_string(),
+            format: "imap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra,
+        };
+        let base = || {
+            indexmap::indexmap! {
+                "server_hostname".to_string() => "localhost".to_string(),
+                "server_username".to_string() => "user".to_string(),
+                "server_password".to_string() => "password".to_string(),
+                "use_tls".to_string() => "false".to_string(),
+                "use_starttls".to_string() => "false".to_string(),
+                "offline_cache".to_string() => "false".to_string(),
+                "use_connection_pool".to_string() => "false".to_string(),
+            }
+        };
+        let event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
+
+        // Absent `trace` defaults to off.
+        let account = account_with(base());
+        let imap = ImapType::new(&account, Default::default(), event_consumer.clone()).unwrap();
+        assert!(!imap.server_conf.trace);
+
+        // `trace = true` is accepted and stored.
+        let mut extra = base();
+        extra.insert("trace".to_string(), "true".to_string());
+        let account = account_with(extra);
+        let imap = ImapType::new(&account, Default::default(), event_consumer.clone()).unwrap();
+        assert!(imap.server_conf.trace);
+
+        // Invalid values are rejected by validation.
+        let mut extra = base();
+        extra.insert("trace".to_string(), "not-a-bool".to_string());
+        let mut account = account_with(extra);
+        assert!(ImapType::validate_config(&mut account).is_err());
+    }
+
     /* `create_mailbox` / `rename_mailbox` hand the server a UTF-8 display
      * name and must transmit it in the RFC 3501 §5.1.3 wire encoding
      * (modified UTF-7), then derive the returned `MailboxHash` from that

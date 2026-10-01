@@ -451,17 +451,11 @@ impl ImapStream {
             let mut socket = AsyncWrapper::new({
                 let addr = (path.clone(), server_conf.server_port);
                 let timeout = server_conf.timeout;
-                let conn = Connection::new_tcp(
+                Connection::new_tcp(
                     smol::unblock(move || tcp_stream_connect(addr, timeout)).await?,
-                );
-                #[cfg(feature = "imap-trace")]
-                {
-                    conn.trace(true).with_id("imap")
-                }
-                #[cfg(not(feature = "imap-trace"))]
-                {
-                    conn
-                }
+                )
+                .trace(server_conf.trace)
+                .with_id(id.clone())
             })?;
             if server_conf.use_starttls {
                 let err_fn = || {
@@ -583,17 +577,11 @@ impl ImapStream {
             AsyncWrapper::new({
                 let addr = (path.clone(), server_conf.server_port);
                 let timeout = server_conf.timeout;
-                let conn = Connection::new_tcp(
+                Connection::new_tcp(
                     smol::unblock(move || tcp_stream_connect(addr, timeout)).await?,
-                );
-                #[cfg(feature = "imap-trace")]
-                {
-                    conn.trace(true).with_id("imap")
-                }
-                #[cfg(not(feature = "imap-trace"))]
-                {
-                    conn
-                }
+                )
+                .trace(server_conf.trace)
+                .with_id(id.clone())
             })?
         };
         if let Err(err) = stream
@@ -2368,6 +2356,7 @@ mod tests {
                 server_port: 143,
                 use_starttls: false,
                 use_tls: false,
+                trace: false,
                 danger_accept_invalid_certs: false,
                 protocol: ImapProtocol::default(),
                 timeout: None,
