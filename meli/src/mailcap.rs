@@ -2170,6 +2170,7 @@ is 50 \% Greek to me" \; cat %s; copiousoutput"#;
         let temp_dir = tempfile::tempdir().unwrap();
         for var in [
             "HOME",
+            "TMPDIR",
             "XDG_CACHE_HOME",
             "XDG_STATE_HOME",
             "XDG_CONFIG_DIRS",
@@ -2181,6 +2182,13 @@ is 50 \% Greek to me" \; cat %s; copiousoutput"#;
         }
         for (var, dir) in [
             ("HOME", temp_dir.path().to_path_buf()),
+            // Mailcap handlers create their `%s` temp files with
+            // `delete_on_drop: false` (they are reaped via
+            // `ProcessRequest::temporary_files` at runtime, which a unit
+            // test never runs) — point `TMPDIR` into the test-owned
+            // directory so re-runs cannot collide with leftovers in the
+            // real `/tmp`.
+            ("TMPDIR", temp_dir.path().join("tmp")),
             ("XDG_CACHE_HOME", temp_dir.path().join(".cache")),
             ("XDG_STATE_HOME", temp_dir.path().join(".local/state")),
             ("XDG_CONFIG_HOME", temp_dir.path().join(".config")),

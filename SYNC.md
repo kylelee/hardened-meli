@@ -41,7 +41,7 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 ## 2026-10-01 21:30 (UTC+8)
 
 - Method: semantic port on seven parallel worktree branches (batch 1: `t1-mailcap`, `t3-notmuch`, `t4-melib-fixes`, `t5-trace-flag`, `t6-listing-compose`, `t7-contrib-gpg`; batch 2 after batch-1 merge: `t2-secret`)
-- Upstream range: `bb6d5916..253ba7dd` (40 commits; 6 SKIPped/partial — see table)
+- Upstream range: `bb6d5916..253ba7dd` (35 commits; 6 SKIPped/partial — see table)
 - Merge commits: `96c35621` (t7), `c7e0745c` (t1), `9cfbcd80` (t6), `eb44b9ac` (t4), `bf84926b` (t3), `1b568f27` (t5), `0fcd631d` (t2)
 - Conflicts: `meli/src/mail/listing/conversations.rs` `filter()` only — combined t4's `get_threads` Option-ization with t6's counter-tuple reduction (restriction removal)
 - Acceptance fixes during merge: `e5c9b3c0` + `ac9dc1a7` (clippy 1.98 new-lint compliance), `9a33ac65` (list-unsubscribe test realigned with the async `send_draft_async` job path — stale assertion pre-existing on `5a04bc0d`, reproduced on detached base), `92f06575` (extra fields moved from `serde_json::Map` + `preserve_order` feature to `IndexMap` — the feature had silently changed JMAP wire key order and broke `test_jmap_query`; upstream uses `IndexMap` without the feature), plus the `decl_version_map` doc example updated for `v0_10_0`
@@ -88,7 +88,7 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
   - Upstream command-completion framework not ported; watch future upstream `meli/src/command/**` commits for non-UI fixes *(from 2026-09-28)*
   - `mailbox_changed` SSE branch implemented but not exercised by the mock server *(from 2026-09-28)*
   - jmap/maildir/nntp double-lock counters not migrated to `MailboxCounters` (upstream `0d7e1532` touched them too; fork deferred to keep this sync's blast radius at backends+imap+notmuch) *(new 2026-10-01)*
-  - `test_jmap_watch` flaked once under full-suite parallel load (SSE mock deadline sensitivity); deterministic in isolation and in the jmap suite — revisit if CI flakes *(new 2026-10-01)*
+  - `test_jmap_watch` Destroy assert initially raced the manual `refresh()` against the SSE-triggered resync for the same state diff (drained the queue before delivery landed); fixed by awaiting the watch future like the Create/NewFlags asserts — the race is gone, keep this entry as provenance *(new 2026-10-01, resolved same day)*
 
 ## 2026-09-28 03:47 (UTC+8)
 

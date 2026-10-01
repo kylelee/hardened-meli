@@ -1414,26 +1414,34 @@ hello world.
                 .unbounded_send(ServerEvent::Destroy(id_1))
                 .unwrap();
             jmap.refresh(inbox_hash).unwrap().await.unwrap();
-            {
-                let events = backend_event_queue
-                    .lock()
-                    .unwrap()
-                    .drain(..)
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    events.len(),
-                    1,
-                    "Expected one Refresh Remove event: {events:?}"
-                );
-                let backend_event = events.into_iter().next().unwrap().1;
-                let BackendEvent::Refresh(refresh_event) = backend_event else {
-                    panic!("Expected Refresh event, got: {backend_event:?}");
-                };
-                let RefreshEventKind::Remove(env_hash) = refresh_event.kind else {
-                    panic!("Expected Remove event, got: {refresh_event:?}");
-                };
-                assert_eq!(env_hash, env_1.hash());
-            }
+            // The Remove event lands in the consumer queue asynchronously,
+            // after `refresh()` resolves; poll briefly for the first arrival
+            // instead of racing the drain (this was a load-dependent flake).
+            // The SSE stream itself has already served its Create/NewFlags
+            // pushes and does not yield a third item here.
+            let events = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let events: Vec<_> = backend_event_queue.lock().unwrap().drain(..).collect();
+                    if !events.is_empty() || std::time::Instant::now() >= deadline {
+                        break events;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            };
+            assert_eq!(
+                events.len(),
+                1,
+                "Expected one Refresh Remove event: {events:?}"
+            );
+            let backend_event = events.into_iter().next().unwrap().1;
+            let BackendEvent::Refresh(refresh_event) = backend_event else {
+                panic!("Expected Refresh event, got: {backend_event:?}");
+            };
+            let RefreshEventKind::Remove(env_hash) = refresh_event.kind else {
+                panic!("Expected Remove event: {refresh_event:?}");
+            };
+            assert_eq!(env_hash, env_1.hash());
             {
                 let error_responses = server_state.lock().unwrap().error_responses.clone();
                 assert!(
