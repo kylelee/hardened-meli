@@ -65,7 +65,7 @@ regex = { workspace = true }
 rusqlite = { version = "^0.37", default-features = false, features = ["array", "modern_sqlite"], optional = true }
 serde = { workspace = true, features = ["rc"] }
 serde_derive = { workspace = true }
-serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
+serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error = { version = "0.1" }
 smallvec = { workspace = true }
 smol = { version = "2" }

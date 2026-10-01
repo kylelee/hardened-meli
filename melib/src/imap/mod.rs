@@ -154,16 +154,13 @@ type Capabilities = indexmap::IndexSet<Box<[u8]>>;
 #[macro_export]
 macro_rules! get_conf_val {
     ($s:ident[$var:literal]) => {
-        $s.extra
-            .get($var)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                Error::new(format!(
-                    "Configuration error ({}): IMAP connection requires the field `{}` set",
-                    $s.name.as_str(),
-                    $var
-                ))
-            })
+        $s.extra.get($var).and_then(|v| v.as_str()).ok_or_else(|| {
+            Error::new(format!(
+                "Configuration error ({}): IMAP connection requires the field `{}` set",
+                $s.name.as_str(),
+                $var
+            ))
+        })
     };
     ($s:ident[$var:literal], $default:expr) => {
         $s.extra
@@ -1993,7 +1990,7 @@ mod tests {
     /// for protocol-level connection dumps.
     #[test]
     fn test_conf_trace_option_parses_and_defaults_to_false() {
-        let account_with = |extra: serde_json::Map<String, serde_json::Value>| AccountSettings {
+        let account_with = |extra: indexmap::IndexMap<String, serde_json::Value>| AccountSettings {
             name: "test".to_string(),
             root_mailbox: "INBOX".to_string(),
             format: "imap".to_string(),
@@ -2007,7 +2004,7 @@ mod tests {
             extra,
         };
         let base = || {
-            let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
             for (k, v) in [
                 ("server_hostname", "localhost"),
                 ("server_username", "user"),

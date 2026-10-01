@@ -69,19 +69,14 @@ mod nttp {
 
     impl PublicInboxNNTP {
         fn nntp_connection(&self, list: &str) -> Result<Box<NntpType>> {
-            let mut extra: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            let mut extra: indexmap::IndexMap<String, serde_json::Value> =
+                indexmap::IndexMap::new();
             extra.insert(
                 "server_hostname".into(),
                 serde_json::Value::String(self.server_hostname.clone()),
             );
-            extra.insert(
-                "require_auth".into(),
-                serde_json::Value::Bool(false),
-            );
-            extra.insert(
-                "store_flags_locally".into(),
-                serde_json::Value::Bool(false),
-            );
+            extra.insert("require_auth".into(), serde_json::Value::Bool(false));
+            extra.insert("store_flags_locally".into(), serde_json::Value::Bool(false));
             if let Some(port) = self.port {
                 extra.insert(
                     "server_port".to_string(),

@@ -1197,7 +1197,7 @@ mod tests {
     /// for protocol-level connection dumps.
     #[test]
     fn test_conf_trace_option_parses_and_defaults_to_false() {
-        let account_with = |extra: serde_json::Map<String, serde_json::Value>| AccountSettings {
+        let account_with = |extra: indexmap::IndexMap<String, serde_json::Value>| AccountSettings {
             name: "test".to_string(),
             root_mailbox: String::new(),
             format: "nntp".to_string(),
@@ -1213,7 +1213,7 @@ mod tests {
             extra,
         };
         let base = || {
-            let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
             for (k, v) in [
                 ("server_hostname", "news.example.com"),
                 ("store_flags_locally", "false"),

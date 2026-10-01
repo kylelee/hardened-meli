@@ -90,7 +90,7 @@ fn new_maildir_backend(
         .collect(),
         manual_refresh: true,
         extra: {
-            let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
             m.insert(
                 "root_mailbox".into(),
                 serde_json::Value::String(root_mailbox.display().to_string()),
