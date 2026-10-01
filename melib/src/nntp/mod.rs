@@ -1190,7 +1190,7 @@ mod tests {
         let mut extra = base();
         extra.insert("trace".to_string(), "true".to_string());
         let account = account_with(extra);
-        let nntp = NntpType::new(&account, Default::default(), event_consumer.clone()).unwrap();
+        let nntp = NntpType::new(&account, Default::default(), event_consumer).unwrap();
         assert!(nntp.server_conf.trace);
 
         // Invalid values are rejected by validation.

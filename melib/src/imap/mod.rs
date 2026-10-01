@@ -1978,7 +1978,7 @@ mod tests {
         let mut extra = base();
         extra.insert("trace".to_string(), "true".to_string());
         let account = account_with(extra);
-        let imap = ImapType::new(&account, Default::default(), event_consumer.clone()).unwrap();
+        let imap = ImapType::new(&account, Default::default(), event_consumer).unwrap();
         assert!(imap.server_conf.trace);
 
         // Invalid values are rejected by validation.

@@ -689,7 +689,7 @@ impl StatusBar {
     /// wording of the action it performs from the pane that holds the
     /// keyboard.
     ///
-    /// | focus            | scroll_up   | scroll_down   | focus_left     | focus_right    | search   |
+    /// | focus            | `scroll_up` | `scroll_down` | `focus_left`   | `focus_right`  | search   |
     /// |------------------|-------------|---------------|----------------|----------------|----------|
     /// | `Sidebar`        | Folder Up   | Folder Down   | hidden         | Open Mail      | hidden   |
     /// | `NoView`         | Maillist Up | Maillist Down | hidden         | Open Mail      | hidden   |

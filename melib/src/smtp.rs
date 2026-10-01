@@ -1160,7 +1160,7 @@ mod tests {
         let conf: SmtpServerConf = serde_json::from_str(with_trace).unwrap();
         assert!(conf.trace);
 
-        assert!(serde_json::from_str::<SmtpServerConf>(invalid).is_err());
+        serde_json::from_str::<SmtpServerConf>(invalid).unwrap_err();
     }
 
     use super::*;
