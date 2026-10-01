@@ -740,7 +740,8 @@ impl Account {
                     && self
                         .collection
                         .get_mailbox(mailbox_hash)
-                        .contains(&env_hash)
+                        .map(|m| m.contains(&env_hash))
+                        .unwrap_or(false)
                 {
                     return;
                 }
@@ -796,7 +797,9 @@ impl Account {
                 }
 
                 {
-                    let threads = self.collection.get_threads(mailbox_hash);
+                    let Some(threads) = self.collection.get_threads(mailbox_hash) else {
+                        return;
+                    };
                     let Some(thread_node_hash) = threads.envelope_to_thread_node.get(&env_hash)
                     else {
                         return;
@@ -862,7 +865,9 @@ impl Account {
                 }
 
                 let thread_hash = {
-                    let threads = self.collection.get_threads(mailbox_hash);
+                    let Some(threads) = self.collection.get_threads(mailbox_hash) else {
+                        return;
+                    };
                     let Some(thread_node_hash) = threads.envelope_to_thread_node.get(&env_hash)
                     else {
                         return;
