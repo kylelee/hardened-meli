@@ -425,19 +425,23 @@ impl Collection {
             .then_some(EnvelopeRefMut { guard, hash })
     }
 
+    /// A read guard for `hash`'s thread groups, or `None` when the mailbox
+    /// is not in the collection.
     #[inline]
-    pub fn get_threads(&'_ self, hash: MailboxHash) -> RwRef<'_, MailboxHash, Threads> {
+    pub fn get_threads(&'_ self, hash: MailboxHash) -> Option<RwRef<'_, MailboxHash, Threads>> {
         let guard = self.threads.read().unwrap();
-        RwRef { guard, hash }
+        guard.contains_key(&hash).then_some(RwRef { guard, hash })
     }
 
+    /// A read guard for `hash`'s envelope hash set, or `None` when the
+    /// mailbox is not in the collection.
     #[inline]
     pub fn get_mailbox(
         &'_ self,
         hash: MailboxHash,
-    ) -> RwRef<'_, MailboxHash, HashSet<EnvelopeHash>> {
+    ) -> Option<RwRef<'_, MailboxHash, HashSet<EnvelopeHash>>> {
         let guard = self.mailboxes.read().unwrap();
-        RwRef { guard, hash }
+        guard.contains_key(&hash).then_some(RwRef { guard, hash })
     }
 
     #[inline]

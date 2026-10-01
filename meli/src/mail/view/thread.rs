@@ -240,7 +240,9 @@ impl ThreadView {
         context: &mut Context,
     ) {
         let collection = context.accounts[&self.coordinates.0].collection.clone();
-        let threads = collection.get_threads(self.coordinates.1);
+        let Some(threads) = collection.get_threads(self.coordinates.1) else {
+            return;
+        };
 
         if !threads.groups.contains_key(&self.thread_group) {
             return;
@@ -1901,7 +1903,8 @@ mod focus_tests {
         let thread_group = {
             let threads = context.accounts[&account_hash]
                 .collection
-                .get_threads(mailbox_hash);
+                .get_threads(mailbox_hash)
+                .expect("test fixture inserted mail into the mailbox threads");
             threads.find_group(threads.envelope_to_thread[&root_hash])
         };
 
@@ -1959,7 +1962,8 @@ mod focus_tests {
         let thread_group = {
             let threads = context.accounts[&account_hash]
                 .collection
-                .get_threads(mailbox_hash);
+                .get_threads(mailbox_hash)
+                .expect("test fixture inserted mail into the mailbox threads");
             threads.find_group(threads.envelope_to_thread[&root_hash])
         };
         ThreadView::new(
@@ -2009,7 +2013,8 @@ mod focus_tests {
         let thread_group = {
             let threads = ctx.accounts[&account_hash]
                 .collection
-                .get_threads(mailbox_hash);
+                .get_threads(mailbox_hash)
+                .expect("test fixture inserted mail into the mailbox threads");
             threads.find_group(threads.envelope_to_thread[&root_hash])
         };
 

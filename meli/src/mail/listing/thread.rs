@@ -183,22 +183,26 @@ impl MailListingTrait for ThreadListing {
                 return;
             }
         }
-        let threads = context.accounts[&self.cursor_pos.0]
+        let roots = if let Some(threads) = context.accounts[&self.cursor_pos.0]
             .collection
-            .get_threads(self.cursor_pos.1);
-        let mut roots = threads.roots();
-        threads.group_inner_sort_by(
-            &mut roots,
-            self.sort,
-            &context.accounts[&self.cursor_pos.0].collection.envelopes,
-        );
-        // Release the read guard before `redraw_threads_list` runs: it
-        // re-acquires the same `threads` lock through
-        // `Collection::get_threads`, and a recursive read on a
-        // write-preferring `RwLock` can deadlock (documented as possibly
-        // panicking) if a backend thread queued for `threads.write()` in
-        // between.
-        drop(threads);
+            .get_threads(self.cursor_pos.1)
+        {
+            let mut roots = threads.roots();
+            threads.group_inner_sort_by(
+                &mut roots,
+                self.sort,
+                &context.accounts[&self.cursor_pos.0].collection.envelopes,
+            );
+            roots
+        } else {
+            Default::default()
+        };
+        // The `threads` guard is scoped to the `if let` above, so it is
+        // released before `redraw_threads_list` runs: that re-acquires the
+        // same `threads` lock through `Collection::get_threads`, and a
+        // recursive read on a write-preferring `RwLock` can deadlock
+        // (documented as possibly panicking) if a backend thread queued for
+        // `threads.write()` in between.
 
         let previous_selection = self.rows.clear(same_mailbox);
         self.redraw_threads_list(
@@ -218,9 +222,12 @@ impl MailListingTrait for ThreadListing {
         items: Box<dyn Iterator<Item = ThreadHash>>,
     ) {
         let account = &context.accounts[&self.new_cursor_pos.0];
-        let threads = account.collection.get_threads(self.new_cursor_pos.1);
         self.length = 0;
-        if threads.is_empty() {
+        let Some(threads) = account
+            .collection
+            .get_threads(self.cursor_pos.1)
+            .filter(|t| !t.is_empty())
+        else {
             let message: String = account[&self.new_cursor_pos.1].status();
             _ = self.data_columns.columns[0].resize_with_context(message.len(), 1, context);
             let area = self.data_columns.columns[0].area();
@@ -234,7 +241,7 @@ impl MailListingTrait for ThreadListing {
                 None,
             );
             return;
-        }
+        };
         let mut min_width = (0, 0, 0, 0, 0);
         #[allow(clippy::type_complexity)]
         let mut row_widths: (
@@ -741,7 +748,10 @@ impl ListingTrait for ThreadListing {
         }
 
         let account = &context.accounts[&self.cursor_pos.0];
-        let threads = account.collection.get_threads(self.cursor_pos.1);
+        let Some(threads) = account.collection.get_threads(self.cursor_pos.1) else {
+            self.redraw_threads_list(context, Box::new(std::iter::empty()));
+            return;
+        };
         for env_hash in results {
             if !account.collection.contains_key(&env_hash) {
                 continue;
@@ -1301,7 +1311,9 @@ impl ThreadListing {
             Ok(result) => {
                 super::notify_if_search_degraded(context, &result);
                 let account = &context.accounts[&self.cursor_pos.0];
-                let threads = account.collection.get_threads(self.cursor_pos.1);
+                let Some(threads) = account.collection.get_threads(self.cursor_pos.1) else {
+                    return;
+                };
                 for env_hash in result.envelopes {
                     if !account.collection.contains_key(&env_hash) {
                         continue;
