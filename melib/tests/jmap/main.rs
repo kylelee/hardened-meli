@@ -1023,11 +1023,15 @@ mod tests {
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
-            extra: indexmap::indexmap! {
-                "server_url".to_string() => format!("http://{}:{}", local_addr.ip(), local_addr.port()),
-                "server_username".to_string() => "user".to_string(),
-                "server_password".to_string() => "password".to_string(),
-                "use_token".to_string() => "true".to_string(),
+            extra: {
+                let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+                m.insert("server_url".to_string(), serde_json::Value::String(format!("http://{}:{}", local_addr.ip(), local_addr.port())));
+                m.insert("server_username".to_string(), serde_json::Value::String("user".to_string()));
+                m.insert("server_password".to_string(), serde_json::Value::String("password".to_string()));
+                m.insert("use_token".to_string(), serde_json::Value::String("true".to_string()));
+            
+                m
             },
         };
 
@@ -1245,11 +1249,15 @@ hello world.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
-            extra: indexmap::indexmap! {
-                "server_url".to_string() => format!("http://{}:{}", local_addr.ip(), local_addr.port()),
-                "server_username".to_string() => "user".to_string(),
-                "server_password".to_string() => "password".to_string(),
-                "use_token".to_string() => "true".to_string(),
+            extra: {
+                let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+                m.insert("server_url".to_string(), serde_json::Value::String(format!("http://{}:{}", local_addr.ip(), local_addr.port())));
+                m.insert("server_username".to_string(), serde_json::Value::String("user".to_string()));
+                m.insert("server_password".to_string(), serde_json::Value::String("password".to_string()));
+                m.insert("use_token".to_string(), serde_json::Value::String("true".to_string()));
+            
+                m
             },
         };
 

@@ -1184,10 +1184,16 @@ fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
         subscribed_mailboxes: vec![],
         mailboxes: indexmap::indexmap! {},
         manual_refresh: false,
-        extra: indexmap::indexmap! {
-            "server_url".to_string() => "https://jmap.example.com".to_string(),
-            "server_username".to_string() => "user".to_string(),
-            "server_password".to_string() => "password".to_string(),
+        extra: {
+            let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            for (k, v) in [
+                ("server_url", "https://jmap.example.com"),
+                ("server_username", "user"),
+                ("server_password", "password"),
+            ] {
+                m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+            }
+            m
         },
     };
 
@@ -1199,13 +1205,14 @@ fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
     let mut account = account;
     account
         .extra
-        .insert("trace".to_string(), "true".to_string());
+        .insert("trace".to_string(), serde_json::Value::String("true".to_string()));
     let conf = JmapServerConf::new(&account).unwrap();
     assert!(conf.trace);
 
     // Invalid values are rejected.
-    account
-        .extra
-        .insert("trace".to_string(), "not-a-bool".to_string());
+    account.extra.insert(
+        "trace".to_string(),
+        serde_json::Value::String("not-a-bool".to_string()),
+    );
     JmapServerConf::new(&account).unwrap_err();
 }
