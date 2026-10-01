@@ -43,6 +43,7 @@
 //!     },
 //!     envelope_from: String::new(),
 //!     extensions: SmtpExtensionSupport::default(),
+//!     trace: true,
 //!     timeout: 60,
 //!     auth: SmtpAuth::Auto {
 //!         username: Secret::Value("l15".into()),
@@ -193,6 +194,8 @@ pub struct SmtpServerConf {
     pub security: SmtpSecurity,
     #[serde(default)]
     pub extensions: SmtpExtensionSupport,
+    #[serde(default)]
+    pub trace: bool,
     /// Timeout for establishing the TCP connection, in seconds. A value of
     /// `0` means no timeout, mirroring the per-account IMAP/NNTP `timeout`
     /// setting.
@@ -306,9 +309,9 @@ impl SmtpConnection {
 
                 let addr = (path.as_str(), server_conf.port);
                 let mut socket = {
-                    let conn = Connection::new_tcp(tcp_stream_connect(addr, connect_timeout)?);
-                    #[cfg(feature = "smtp-trace")]
-                    let conn = conn.trace(true).with_id("smtp");
+                    let conn = Connection::new_tcp(tcp_stream_connect(addr, connect_timeout)?)
+                        .trace(server_conf.trace)
+                        .with_id("smtp");
 
                     AsyncWrapper::new(conn)?
                 };
@@ -362,23 +365,15 @@ impl SmtpConnection {
                 }
 
                 let mut ret = {
-                    let socket = socket.into_inner()?;
-                    #[cfg(feature = "smtp-trace")]
-                    let socket = socket.trace(false);
+                    let socket = socket.into_inner()?.trace(false);
                     let _path = path.clone();
 
                     socket.set_nonblocking(false)?;
                     let conn = unblock(move || connector.connect(&_path, socket)).await?;
                     AsyncWrapper::new({
-                        let conn = Connection::new_tls(conn);
-                        #[cfg(feature = "smtp-trace")]
-                        {
-                            conn.trace(true).with_id("smtp")
-                        }
-                        #[cfg(not(feature = "smtp-trace"))]
-                        {
-                            conn
-                        }
+                        Connection::new_tls(conn)
+                            .trace(server_conf.trace)
+                            .with_id("smtp")
                     })?
                 };
                 if matches!(server_conf.security, SmtpSecurity::Tls { .. }) {
@@ -397,15 +392,9 @@ impl SmtpConnection {
             SmtpSecurity::None => {
                 let addr = (path.as_str(), server_conf.port);
                 let mut ret = AsyncWrapper::new({
-                    let conn = Connection::new_tcp(tcp_stream_connect(addr, connect_timeout)?);
-                    #[cfg(feature = "smtp-trace")]
-                    {
-                        conn.trace(true).with_id("smtp")
-                    }
-                    #[cfg(not(feature = "smtp-trace"))]
-                    {
-                        conn
-                    }
+                    Connection::new_tcp(tcp_stream_connect(addr, connect_timeout)?)
+                        .trace(server_conf.trace)
+                        .with_id("smtp")
                 })?;
                 res.clear();
                 let reply = read_lines(
@@ -990,7 +979,7 @@ impl TryFrom<&'_ str> for ReplyCode {
     type Error = Error;
     fn try_from(val: &'_ str) -> Result<Self> {
         if val.len() != 3 {
-            debug!("{}", val);
+            log::debug!("{}", val);
         }
         debug_assert!(val.len() == 3);
         use ReplyCode::*;
@@ -1154,6 +1143,26 @@ async fn read_lines<'r>(
 
 #[cfg(test)]
 mod tests {
+    /// The `trace` SMTP setting must parse and default to off: it replaced
+    /// the per-protocol protocol-dump cargo features as the switch for
+    /// protocol-level connection dumps.
+    #[test]
+    fn test_smtp_server_conf_trace_option_parses_and_defaults_to_false() {
+        let base = r#"{"hostname": "127.0.0.1", "port": 25, "auth": {"type": "none"}}"#;
+        let with_trace = r#"{"hostname": "127.0.0.1", "port": 25, "auth": {"type": "none"},
+            "trace": true}"#;
+        let invalid = r#"{"hostname": "127.0.0.1", "port": 25, "auth": {"type": "none"},
+            "trace": "yes"}"#;
+
+        let conf: SmtpServerConf = serde_json::from_str(base).unwrap();
+        assert!(!conf.trace);
+
+        let conf: SmtpServerConf = serde_json::from_str(with_trace).unwrap();
+        assert!(conf.trace);
+
+        assert!(serde_json::from_str::<SmtpServerConf>(invalid).is_err());
+    }
+
     use super::*;
 
     use crate::{
@@ -1499,6 +1508,7 @@ security = { type = "tls" }
                 auth: SmtpAuth::None,
                 security: SmtpSecurity::None,
                 extensions: SmtpExtensionSupport::default(),
+                trace: true,
                 timeout: 1,
             };
             let started = std::time::Instant::now();

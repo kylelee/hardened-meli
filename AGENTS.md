@@ -28,4 +28,4 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 
 ## Debugging / runtime
 
-- Trace logs: a debug build writes all logs to `./log/`. Build with `--features debug-tracing` (plus `imap-trace`/`smtp-trace`/`nntp-trace`/`jmap-trace` for protocol dumps) for extra tracing; set `MELI_DEBUG_STDERR=yes` to log to stderr instead.
+- Trace logs: a debug build writes all logs to `./log/`. Build with `--features debug-tracing` for extra tracing; set `MELI_DEBUG_STDERR=yes` to log to stderr instead. Protocol-level connection dumps are no longer build features: set `trace = true` in the account's extra settings (IMAP, JMAP, NNTP) or in `composing.send_mail` SMTP settings.

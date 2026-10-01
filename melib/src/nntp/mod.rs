@@ -123,6 +123,7 @@ pub struct NntpServerConf {
     pub use_starttls: bool,
     pub use_tls: bool,
     pub require_auth: bool,
+    pub trace: bool,
     pub danger_accept_invalid_certs: bool,
     pub extension_use: NntpExtensionUse,
     pub timeout_dur: Option<Duration>,
@@ -699,6 +700,7 @@ impl NntpType {
         let danger_accept_invalid_certs: bool =
             get_conf_val!(s["danger_accept_invalid_certs"], false)?;
         let require_auth = get_conf_val!(s["require_auth"], false)?;
+        let trace: bool = get_conf_val!(s["trace"], false)?;
         let store_flags_locally = get_conf_val!(s["store_flags_locally"], true)?;
         #[cfg(not(feature = "sqlite3"))]
         if store_flags_locally {
@@ -733,6 +735,7 @@ impl NntpType {
                 get_conf_val!(s["server_password"], String::new())?
             },
             require_auth,
+            trace,
             server_port,
             use_tls,
             use_starttls,
@@ -955,6 +958,7 @@ impl NntpType {
             .set_kind(ErrorKind::Configuration));
         }
         get_conf_val!(s["use_deflate"], false)?;
+        get_conf_val!(s["trace"], false)?;
         get_conf_val!(s["danger_accept_invalid_certs"], false)?;
         get_conf_val!(s["timeout"], 16_u64)?;
         let extra_keys = s
@@ -1147,6 +1151,54 @@ impl FetchState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MailboxConf;
+
+    /// The account-level `trace` option must parse and default to off: it
+    /// replaced the per-protocol protocol-dump cargo features as the switch
+    /// for protocol-level connection dumps.
+    #[test]
+    fn test_conf_trace_option_parses_and_defaults_to_false() {
+        let account_with = |extra: indexmap::IndexMap<String, String>| AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: String::new(),
+            format: "nntp".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {
+                "example.test".to_string() => MailboxConf::default(),
+            },
+            manual_refresh: false,
+            extra,
+        };
+        let base = || {
+            indexmap::indexmap! {
+                "server_hostname".to_string() => "news.example.com".to_string(),
+                "store_flags_locally".to_string() => "false".to_string(),
+            }
+        };
+        let event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
+
+        // Absent `trace` defaults to off.
+        let account = account_with(base());
+        let nntp = NntpType::new(&account, Default::default(), event_consumer.clone()).unwrap();
+        assert!(!nntp.server_conf.trace);
+
+        // `trace = true` is accepted and stored.
+        let mut extra = base();
+        extra.insert("trace".to_string(), "true".to_string());
+        let account = account_with(extra);
+        let nntp = NntpType::new(&account, Default::default(), event_consumer.clone()).unwrap();
+        assert!(nntp.server_conf.trace);
+
+        // Invalid values are rejected by validation.
+        let mut extra = base();
+        extra.insert("trace".to_string(), "not-a-bool".to_string());
+        let mut account = account_with(extra);
+        assert!(NntpType::validate_config(&mut account).is_err());
+    }
 
     #[test]
     fn test_newnews_since_timestamp_saturates_at_epoch() {

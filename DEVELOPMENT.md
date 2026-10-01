@@ -75,11 +75,15 @@ export MELI_DEBUG_STDERR=yes
 
 This means you will have to to redirect `stderr` to a file like `meli 2> trace.log`.
 
-Tracing is opt-in by build features:
+Tracing to `stderr` is opt-in by a build feature:
 
 ```sh
-cargo build --features=debug-tracing,imap-trace,smtp-trace
+cargo build --features=debug-tracing
 ```
+
+To additionally trace network and protocol communications, set `trace = true`
+in the account's extra settings (IMAP, JMAP, NNTP) or in the
+`composing.send_mail` SMTP settings; no special build is required.
 
 ## use `.git-blame-ignore-revs` file _optional_
 

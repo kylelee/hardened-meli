@@ -71,18 +71,12 @@ impl NntpStream {
         let stream = {
             let addr = (path.as_str(), server_conf.server_port);
             AsyncWrapper::new({
-                let conn = Connection::new_tcp(tcp_stream_connect(
+                Connection::new_tcp(tcp_stream_connect(
                     addr,
                     Some(std::time::Duration::new(16, 0)),
-                )?);
-                #[cfg(feature = "nntp-trace")]
-                {
-                    conn.trace(true).with_id("nntp")
-                }
-                #[cfg(not(feature = "nntp-trace"))]
-                {
-                    conn
-                }
+                )?)
+                .trace(server_conf.trace)
+                .with_id("nntp")
             })?
         };
         let mut res = String::with_capacity(8 * 1024);
@@ -185,15 +179,9 @@ impl NntpStream {
                 .await
                 .chain_err_summary(|| format!("Could not initiate TLS negotiation to {path}."))?;
                 ret.stream = AsyncWrapper::new({
-                    let conn = Connection::new_tls(conn);
-                    #[cfg(feature = "nntp-trace")]
-                    {
-                        conn.trace(true).with_id("nntp")
-                    }
-                    #[cfg(not(feature = "nntp-trace"))]
-                    {
-                        conn
-                    }
+                    Connection::new_tls(conn)
+                        .trace(server_conf.trace)
+                        .with_id("nntp")
                 })
                 .chain_err_summary(|| format!("Could not initiate TLS negotiation to {path}."))?;
             }
