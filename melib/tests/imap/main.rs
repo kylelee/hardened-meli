@@ -2884,10 +2884,9 @@ hello world 3.
             }
             {
                 let mailbox = imap.uid_store.mailboxes.lock().await;
-                let exists_lck = mailbox.values().next().unwrap().exists.lock().unwrap();
-                assert_eq!(exists_lck.len(), 3);
-                let unseen_lck = mailbox.values().next().unwrap().unseen.lock().unwrap();
-                assert_eq!(unseen_lck.len(), 3);
+                let counters = mailbox.values().next().unwrap().counters.lock().unwrap();
+                assert_eq!(counters.total.len(), 3);
+                assert_eq!(counters.unseen.len(), 3);
             }
             {
                 let mut fetch_fut = imap.fetch(inbox_hash).unwrap().into_future();
@@ -2954,10 +2953,9 @@ hello world 3.
             };
             {
                 let mailbox = imap.uid_store.mailboxes.lock().await;
-                let exists_lck = mailbox.values().next().unwrap().exists.lock().unwrap();
-                assert_eq!(exists_lck.len(), 2);
-                let unseen_lck = mailbox.values().next().unwrap().unseen.lock().unwrap();
-                assert_eq!(unseen_lck.len(), 2);
+                let counters = mailbox.values().next().unwrap().counters.lock().unwrap();
+                assert_eq!(counters.total.len(), 2);
+                assert_eq!(counters.unseen.len(), 2);
             }
             {
                 let mut fetch_fut = imap.fetch(inbox_hash).unwrap().into_future();
@@ -4579,9 +4577,8 @@ hello world 3.
 
                         let mailboxes_lck = imap.uid_store.mailboxes.lock().await;
                         let f = &mailboxes_lck[&inbox_hash];
-                        let exists = f.exists.lock().unwrap().clone();
-                        let unseen = f.unseen.lock().unwrap().clone();
-                        (exists, unseen)
+                        let counters = f.counters.lock().unwrap().clone();
+                        (counters.total, counters.unseen)
                     })
                 })
                 .join()

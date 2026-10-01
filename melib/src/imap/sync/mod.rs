@@ -311,9 +311,9 @@ impl ImapConnection {
             );
         }
 
-        let (mailbox_exists, unseen) = {
+        let counters = {
             let f = &self.uid_store.mailboxes.lock().await[&mailbox_hash];
-            (f.exists.clone(), f.unseen.clone())
+            f.counters.clone()
         };
         let mut refresh_events = vec![];
 
@@ -485,25 +485,21 @@ impl ImapConnection {
         let new_envelopes_hash_set: BTreeSet<_> =
             new_envelopes.iter().map(|env| env.hash()).collect::<_>();
         {
-            let mut unseen_lck = unseen.lock().unwrap();
+            let mut counters = counters.lock().unwrap();
             for &seen_env_hash in new_envelopes_hash_set
                 .difference(&new_unseen)
                 .chain(new_seen.iter())
             {
-                unseen_lck.remove(seen_env_hash);
+                counters.unseen.remove(seen_env_hash);
             }
 
-            unseen_lck.insert_set(new_unseen);
-        }
-        {
-            let mut exists_lck = mailbox_exists.lock().unwrap();
-            exists_lck.insert_set(new_envelopes_hash_set);
+            counters.unseen.insert_set(new_unseen);
+            counters.total.insert_set(new_envelopes_hash_set);
         }
         // Step 4. Remove events
         {
             let mut env_lck = self.uid_store.envelopes.lock().unwrap();
-            let mut unseen_lck = unseen.lock().unwrap();
-            let mut exists_lck = mailbox_exists.lock().unwrap();
+            let mut counters = counters.lock().unwrap();
             for env_hash in env_lck
                 .iter()
                 .filter_map(|(h, cenv)| {
@@ -527,8 +523,8 @@ impl ImapConnection {
                 // A mail removed on the server must not survive as a
                 // ghost in the seen/unseen sets either. (Semantic port
                 // of upstream meli 4f2414a3.)
-                unseen_lck.remove(*env_hash);
-                exists_lck.remove(*env_hash);
+                counters.unseen.remove(*env_hash);
+                counters.total.remove(*env_hash);
                 env_lck.remove(env_hash);
             }
         }
@@ -642,13 +638,9 @@ impl ImapConnection {
         self.uid_store
             .update_mailbox(mailbox_hash, &select_response)?;
 
-        let (mailbox_path, mailbox_exists, unseen) = {
+        let (mailbox_path, counters) = {
             let f = &self.uid_store.mailboxes.lock().await[&mailbox_hash];
-            (
-                f.imap_path().to_string(),
-                f.exists.clone(),
-                f.unseen.clone(),
-            )
+            (f.imap_path().to_string(), f.counters.clone())
         };
 
         // Same cache-completeness invariant as `resync_basic`: the persisted
@@ -896,28 +888,25 @@ impl ImapConnection {
             let new_envelopes_hash_set: BTreeSet<_> =
                 new_envelopes.iter().map(|env| env.hash()).collect::<_>();
             {
-                let mut unseen_lck = unseen.lock().unwrap();
-                if unseen_lck.set.is_empty() {
-                    let new_total = unseen_lck.len() + new_unseen.len();
-                    unseen_lck.set_not_yet_seen(new_total);
+                let mut counters = counters.lock().unwrap();
+                if counters.unseen.set.is_empty() {
+                    let new_total = counters.unseen.len() + new_unseen.len();
+                    counters.unseen.set_not_yet_seen(new_total);
                 } else {
                     for &seen_env_hash in new_envelopes_hash_set
                         .difference(&new_unseen)
                         .chain(new_seen.iter())
                     {
-                        unseen_lck.remove(seen_env_hash);
+                        counters.unseen.remove(seen_env_hash);
                     }
 
-                    unseen_lck.insert_set(new_unseen);
+                    counters.unseen.insert_set(new_unseen);
                 }
-            }
-            {
-                let mut exists_lck = mailbox_exists.lock().unwrap();
-                if exists_lck.set.is_empty() {
-                    let new_total = exists_lck.len() + new_envelopes_hash_set.len();
-                    exists_lck.set_not_yet_seen(new_total);
+                if counters.total.set.is_empty() {
+                    let new_total = counters.total.len() + new_envelopes_hash_set.len();
+                    counters.total.set_not_yet_seen(new_total);
                 } else {
-                    exists_lck.insert_set(new_envelopes_hash_set);
+                    counters.total.insert_set(new_envelopes_hash_set);
                 }
             }
         }
@@ -986,11 +975,11 @@ impl ImapConnection {
 
     pub async fn init_mailbox(&mut self, mailbox_hash: MailboxHash) -> Result<SelectResponse> {
         let mut response = Vec::with_capacity(8 * 1024);
-        let (mailbox_path, mailbox_exists, permissions) = {
+        let (mailbox_path, counters, permissions) = {
             let f = &self.uid_store.mailboxes.lock().await[&mailbox_hash];
             (
                 f.imap_path().to_string(),
-                f.exists.clone(),
+                f.counters.clone(),
                 f.permissions.clone(),
             )
         };
@@ -1016,16 +1005,18 @@ impl ImapConnection {
                     *v = highestmodseq;
                 }
             }
-            let mut permissions = permissions.lock().unwrap();
-            permissions.create_messages = !select_response.read_only;
-            permissions.remove_messages = !select_response.read_only;
-            permissions.set_flags = !select_response.read_only;
-            permissions.rename_messages = !select_response.read_only;
-            permissions.delete_messages = !select_response.read_only;
             {
-                let mut mailbox_exists_lck = mailbox_exists.lock().unwrap();
-                mailbox_exists_lck.clear();
-                mailbox_exists_lck.set_not_yet_seen(select_response.exists);
+                let mut permissions = permissions.lock().unwrap();
+                permissions.create_messages = !select_response.read_only;
+                permissions.remove_messages = !select_response.read_only;
+                permissions.set_flags = !select_response.read_only;
+                permissions.rename_messages = !select_response.read_only;
+                permissions.delete_messages = !select_response.read_only;
+            }
+            {
+                let mut counters = counters.lock().unwrap();
+                counters.total.clear();
+                counters.total.set_not_yet_seen(select_response.exists);
             }
         }
         if select_response.exists == 0 {
