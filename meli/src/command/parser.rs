@@ -28,6 +28,8 @@ use crate::{
     command::{argcheck::*, error::*},
 };
 
+use melib::email::MessageID;
+
 const FLAG_SUGGESTIONS: &[&str] = &[
     "passed",
     "replied",
@@ -115,6 +117,7 @@ pub fn listing_action(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErro
         delete_message,
         copymove,
         import,
+        public_inbox_import,
         search,
         select,
         open_in_new_tab,
@@ -1394,5 +1397,54 @@ pub fn import(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
             file.to_string().into(),
             mailbox_path.to_string(),
         ))),
+    ))
+}
+
+/// An unquoted single-word argument: alphanumerics, `_` and `-`.
+fn literal_argument(input: &[u8]) -> IResult<&[u8], &str> {
+    map_res(take_while(|c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'), |b| {
+        std::str::from_utf8(b)
+    })(input)
+}
+
+pub fn public_inbox_import(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:3, max_arg: 3, public_inbox_import};
+    let (input, _) = tag("public-inbox")(input.trim())?;
+    arg_chk!(start check, input);
+    let (input, _) = is_a(" ")(input)?;
+    arg_chk!(inc check, input);
+    let (input, subcommand) = literal_argument(input)?;
+    let (input, _) = is_a(" ")(input)?;
+    arg_chk!(inc check, input);
+    let (input, account) = quoted_argument(input)?;
+    let (input, _) = is_a(" ")(input)?;
+    arg_chk!(inc check, input);
+    let (input, mailbox_path) = quoted_argument(input)?;
+    let (input, _) = is_a(" ")(input)?;
+    arg_chk!(inc check, input);
+    let (input, message_id) = quoted_argument(input)?;
+    let (input, _) = eof(input)?;
+    arg_chk!(finish check, input);
+    let thread = match subcommand {
+        "import" => false,
+        "import-thread" => true,
+        other => {
+            return Ok((
+                input,
+                Err(CommandError::BadValue {
+                    inner: other.to_string().into(),
+                    suggestions: Some(&["import", "import-thread"]),
+                }),
+            ));
+        }
+    };
+    Ok((
+        input,
+        Ok(Listing(PublicInboxImport {
+            thread,
+            account: account.to_string(),
+            mailbox_path: mailbox_path.to_string(),
+            message_id: MessageID::new(message_id),
+        })),
     ))
 }
