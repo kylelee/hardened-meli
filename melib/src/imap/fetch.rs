@@ -266,25 +266,28 @@ impl FetchState {
                             if self.stage == FetchStage::Finished && self.cache_is_incomplete() {
                                 self.stage = FetchStage::InitialFresh;
                             }
-                            let (mailbox_exists, unseen) = {
+                            let counters = {
                                 let f = &self.uid_store.mailboxes.lock().await[&self.mailbox_hash];
-                                (Arc::clone(&f.exists), Arc::clone(&f.unseen))
+                                f.counters.clone()
                             };
-                            unseen.lock().unwrap().insert_existing_set(
-                                cached_payload
-                                    .iter()
-                                    .filter_map(|env| {
-                                        if !env.is_seen() {
-                                            Some(env.hash())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect(),
-                            );
-                            mailbox_exists.lock().unwrap().insert_existing_set(
-                                cached_payload.iter().map(|env| env.hash()).collect::<_>(),
-                            );
+                            {
+                                let mut counters = counters.lock().unwrap();
+                                counters.unseen.insert_existing_set(
+                                    cached_payload
+                                        .iter()
+                                        .filter_map(|env| {
+                                            if !env.is_seen() {
+                                                Some(env.hash())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect(),
+                                );
+                                counters.total.insert_existing_set(
+                                    cached_payload.iter().map(|env| env.hash()).collect::<_>(),
+                                );
+                            }
                             // The cache served first for fast UX; when the
                             // cache batches are exhausted, one final resync
                             // reconciles the payload and the unseen/exists
@@ -296,7 +299,8 @@ impl FetchState {
                                 let mut conn = self.connection.lock().await?;
                                 match conn.resync(self.mailbox_hash).await {
                                     Ok(Some(payload)) => {
-                                        unseen.lock().unwrap().insert_existing_set(
+                                        let mut counters = counters.lock().unwrap();
+                                        counters.unseen.insert_existing_set(
                                             payload
                                                 .iter()
                                                 .filter_map(|env| {
@@ -308,7 +312,7 @@ impl FetchState {
                                                 })
                                                 .collect(),
                                         );
-                                        mailbox_exists.lock().unwrap().insert_existing_set(
+                                        counters.total.insert_existing_set(
                                             payload.iter().map(|env| env.hash()).collect::<_>(),
                                         );
                                         cached_payload.extend(payload);
@@ -461,25 +465,28 @@ impl FetchState {
                                 _ => FetchStage::ResyncCache,
                             };
                             self.cache_served_offline = true;
-                            let (mailbox_exists, unseen) = {
+                            let counters = {
                                 let f = &self.uid_store.mailboxes.lock().await[&self.mailbox_hash];
-                                (Arc::clone(&f.exists), Arc::clone(&f.unseen))
+                                f.counters.clone()
                             };
-                            unseen.lock().unwrap().insert_existing_set(
-                                cached_payload
-                                    .iter()
-                                    .filter_map(|env| {
-                                        if !env.is_seen() {
-                                            Some(env.hash())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect(),
-                            );
-                            mailbox_exists.lock().unwrap().insert_existing_set(
-                                cached_payload.iter().map(|env| env.hash()).collect::<_>(),
-                            );
+                            {
+                                let mut counters = counters.lock().unwrap();
+                                counters.unseen.insert_existing_set(
+                                    cached_payload
+                                        .iter()
+                                        .filter_map(|env| {
+                                            if !env.is_seen() {
+                                                Some(env.hash())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect(),
+                                );
+                                counters.total.insert_existing_set(
+                                    cached_payload.iter().map(|env| env.hash()).collect::<_>(),
+                                );
+                            }
                             return Ok(cached_payload);
                         }
                         Ok(None) => {
@@ -640,14 +647,9 @@ impl FetchState {
                     let next = &mut self.fresh_fetch_next;
                     let response = &mut self.response;
                     let mut our_unseen: BTreeSet<EnvelopeHash> = BTreeSet::default();
-                    let (mailbox_path, mailbox_exists, no_select, unseen) = {
+                    let (mailbox_path, counters, no_select) = {
                         let f = &uid_store.mailboxes.lock().await[&mailbox_hash];
-                        (
-                            f.imap_path().to_string(),
-                            Arc::clone(&f.exists),
-                            f.no_select,
-                            Arc::clone(&f.unseen),
-                        )
+                        (f.imap_path().to_string(), f.counters.clone(), f.no_select)
                     };
                     if no_select {
                         self.stage = FetchStage::Finished;
@@ -662,8 +664,9 @@ impl FetchState {
                     let (take, finished) = {
                         let remaining = uids.len().saturating_sub(*next);
                         if remaining == 0 {
-                            unseen.lock().unwrap().set_not_yet_seen(0);
-                            mailbox_exists.lock().unwrap().set_not_yet_seen(0);
+                            let mut counters = counters.lock().unwrap();
+                            counters.unseen.set_not_yet_seen(0);
+                            counters.total.set_not_yet_seen(0);
                             self.stage = FetchStage::Finished;
                             return Ok(Vec::new());
                         }
@@ -865,11 +868,13 @@ impl FetchState {
                             .insert((mailbox_hash, uid), env.hash());
                         envelopes.push(env);
                     }
-                    unseen.lock().unwrap().insert_existing_set(our_unseen);
-                    mailbox_exists
-                        .lock()
-                        .unwrap()
-                        .insert_existing_set(envelopes.iter().map(|env| env.hash()).collect::<_>());
+                    {
+                        let mut counters = counters.lock().unwrap();
+                        counters.unseen.insert_existing_set(our_unseen);
+                        counters.total.insert_existing_set(
+                            envelopes.iter().map(|env| env.hash()).collect::<_>(),
+                        );
+                    }
                     drop(conn);
 
                     // Advance the cursor; if the list is exhausted,
@@ -878,8 +883,9 @@ impl FetchState {
                     // the unused trailing slots are freed (otherwise
                     // every chunk re-uses the full Vec).
                     if finished {
-                        unseen.lock().unwrap().set_not_yet_seen(0);
-                        mailbox_exists.lock().unwrap().set_not_yet_seen(0);
+                        let mut counters = counters.lock().unwrap();
+                        counters.unseen.set_not_yet_seen(0);
+                        counters.total.set_not_yet_seen(0);
                         // Free the unused tail of the UID list: every
                         // `chunk()` call would otherwise retain the
                         // whole `Vec` even though we already served

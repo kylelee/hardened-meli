@@ -544,8 +544,9 @@ fn mailbox_list_roundtrip() {
     for mailbox in loaded.values() {
         assert!(mailbox.select.read().unwrap().is_none());
         assert!(!mailbox.is_warm());
-        assert_eq!(mailbox.exists.lock().unwrap().len(), 0);
-        assert_eq!(mailbox.unseen.lock().unwrap().len(), 0);
+        let counters = mailbox.counters.lock().unwrap();
+        assert_eq!(counters.total.len(), 0);
+        assert_eq!(counters.unseen.len(), 0);
         assert_eq!(
             *mailbox.permissions.lock().unwrap(),
             MailboxPermissions::default()
