@@ -193,15 +193,18 @@ other_email=test2@example.com;test3@example.com
         } else {
             indexmap::indexmap! {}
         };
-        let mut extra = indexmap::indexmap! {};
+        let mut extra: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
         if with_root_mailbox {
-            extra.insert("root_mailbox".into(), root_mailbox.display().to_string());
+            extra.insert(
+                "root_mailbox".into(),
+                serde_json::Value::String(root_mailbox.display().to_string()),
+            );
         }
         if let Some(library_file_path) = library_file_path {
             extra.insert(
                 "library_file_path".into(),
-                library_file_path.display().to_string(),
+                serde_json::Value::String(library_file_path.display().to_string()),
             );
         }
 

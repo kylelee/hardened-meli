@@ -99,18 +99,22 @@ impl JmapConnection {
             client
         };
         let client = if server_conf.use_token {
+            // Resolve Secret -> plaintext only at the moment we need it.
+            let password_value = server_conf.server_password.value()?;
             client
                 .authentication(isahc::auth::Authentication::none())
                 .default_header(
                     http::header::AUTHORIZATION,
-                    format!("Bearer {}", server_conf.server_password),
+                    format!("Bearer {}", password_value),
                 )
         } else {
+            // Fork Fork policy: never log the Secret; resolve just-in-time.
+            let password_value = server_conf.server_password.value()?;
             client
                 .authentication(isahc::auth::Authentication::basic())
                 .credentials(isahc::auth::Credentials::new(
                     &server_conf.server_username,
-                    &server_conf.server_password,
+                    &password_value,
                 ))
         };
         let client = client.build()?;

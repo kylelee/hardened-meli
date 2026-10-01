@@ -138,7 +138,11 @@ pub struct EnvelopeCache {
 pub struct JmapServerConf {
     pub server_url: Url,
     pub server_username: String,
-    pub server_password: String,
+    /// Password / Bearer token. Carried as a [`Secret`] (upstream port of
+    /// #448) so the inline-table `{ command = "..." }` form and the literal
+    /// form share one type. Plaintext is resolved via [`Secret::value`] at
+    /// the wire boundary.
+    pub server_password: crate::conf::Secret,
     pub use_token: bool,
     pub trace: bool,
     pub danger_accept_invalid_certs: bool,
@@ -147,7 +151,7 @@ pub struct JmapServerConf {
 
 macro_rules! get_conf_val {
     ($s:ident[$var:literal]) => {
-        $s.extra.get($var).ok_or_else(|| {
+        $s.extra.get($var).and_then(|v| v.as_str()).ok_or_else(|| {
             Error::new(format!(
                 "Configuration error ({}): JMAP connection requires the field `{}` set",
                 $s.name.as_str(),
@@ -175,6 +179,7 @@ macro_rules! get_conf_val {
     ($s:ident[$var:literal], $default:expr, $hd: literal) => {
         $s.extra
             .get($var)
+            .and_then(|v| v.as_str())
             .map(|v| {
                 <_>::from_str(v).map_err(|e| {
                     Error::new(format!(
@@ -202,16 +207,17 @@ impl JmapServerConf {
                 ^ s.extra.contains_key("server_password"))
         {
             return Err(Error::new(format!(
-                "({}) `use_token` use requires either the `server_password_command` set with a \
-                 command that returns an Bearer token of your account, or `server_password` with \
-                 the API Bearer token as a string. Consult documentation for guidance.",
+                "({}) `use_token` use requires either `server_password_command` set with a \
+                 command that returns a Bearer token, or `server_password` set with the API \
+                 Bearer token (literal string, or `{{ command = \"...\" }}` table). Consult \
+                 documentation for guidance.",
                 s.name,
             )));
         }
         Ok(Self {
             server_url: get_conf_val!(s["server_url"], Url, "a string containing a URL")?,
             server_username: get_conf_val!(s["server_username"], String, "a string")?,
-            server_password: s.server_password()?,
+            server_password: s.server_password_field()?,
             use_token,
             trace: get_conf_val!(s["trace"], false, "true or false")?,
             danger_accept_invalid_certs: get_conf_val!(
@@ -1662,14 +1668,20 @@ impl JmapType {
     pub fn validate_config(s: &mut AccountSettings) -> Result<()> {
         macro_rules! get_conf_val {
             ($s:ident[$var:literal]) => {
-                $s.extra.swap_remove($var).ok_or_else(|| {
-                    Error::new(format!(
-                        "Configuration error ({}): JMAP connection requires the field `{}` set",
-                        $s.name.as_str(),
-                        $var
-                    ))
-                    .set_kind(ErrorKind::Configuration)
-                })
+                $s.extra
+                    .swap_remove($var)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "Configuration error ({}): JMAP connection requires the field `{}` set",
+                            $s.name.as_str(),
+                            $var
+                        ))
+                        .set_kind(ErrorKind::Configuration)
+                    })
             };
             ($s:ident[$var:literal], $t:ty, $hd: literal) => {
                 get_conf_val!($s[$var]).and_then(|v| {
@@ -1690,6 +1702,10 @@ impl JmapType {
             ($s:ident[$var:literal], $default:expr, $hd: literal) => {
                 $s.extra
                     .swap_remove($var)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        _ => None,
+                    })
                     .map(|v| {
                         <_>::from_str(&v).map_err(|e| {
                             Error::new(format!(
@@ -1712,9 +1728,45 @@ impl JmapType {
 
         get_conf_val!(s["use_token"], false, "true or false")?;
         get_conf_val!(s["trace"], false, "true or false")?;
-        // either of these two needed
-        get_conf_val!(s["server_password"])
-            .or_else(|_| get_conf_val!(s["server_password_command"]))?;
+        // Either `server_password` (string or `{ command = "..." }` table)
+        // or the legacy `server_password_command` is required.
+        let server_pw_value = s.extra.swap_remove("server_password");
+        let server_pw_cmd_value = s.extra.swap_remove("server_password_command");
+        match (server_pw_value, server_pw_cmd_value) {
+            (Some(v), None) => {
+                // Validate the inline-table form early so failures are
+                // reported here rather than later at connection time.
+                if let serde_json::Value::Object(_) = &v {
+                    let _ = <crate::conf::Secret as crate::conf::ExtraSetting>::deserialize_extra(&v)
+                        .map_err(|err| {
+                            Error::new(format!(
+                                "({}) `server_password` object is not a valid Secret: {err}",
+                                s.name.as_str(),
+                            ))
+                            .set_kind(ErrorKind::Configuration)
+                        })?;
+                }
+            }
+            (None, Some(_)) => {
+                // legacy command syntax — accepted but flagged at runtime.
+            }
+            (Some(_), Some(_)) => {
+                return Err(Error::new(format!(
+                    "Configuration error ({}): both server_password and server_password_command \
+                     are set, cannot choose",
+                    s.name.as_str(),
+                ))
+                .set_kind(ErrorKind::Configuration));
+            }
+            (None, None) => {
+                return Err(Error::new(format!(
+                    "Configuration error ({}): JMAP connection requires `server_password` set \
+                     (string or `{{ command = \"...\" }}` table)",
+                    s.name.as_str(),
+                ))
+                .set_kind(ErrorKind::Configuration));
+            }
+        }
 
         get_conf_val!(s["danger_accept_invalid_certs"], false, "true or false")?;
         get_conf_val!(
