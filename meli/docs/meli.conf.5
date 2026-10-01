@@ -413,11 +413,22 @@ example:
 .It Ic server_username Ar String
 Server username
 .It Ic server_password Ar String
-Server password
-.It Ic server_password_command Ar String
 .Pq Em optional
-Use instead of
-.Ic server_password
+Server password, as a literal string or as an inline table with a
+.Em command
+value:
+.Pp
+Server password literal:
+.Qq Li server_password = "hunter2"
+.Pp
+Server password command:
+.Qq Li server_password = { command = "pass show meli/imap" }
+.Pp
+The
+.Em command
+form evaluates the shell command at connection time and the trimmed stdout
+becomes the password.
+.Pp
 .It Ic server_port Ar number
 .Pq Em optional
 The port to connect to
@@ -721,11 +732,13 @@ example:
 .It Ic server_username Ar String
 Server username
 .It Ic server_password Ar String
-Server password
-.It Ic server_password_command Ar String
 .Pq Em optional
-Use instead of
-.Ic server_password
+Server password / Bearer token, as a literal string or as an inline table
+with a
+.Em command
+value (see
+.Em imap
+backend above for the syntax).
 .It Ic use_token Ar boolean
 Authenticate using the API Bearer token method.
 If enabled, the token value must be provided as the configured password.
@@ -810,7 +823,12 @@ example:
 .It Ic server_username Ar String
 Server username
 .It Ic server_password Ar String
-Server password
+.Pq Em optional
+Server password, as a literal string or as an inline table with a
+.Em command
+value (see
+.Em imap
+backend above for the syntax).
 .It Ic require_auth Ar boolean
 .Pq Em optional
 require authentication in every case
