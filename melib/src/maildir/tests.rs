@@ -277,11 +277,14 @@ fn new_maildir_backend(
         indexmap::indexmap! {}
     };
     let extra = if with_root_mailbox {
-        indexmap::indexmap! {
-            "root_mailbox".into() => root_mailbox.display().to_string(),
-        }
+        let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        m.insert(
+            "root_mailbox".into(),
+            serde_json::Value::String(root_mailbox.display().to_string()),
+        );
+        m
     } else {
-        indexmap::indexmap! {}
+        serde_json::Map::new()
     };
 
     let account_conf = AccountSettings {
