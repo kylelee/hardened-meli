@@ -53,15 +53,15 @@ use std::{
 };
 
 use futures::{
+    StreamExt,
     executor::block_on,
     future::{self, Either},
-    StreamExt,
 };
 use melib::{
+    Mail,
     backends::prelude::*,
     maildir::{utilities::MaildirFilePathExt, *},
     utils::logging::{LogLevel, Logger},
-    Mail,
 };
 use tempfile::TempDir;
 
@@ -138,10 +138,10 @@ fn move_file(
     let hash_index = hash_indexes_lck.entry(source_mailbox_hash).or_default();
     let path_src = {
         assert!(
-            hash_index.contains_key(&env_hash),
+            hash_index.index.contains_key(&env_hash),
             "{hash_index:?} does not contain {env_hash:?}"
         );
-        hash_index[&env_hash].to_path_buf()
+        hash_index.index[&env_hash].to_path_buf()
     };
 
     let mut dest_dir: PathBuf = cache.mailboxes.lock().unwrap()[&destination_mailbox_hash]
