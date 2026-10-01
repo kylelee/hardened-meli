@@ -21,7 +21,7 @@
  */
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{CStr, CString, OsStr},
     io::Read,
     os::unix::ffi::OsStrExt,
@@ -77,8 +77,7 @@ pub use tags::*;
 pub use thread::*;
 
 #[derive(Debug)]
-#[repr(transparent)]
-pub struct DbPointer(pub NonNull<ffi::notmuch_database_t>);
+pub struct DbPointer(pub NonNull<ffi::notmuch_database_t>, Arc<NotmuchLibrary>);
 
 unsafe impl Send for DbPointer {}
 unsafe impl Sync for DbPointer {}
@@ -90,7 +89,21 @@ impl DbPointer {
     }
 }
 
-#[derive(Debug)]
+impl Drop for DbPointer {
+    fn drop(&mut self) {
+        unsafe {
+            if let Err(err) = try_call!(self.1, (self.1.database_close())(self.0.as_mut())) {
+                log::error!("Could not call C notmuch_database_close: {err}");
+                return;
+            }
+            if let Err(err) = try_call!(self.1, (self.1.database_destroy())(self.0.as_mut())) {
+                log::error!("Could not call C notmuch_database_destroy: {err}");
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DbConnection {
     pub lib: Arc<NotmuchLibrary>,
     pub inner: Arc<Mutex<DbPointer>>,
@@ -128,20 +141,16 @@ impl DbConnection {
                 path.display()
             )));
         }
-        #[cfg(debug_assertions)]
-        let database = DbPointer(
-            NonNull::new(database)
-                .expect("notmuch_database_open returned a NULL pointer and status = 0"),
-        );
-        #[cfg(not(debug_assertions))]
-        let database = NonNull::new(database).map(DbPointer).ok_or_else(|| {
-            Error::new("notmuch_database_open returned a NULL pointer and status = 0")
-                .set_kind(ErrorKind::LinkedLibrary("notmuch"))
-                .set_details(
-                    "libnotmuch exhibited an unexpected and unrecoverable error. Make sure your \
-                     libnotmuch version is compatible with this release.",
-                )
-        })?;
+        let database = NonNull::new(database)
+            .map(|ptr| DbPointer(ptr, lib.clone()))
+            .ok_or_else(|| {
+                Error::new("notmuch_database_open returned a NULL pointer and status = 0")
+                    .set_kind(ErrorKind::LinkedLibrary("notmuch"))
+                    .set_details(
+                        "libnotmuch exhibited an unexpected and unrecoverable error. Make sure \
+                         your libnotmuch version is compatible with this release.",
+                    )
+            })?;
         let ret = Self {
             lib,
             inner: Arc::new(Mutex::new(database)),
@@ -172,163 +181,82 @@ impl DbConnection {
         snapshot: &mut Snapshot,
         account_hash: AccountHash,
     ) -> Result<Option<BackendEvent>> {
-        let mut stack: VecDeque<CString> = VecDeque::new();
-        let mut events = vec![];
-        stack.push_back(self.mail_root()?);
-        while let Some(path) = stack.pop_front() {
-            let mut directory_snapshot: Option<NotmuchDirectory> =
-                snapshot.connection.directory(&path)?;
-            let mut directory_current: Option<NotmuchDirectory> = self.directory(&path)?;
-            let mtime_current: libc::time_t =
-                directory_current.as_mut().map(|d| d.mtime()).unwrap_or(0);
-            let mtime_snapshot: libc::time_t =
-                directory_snapshot.as_mut().map(|d| d.mtime()).unwrap_or(0);
-
-            let (current_files, current_subdirs): (HashSet<CString>, HashSet<CString>) =
-                if let Some(directory) = directory_current.as_mut() {
-                    assert_eq!(&directory.path, &path);
-                    let current_files = directory.child_files_paths().collect();
-                    let current_subdirs = directory
-                        .child_directories_paths()
-                        .collect::<HashSet<CString>>();
-                    for subdir in &current_subdirs {
-                        stack.push_back(subdir.clone());
-                    }
-                    (current_files, current_subdirs)
-                } else {
-                    let mut current_files = HashSet::new();
-                    let mut current_subdirs = HashSet::new();
-                    for entry in std::fs::read_dir(OsStr::from_bytes(path.as_bytes()))? {
-                        let dir = entry?;
-                        // A NUL byte cannot be represented in a `CString`:
-                        // skip the entry with a warning instead of panicking.
-                        let Ok(entry_path) = CString::new(dir.path().as_os_str().as_bytes()) else {
-                            log::warn!(
-                                "Skipping notmuch database path with a NUL byte: {:?}",
-                                dir.path()
-                            );
-                            continue;
-                        };
-                        if dir.file_type()?.is_dir() {
-                            // Pass 1: For each directory in current_subdirs, add to stack to visit
-                            // in the next loops
-                            current_subdirs.insert(entry_path.clone());
-                            stack.push_back(entry_path);
-                        } else {
-                            current_files.insert(entry_path);
-                        }
-                    }
-                    (current_files, current_subdirs)
-                };
-
-            // Compare mtime_snapshot to mtime_current. If they are equivalent, terminate
-            // the algorithm at this point, (this directory has not been updated
-            // in the filesystem since the last database scan of PASS 2).
-            //
-            // If the directory's modification time in the filesystem is the same as what we
-            // recorded in the database the last time we scanned it, then we can skip the
-            // second pass entirely.
-            //
-            // We test for strict equality here to avoid a bug that can happen if the system
-            // clock jumps backward, (preventing new mail from being discovered
-            // until the clock catches up and the directory is modified again).
-
-            if directory_snapshot.is_some()
-                && directory_current.is_some()
-                && mtime_snapshot == mtime_current
-                && mtime_snapshot != 0
-                && Some(mtime_current)
-                    == std::fs::metadata(OsStr::from_bytes(path.as_bytes()))
-                        .ok()
-                        .and_then(|metadata| metadata.modified().ok())
-                        .and_then(|mtime| {
-                            mtime.duration_since(std::time::SystemTime::UNIX_EPOCH).ok()
-                        })
-                        .map(|dur| dur.as_secs() as i64)
-            {
+        let mailboxes_lck = mailboxes.read().unwrap();
+        let mailbox_queries = mailboxes_lck
+            .iter()
+            .map(|(k, v)| {
+                let total = v.counters.lock().unwrap().total.set.clone();
+                (*k, (total, v.query_str.to_string()))
+            })
+            .collect::<HashMap<MailboxHash, (BTreeSet<EnvelopeHash>, String)>>();
+        let mut events = IndexMap::new();
+        for (mailbox_hash, (mut current, query_str)) in mailbox_queries {
+            // The mailbox can be removed while a refresh is in flight; skip
+            // it instead of panicking on the map lookup.
+            let Some(mailbox) = mailboxes_lck.get(&mailbox_hash) else {
                 continue;
-            }
+            };
+            let mut counters = mailbox.counters.lock().unwrap();
 
-            // Ask the snapshot database for files and directories within 'path'
-            // (snapshot_files and snapshot_subdirs)
-            let (snapshot_files, snapshot_subdirs): (HashSet<CString>, HashSet<CString>) =
-                if let Some(directory) = directory_snapshot.as_mut() {
-                    (
-                        directory.child_files_paths().collect(),
-                        directory.child_directories_paths().collect(),
-                    )
+            let query: Query = Query::new(self, &query_str)?;
+
+            for message in query.search()? {
+                let env_hash = message.env_hash();
+                if !current.remove(&env_hash) {
+                    let env = snapshot.insert_envelope(&message, mailbox_hash);
+                    counters.total.insert_new(env.hash());
+                    if !env.is_seen() {
+                        counters.unseen.insert_new(env.hash());
+                    }
+                    events.insert(
+                        (mailbox_hash, env.hash()),
+                        RefreshEventKind::Create(Box::new(env)),
+                    );
                 } else {
-                    // If the database has never seen this directory before, we can
-                    // simply leave snapshot_files and snapshot_subdirs None.
-                    (HashSet::default(), HashSet::default())
-                };
-
-            // Pass 2: Walk current_files simultaneously with snapshot_files current_subdirs
-            // with snapshot_subdirs. Look for one of three interesting cases:
-
-            // 1. Regular file in current_files and not in snapshot_files This is a new file
-            //    to add_message into the database.
-            for new_message in current_files.difference(&snapshot_files) {
-                let Some(message) = Message::find_message_by_path(self, new_message)? else {
-                    // Path does not correspond to a message.
-                    continue;
-                };
-                for (&mailbox_hash, m) in mailboxes.read().unwrap().iter() {
-                    let query_str = format!("{} id:{}", m.query_str.as_str(), message.msg_id_str());
-                    let query: Query = Query::new(self, &query_str)?;
-                    if query.count().unwrap_or(0) > 0 {
-                        let env = snapshot.insert_envelope(&message, mailbox_hash);
-                        let mut total_lck = m.total.lock().unwrap();
-                        let mut unseen_lck = m.unseen.lock().unwrap();
-                        *total_lck += 1;
-                        if !env.is_seen() {
-                            *unseen_lck += 1;
-                        }
-                        events.push(RefreshEvent {
-                            account_hash,
-                            mailbox_hash,
-                            kind: RefreshEventKind::Create(Box::new(env)),
-                        });
+                    counters.unseen.remove(env_hash);
+                    let (flags, tags) = message.tags().collect_flags_and_tags();
+                    if !flags.contains(Flag::SEEN) {
+                        counters.unseen.insert_new(env_hash)
+                    }
+                    let prev_message =
+                        Message::find_message(&snapshot.connection, message.msg_id_cstr())?;
+                    let (prev_flags, prev_tags) = prev_message.tags().collect_flags_and_tags();
+                    if (&flags, &tags) != (&prev_flags, &prev_tags) {
+                        events.insert(
+                            (mailbox_hash, env_hash),
+                            RefreshEventKind::NewFlags(env_hash, (flags, tags)),
+                        );
                     }
                 }
             }
 
-            let mut removed_dir_stack = VecDeque::new();
-            let mut removed_files: HashSet<Cow<'_, CStr>> = HashSet::default();
-            // 2. Filename in snapshot_files not in current_files. This is a file that has
-            //    been removed from the mail store.
-            for removed_file in snapshot_files.difference(&current_files) {
-                removed_files.insert(Cow::Borrowed(removed_file));
-            }
-
-            // 3. Directory in snapshot_subdirs not in current_subdirs This is a directory
-            //    that has been removed from the mail store.
-            for removed_dir in snapshot_subdirs.difference(&current_subdirs) {
-                removed_dir_stack.push_back(Cow::Borrowed(removed_dir));
-            }
-            while let Some(removed_dir) = removed_dir_stack.pop_front() {
-                let mut directory_snapshot: Option<NotmuchDirectory> =
-                    snapshot.connection.directory(&removed_dir)?;
-                if let Some(directory) = directory_snapshot.as_mut() {
-                    removed_files.extend(directory.child_files_paths().map(Cow::Owned));
-                    removed_dir_stack.extend(directory.child_directories_paths().map(Cow::Owned));
-                }
-            }
-            for removed_file in removed_files {
-                let env_hash = {
-                    let Some(message) =
-                        Message::find_message_by_path(&snapshot.connection, &removed_file)?
-                    else {
-                        // Path does not correspond to a message.
-                        continue;
-                    };
-                    message.env_hash()
-                };
-                events.extend(snapshot.remove_envelope(env_hash));
+            for removed_hash in current {
+                snapshot
+                    .env_to_mailbox_index
+                    .entry(removed_hash)
+                    .or_default()
+                    .remove(&mailbox_hash);
+                counters.total.remove(removed_hash);
+                counters.unseen.remove(removed_hash);
+                events.insert(
+                    (mailbox_hash, removed_hash),
+                    RefreshEventKind::Remove(removed_hash),
+                );
+                snapshot.message_id_index.remove(&removed_hash);
+                snapshot.env_to_mailbox_index.remove(&removed_hash);
             }
         }
 
-        Ok(events.try_into().ok())
+        Ok(events
+            .into_iter()
+            .map(|((mailbox_hash, _), kind)| RefreshEvent {
+                account_hash,
+                mailbox_hash,
+                kind,
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .ok())
     }
 
     /// Return the mail root
@@ -393,28 +321,11 @@ impl From<NotmuchError> for Error {
     }
 }
 
-impl Drop for DbConnection {
-    fn drop(&mut self) {
-        let mut inner = self.inner.lock().unwrap();
-        unsafe {
-            if let Err(err) = try_call!(self.lib, (self.lib.database_close())(inner.as_mut())) {
-                log::error!("Could not call C notmuch_database_close: {err}");
-                return;
-            }
-            if let Err(err) = try_call!(self.lib, (self.lib.database_destroy())(inner.as_mut())) {
-                log::error!("Could not call C notmuch_database_destroy: {err}");
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct NotmuchDb {
     lib: Arc<NotmuchLibrary>,
     mailboxes: Arc<RwLock<HashMap<MailboxHash, NotmuchMailbox>>>,
     snapshot: Arc<RwLock<Snapshot>>,
-    index: Arc<RwLock<HashMap<EnvelopeHash, CString>>>,
-    mailbox_index: Arc<RwLock<HashMap<EnvelopeHash, SmallVec<[MailboxHash; 16]>>>>,
     collection: Collection,
     path: PathBuf,
     account_hash: AccountHash,
@@ -530,8 +441,7 @@ impl NotmuchDb {
                         parent: None,
                         query_str: query_str.to_string(),
                         usage: Arc::new(RwLock::new(SpecialUsageMailbox::Normal)),
-                        total: Arc::new(Mutex::new(0)),
-                        unseen: Arc::new(Mutex::new(0)),
+                        counters: Default::default(),
                     },
                 );
             } else {
@@ -571,8 +481,6 @@ impl NotmuchDb {
         Ok(Box::new(Self {
             lib,
             path,
-            index: Arc::new(RwLock::new(Default::default())),
-            mailbox_index: Arc::new(RwLock::new(Default::default())),
             snapshot: Arc::new(RwLock::new(Snapshot {
                 connection,
                 message_id_index: Default::default(),
@@ -701,39 +609,26 @@ impl MailBackend for NotmuchDb {
     }
 
     fn fetch(&mut self, mailbox_hash: MailboxHash) -> ResultStream<Vec<Envelope>> {
+        let snapshot = self.snapshot.clone();
         struct FetchState {
             mailbox_hash: MailboxHash,
             database: Arc<DbConnection>,
-            index: Arc<RwLock<HashMap<EnvelopeHash, CString>>>,
-            mailbox_index: Arc<RwLock<HashMap<EnvelopeHash, SmallVec<[MailboxHash; 16]>>>>,
+            snapshot: Arc<RwLock<Snapshot>>,
             mailboxes: Arc<RwLock<HashMap<MailboxHash, NotmuchMailbox>>>,
-            tag_index: Arc<RwLock<BTreeMap<TagHash, String>>>,
             iter: std::vec::IntoIter<CString>,
         }
         impl FetchState {
             async fn fetch(&mut self) -> Result<Option<Vec<Envelope>>> {
-                let mut unseen_count = 0;
-                let chunk_size = 250;
-                let mut mailbox_index_lck = self.mailbox_index.write().unwrap();
+                let chunk_size = 1000;
+                let mut snapshot = self.snapshot.write().unwrap();
                 let mut ret: Vec<Envelope> = Vec::with_capacity(chunk_size);
                 let mut done: bool = false;
                 for _ in 0..chunk_size {
                     if let Some(message_id) = self.iter.next() {
-                        let message =
-                            if let Ok(v) = Message::find_message(&self.database, &message_id) {
-                                v
-                            } else {
-                                continue;
-                            };
-                        let env = message.into_envelope(&self.index, &self.tag_index);
-                        mailbox_index_lck
-                            .entry(env.hash())
-                            .or_default()
-                            .push(self.mailbox_hash);
-                        if !env.is_seen() {
-                            unseen_count += 1;
-                        }
-                        ret.push(env);
+                        let Ok(message) = Message::find_message(&self.database, &message_id) else {
+                            continue;
+                        };
+                        ret.push(snapshot.insert_envelope(&message, self.mailbox_hash));
                     } else {
                         done = true;
                         break;
@@ -751,8 +646,21 @@ impl MailBackend for NotmuchDb {
                         ))
                         .set_kind(ErrorKind::NotFound));
                     };
-                    let mut unseen_lck = mailbox.unseen.lock().unwrap();
-                    *unseen_lck += unseen_count;
+                    let mut counters = mailbox.counters.lock().unwrap();
+                    counters.unseen.insert_set(
+                        ret.iter()
+                            .filter_map(|env| {
+                                if !env.is_seen() {
+                                    Some(env.hash())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect(),
+                    );
+                    counters
+                        .total
+                        .insert_set(ret.iter().map(|env| env.hash()).collect());
                 }
                 if done && ret.is_empty() {
                     Ok(None)
@@ -766,9 +674,6 @@ impl MailBackend for NotmuchDb {
             self.lib.clone(),
             false,
         )?);
-        let index = self.index.clone();
-        let mailbox_index = self.mailbox_index.clone();
-        let tag_index = self.collection.tag_index.clone();
         let mailboxes = self.mailboxes.clone();
         let v: Vec<CString>;
         {
@@ -779,16 +684,18 @@ impl MailBackend for NotmuchDb {
             };
             let query: Query = Query::new(&database, mailbox.query_str.as_str())?;
             {
-                let mut total_lck = mailbox.total.lock().unwrap();
-                let mut unseen_lck = mailbox.unseen.lock().unwrap();
-                *total_lck = query.count()? as usize;
-                *unseen_lck = 0;
+                let mut counters = mailbox.counters.lock().unwrap();
+                counters.total.clear();
+                counters.total.set_not_yet_seen(query.count()? as usize);
+                counters.unseen.clear()
             }
-            let mut index_lck = index.write().unwrap();
+            let mut snapshot = snapshot.write().unwrap();
             v = query
                 .search()?
                 .map(|m| {
-                    index_lck.insert(m.env_hash(), m.msg_id_cstr().into());
+                    snapshot
+                        .message_id_index
+                        .insert(m.env_hash(), m.msg_id_cstr().into());
                     m.msg_id_cstr().into()
                 })
                 .collect();
@@ -798,9 +705,7 @@ impl MailBackend for NotmuchDb {
             mailbox_hash,
             mailboxes,
             database,
-            index,
-            mailbox_index,
-            tag_index,
+            snapshot,
             iter: v.into_iter(),
         };
         Ok(Box::pin(try_fn_stream(|emitter| async move {
@@ -858,7 +763,9 @@ impl MailBackend for NotmuchDb {
             notify::Config::default().with_poll_interval(std::time::Duration::from_secs(2)),
         )
         .and_then(|mut watcher| {
-            watcher.watch(&self.path, RecursiveMode::Recursive)?;
+            let mut path = path.clone();
+            path.push(".notmuch");
+            watcher.watch(&path, RecursiveMode::Recursive)?;
             Ok(watcher)
         })
         .map_err(|err| err.set_err_details("Failed to create file change monitor."))?;
@@ -929,7 +836,7 @@ impl MailBackend for NotmuchDb {
                 true,
             )?),
             hash,
-            index: self.index.clone(),
+            snapshot: self.snapshot.clone(),
         };
 
         Ok(Box::pin(async move { op.as_bytes().await }))
@@ -963,26 +870,28 @@ impl MailBackend for NotmuchDb {
     fn set_flags(
         &mut self,
         env_hashes: EnvelopeHashBatch,
-        mailbox_hash: MailboxHash,
+        _mailbox_hash: MailboxHash,
         flags: Vec<FlagOp>,
     ) -> ResultFuture<()> {
         let database = DbConnection::new(self.path.as_path(), self.lib.clone(), true)?;
         let tag_index = self.collection.clone().tag_index;
-        let mailboxes = self.mailboxes.clone();
-        let mailbox_index = self.mailbox_index.clone();
-        let index = self.index.clone();
+        let snapshot = self.snapshot.clone();
 
         Ok(Box::pin(async move {
-            let mut index_lck = index.write().unwrap();
-            let mut has_seen_changes_mailboxes_set = BTreeSet::new();
+            let mut snapshot = snapshot.write().unwrap();
             for env_hash in env_hashes.iter() {
-                let message = match Message::find_message(&database, &index_lck[&env_hash]) {
+                let Some(message_id) = snapshot.message_id_index.get(&env_hash) else {
+                    log::debug!("set_flags: no message id cached for envelope {env_hash}");
+                    continue;
+                };
+                let message = match Message::find_message(&database, message_id) {
                     Ok(v) => v,
                     Err(err) => {
                         log::debug!("not found {err}");
                         continue;
                     }
                 };
+                message.tags_to_maildir_flags()?;
                 message.freeze();
 
                 let tags = message.tags().collect::<Vec<&CStr>>();
@@ -1006,10 +915,7 @@ impl MailBackend for NotmuchDb {
                     }};
                 }
 
-                let mut has_seen_changes = false;
                 for op in flags.iter() {
-                    has_seen_changes |=
-                        matches!(op, FlagOp::Set(Flag::SEEN) | FlagOp::UnSet(Flag::SEEN));
                     match op {
                         FlagOp::Set(Flag::DRAFT) => add_tag!(c"draft"),
                         FlagOp::UnSet(Flag::DRAFT) => remove_tag!(c"draft"),
@@ -1050,27 +956,14 @@ impl MailBackend for NotmuchDb {
                 message.tags_to_maildir_flags()?;
 
                 let msg_id = message.msg_id_cstr();
-                if let Some(p) = index_lck.get_mut(&env_hash) {
+                if let Some(p) = snapshot.message_id_index.get_mut(&env_hash) {
                     *p = msg_id.into();
-                }
-
-                if has_seen_changes {
-                    let mailbox_index_lck = mailbox_index.read().unwrap();
-                    has_seen_changes_mailboxes_set.insert(mailbox_hash);
-                    has_seen_changes_mailboxes_set
-                        .extend(mailbox_index_lck.values().flat_map(|hs| hs.iter().cloned()));
                 }
             }
             for op in flags.iter() {
                 if let FlagOp::SetTag(tag) = op {
                     let hash = TagHash::from_bytes(tag.as_bytes());
                     tag_index.write().unwrap().insert(hash, tag.to_string());
-                }
-            }
-            if !has_seen_changes_mailboxes_set.is_empty() {
-                let mailboxes_lck = mailboxes.write().unwrap();
-                for mh in has_seen_changes_mailboxes_set {
-                    mailboxes_lck[&mh].update_counts(&database)?;
                 }
             }
 
@@ -1111,7 +1004,14 @@ impl MailBackend for NotmuchDb {
             } else {
                 String::new()
             };
+            let wasnt_empty = !query_s.trim().is_empty();
+            if wasnt_empty {
+                query_s.push_str(" AND (");
+            }
             melib_query.query_to_string(&mut query_s)?;
+            if wasnt_empty {
+                query_s.push(')');
+            }
             let query: Query = Query::new(&database, &query_s)?;
             Ok(query.search()?.map(|message| message.env_hash()).collect())
         }))
@@ -1139,7 +1039,11 @@ impl MailBackend for NotmuchDb {
             } else {
                 String::new()
             };
-            let query_s = format!("{mailbox_query_s}{query_str}");
+            let query_s = if mailbox_query_s.trim().is_empty() {
+                query_str
+            } else {
+                format!("{mailbox_query_s} AND ({query_str})")
+            };
             let query: Query = Query::new(&database, &query_s)?;
             Ok(query.search()?.map(|message| message.env_hash()).collect())
         }))
@@ -1214,7 +1118,7 @@ impl MailBackend for NotmuchDb {
 #[derive(Clone, Debug)]
 struct NotmuchOp {
     hash: EnvelopeHash,
-    index: Arc<RwLock<HashMap<EnvelopeHash, CString>>>,
+    snapshot: Arc<RwLock<Snapshot>>,
     database: Arc<DbConnection>,
 }
 
@@ -1222,8 +1126,14 @@ impl NotmuchOp {
     async fn as_bytes(&self) -> Result<Vec<u8>> {
         let _self = self.clone();
         smol::unblock(move || {
-            let index_lck = _self.index.write().unwrap();
-            let message = Message::find_message(&_self.database, &index_lck[&_self.hash])?;
+            let snapshot_lck = _self.snapshot.write().unwrap();
+            let Some(message_id) = snapshot_lck.message_id_index.get(&_self.hash) else {
+                return Err(Error::new(
+                    "Requested envelope was not found in the notmuch snapshot index",
+                )
+                .set_kind(ErrorKind::NotFound));
+            };
+            let message = Message::find_message(&_self.database, message_id)?;
             let mut f = std::fs::File::open(message.get_filename())?;
             let mut response = Vec::new();
             f.read_to_end(&mut response)?;
