@@ -266,11 +266,13 @@ server_password = "hunter2"
                 || out.contains("server_password = {command = \"echo hunter2\"}"),
             "expected the imap2 entry to be converted; got:\n{out}"
         );
-        assert!(
-            !out.contains("server_password_command")
-                || !out.contains("server_password_command = \"false\"")
-                || out.matches("server_password_command").count() == 1,
-            "expected server_password_command entries to be transformed; got:\n{out}"
+        // All `server_password_command` entries must be gone after the
+        // transform: a partial conversion that leaves any behind (even
+        // exactly one) is a failure.
+        assert_eq!(
+            out.matches("server_password_command").count(),
+            0,
+            "expected every server_password_command entry to be transformed; got:\n{out}"
         );
 
         // Revert and check that server_password_command is restored.

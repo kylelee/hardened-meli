@@ -41,7 +41,7 @@ git fetch upstream
 ## 2026-10-01 21:30 (UTC+8)
 
 - 同步方式：七个并行 worktree 分支语义移植（批次一：`t1-mailcap`、`t3-notmuch`、`t4-melib-fixes`、`t5-trace-flag`、`t6-listing-compose`、`t7-contrib-gpg`；批次一合并后批次二：`t2-secret`）
-- 上游区间：`bb6d5916..253ba7dd`（40 个提交；6 个 SKIP/部分跳过——见下表）
+- 上游区间：`bb6d5916..253ba7dd`（35 个提交；6 个 SKIP/部分跳过——见下表）
 - 合并提交：`96c35621`（t7）、`c7e0745c`（t1）、`9cfbcd80`（t6）、`eb44b9ac`（t4）、`bf84926b`（t3）、`1b568f27`（t5）、`0fcd631d`（t2）
 - 冲突：仅 `meli/src/mail/listing/conversations.rs` 的 `filter()`——t4 的 `get_threads` Option 化与 t6 的计数元组精简（限制移除）合并
 - 合并期验收修复：`e5c9b3c0` + `ac9dc1a7`（clippy 1.98 新增规则合规）、`9a33ac65`（退订测试对齐异步 `send_draft_async` job 路径——旧断言为 `5a04bc0d` 上的存量问题，已在 detached 基线复现）、`92f06575`（extra 字段由 `serde_json::Map` + `preserve_order` 特性改为 `IndexMap`——该特性悄悄改变了 JMAP 线上键序并破坏 `test_jmap_query`；上游本就用 `IndexMap` 且不开该特性）、`decl_version_map` 文档示例补 `v0_10_0` 条目
@@ -88,7 +88,7 @@ git fetch upstream
   - 上游命令补全框架未移植；关注后续上游 `meli/src/command/**` 提交中的非 UI 修复 *(自 2026-09-28)*
   - `mailbox_changed` SSE 分支已实现但 mock 服务器未覆盖 *(自 2026-09-28)*
   - jmap/maildir/nntp 双锁计数未迁移到 `MailboxCounters`（上游 `0d7e1532` 也改了它们；fork 为控制本轮影响面仅做 backends+imap+notmuch）*(新增 2026-10-01)*
-  - `test_jmap_watch` 在全量并行负载下出现过一次抖动（SSE mock 截止时间敏感）；单独与整套运行均确定性通过——若 CI 抖动再回头 *(新增 2026-10-01)*
+  - `test_jmap_watch` 的 Destroy 断言曾让手动 `refresh()` 与 SSE 触发的 resync 争抢同一状态差分（drain 早于事件送达）；已改为与 Create/NewFlags 断言一致的 await watch future 模式——竞态已消除，此条留作溯源 *(新增 2026-10-01，当日解决)*
 
 ## 2026-09-28 03:47 (UTC+8)
 
