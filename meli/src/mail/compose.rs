@@ -2570,26 +2570,29 @@ impl Component for Composer {
                     return true;
                 }
 
+                let f = Arc::new(f);
                 let editor_command = format!("{} \"$@\"", editor);
-                context.replies.push_back(UIEvent::ProcessRequest {
-                    owner: self.id,
-                    command: {
-                        let mut cmd = Command::new("sh");
-                        cmd.args(["-c", &editor_command])
-                            .arg(&editor)
-                            .arg(f.path())
-                            .stdin(Stdio::inherit())
-                            .stdout(Stdio::inherit())
-                            .stderr(Stdio::inherit());
-                        cmd
-                    },
-                    spawn: Some(Default::default()),
-                    result_cb: ProcessResultFn(Box::new(|output| {
-                        Some(Box::new(ComposerMessage::Editor(
-                            output.map(|_| Arc::new(f)),
-                        )))
-                    })),
-                });
+                context
+                    .replies
+                    .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
+                        owner: self.id,
+                        command: {
+                            let mut cmd = Command::new("sh");
+                            cmd.args(["-c", &editor_command])
+                                .arg(&editor)
+                                .arg(f.path())
+                                .stdin(Stdio::inherit())
+                                .stdout(Stdio::inherit())
+                                .stderr(Stdio::inherit());
+                            cmd
+                        },
+                        spawn: Some(Default::default()),
+                        result_cb: ProcessResultFn(Box::new({
+                            let f = f.clone();
+                            |output| Some(Box::new(ComposerMessage::Editor(output.map(|_| f))))
+                        })),
+                        temporary_files: vec![f],
+                    })));
                 return true;
             }
             UIEvent::Action(Action::Tab(ComposerAction(ref a))) => match a {
@@ -2619,29 +2622,37 @@ impl Component for Composer {
                         }
                     };
 
-                    context.replies.push_back(UIEvent::ProcessRequest {
-                        owner: self.id,
-                        command: {
-                            let mut cmd = Command::new("sh");
-                            cmd.args(["-c", command])
-                                .stdin(Stdio::null())
-                                .stdout(Stdio::from(std_file))
-                                .stderr(Stdio::piped());
-                            cmd
-                        },
-                        spawn: Some(Default::default()),
-                        result_cb: ProcessResultFn(Box::new(|output| {
-                            if let Ok(ref output) = output {
-                                if !output.stderr.is_empty() {
-                                    log::warn!(
-                                        "Command stderr output: `{}`.",
-                                        String::from_utf8_lossy(&output.stderr)
-                                    );
+                    context
+                        .replies
+                        .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
+                            owner: self.id,
+                            command: {
+                                let mut cmd = Command::new("sh");
+                                cmd.args(["-c", command])
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::from(std_file))
+                                    .stderr(Stdio::piped());
+                                cmd
+                            },
+                            spawn: Some(Default::default()),
+                            result_cb: ProcessResultFn(Box::new({
+                                let f = f.clone();
+                                |output| {
+                                    if let Ok(ref output) = output {
+                                        if !output.stderr.is_empty() {
+                                            log::warn!(
+                                                "Command stderr output: `{}`.",
+                                                String::from_utf8_lossy(&output.stderr)
+                                            );
+                                        }
+                                    }
+                                    Some(Box::new(ComposerMessage::AddAttachment(
+                                        output.map(|_| f),
+                                    )))
                                 }
-                            }
-                            Some(Box::new(ComposerMessage::AddAttachment(output.map(|_| f))))
-                        })),
-                    });
+                            })),
+                            temporary_files: vec![f],
+                        })));
                     return true;
                 }
                 ComposerTabAction::AddAttachment(FileAction::Path(ref path)) => {
@@ -2684,21 +2695,24 @@ impl Component for Composer {
                         self.set_dirty(true);
                         return true;
                     };
-                    context.replies.push_back(UIEvent::ProcessRequest {
-                        owner: self.id,
-                        command: {
-                            let mut cmd = Command::new("sh");
-                            cmd.args(["-c", command])
-                                .stdin(Stdio::inherit())
-                                .stdout(Stdio::piped())
-                                .stderr(Stdio::piped());
-                            cmd
-                        },
-                        spawn: Some(Default::default()),
-                        result_cb: ProcessResultFn(Box::new(|output| {
-                            Some(Box::new(ComposerMessage::FilePicker(output)))
-                        })),
-                    });
+                    context
+                        .replies
+                        .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
+                            owner: self.id,
+                            command: {
+                                let mut cmd = Command::new("sh");
+                                cmd.args(["-c", command])
+                                    .stdin(Stdio::inherit())
+                                    .stdout(Stdio::piped())
+                                    .stderr(Stdio::piped());
+                                cmd
+                            },
+                            spawn: Some(Default::default()),
+                            result_cb: ProcessResultFn(Box::new(|output| {
+                                Some(Box::new(ComposerMessage::FilePicker(output)))
+                            })),
+                            temporary_files: vec![],
+                        })));
                     return true;
                 }
                 ComposerTabAction::RemoveAttachment(idx) => {
@@ -4438,7 +4452,7 @@ exit 0
         assert!(
             !replies
                 .iter()
-                .any(|ev| matches!(ev, UIEvent::Fork(_) | UIEvent::ProcessRequest { .. })),
+                .any(|ev| matches!(ev, UIEvent::Fork(_) | UIEvent::ProcessRequest(_))),
             "shortcut letters must not spawn an editor or a process: {replies:?}"
         );
     }
@@ -4506,7 +4520,7 @@ exit 0
         assert!(
             !replies
                 .iter()
-                .any(|ev| matches!(ev, UIEvent::Fork(_) | UIEvent::ProcessRequest { .. })),
+                .any(|ev| matches!(ev, UIEvent::Fork(_) | UIEvent::ProcessRequest(_))),
             "opening the send confirmation must not spawn a process: {replies:?}"
         );
     }
