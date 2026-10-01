@@ -1196,7 +1196,7 @@ fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
     assert!(!conf.trace);
 
     // `trace = true` is accepted and stored.
-    let mut account = account.clone();
+    let mut account = account;
     account
         .extra
         .insert("trace".to_string(), "true".to_string());
@@ -1207,5 +1207,5 @@ fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
     account
         .extra
         .insert("trace".to_string(), "not-a-bool".to_string());
-    assert!(JmapServerConf::new(&account).is_err());
+    JmapServerConf::new(&account).unwrap_err();
 }

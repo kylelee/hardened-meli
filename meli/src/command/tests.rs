@@ -446,9 +446,10 @@ fn test_command_parser_public_inbox_import() {
         parsed
     );
     // Quoted arguments and bracketed message ID, thread variant.
-    let (rest, parsed) =
-        parser::public_inbox_import(b"public-inbox import-thread foo \"bar\" <message@example.com>")
-            .unwrap();
+    let (rest, parsed) = parser::public_inbox_import(
+        b"public-inbox import-thread foo \"bar\" <message@example.com>",
+    )
+    .unwrap();
     assert_eq!(rest, b"");
     assert!(
         matches!(
@@ -484,7 +485,7 @@ fn test_command_parser_public_inbox_import() {
         }),
     );
     // Missing arguments fail to parse.
-    assert!(parse_command(b"public-inbox import foo").is_err());
+    parse_command(b"public-inbox import foo").unwrap_err();
     // Trailing junk after the message ID fails to parse.
-    assert!(parse_command(b"public-inbox import foo bar <m@example.com> baz").is_err());
+    parse_command(b"public-inbox import foo bar <m@example.com> baz").unwrap_err();
 }
