@@ -580,8 +580,7 @@ impl ListingTrait for ConversationsListing {
 
         let account = &context.accounts[&self.cursor_pos.0];
         let threads = account.collection.get_threads(self.cursor_pos.1);
-        let (mut missing_env, mut no_thread_node, mut not_in_rows, mut mapped) =
-            (0usize, 0usize, 0usize, 0usize);
+        let (mut missing_env, mut no_thread_node, mut mapped) = (0usize, 0usize, 0usize);
         let results_len = results.len();
         for env_hash in results {
             if !account.collection.contains_key(&env_hash) {
@@ -600,19 +599,14 @@ impl ListingTrait for ConversationsListing {
             if self.filtered_order.contains_key(&thread) {
                 continue;
             }
-            if self.rows.all_threads.contains(&thread) {
-                mapped += 1;
-                self.filtered_selection.push(thread);
-                self.filtered_order
-                    .insert(thread, self.filtered_selection.len().saturating_sub(1));
-            } else {
-                not_in_rows += 1;
-            }
+            mapped += 1;
+            self.filtered_selection.push(thread);
+            self.filtered_order
+                .insert(thread, self.filtered_selection.len().saturating_sub(1));
         }
         log::debug!(
             "conversations filter `{}`: {} results -> {} mapped (missing_env {missing_env}, \
-             no_thread_node {no_thread_node}, not_in_rows {not_in_rows}); mailbox {} has {} \
-             threads in rows",
+             no_thread_node {no_thread_node}); mailbox {} has {} threads in rows",
             self.filter_term,
             results_len,
             mapped,
