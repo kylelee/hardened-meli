@@ -263,6 +263,11 @@ fn test_arg_count_mismatch_is_reported_not_panicked() {
         b"flag unset junk extra",
         parser::flag
     );
+    check_wrong_arg_count!(
+        "flag toggle junk extra",
+        b"flag toggle junk extra",
+        parser::flag
+    );
     check_wrong_arg_count!("tag add foo extra", b"tag add foo extra", parser::_tag);
     check_wrong_arg_count!(
         "tag remove foo extra",

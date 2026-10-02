@@ -206,7 +206,7 @@ pub fn parse_command(input: &[u8]) -> Result<Action, CommandError> {
 /// # Example
 ///
 /// ```
-/// # use meli::{melib::Flag, command::{Action,ListingAction, FlagAction, parser}};
+/// # use meli::{melib::Flag, command::{Action,ListingAction, FlagAction, error::CommandError, parser}};
 ///
 /// let (rest, parsed) = parser::flag(b"flag set junk").unwrap();
 /// assert_eq!(rest, b"");
@@ -253,6 +253,48 @@ pub fn parse_command(input: &[u8]) -> Result<Action, CommandError> {
 ///     &parsed.unwrap_err().to_string(),
 ///     "Bad value/argument: xunk is not a valid flag name. Possible values are: passed, replied, \
 ///      seen or read, junk or trash or trashed, draft, flagged"
+/// );
+///
+/// let (rest, parsed) = parser::flag(b"flag toggle seen").unwrap();
+/// assert_eq!(rest, b"");
+/// assert!(
+///     matches!(
+///         parsed,
+///         Ok(Action::Listing(ListingAction::Flag(FlagAction::Toggle(
+///             Flag::SEEN
+///         ))))
+///     ),
+///     "{:?}",
+///     parsed
+/// );
+///
+/// let (rest, parsed) = parser::flag(b"flag toggle draft").unwrap();
+/// assert_eq!(rest, b"");
+/// assert!(
+///     matches!(
+///         parsed,
+///         Ok(Action::Listing(ListingAction::Flag(FlagAction::Toggle(
+///             Flag::DRAFT
+///         ))))
+///     ),
+///     "{:?}",
+///     parsed
+/// );
+///
+/// let (rest, parsed) = parser::flag(b"flag toggle xunk").unwrap();
+/// assert_eq!(rest, b"");
+/// assert_eq!(
+///     &parsed.unwrap_err().to_string(),
+///     "Bad value/argument: xunk is not a valid flag name. Possible values are: passed, replied, \
+///      seen or read, junk or trash or trashed, draft, flagged"
+/// );
+///
+/// let (rest, parsed) = parser::flag(b"flag toggle seen extra").unwrap();
+/// assert_eq!(rest, b" extra");
+/// assert!(
+///     matches!(parsed, Err(CommandError::WrongNumberOfArguments { .. })),
+///     "{:?}",
+///     parsed
 /// );
 /// ```
 pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandError>> {
@@ -320,6 +362,29 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
                 Ok((
                     input,
                     Ok(Listing(ListingAction::Flag(FlagAction::Unset(flag)))),
+                ))
+            },
+            |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
+                let mut check = arg_init! { min_arg:1, max_arg: 1, flag};
+                let (input, _) = tag("toggle")(input.trim())?;
+                arg_chk!(start check, input);
+                let (input, _) = is_a(" ")(input)?;
+                arg_chk!(inc check, input);
+                let (input, flag) = quoted_argument(input.trim())?;
+                arg_chk!(finish check, input);
+                let (input, _) = eof(input)?;
+                let Some(flag) = parse_flag(flag) else {
+                    return Ok((
+                        b"",
+                        Err(CommandError::BadValue {
+                            inner: format!("{flag} is not a valid flag name").into(),
+                            suggestions: Some(FLAG_SUGGESTIONS),
+                        }),
+                    ));
+                };
+                Ok((
+                    input,
+                    Ok(Listing(ListingAction::Flag(FlagAction::Toggle(flag)))),
                 ))
             },
         )),

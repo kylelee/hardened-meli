@@ -326,8 +326,8 @@ define_commands!([
                    desc: "tag [add/remove], edits message's tags.",
                    parser: parser::_tag
                 },
-                { tags: ["flag", "flag set", "flag unset"],
-                   desc: "flag [set/unset] NAME, sets or unsets a message flag: seen, flagged, draft, passed, replied or trash",
+                { tags: ["flag", "flag set", "flag unset", "flag toggle"],
+                   desc: "flag [set/unset/toggle] NAME, sets, unsets or toggles a message flag: seen, flagged, draft, passed, replied or trash",
                    parser: parser::flag
                 },
                 { tags: ["print "],
