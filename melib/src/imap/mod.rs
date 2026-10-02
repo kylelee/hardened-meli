@@ -118,11 +118,12 @@ pub struct EnvelopeCache {
 pub struct ImapServerConf {
     pub server_hostname: String,
     pub server_username: String,
-    /// Password / token. Carried as a [`Secret`] so that inline-table
-    /// `{ command = "..." }` form (upstream port of #448) and the legacy
-    /// literal-string form both deserialize into one type. The connection
-    /// layer calls [`Secret::value`] right before the SASL exchange so the
-    /// plaintext never lingers in memory.
+    /// Password / token. Carried as a [`Secret`](crate::conf::Secret) so
+    /// that inline-table `{ command = "..." }` form (upstream port of #448)
+    /// and the legacy literal-string form both deserialize into one type.
+    /// The connection layer calls
+    /// [`Secret::value`](crate::conf::Secret::value) right before the SASL
+    /// exchange so the plaintext never lingers in memory.
     pub server_password: crate::conf::Secret,
     pub server_port: u16,
     pub use_starttls: bool,

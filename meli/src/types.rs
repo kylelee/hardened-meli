@@ -69,7 +69,8 @@ pub enum StatusEvent {
     SetMouse(bool),
     ScrollUpdate(ScrollUpdate),
     /// Sent by the focused listing/tree component whenever its cursor
-    /// changes `(AccountHash, MailboxHash)`. The [`StatusBar`] consumes it
+    /// changes `(AccountHash, MailboxHash)`. The
+    /// [`StatusBar`](crate::utilities::StatusBar) consumes it
     /// to track which mailbox's `MailboxStatus::Parsing` ratio drives the
     /// central `LineGauge`; ignored by every other component.
     FocusMailbox(AccountHash, MailboxHash),

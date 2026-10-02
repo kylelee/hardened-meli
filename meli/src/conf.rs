@@ -506,8 +506,8 @@ fn remove_legacy_listing_keys(table: &mut toml::value::Table, location: &str) ->
 /// Strip removed listing keys from the pp-expanded configuration text `s`:
 /// the top-level `listing` table, every `accounts.<name>.listing` table and
 /// every `accounts.<name>.mailboxes.<mailbox>.listing` table
-/// ([`FileMailboxConf`](crate::conf::FileMailboxConf) flattens
-/// [`MailUIConf`](crate::conf::MailUIConf), so the same
+/// ([`FileMailboxConf`] flattens
+/// [`MailUIConf`], so the same
 /// `deny_unknown_fields` override applies there).
 ///
 /// If `s` is not valid TOML, return it untouched so the existing error path

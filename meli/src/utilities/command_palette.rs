@@ -24,7 +24,7 @@
 //! command list below it.
 //!
 //! The palette is a plain struct (not a [`Component`]): it never enters
-//! the component tree — [`StatusBar`](super::StatusBar) owns it for its
+//! the component tree — [`StatusBar`] owns it for its
 //! whole lifetime, feeds it `UIEvent::CmdInput` keys and draws it over
 //! the full screen area when the mode is `UIMode::Command`.
 

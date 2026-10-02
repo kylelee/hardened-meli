@@ -138,10 +138,11 @@ pub struct EnvelopeCache {
 pub struct JmapServerConf {
     pub server_url: Url,
     pub server_username: String,
-    /// Password / Bearer token. Carried as a [`Secret`] (upstream port of
-    /// #448) so the inline-table `{ command = "..." }` form and the literal
-    /// form share one type. Plaintext is resolved via [`Secret::value`] at
-    /// the wire boundary.
+    /// Password / Bearer token. Carried as a
+    /// [`Secret`](crate::conf::Secret) (upstream port of #448) so the
+    /// inline-table `{ command = "..." }` form and the literal form share
+    /// one type. Plaintext is resolved via
+    /// [`Secret::value`](crate::conf::Secret::value) at the wire boundary.
     pub server_password: crate::conf::Secret,
     pub use_token: bool,
     pub trace: bool,
@@ -1736,8 +1737,9 @@ impl JmapType {
                 // Validate the inline-table form early so failures are
                 // reported here rather than later at connection time.
                 if let serde_json::Value::Object(_) = &v {
-                    let _ = <crate::conf::Secret as crate::conf::ExtraSetting>::deserialize_extra(&v)
-                        .map_err(|err| {
+                    let _ =
+                        <crate::conf::Secret as crate::conf::ExtraSetting>::deserialize_extra(&v)
+                            .map_err(|err| {
                             Error::new(format!(
                                 "({}) `server_password` object is not a valid Secret: {err}",
                                 s.name.as_str(),
