@@ -23,8 +23,8 @@
 
 use crate::{
     backends::{
-        AccountHash, BackendEvent, EnvelopeHash, LazyCountSet, MailboxHash, RefreshEvent,
-        RefreshEventKind,
+        AccountHash, BackendEvent, EnvelopeHash, EnvelopeHashBatch, LazyCountSet, MailboxHash,
+        RefreshEvent, RefreshEventKind,
     },
     utils::logging::LogLevel,
 };
@@ -195,4 +195,111 @@ fn backend_lookup_is_case_insensitive_and_reports_unknown_format() {
         Err(err) => err,
     };
     assert_eq!(err.kind, ErrorKind::Configuration);
+}
+
+/// A large [`BackendEvent::RefreshBatch`] must not dump every
+/// [`RefreshEvent`] in its `Debug` output (upstream 32733460: batches can
+/// be huge, and `Debug` is used in logs). Batches of 30 or more events are
+/// summarized as the event count plus the first 30 entries, keeping the
+/// output bounded.
+#[test]
+fn test_backend_event_debug_refresh_batch_output_is_bounded() {
+    let big_batch = BackendEvent::RefreshBatch(
+        std::iter::repeat_n(
+            RefreshEvent {
+                account_hash: AccountHash(0),
+                mailbox_hash: MailboxHash(0),
+                kind: RefreshEventKind::Rescan,
+            },
+            300,
+        )
+        .collect(),
+    );
+
+    let debug = format!("{big_batch:?}");
+    assert!(
+        debug.len() < 4096,
+        "Debug output for a large batch must be bounded, got {} bytes",
+        debug.len()
+    );
+    assert!(
+        debug.contains("length: 300"),
+        "the event count must be reported: {debug}"
+    );
+    assert_eq!(
+        debug.matches("RefreshEvent").count(),
+        30,
+        "only the first 30 events may be printed: {debug}"
+    );
+}
+
+/// Batches below the size threshold and the other variants must keep
+/// printing all their fields, so small updates stay diagnosable.
+#[test]
+fn test_backend_event_debug_small_refresh_batch_and_other_variants_are_complete() {
+    let event = || RefreshEvent {
+        account_hash: AccountHash(7),
+        mailbox_hash: MailboxHash(9),
+        kind: RefreshEventKind::Rescan,
+    };
+
+    let small_batch = BackendEvent::RefreshBatch(vec![event(), event(), event()]);
+    let debug = format!("{small_batch:?}");
+    assert_eq!(
+        debug.matches("RefreshEvent").count(),
+        3,
+        "all events of a small batch must be printed: {debug}"
+    );
+    assert!(
+        !debug.contains(".."),
+        "a small batch must not be summarized: {debug}"
+    );
+
+    let notice = BackendEvent::Notice {
+        description: "description".to_string(),
+        content: Some("content".to_string()),
+        level: LogLevel::ERROR,
+    };
+    let debug = format!("{notice:?}");
+    for expected in [
+        "BackendEvent::Notice",
+        "description: \"description\"",
+        "content: Some(\"content\")",
+        "level: ERROR",
+    ] {
+        assert!(debug.contains(expected), "missing {expected:?} in {debug}");
+    }
+
+    let debug = format!("{:?}", BackendEvent::Refresh(event()));
+    assert!(
+        debug.contains("BackendEvent::Refresh") && debug.contains("Rescan"),
+        "a single refresh must be printed in full: {debug}"
+    );
+
+    let account_state_change = BackendEvent::AccountStateChange {
+        message: std::borrow::Cow::Borrowed("message"),
+    };
+    let debug = format!("{account_state_change:?}");
+    assert!(
+        debug.contains("Backend::AccountStateChange") && debug.contains("message: \"message\""),
+        "an account state change must be printed in full: {debug}"
+    );
+}
+
+/// Upstream 1218cb74: a `Vec<EnvelopeHash>` converts into an
+/// [`EnvelopeHashBatch`] by splitting into the first hash and the rest;
+/// an empty vector has no first hash and must be rejected.
+#[test]
+fn test_envelope_hash_batch_try_from_vec() {
+    assert!(EnvelopeHashBatch::try_from(Vec::<EnvelopeHash>::new()).is_err());
+
+    let single = EnvelopeHashBatch::try_from(vec![EnvelopeHash(1)]).unwrap();
+    assert_eq!(single.first, EnvelopeHash(1));
+    assert!(single.rest.is_empty());
+
+    let multi =
+        EnvelopeHashBatch::try_from(vec![EnvelopeHash(1), EnvelopeHash(2), EnvelopeHash(3)])
+            .unwrap();
+    assert_eq!(multi.first, EnvelopeHash(1));
+    assert_eq!(multi.rest, vec![EnvelopeHash(2), EnvelopeHash(3)]);
 }

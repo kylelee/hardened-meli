@@ -847,6 +847,9 @@ impl MailBackend for ImapType {
                                 FlagOp::Set(flag) if *flag == Flag::DRAFT => {
                                     tmp.push(ImapCodecFlag::Draft);
                                 }
+                                FlagOp::Set(flag) if *flag == Flag::PASSED => {
+                                    // Ignore
+                                }
                                 FlagOp::Set(_) => {
                                     log::error!(
                                         "Application error: more than one flag bit set in \
@@ -917,6 +920,9 @@ impl MailBackend for ImapType {
                                 }
                                 FlagOp::UnSet(flag) if *flag == Flag::DRAFT => {
                                     tmp.push(ImapCodecFlag::Draft);
+                                }
+                                FlagOp::UnSet(flag) if *flag == Flag::PASSED => {
+                                    // Ignore
                                 }
                                 FlagOp::UnSet(_) => {
                                     log::error!(
