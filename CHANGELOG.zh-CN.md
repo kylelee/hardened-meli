@@ -16,6 +16,10 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+- `flag toggle <FLAG>` 命令（上游 `8404d74a`,修上游 #765）:在选中邮件上切换标志——从 collection 读取每封当前 flags,无该标志的收进 Set 批、有的收进 UnSet 批,合并为一个后台 `toggle-flag` job;已登记命令面板补全表;解析臂按 fork 惯例,doctest 覆盖合法/非法标志名与参数数量错误。
+
+- `TryFrom<Vec<EnvelopeHash>> for EnvelopeHashBatch`（上游 `1218cb74`）:空 vec 返回 `Err`,非空拆为 `first`/`rest`。
+
 - mailcap RFC 1524 完整实现（上游 `253ba7dd` + `0d4b0bf9` + `c8cad6fb` + `2309c167`，语义移植；修上游 #556）：`MailcapEntry` 解析全部 RFC 字段（`compose`/`composetyped`/`print`/`edit`/`test=`、`copiousoutput`、`needsterminal`、`nametemplate`、`textualnewlines`），展开 `%s`/`%t`/`%n`/`%F`/`%{param}`（含 multipart `%F` 子部件文件展开），执行 `test=` 探测程序，并管理处理器生命周期：`UIEvent::ProcessRequest` 改为携带 `temporary_files` 的结构体（`Arc<File>` 句柄存活至结果回调结束再释放以清理临时文件），`spawn: None` 路径同样检查非零退出/信号终止。fork 偏差：所有替换值（`%t`、`%{param}`、路径）经 fork 的 POSIX 单引号 shell 引用而非上游裸拼接；未知 `%` 序列返回 `Error` 而非 panic；坏条目逐条跳过。`sanitize_filename` 标点清洗收窄为 `!"'/\`，`@` 与点号在附件文件名中保留。
 
 - 运行时账户级协议跟踪（上游 `6429fccc` + `d75d3be8`）：账户设置 `trace = true`（IMAP/JMAP/NNTP 的 `extra`、SMTP `send_mail` 表）即可开启协议级连接转储，无需重编译——`{imap,jmap,nntp,smtp}-trace` 四个 cargo 特性移除。fork 自有 `debug-tracing` 特性不变（管 `./log/` 落盘）；melib 残留 `debug!` 宏删除、调用迁移到 `log::debug!`/`log::trace!`，`to_str!` 保留（QQ-Mail 容错 IMAP 解析器在用）。trace 凭据脱敏（`test_trace_redact_*`）保留并扩展。
@@ -60,11 +64,16 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 - maildir 用户主动操作（设 flag/删除/改名）完成后直接发出后端事件（上游 `34e40e0e`），不再依赖 notify watcher 观察文件系统；fork 的「缓存锁下不做文件系统 IO」纪律保留。
 
+- `BackendEvent` 日志输出有界化（上游 `32733460`）：派生 `Debug` 会全量打印 `RefreshBatch` 的每个事件，大刷新产生数 MB 日志行；手写 `Debug` 改为批次 ≥30 条时只打印条数+前 30 条，更小批次与其余变体完整打印。
+
+
 
 - 依赖治理：移除根 `Cargo.toml` 的 `[patch.crates-io]` 与 `vendor/crossterm/` 目录，crossterm 回归 crates.io 0.29.0 原版。原补丁防御的「未识别私有 CSI 卡死」改由删除无用启动查询（`CSI ? 2026 $ p` 同步输出支持探测，全代码库无消费者）+ 输入看门狗承担。离线构建改为依赖本地 cargo cache 预取（`cargo fetch`）。
 - `envelope-view.reply_to_all` 默认键由 `C-g` 改为 `C-a`（`reply` 保持 `r`，`reply_to_author` 保持 `C-r`）；底栏 `Reply All` 提示与邮件视图按键派发随同一配置绑定自动同步。
 
 ### 修复（Fixed）
+
+- IMAP `set_flags` 忽略 `Flag::PASSED`（上游 `5151e75c`）：IMAP 协议无 PASSED 的线上表示，设置/取消它会落入「more than one flag bit」应用错误分支并让整条 `UID STORE` 失败；现为显式空操作。mock 服务器回归测试 `test_imap_set_flags_ignores_passed`（修复前验证为红，精确复现上游错误）。
 
 - 账户 `extra` 数值/布尔配置在 `serde_json::Value` 迁移后静默回落默认值（`a0cd...` 移植上游 `97a08539`+`254cee97` 引入）：imap/nntp/jmap/mbox 的 `get_conf_val!` 宏只按 `as_str()` 取值，TOML 的 `server_port = 993`、`timeout = 90`、`use_idle = true` 等变成 `Value::Number`/`Value::Bool` 后永远匹配不上。症状：`server_port` 回落到 143，连带 `use_starttls` 默认翻转为 `true`——QQ 邮箱（imap.qq.com / imap.exmail.qq.com，143 端口拒 STARTTLS 回 `* BAD Command!`）连不上，而 163（Coremail 容忍 143 STARTTLS）侥幸能用。新增 `AccountSettings::extra_conf_string` 把 `Number`/`Bool` 标量强转为字符串，恢复旧版全字符串语义；`Value::Object`（Secret 表）仍返回 `None`。回归测试 `test_account_settings_extra_conf_string`、`test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf`（修复前验证为红：端口解析成 143）。
 
@@ -118,6 +127,8 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 <!-- ### 打包（Packaging） -->
 
 ### 杂项（Miscellaneous Tasks）
+
+- 与上游 meli 完全同步（截至 **2026-10-02，上游 HEAD `aea4508b`**）：上游区间 `253ba7dd..aea4508b`（16 个提交）在两个并行 worktree 上语义移植——IMAP `Flag::PASSED` 忽略、`BackendEvent::RefreshBatch` 日志有界化、`EnvelopeHashBatch` Vec 转换、`flag toggle` 命令（修上游 #765）；十二个提交刻意跳过（附件编辑按钮与主题属性——UI 层按策略不同步、分叉形态上的 clippy 修正、被 fork nucleo 命令面板取代或不适用的补全与波浪号展开；逐提交记账见 [SYNC.zh-CN.md](./SYNC.zh-CN.md)）。台账同时披露 `f6ddf9a4` 移植缺口：上游类型化 `deserialize_extra_field` extra 值机制（2026-09-28）未随 2026-10-01 移植——正是数值/布尔 extra 配置静默吞掉 bug 的成因，已由本地 `extra_conf_string` 修复；两机制并存为已知分歧，后续另立统一任务。
 
 - 与上游 meli 完全同步（截至 **2026-10-01，上游 HEAD `253ba7dd`**）：上游区间 `bb6d5916..253ba7dd`（35 个提交）在七个并行 worktree 任务上语义移植——mailcap RFC 1524 重写与进程管理、`Secret` 凭据字段与 `v0.10.0` 迁移、运行时 `trace` 账户开关、notmuch refresh/AND 搜索链、maildir 直发事件、`public-inbox import`、撰写页多地址补全及十项小修（逐提交记账见 [SYNC.zh-CN.md](./SYNC.zh-CN.md)）。刻意跳过：`266b918a`（Selector 回调传 context——fork 对话框已重写）、`59ffaaeb`（RowsState 去泛型——纯内部重构，fork listing 已重写）、`facc045c`（删 `to_str!`——fork 容错 IMAP 解析器仍在用）、`9ff2e38e`（`change_log_level` 设 max level——fork 已修）、`41b547c6`/`63894a9c`（mock 上下文 TRACE/环境重置测试基建——fork 自有 hermetic XDG 助手）、`05dde1d2` 部分（fork 保留 `debug-tracing` 特性管 `./log/` 落盘，仅适用其过时宏部分）。已通过 `make check`、`make lint`、`make test`（全 feature 全绿）。
 
