@@ -45,7 +45,7 @@ git fetch upstream
 - 合并提交：`361f97b`（sync-melib-trio,fast-forward）、`aea11df` 经合并 `86d1ede`（sync-flag-toggle）
 - 冲突：无（文件集不相交）
 - 移植缺口披露：上游 `f6ddf9a4`（2026-09-28,`deserialize_extra_field` + `ExtraSetting` 类型化 extra 反序列化）早于本区间且未被 2026-10-01 移植——该缺口正是数值/布尔 extra 配置被静默吞掉 bug 的根因,已由本地 `ebdfcff8`（`AccountSettings::extra_conf_string`）修复。已知分歧：fork 保留 `extra_conf_string` 字符串强转（已对 QQ 邮箱 993 隐式 TLS 实网验证）;上游走类型化反序列化。后续任务：评估统一为单一机制。
-- 验证：`make check`、`make lint`、`make test`、CI 对等（`.gitea/Makefile.*`）全绿;保护门槛：`test_account_settings_extra_conf_string` 与 `test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf` 原样通过、四处 `get_conf_val!` 宏未动;实网冒烟：qq 993 隐式 TLS 登录成功、0 条 STARTTLS 行
+- 验证：`make check`、`make lint`、`make test` 全绿;CI 对等：`Makefile.build`（含 rustdoc）+ `Makefile.manifest-lint`（cargo-sort + debian/changelog）+ `clippy` 绿——`rustfmt` 与 `cargo-msrv` 本机跳过（无 nightly 工具链 / cargo-msrv 未安装且 ~/.cargo 只读;CI runner 具备）;保护门槛：`test_account_settings_extra_conf_string` 与 `test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf` 原样通过、四处 `get_conf_val!` 宏未动;实网冒烟：qq + work 993 隐式 TLS 登录成功（`M2 OK Success login ok`）、0 条 STARTTLS 行
 
 | 本地提交 | 上游提交 | 类别 | 类型 | 说明 |
 | --- | --- | --- | --- | --- |
