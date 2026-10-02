@@ -174,6 +174,18 @@ impl AccountSettings {
         self.extra.get(key)
     }
 
+    /// Look up an `extra` value as an owned string, coercing non-string
+    /// scalars (numbers, booleans) to their string form — mirroring the
+    /// legacy `IndexMap<String, String>` behaviour where every TOML value
+    /// was stringified before the `serde_json::Value` migration.
+    pub fn extra_conf_string(&self, key: &str) -> Option<String> {
+        match self.extra.get(key)? {
+            serde_json::Value::String(s) => Some(s.clone()),
+            v @ (serde_json::Value::Number(_) | serde_json::Value::Bool(_)) => Some(v.to_string()),
+            _ => None,
+        }
+    }
+
     /// Resolve the server password to a [`Secret`] suitable for the
     /// connection layer.
     ///

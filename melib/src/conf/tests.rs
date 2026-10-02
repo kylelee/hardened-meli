@@ -184,3 +184,54 @@ fn test_config_serde_secret() {
         ],
     );
 }
+
+#[test]
+fn test_account_settings_extra_conf_string() {
+    use crate::conf::AccountSettings;
+
+    let account_with = |extra: indexmap::IndexMap<String, serde_json::Value>| AccountSettings {
+        name: "test".to_string(),
+        root_mailbox: "INBOX".to_string(),
+        format: "imap".to_string(),
+        identity: "user@example.com".to_string(),
+        extra_identities: vec![],
+        read_only: false,
+        display_name: None,
+        subscribed_mailboxes: vec![],
+        mailboxes: indexmap::IndexMap::new(),
+        manual_refresh: false,
+        extra,
+    };
+
+    let mut extra = indexmap::IndexMap::new();
+    extra.insert(
+        "server_hostname".to_string(),
+        serde_json::Value::String("imap.example.com".to_string()),
+    );
+    extra.insert("server_port".to_string(), serde_json::json!(993));
+    extra.insert("use_idle".to_string(), serde_json::Value::Bool(true));
+    extra.insert(
+        "server_password".to_string(),
+        serde_json::json!({ "command": "get-pass" }),
+    );
+    let account = account_with(extra);
+
+    // Strings pass through unchanged.
+    assert_eq!(
+        account.extra_conf_string("server_hostname").as_deref(),
+        Some("imap.example.com")
+    );
+    // Numbers and booleans are stringified, mirroring the legacy
+    // IndexMap<String, String> behaviour.
+    assert_eq!(
+        account.extra_conf_string("server_port").as_deref(),
+        Some("993")
+    );
+    assert_eq!(
+        account.extra_conf_string("use_idle").as_deref(),
+        Some("true")
+    );
+    // Objects (Secret inline tables) and absent keys stay None.
+    assert_eq!(account.extra_conf_string("server_password"), None);
+    assert_eq!(account.extra_conf_string("missing"), None);
+}

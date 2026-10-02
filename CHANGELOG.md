@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Numeric/boolean account `extra` settings silently fell back to defaults after the `serde_json::Value` migration (`a0cd...` port of upstream `97a08539`+`254cee97`): the imap/nntp/jmap/mbox `get_conf_val!` macros read values only via `as_str()`, so TOML `server_port = 993`, `timeout = 90`, `use_idle = true` etc. arrived as `Value::Number`/`Value::Bool` and never matched. Symptom: `server_port` fell back to 143, flipping the `use_starttls` default to `true` — QQ Mail (imap.qq.com / imap.exmail.qq.com, which reject STARTTLS on 143 with `* BAD Command!`) could not connect while 163 (Coremail tolerates STARTTLS on 143) kept working. `AccountSettings::extra_conf_string` now coerces `Number`/`Bool` scalars to their string form, restoring the legacy all-strings semantics; `Value::Object` (Secret tables) still yields `None`. Regression tests `test_account_settings_extra_conf_string` and `test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf` (verified red pre-fix: port parsed as 143).
+
 - Searching while a filter is active searches the whole mailbox again (upstream `2b86929b`): all four listing kinds previously restricted new search results to the rows surviving the previous filter; regression test `filter_on_top_of_filter_searches_whole_mailbox` added (verified red on the old code).
 
 - Trash targeting no longer falls back to the Junk mailbox when no Trash exists (upstream `e4565617`) — Junk is for spam; the "no Trash folder" notice stays.

@@ -154,7 +154,7 @@ type Capabilities = indexmap::IndexSet<Box<[u8]>>;
 #[macro_export]
 macro_rules! get_conf_val {
     ($s:ident[$var:literal]) => {
-        $s.extra.get($var).and_then(|v| v.as_str()).ok_or_else(|| {
+        $s.extra_conf_string($var).ok_or_else(|| {
             Error::new(format!(
                 "Configuration error ({}): IMAP connection requires the field `{}` set",
                 $s.name.as_str(),
@@ -163,9 +163,8 @@ macro_rules! get_conf_val {
         })
     };
     ($s:ident[$var:literal], $default:expr) => {
-        $s.extra
-            .get($var)
-            .and_then(|v| v.as_str())
+        $s.extra_conf_string($var)
+            .as_deref()
             .map(|v| {
                 <_>::from_str(v).map_err(|e| {
                     Error::new(format!(
@@ -1514,8 +1513,8 @@ impl ImapType {
         let fetch_body_structure: bool = get_conf_val!(s["fetch_body_structure"], true)?;
         let use_connection_pool = get_conf_val!(s["use_connection_pool"], true)?;
         let server_conf = ImapServerConf {
-            server_hostname: server_hostname.to_string(),
-            server_username: server_username.to_string(),
+            server_hostname,
+            server_username,
             server_password,
             server_port,
             use_tls,
@@ -2043,6 +2042,72 @@ mod tests {
         );
         let mut account = account_with(extra);
         assert!(ImapType::validate_config(&mut account).is_err());
+    }
+
+    /// Regression test: with the `serde_json::Value` `extra` migration,
+    /// TOML numeric/boolean settings (e.g. `server_port = 993`) arrive as
+    /// `Value::Number`/`Value::Bool`. `get_conf_val!` used to inspect them
+    /// only via `as_str()`, silently falling back to defaults (QQ accounts
+    /// ended up dialing port 143 with STARTTLS and got `* BAD Command!`
+    /// back). Non-string scalars must still reach the backend conf.
+    #[test]
+    fn test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf() {
+        let account_with = |extra: indexmap::IndexMap<String, serde_json::Value>| AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: "INBOX".to_string(),
+            format: "imap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra,
+        };
+        // `use_tls`/`use_starttls` are deliberately absent: their defaults
+        // are derived from `server_port`, the exact value that used to be
+        // dropped.
+        let base = || {
+            let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
+            for (k, v) in [
+                (
+                    "server_hostname",
+                    serde_json::Value::String("localhost".to_string()),
+                ),
+                (
+                    "server_username",
+                    serde_json::Value::String("user".to_string()),
+                ),
+                (
+                    "server_password",
+                    serde_json::Value::String("password".to_string()),
+                ),
+                ("server_port", serde_json::json!(993)),
+                ("timeout", serde_json::json!(90)),
+                ("use_idle", serde_json::Value::Bool(true)),
+                ("offline_cache", serde_json::Value::Bool(false)),
+                ("use_connection_pool", serde_json::Value::Bool(false)),
+            ] {
+                m.insert(k.to_string(), v);
+            }
+            m
+        };
+        let event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
+
+        let account = account_with(base());
+        let imap = ImapType::new(&account, Default::default(), event_consumer).unwrap();
+        assert_eq!(imap.server_conf.server_port, 993);
+        assert!(imap.server_conf.use_tls);
+        assert!(!imap.server_conf.use_starttls);
+        assert_eq!(imap.server_conf.timeout, Some(Duration::from_secs(90)));
+        assert!(matches!(
+            &imap.server_conf.protocol,
+            ImapProtocol::IMAP {
+                extension_use: ImapExtensionUse { idle: true, .. },
+                ..
+            }
+        ));
     }
 
     /* `create_mailbox` / `rename_mailbox` hand the server a UTF-8 display
