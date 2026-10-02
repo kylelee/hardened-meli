@@ -73,8 +73,8 @@ impl ManageSieveConnection {
             Some(std::time::Duration::from_secs(timeout))
         };
         let server_conf = ImapServerConf {
-            server_hostname: server_hostname.to_string(),
-            server_username: server_username.to_string(),
+            server_hostname,
+            server_username,
             server_password,
             server_port,
             use_starttls: true,

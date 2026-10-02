@@ -66,6 +66,8 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 修复（Fixed）
 
+- 账户 `extra` 数值/布尔配置在 `serde_json::Value` 迁移后静默回落默认值（`a0cd...` 移植上游 `97a08539`+`254cee97` 引入）：imap/nntp/jmap/mbox 的 `get_conf_val!` 宏只按 `as_str()` 取值，TOML 的 `server_port = 993`、`timeout = 90`、`use_idle = true` 等变成 `Value::Number`/`Value::Bool` 后永远匹配不上。症状：`server_port` 回落到 143，连带 `use_starttls` 默认翻转为 `true`——QQ 邮箱（imap.qq.com / imap.exmail.qq.com，143 端口拒 STARTTLS 回 `* BAD Command!`）连不上，而 163（Coremail 容忍 143 STARTTLS）侥幸能用。新增 `AccountSettings::extra_conf_string` 把 `Number`/`Bool` 标量强转为字符串，恢复旧版全字符串语义；`Value::Object`（Secret 表）仍返回 `None`。回归测试 `test_account_settings_extra_conf_string`、`test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf`（修复前验证为红：端口解析成 143）。
+
 - 过滤态下再次搜索作用于全邮箱（上游 `2b86929b`）：四种 listing 此前都把新搜索结果限制在上一次过滤存活的行集内；新增回归测试 `filter_on_top_of_filter_searches_whole_mailbox`（旧代码上验证为红）。
 
 - 无 Trash 文件夹时不再回退用 Junk（上游 `e4565617`）——Junk 是垃圾邮件专用；「无 Trash 文件夹」提示保留。

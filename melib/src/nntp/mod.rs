@@ -58,7 +58,7 @@ pub type UID = usize;
 
 macro_rules! get_conf_val {
     ($s:ident[$var:literal]) => {
-        $s.extra.get($var).and_then(|v| v.as_str()).ok_or_else(|| {
+        $s.extra_conf_string($var).ok_or_else(|| {
             Error::new(format!(
                 "{}: NNTP connection requires the field `{}` set",
                 $s.name.as_str(),
@@ -68,9 +68,8 @@ macro_rules! get_conf_val {
         })
     };
     ($s:ident[$var:literal], $default:expr) => {
-        $s.extra
-            .get($var)
-            .and_then(|v| v.as_str())
+        $s.extra_conf_string($var)
+            .as_deref()
             .map(|v| {
                 <_>::from_str(v).map_err(|e| {
                     Error::new(format!(
@@ -724,9 +723,9 @@ impl NntpType {
             }
         };
         let server_conf = NntpServerConf {
-            server_hostname: server_hostname.to_string(),
+            server_hostname,
             server_username: if require_auth {
-                get_conf_val!(s["server_username"])?.to_string()
+                get_conf_val!(s["server_username"])?
             } else {
                 get_conf_val!(s["server_username"], String::new())?
             },
