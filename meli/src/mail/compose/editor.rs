@@ -20,7 +20,7 @@
  */
 
 //! Built-in compose body editor: an in-composer `ratatui-textarea` widget
-//! used by [`Composer`](super::Composer) while `ViewMode::EditBody` is
+//! used by [`Composer`] while `ViewMode::EditBody` is
 //! active.
 //!
 //! Rendering follows the command palette's bridge pattern: the textarea is

@@ -24,7 +24,7 @@
 
 //! Pluggable PGP backends.
 //!
-//! This module wires the [`PGPBackend`](melib::email::pgp::PGPBackend) trait
+//! This module wires the [`PGPBackend`] trait
 //! into meli by selecting between the libgpgme-backed implementation and an
 //! arbitrary command-line backend (driven by the contrib
 //! `pgp-cli-backends/gpg/*.py` scripts by default).

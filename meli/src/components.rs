@@ -164,9 +164,9 @@ pub trait Component: std::fmt::Display + std::fmt::Debug + Send + Sync {
     }
 
     /// The mailbox the user is currently focused on, if any. The
-    /// [`StatusBar`](crate::utilities::StatusBar) uses this to scope
+    /// [`StatusBar`] uses this to scope
     /// `LineGauge` rendering to the focused mailbox's `MailboxStatus`;
-    /// containers like [`Tabbed`](crate::utilities::Tabbed) forward
+    /// containers like [`Tabbed`] forward
     /// whatever the active child returns. Defaults to `None` for
     /// components that have no mailbox concept.
     fn status_watch(&self) -> Option<(AccountHash, MailboxHash)> {
@@ -175,10 +175,10 @@ pub trait Component: std::fmt::Display + std::fmt::Debug + Send + Sync {
 
     /// Which pane of the listing layouts holds the keyboard, reported by
     /// [`Component::hint_focus`] for the status-bar hints segment. The
-    /// [`StatusBar`](crate::utilities::StatusBar) consumes this to pick
+    /// [`StatusBar`] consumes this to pick
     /// the per-layout wording — and visibility — of the scroll and
     /// pane-switch hints; containers like
-    /// [`Tabbed`](crate::utilities::Tabbed) forward whatever the active
+    /// [`Tabbed`] forward whatever the active
     /// child returns. Defaults to `None` for components that do not
     /// model the listing layouts, which keeps the default hint labels.
     fn hint_focus(&self) -> Option<HintFocus> {

@@ -118,8 +118,9 @@ fn newnews_since_timestamp(latest_article: crate::UnixTimestamp) -> crate::UnixT
 pub struct NntpServerConf {
     pub server_hostname: String,
     pub server_username: String,
-    /// Password. Carried as a [`Secret`] (upstream port of #448) so the
-    /// inline-table `{ command = "..." }` form and the literal form share
+    /// Password. Carried as a [`Secret`](crate::conf::Secret) (upstream
+    /// port of #448) so the inline-table `{ command = "..." }` form and
+    /// the literal form share
     /// one type. Resolved at the wire boundary.
     pub server_password: crate::conf::Secret,
     pub server_port: u16,
