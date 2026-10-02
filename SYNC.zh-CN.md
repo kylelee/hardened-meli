@@ -38,6 +38,26 @@ git fetch upstream
 
 ## 同步记录
 
+## 2026-10-02 22:30 (UTC+8)
+
+- 同步方式：两个并行 worktree 分支语义移植（`sync-melib-trio`、`sync-flag-toggle`），各由一个 dsh 子代理执行,每项改动 TDD 先红后绿
+- 上游区间：`253ba7dd..aea4508b`（16 个提交；4 个移植、12 个 SKIP——见下表）
+- 合并提交：`361f97b`（sync-melib-trio,fast-forward）、`aea11df` 经合并 `86d1ede`（sync-flag-toggle）
+- 冲突：无（文件集不相交）
+- 移植缺口披露：上游 `f6ddf9a4`（2026-09-28,`deserialize_extra_field` + `ExtraSetting` 类型化 extra 反序列化）早于本区间且未被 2026-10-01 移植——该缺口正是数值/布尔 extra 配置被静默吞掉 bug 的根因,已由本地 `ebdfcff8`（`AccountSettings::extra_conf_string`）修复。已知分歧：fork 保留 `extra_conf_string` 字符串强转（已对 QQ 邮箱 993 隐式 TLS 实网验证）;上游走类型化反序列化。后续任务：评估统一为单一机制。
+- 验证：`make check`、`make lint`、`make test`、CI 对等（`.gitea/Makefile.*`）全绿;保护门槛：`test_account_settings_extra_conf_string` 与 `test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf` 原样通过、四处 `get_conf_val!` 宏未动;实网冒烟：qq 993 隐式 TLS 登录成功、0 条 STARTTLS 行
+
+| 本地提交 | 上游提交 | 类别 | 类型 | 说明 |
+| --- | --- | --- | --- | --- |
+| `361f97b` | `5151e75c` | port | fix(melib) | `set_flags` 忽略 `Flag::PASSED`（Set/UnSet 空操作臂）——此前落入「more than one flag bit」错误分支;mock-server 测试 `test_imap_set_flags_ignores_passed`（修复前验证为红） |
+| `361f97b` | `32733460` | port | perf(melib) | `BackendEvent` 手写 `Debug`：`RefreshBatch` ≥30 条只打印条数+前 30（派生 Debug 全量打印导致日志行数 MB 级膨胀）;单测验证输出有界与阈值下完整 |
+| `361f97b` | `1218cb74` | port | feat(melib) | `TryFrom<Vec<EnvelopeHash>> for EnvelopeHashBatch`（空 vec → `Err`）;单测覆盖空/单/多元素 |
+| `aea11df` | `8404d74a` | port+deviation | feat(meli) | `flag toggle <FLAG>` 命令（上游 #765）：`FlagAction::Toggle`、解析器第三 alt 臂、双批执行（无标志→Set 批、有标志→UnSet 批）合一个 `toggle-flag` job;偏差：解析臂按 fork 惯例、集合转换用既有 slice `TryFrom`（不依赖 Vec impl）、spawn 走 `account.is_async()`;命令面板补全表已登记 |
+| — | `aea4508b`、`7d1d5b4d`、`4fb09060`、`b690d871` | **SKIP** | feat(meli) | 附件编辑 Add/Remove 按钮与 ButtonWidget 主题——UI 层,按策略不同步 UI（fork 自有 UI 架构） |
+| — | `90e68695`、`b7b7565e` | **SKIP** | chore | 上游分叉代码形态上的 clippy 修正;fork CI 本就全绿 |
+| — | `537c687e`、`68f368aa`、`cf64e366`、`553f3baf` | **SKIP** | feat(meli) | 命令补全改进——被 fork 的 nucleo 命令面板取代 |
+| — | `a41cb7b0`、`08561c25` | **SKIP** | feat(melib) | `ShellExpandTrait::expand_tilde` 与补全波浪号展开——仅服务上游补全;fork 无消费方（视图路径已用 `expand()`）,移植即死代码 |
+
 ## 2026-10-01 21:30 (UTC+8)
 
 - 同步方式：七个并行 worktree 分支语义移植（批次一：`t1-mailcap`、`t3-notmuch`、`t4-melib-fixes`、`t5-trace-flag`、`t6-listing-compose`、`t7-contrib-gpg`；批次一合并后批次二：`t2-secret`）

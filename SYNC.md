@@ -38,6 +38,27 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## Sync log
 
+
+## 2026-10-02 22:30 (UTC+8)
+
+- Method: semantic port on two parallel worktree branches (`sync-melib-trio`, `sync-flag-toggle`), executed by two dsh sub-agents with TDD (red→green) per change
+- Upstream range: `253ba7dd..aea4508b` (16 commits; 4 ported, 12 SKIPped — see table)
+- Merge commits: `361f97b` (sync-melib-trio, fast-forward), `aea11df` via merge `86d1ede` (sync-flag-toggle)
+- Conflicts: none (disjoint file sets)
+- Port-gap disclosure: upstream's `f6ddf9a4` (2026-09-28, `deserialize_extra_field` + `ExtraSetting` typed extra deserialization) predates this range and was NOT carried by the 2026-10-01 port — that gap is the root cause of the numeric/boolean extra-config silent-swallow bug fixed locally in `ebdfcff8` (`AccountSettings::extra_conf_string`). Known divergence: fork keeps `extra_conf_string` string-coercion (real-network verified against QQ Mail 993 implicit TLS); upstream uses typed deserialization. Follow-up task: evaluate unifying on one mechanism.
+- Verification: `make check`, `make lint`, `make test`, CI parity (`.gitea/Makefile.*`) all green; protection gate: `test_account_settings_extra_conf_string` + `test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf` pass unchanged, all four `get_conf_val!` macros untouched; real-network smoke: qq 993 implicit TLS login OK, 0 STARTTLS lines
+
+| Local commit | Upstream commit | Kind | Type | Notes |
+| --- | --- | --- | --- | --- |
+| `361f97b` | `5151e75c` | port | fix(melib) | `set_flags` ignores `Flag::PASSED` (Set/UnSet no-op arms) — was falling into the "more than one flag bit" error branch; mock-server test `test_imap_set_flags_ignores_passed` (verified red pre-fix) |
+| `361f97b` | `32733460` | port | perf(melib) | `BackendEvent` hand-written `Debug`: `RefreshBatch` ≥30 entries prints length + first 30 (derived Debug printed every event — multi-MB log lines); unit tests verify bounded output and completeness below the threshold |
+| `361f97b` | `1218cb74` | port | feat(melib) | `TryFrom<Vec<EnvelopeHash>> for EnvelopeHashBatch` (empty → `Err`); unit test covers empty/single/many |
+| `aea11df` | `8404d74a` | port+deviation | feat(meli) | `flag toggle <FLAG>` command (upstream #765): `FlagAction::Toggle`, third parser alt arm, dual-batch execution (envs without flag → Set batch, with flag → UnSet batch) in one `toggle-flag` job; deviations: fork parser arm structure per fork convention, `EnvelopeHashBatch` via existing slice `TryFrom` (no dependency on the Vec impl), `account.is_async()` spawn lane; palette completion entry added |
+| — | `aea4508b`, `7d1d5b4d`, `4fb09060`, `b690d871` | **SKIP** | feat(meli) | compose/edit_attachments Add/Remove buttons + ButtonWidget theme attrs — UI layer; fork has its own UI architecture (no UI sync per policy) |
+| — | `90e68695`, `b7b7565e` | **SKIP** | chore | clippy lint fixes on upstream-diverged code shapes; fork CI is green |
+| — | `537c687e`, `68f368aa`, `cf64e366`, `553f3baf` | **SKIP** | feat(meli) | command-completion improvements — superseded by fork's nucleo command palette |
+| — | `a41cb7b0`, `08561c25` | **SKIP** | feat(melib) | `ShellExpandTrait::expand_tilde` + tilde expansion in `complete()` — only serves upstream's completion framework; the fork has no production caller of `complete()` (its only call sites are the trait's own unit tests, which already `.expand()` first), so porting would be dead code |
+
 ## 2026-10-01 21:30 (UTC+8)
 
 - Method: semantic port on seven parallel worktree branches (batch 1: `t1-mailcap`, `t3-notmuch`, `t4-melib-fixes`, `t5-trace-flag`, `t6-listing-compose`, `t7-contrib-gpg`; batch 2 after batch-1 merge: `t2-secret`)
