@@ -135,6 +135,14 @@ MELI_CONFIG=./test_config cargo run
 
 详见 [`meli(7)`](./meli/docs/meli.7)（完整教程）与 [`meli.conf(5)`](./meli/docs/meli.conf.5)（全部配置项）。
 
+### 经过测试的邮箱提供商
+
+以下邮箱提供商已经过 `meli` 实测：
+
+- 腾讯企业邮箱
+- QQ邮箱
+- 163邮箱
+
 ### 支持的邮件后端
 
 | 协议          | 支持程度   |
