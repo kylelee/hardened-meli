@@ -437,6 +437,16 @@ rusty_fork_test! {
     fn test_imap_rebuild_nondestructive_on_conn_drop() {
         tests::run_imap_rebuild_nondestructive_on_conn_drop();
     }
+
+    /// Setting or unsetting `Flag::PASSED` (a maildir-only flag) must be
+    /// ignored by the IMAP backend instead of being rejected with
+    /// "more than one flag bit set" (upstream 5151e75c), while regular
+    /// flags still reach the wire. See
+    /// `tests::run_imap_set_flags_ignores_passed`.
+    #[test]
+    fn test_imap_set_flags_ignores_passed() {
+        tests::run_imap_set_flags_ignores_passed();
+    }
 }
 
 pub mod server {
@@ -2172,6 +2182,16 @@ pub mod server {
                             }
                             tcp_stream
                                 .write_all(format!("{id} OK FETCH completed\r\n").as_bytes())
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
+                        uid_store if uid_store.starts_with("UID STORE ") => {
+                            // Answered generically for flag-operation tests:
+                            // the client only needs the tagged OK.
+                            tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                            tcp_stream
+                                .write_all(b" OK STORE completed\r\n")
                                 .await
                                 .unwrap();
                             tcp_stream.flush().await.unwrap();
@@ -5492,6 +5512,152 @@ hello world 4.
 
     /// Point the process' XDG environment at `temp_dir` so the IMAP
     /// offline cache (and any other state) is created under it.
+    /// `Flag::PASSED` (maildir "Re" = passed) carries no IMAP meaning: the
+    /// `APPEND` path already drops it (see `From<Flag> for Vec<imap_codec
+    /// flag::Flag>`), and since upstream 5151e75c `set_flags` must ignore
+    /// it in both directions instead of failing the whole update with
+    /// "more than one flag bit set". A regular flag (`\Seen`) proves the
+    /// STORE path itself still works; the two `PASSED` operations prove
+    /// they complete a full `UID STORE` round-trip without an error.
+    pub(crate) fn run_imap_set_flags_ignores_passed() {
+        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let account_conf = AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: "INBOX".to_string(),
+            format: "imap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra: {
+                let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                    indexmap::IndexMap::new();
+
+                m.insert(
+                    "server_hostname".to_string(),
+                    serde_json::Value::String(local_addr.ip().to_string()),
+                );
+                m.insert(
+                    "server_username".to_string(),
+                    serde_json::Value::String("user".to_string()),
+                );
+                m.insert(
+                    "server_password".to_string(),
+                    serde_json::Value::String("password".to_string()),
+                );
+                m.insert(
+                    "server_port".to_string(),
+                    serde_json::Value::String(local_addr.port().to_string()),
+                );
+                m.insert(
+                    "use_starttls".to_string(),
+                    serde_json::Value::String("false".to_string()),
+                );
+                m.insert(
+                    "use_tls".to_string(),
+                    serde_json::Value::String("false".to_string()),
+                );
+                // Important for testing, because we expect only one
+                // connection to be used.
+                m.insert(
+                    "use_connection_pool".to_string(),
+                    serde_json::Value::String("false".to_string()),
+                );
+                m.insert(
+                    "timeout".to_string(),
+                    serde_json::Value::String(1_u64.to_string()),
+                );
+
+                m
+            },
+        };
+
+        let mut imap =
+            ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
+        let listener = smol::Async::new(listener).unwrap();
+        let mut is_online_fut = imap.is_online().unwrap();
+        let (command_sender, command_receiver) = unbounded();
+        let session = ImapServerStream::new(
+            &listener,
+            &mut is_online_fut,
+            (command_sender.clone(), command_receiver),
+            Arc::clone(&server_state),
+        );
+        let received_commands = Arc::clone(&session.received_commands);
+        block_on(is_online_fut).unwrap();
+        let session_loop = Box::pin(session.loop_handler("set-flags-session"));
+        let loop_handle = std::thread::spawn(move || block_on(session_loop));
+
+        // Discover the mock mailbox (LIST/LSUB round-trip); its hash is
+        // needed for the SELECT and the flag operations.
+        let mailboxes = block_on(imap.mailboxes().unwrap()).unwrap();
+        let inbox_hash = *mailboxes.keys().next().unwrap();
+
+        // Pretend a previous fetch registered UID 1 for our envelope, as
+        // `set_flags` maps envelope hashes to UIDs through it.
+        imap.uid_store
+            .hash_index
+            .lock()
+            .unwrap()
+            .insert(EnvelopeHash(1), (1, inbox_hash));
+
+        let batch = EnvelopeHashBatch::try_from(&[EnvelopeHash(1)][..]).unwrap();
+
+        // Positive control: a regular flag must reach the wire as a STORE.
+        block_on(
+            imap.set_flags(batch.clone(), inbox_hash, vec![FlagOp::Set(Flag::SEEN)])
+                .unwrap(),
+        )
+        .unwrap();
+        {
+            let lck = received_commands.lock().unwrap();
+            assert!(
+                lck.iter().any(|l| l.contains("+FLAGS (\\Seen)")),
+                "a regular flag must be stored on the wire: {lck:?}"
+            );
+        }
+
+        // The regression: `PASSED` alone must be ignored in both
+        // directions, not rejected as a bug.
+        block_on(
+            imap.set_flags(batch.clone(), inbox_hash, vec![FlagOp::Set(Flag::PASSED)])
+                .unwrap(),
+        )
+        .expect("setting Flag::PASSED must be ignored, not an error");
+        block_on(
+            imap.set_flags(batch, inbox_hash, vec![FlagOp::UnSet(Flag::PASSED)])
+                .unwrap(),
+        )
+        .expect("unsetting Flag::PASSED must be ignored, not an error");
+
+        let store_round_trips = {
+            let lck = received_commands.lock().unwrap();
+            lck.iter().filter(|l| l.contains("UID STORE")).count()
+        };
+        assert_eq!(
+            store_round_trips, 3,
+            "each flag operation must complete a UID STORE round-trip: {received_commands:?}"
+        );
+
+        command_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loop_handle.join().unwrap();
+    }
+
     fn set_test_xdg_env(temp_dir: &TempDir) {
         for var in [
             "HOME",

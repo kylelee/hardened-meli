@@ -283,7 +283,7 @@ impl Backends {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum BackendEvent {
     Notice {
         description: String,
@@ -295,6 +295,38 @@ pub enum BackendEvent {
     AccountStateChange {
         message: Cow<'static, str>,
     },
+}
+
+impl std::fmt::Debug for BackendEvent {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Notice {
+                description,
+                content,
+                level,
+            } => fmt
+                .debug_struct("BackendEvent::Notice")
+                .field("description", description)
+                .field("content", content)
+                .field("level", level)
+                .finish(),
+            Self::Refresh(ev) => fmt.debug_tuple("BackendEvent::Refresh").field(ev).finish(),
+            Self::RefreshBatch(v) => {
+                if v.len() < 30 {
+                    fmt.debug_tuple("Backend::RefreshBatch").field(v).finish()
+                } else {
+                    fmt.debug_struct("Backend::RefreshBatch")
+                        .field("length", &v.len())
+                        .field("contents", &&v[..30])
+                        .finish_non_exhaustive()
+                }
+            }
+            Self::AccountStateChange { message } => fmt
+                .debug_struct("Backend::AccountStateChange")
+                .field("message", message)
+                .finish(),
+        }
+    }
 }
 
 impl From<Error> for BackendEvent {
@@ -808,6 +840,19 @@ impl TryFrom<&[EnvelopeHash]> for EnvelopeHashBatch {
             first: value[0],
             rest: value[1..].to_vec(),
         })
+    }
+}
+
+impl TryFrom<Vec<EnvelopeHash>> for EnvelopeHashBatch {
+    type Error = ();
+
+    /// Convert a non-empty `EnvelopeHash` vector.
+    fn try_from(mut value: Vec<EnvelopeHash>) -> std::result::Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err(());
+        }
+        let first = value.remove(0);
+        Ok(Self { first, rest: value })
     }
 }
 
