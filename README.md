@@ -135,6 +135,14 @@ MELI_CONFIG=./test_config cargo run
 
 See [`meli(7)`](./meli/docs/meli.7) for an extensive tutorial and [`meli.conf(5)`](./meli/docs/meli.conf.5) for all configuration values.
 
+### Tested e-mail providers
+
+The following e-mail providers have been tested with `meli`:
+
+- Tencent Enterprise Email (腾讯企业邮箱)
+- QQ Mail (QQ邮箱)
+- NetEase 163 Mail (163邮箱)
+
 ### Supported E-mail backends
 
 | Protocol      | Support    |
