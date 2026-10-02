@@ -8,7 +8,7 @@ meli (0.10.0-1) trixie; urgency=medium
     `extra` settings are parsed correctly again; IMAP accounts on
     implicit-TLS port 993 no longer fall back to port 143 with STARTTLS.
 
- -- Kyle Lee  Fri, 02 Oct 2026 17:10:29 +0000
+ -- Kyle Lee <k@example.com>  Fri, 02 Oct 2026 17:10:29 +0000
 
 meli (0.9.0-2) trixie; urgency=medium
 
