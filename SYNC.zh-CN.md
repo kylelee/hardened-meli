@@ -38,7 +38,7 @@ git fetch upstream
 
 ## 同步记录
 
-## 2026-10-02 22:30 (UTC+8)
+## 2026-10-03 01:20 (UTC+8)
 
 - 同步方式：两个并行 worktree 分支语义移植（`sync-melib-trio`、`sync-flag-toggle`），各由一个 dsh 子代理执行,每项改动 TDD 先红后绿
 - 上游区间：`253ba7dd..aea4508b`（16 个提交；4 个移植、12 个 SKIP——见下表）
