@@ -291,7 +291,7 @@ fn test_backend_event_debug_small_refresh_batch_and_other_variants_are_complete(
 /// an empty vector has no first hash and must be rejected.
 #[test]
 fn test_envelope_hash_batch_try_from_vec() {
-    assert!(EnvelopeHashBatch::try_from(Vec::<EnvelopeHash>::new()).is_err());
+    EnvelopeHashBatch::try_from(Vec::<EnvelopeHash>::new()).unwrap_err();
 
     let single = EnvelopeHashBatch::try_from(vec![EnvelopeHash(1)]).unwrap();
     assert_eq!(single.first, EnvelopeHash(1));
