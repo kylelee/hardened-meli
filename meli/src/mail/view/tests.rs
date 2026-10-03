@@ -2024,6 +2024,150 @@ fn save_attachment_dot_pile_and_overlength_names_are_flat_and_capped() {
     assert!(joined.contains("OVERLONG-fake"), "{joined:?}");
 }
 
+/// CVE-1999-0427 regression (display): opening a mail whose attachment
+/// name is 64 KiB long (the CVE's denial-of-service width) must build
+/// the view, embed the name in the attachment tree, and render the
+/// pager bounded at real and degenerate terminal sizes — the
+/// over-long name becomes wrapped continuation lines, never a wedge.
+#[test]
+fn envelope_view_overlong_attachment_name_renders_bounded() {
+    let name = format!("CVE19990427VIEW-{}", "A".repeat(64 * 1024));
+    let body = format!(
+        "MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"=_cve-1999-0427\"\r\n\
+         \r\n\
+         --=_cve-1999-0427\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         body\r\n\
+         --=_cve-1999-0427\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"{name}\"\r\n\
+         \r\n\
+         BINARY-fake\r\n\
+         --=_cve-1999-0427--\r\n"
+    );
+    let mut ctx = mock_context();
+    let start = std::time::Instant::now();
+    let mut view = attachments_envelope_view(&ctx, "cve-1999-0427", "overlong@x.example", &body);
+    assert!(
+        view.attachment_tree.contains("CVE19990427VIEW-"),
+        "the attachment tree must embed the over-long name"
+    );
+    let theme_default = crate::conf::value(&ctx, "theme_default");
+    for (cols, rows) in [(80usize, 24usize), (8, 4), (2, 1)] {
+        view.set_dirty(true);
+        let mut screen = Screen::<Virtual>::new(theme_default);
+        assert!(screen.resize(cols, rows), "({cols}x{rows}) must resize");
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, &mut ctx);
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "the over-long-name mail must render bounded (took {:?})",
+        start.elapsed()
+    );
+}
+
+/// CVE-1999-0427 regression (batch save): `save-all-attachments` on a
+/// mail whose every attachment name is over-long (64 KiB+, the CVE's
+/// denial-of-service width) must land every file capped into one flat
+/// component cut on a character boundary, deduping cap-colliding
+/// twins, with the right bytes and permissions under each.
+#[test]
+fn save_all_attachments_overlength_names_land_capped_and_deduped() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Two names sharing their first 192 bytes: after the component cap
+    // they collide, forcing the `_1` dedup suffix on the second.
+    let long_a = format!("CVE19990427SAVE-{}", "A".repeat(64 * 1024));
+    let long_a_twin = format!("CVE19990427SAVE-{}B", "A".repeat(64 * 1024));
+    let long_cjk = "攻".repeat(64 * 1024 / 3);
+    let body = format!(
+        "MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"=_cve-1999-0427\"\r\n\
+         \r\n\
+         --=_cve-1999-0427\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"{long_a}\"\r\n\
+         \r\n\
+         AAA-fake\r\n\
+         --=_cve-1999-0427\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"{long_a_twin}\"\r\n\
+         \r\n\
+         TWIN-fake\r\n\
+         --=_cve-1999-0427\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"{long_cjk}\"\r\n\
+         \r\n\
+         CJK-fake\r\n\
+         --=_cve-1999-0427--\r\n"
+    );
+    let mut ctx = mock_context();
+    let view = attachments_envelope_view(&ctx, "cve-1999-0427", "save-all@x.example", &body);
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+
+    let start = std::time::Instant::now();
+    view.save_all_attachments_to(&mut ctx, Some(&downloads));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "the batch save must stay bounded on over-long names (took {:?})",
+        start.elapsed()
+    );
+
+    let out_dirs: Vec<_> = std::fs::read_dir(&downloads)
+        .expect("Downloads must exist after a successful save")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        out_dirs.len(),
+        1,
+        "exactly one meli-<subject> directory must appear, got {out_dirs:?}"
+    );
+    let dir = out_dirs[0].clone();
+    let names = assert_flat_names(&dir);
+    let capped_a = format!(
+        "CVE19990427SAVE-{}",
+        "A".repeat(192 - "CVE19990427SAVE-".len())
+    );
+    let expected = vec![
+        capped_a.clone(),
+        format!("{capped_a}_1"),
+        "攻".repeat(crate::types::FILENAME_COMPONENT_MAX_BYTES / 3),
+    ];
+    assert_eq!(
+        names, expected,
+        "every over-long name must land capped, deduped and recognizable"
+    );
+    for (name, marker) in [
+        (&expected[0], "AAA-fake"),
+        (&expected[1], "TWIN-fake"),
+        (&expected[2], "CJK-fake"),
+    ] {
+        let path = dir.join(name);
+        let content =
+            std::fs::read(&path).unwrap_or_else(|err| panic!("{name:?} must land: {err}"));
+        assert!(
+            String::from_utf8_lossy(&content).contains(marker),
+            "{name:?} must contain {marker:?}"
+        );
+        let mode = PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions());
+        assert_eq!(mode & 0o777, 0o600, "{name:?} must be owner-only");
+    }
+
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Notification { body, .. }
+            if body.contains("Saved 3 attachment(s)"))),
+        "a single summary notification must report the save, got {replies:?}"
+    );
+}
+
 /// CVE-2024-43604 regression (whole-message save): the `.eml` filename
 /// derived from the mail-controlled `Message-ID` used to reach
 /// `PathBuf::push` unsanitized, so `save-attachment 0 <dir>` on a mail
