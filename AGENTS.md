@@ -4,7 +4,7 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 
 ## Layout
 
-- Workspace members are only `meli/` and `melib/` (root `Cargo.toml`). `tools/` is a standalone crate (it declares its own `[workspace]`); it is not built by `cargo build` at the root.
+- Workspace members are only `meli/` and `melib/` (root `Cargo.toml`).
 - `melib/` — mail library. Backend trait in `src/backends.rs`; protocol implementations are per-protocol modules: `src/imap/` (connection pool + sqlite3 sync cache in `src/imap/sync/`), `src/maildir/`, `src/mbox/`, `src/notmuch/`, `src/jmap/`, `src/nntp/`, `src/smtp/`. E-mail parsing in `src/email/`.
 - `meli/` — terminal UI (binary `src/main.rs`). UI components in `src/mail/`, `src/terminal/`; thread-pool job executor in `src/jobs.rs`; account/backend glue in `src/accounts/`.
 
@@ -22,7 +22,7 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 - MSRV is **1.85.0** (`rust-version` in Cargo.toml; BUILD.md's "1.80" is stale).
 - Commits require a DCO sign-off: always `git commit -s` (CI enforces it via `.gitea/check_dco.sh`).
 - New files need a license preamble (`"This file is part of meli"` / `"This file is part of melib"` or an `SPDX-License-Identifier` line) — enforced by `scripts/pre-commit`.
-- `derive` attributes must be sorted alphabetically (`cargo-derivefmt` lints melib, meli, and tools in CI).
+- `derive` attributes must be sorted alphabetically (`cargo-derivefmt` lints melib and meli in CI).
 - `meli/src/conf/overrides.rs` is `@generated` by `meli/build.rs` from the settings structs in `meli/src/conf/{pager,listing,notifications,shortcuts,composing,tags,pgp}.rs`. Never hand-edit; to regenerate, touch the sentinel file `meli/src/conf/.rebuild.overrides.rs` and rebuild.
 - The `cli-docs` feature (in meli's default features) shells out to `mandoc` or `man` in `meli/build.rs`; without either binary the build panics — disable the feature if they're unavailable.
 

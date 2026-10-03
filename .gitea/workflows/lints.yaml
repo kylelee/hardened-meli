@@ -149,8 +149,3 @@ jobs:
         run: |
           source "${HOME}/.cargo/env"
           make -f .gitea/Makefile.lint cargo-derivefmt-meli
-      - name: cargo-derivefmt tools
-        if: success() || failure()
-        run: |
-          source "${HOME}/.cargo/env"
-          make -f .gitea/Makefile.lint cargo-derivefmt-tools
