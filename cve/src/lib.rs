@@ -213,3 +213,30 @@ mod cve_2017_17689;
 #[cfg(test)]
 #[path = "CVE-2026-0818.rs"]
 mod cve_2026_0818;
+
+/// CVE-2023-23397 (Microsoft Outlook on Windows, CVSS 9.8, CISA KEV,
+/// APT28) zero-click credential-theft regression (issue #21, table 2
+/// of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// malicious `text/calendar` meeting invite sets the reminder sound
+/// (`VALARM` `ATTACH;VALUE=URI`, MAPI `PidLidReminderFileParameter`)
+/// to a Windows UNC path `\\attacker.example\share\a.wav`, and
+/// Outlook dereferenced it at reminder time with no user interaction,
+/// authenticating to the attacker's SMB server with the victim's NTLM
+/// credentials. meli has no MAPI store, no reminder subsystem and no
+/// SMB client, so the equivalent surfaces — every place
+/// mail-controlled bytes can become an "openable link" the OS url
+/// launcher dispatches — are mapped and locked: the calendar part
+/// renders through the plain-text `InlineText` branch with no
+/// iCalendar interpretation, the pager's linkify extraction cannot
+/// carry the UNC's backslash tail (and every `file:`/`smb:` URL it
+/// does surface is held behind the `go_to_url` confirmation gate),
+/// the HTML mirror's scheme-bearing hrefs die in `sanitize`, and —
+/// the real gap this issue exposed — the two mail-header-derived
+/// launcher sites (`List-Unsubscribe` URL options, `List-Archive`)
+/// that used to hand attacker-controlled header bytes straight to
+/// `Command::new(url_launcher)` now enforce the same http/https/
+/// mailto whitelist, fixed and regression-locked together with the
+/// corpus in `meli/src/mail/view.rs` / `meli/src/mail/view/tests.rs`.
+#[cfg(test)]
+#[path = "CVE-2023-23397.rs"]
+mod cve_2023_23397;

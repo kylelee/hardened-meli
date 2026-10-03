@@ -911,6 +911,200 @@ fn go_to_url_confirm_launches_url_after_dialog() {
     assert!(view.pending_launch_url.is_none());
 }
 
+/// Insert an envelope with arbitrary extra headers (each already
+/// CRLF-terminated) into the mock account's `INBOX` and return its
+/// coordinates, so `mailbox_settings!` lookups in `MailView` resolve.
+fn insert_envelope_with_headers(
+    context: &Context,
+    extra_headers: &str,
+) -> (AccountHash, MailboxHash, EnvelopeHash) {
+    let account_hash = *context.accounts.iter().next().unwrap().0;
+    let mailbox_hash = MailboxHash::from_bytes(b"INBOX");
+    let bytes = format!(
+        "From: newsletter@list.example\r\n\
+To: victim@victim.example\r\n\
+Subject: weekly\r\n\
+Message-ID: <list-headers-{}@list.example>\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+{extra_headers}\r\n\
+hello\r\n",
+        extra_headers.len()
+    );
+    let envelope = Envelope::from_bytes(bytes.as_bytes(), None).expect("could not parse envelope");
+    let env_hash = envelope.hash();
+    context.accounts[&account_hash]
+        .collection
+        .insert(envelope, mailbox_hash);
+    (account_hash, mailbox_hash, env_hash)
+}
+
+/// Point the mock context's global url-launcher setting at the spy script.
+fn use_spy_launcher(context: &mut Context, script: &Path) {
+    context.settings.pager.url_launcher = Some(script.to_string_lossy().into_owned());
+}
+
+/// A `List-Unsubscribe` URL option with a non-launchable scheme (UNC path,
+/// `file:`, `smb:`, application scheme) must never be offered in the
+/// confirmation dialog nor reach the url launcher: only the first
+/// `http`/`https`/`mailto` option may. Security fix for CVE-2023-23397
+/// (issue #21): the Outlook reminder-sound vector dereferenced exactly such
+/// attacker-chosen paths; meli's mail-header-derived launcher targets get
+/// the same scheme whitelist `go_to_url` applies to body links (W3-T17).
+#[test]
+fn list_unsubscribe_skips_non_launchable_url_options() {
+    let mut ctx = mock_context();
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = spy_launcher(dir.path());
+    use_spy_launcher(&mut ctx, &script);
+    _ = register_inbox(&mut ctx);
+    let coordinates = insert_envelope_with_headers(
+        &ctx,
+        "List-Unsubscribe: <\\\\attacker.example\\share\\a.wav>, \
+<File://attacker.example/share/unsub.html>, \
+<smb://attacker.example/share/unsub>, \
+<https://lists.example/unsub?u=victim>\r\n",
+    );
+    let mut view = MailView::new(Some(coordinates), false, &mut ctx);
+
+    trigger_list_unsubscribe(&mut view, &mut ctx);
+    // The non-launchable options must be skipped in order; the first
+    // launchable one is offered for confirmation.
+    assert!(view.unsubscribe_dialog.is_some(), "dialog must open");
+    assert_eq!(
+        view.pending_unsubscribe
+            .as_ref()
+            .map(|a| a.target_description()),
+        Some("https://lists.example/unsub?u=victim".to_string()),
+        "UNC/file/smb options must be skipped, got: {:?}",
+        view.pending_unsubscribe
+    );
+
+    // Confirm, feed the dialog replies back like the main loop, then check
+    // the spy received exactly the whitelisted URL.
+    let mut event = UIEvent::Input(Key::Char('\n'));
+    _ = view.process_event(&mut event, &mut ctx);
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    for mut ev in replies {
+        _ = view.process_event(&mut ev, &mut ctx);
+    }
+    let mut invoked = String::new();
+    for _ in 0..150 {
+        invoked = std::fs::read_to_string(&log).unwrap_or_default();
+        if !invoked.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        invoked, "https://lists.example/unsub?u=victim\n",
+        "launcher must receive exactly the whitelisted URL"
+    );
+}
+
+/// A `List-Unsubscribe` header whose only URL options are non-launchable
+/// (UNC `\\host\share\file`, the exact CVE-2023-23397 payload form) must
+/// offer nothing at all: no dialog, no pending action, no launcher
+/// invocation, and a notification explaining the refusal.
+#[test]
+fn list_unsubscribe_unc_only_is_refused() {
+    let mut ctx = mock_context();
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = spy_launcher(dir.path());
+    use_spy_launcher(&mut ctx, &script);
+    _ = register_inbox(&mut ctx);
+    let coordinates = insert_envelope_with_headers(
+        &ctx,
+        "List-Unsubscribe: <\\\\attacker.example\\share\\a.wav>\r\n",
+    );
+    let mut view = MailView::new(Some(coordinates), false, &mut ctx);
+
+    trigger_list_unsubscribe(&mut view, &mut ctx);
+    assert!(view.unsubscribe_dialog.is_none(), "no dialog may open");
+    assert!(view.pending_unsubscribe.is_none(), "no action may pend");
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies.iter().any(
+            |ev| matches!(ev, UIEvent::Notification { title: Some(t), .. }
+            if t.contains("List-Unsubscribe"))
+        ),
+        "a refusal notification must be emitted, got: {replies:?}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let invoked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        invoked.is_empty(),
+        "UNC List-Unsubscribe option must never reach the launcher, got: {invoked:?}"
+    );
+}
+
+/// The `List-Archive` action must refuse — with a notification, and without
+/// invoking the url launcher — an archive URL whose scheme is not
+/// http/https/mailto. Security fix for CVE-2023-23397 (issue #21):
+/// `List-Archive` is attacker-controlled header content that used to be
+/// handed to the OS launcher as-is, unlike body links (W3-T17).
+#[test]
+fn list_archive_non_launchable_scheme_is_refused() {
+    let mut ctx = mock_context();
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = spy_launcher(dir.path());
+    use_spy_launcher(&mut ctx, &script);
+    _ = register_inbox(&mut ctx);
+    let coordinates = insert_envelope_with_headers(
+        &ctx,
+        "List-Archive: <File://attacker.example/share/a.wav>\r\n",
+    );
+    let mut view = MailView::new(Some(coordinates), false, &mut ctx);
+
+    let mut event = UIEvent::Action(Action::MailingListAction(MailingListAction::ListArchive));
+    _ = view.process_event(&mut event, &mut ctx);
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let invoked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        invoked.is_empty(),
+        "non-launchable List-Archive URL must never reach the launcher, got: {invoked:?}"
+    );
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies.iter().any(
+            |ev| matches!(ev, UIEvent::Notification { title: Some(t), .. }
+                if t.contains("Refusing to open List-Archive URL"))
+        ),
+        "a refusal notification must be emitted, got: {replies:?}"
+    );
+}
+
+/// Positive control: an `http(s)` `List-Archive` URL is still handed to the
+/// configured launcher unchanged — the scheme gate must not break the
+/// legitimate feature.
+#[test]
+fn list_archive_https_still_launches() {
+    let mut ctx = mock_context();
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = spy_launcher(dir.path());
+    use_spy_launcher(&mut ctx, &script);
+    _ = register_inbox(&mut ctx);
+    let coordinates =
+        insert_envelope_with_headers(&ctx, "List-Archive: <https://lists.example/archive/>\r\n");
+    let mut view = MailView::new(Some(coordinates), false, &mut ctx);
+
+    let mut event = UIEvent::Action(Action::MailingListAction(MailingListAction::ListArchive));
+    _ = view.process_event(&mut event, &mut ctx);
+
+    let mut invoked = String::new();
+    for _ in 0..150 {
+        invoked = std::fs::read_to_string(&log).unwrap_or_default();
+        if !invoked.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        invoked, "https://lists.example/archive/\n",
+        "launcher must receive the https archive URL unchanged"
+    );
+}
+
 /// Register an `INBOX` mailbox on the mock account so per-mailbox settings
 /// lookups (`mailbox_settings!`, e.g. `ThreadView::shortcuts`) resolve.
 fn register_inbox(context: &mut Context) -> (AccountHash, MailboxHash) {

@@ -92,8 +92,17 @@ impl UnsubscribeAction {
 /// Pick the `List-Unsubscribe` option that would be performed, if any.
 ///
 /// Mirrors the historical dispatch order: the first `mailto:` option that
-/// parses wins, otherwise the first URL option; unparseable options are
-/// skipped.
+/// parses wins, otherwise the first launchable URL option; options that
+/// cannot be used are skipped.
+///
+/// A URL option is launchable only when its scheme is in the default
+/// launcher whitelist ([`envelope::is_default_launchable_scheme`]:
+/// `http`/`https`/`mailto`), matching RFC 8058 which permits only `mailto:`
+/// and `https:` options. Anything else — `file:`, `smb:`, an application
+/// scheme, or a bare Windows UNC `\\host\share` path — is skipped like an
+/// unparseable `mailto:` option: mail-header content must never reach the
+/// system url launcher with a scheme the user did not sign up for
+/// (CVE-2023-23397, issue #21).
 pub fn unsubscribe_action(
     unsubscribe: &[list_management::ListAction<'_>],
 ) -> Option<UnsubscribeAction> {
@@ -105,9 +114,11 @@ pub fn unsubscribe_action(
                 }
             }
             list_management::ListAction::Url(url) => {
-                return Some(UnsubscribeAction::OpenUrl(
-                    String::from_utf8_lossy(url).into_owned(),
-                ));
+                let url = String::from_utf8_lossy(url).into_owned();
+                if !envelope::is_default_launchable_scheme(&url) {
+                    continue;
+                }
+                return Some(UnsubscribeAction::OpenUrl(url));
             }
             list_management::ListAction::No => {}
         }
@@ -1012,11 +1023,43 @@ impl Component for MailView {
                                         context,
                                     )));
                                 self.set_dirty(true);
+                            } else {
+                                context.replies.push_back(UIEvent::Notification {
+                                    title: Some("Couldn't perform List-Unsubscribe action".into()),
+                                    source: None,
+                                    body: "No usable List-Unsubscribe option: URL options are \
+                                           restricted to http/https/mailto."
+                                        .into(),
+                                    kind: None,
+                                });
                             }
                             return true;
                         }
                         MailingListAction::ListArchive if actions.archive.is_some() => {
                             /* open archive url with url_launcher */
+                            let url_arg = actions.archive.unwrap();
+                            // `List-Archive` (RFC 2369) is attacker-controlled
+                            // header content: only default-launchable schemes
+                            // (http/https/mailto) may reach the system url
+                            // launcher, the same gate `go_to_url` applies to
+                            // body links. A Windows UNC `\\host\share` path,
+                            // `file:` or `smb:` value would otherwise be
+                            // dispatched by the OS launcher as-is
+                            // (CVE-2023-23397, issue #21).
+                            if !envelope::is_default_launchable_scheme(url_arg) {
+                                context.replies.push_back(UIEvent::Notification {
+                                    title: Some("Refusing to open List-Archive URL".into()),
+                                    source: None,
+                                    body: format!(
+                                        "`{url_arg}` is not an http/https/mailto URL; the url \
+                                         launcher would dispatch any other scheme to whatever \
+                                         the desktop environment has registered for it."
+                                    )
+                                    .into(),
+                                    kind: None,
+                                });
+                                return true;
+                            }
                             let url_launcher = mailbox_settings!(
                                 context[coordinates.0][&coordinates.1].pager.url_launcher
                             )
@@ -1027,7 +1070,6 @@ impl Component for MailView {
                             } else {
                                 "xdg-open"
                             });
-                            let url_arg = actions.archive.unwrap();
                             match Command::new(url_launcher)
                                 .arg(url_arg)
                                 .stdin(Stdio::piped())
