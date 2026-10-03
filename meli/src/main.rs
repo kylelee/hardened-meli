@@ -34,9 +34,10 @@ use args::*;
 use meli::*;
 
 fn main() {
-    // Route panics into the log file: a thread that panics (e.g. the async
-    // job executor's worker, whose death freezes every remote operation)
-    // otherwise leaves no trace when stderr is covered by the TUI.
+    // Route panics into the log file: a thread that panics (e.g. one of the
+    // `tokio` runtime workers of the job executor) otherwise leaves no trace
+    // when stderr is covered by the TUI. Panics inside spawned jobs are
+    // additionally isolated per task; see `jobs.rs`.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default_hook(info);

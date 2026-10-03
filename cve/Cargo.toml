@@ -10,6 +10,8 @@ license = "EUPL-1.2 OR GPL-3.0-or-later"
 description = "CVE research reports and regression corpus for the meli e-mail client"
 homepage = "https://github.com/kylelee/hardened-meli"
 repository = "https://github.com/kylelee/hardened-meli"
+keywords = ["security", "cve", "regression-tests", "email"]
+categories = ["email", "development-tools::testing"]
 
 [lib]
 name = "cve"
