@@ -177,6 +177,34 @@ pub const MIME_ENCODED_WORDS: &[MimeEncodedWord] = &[
     },
 ];
 
+/// CVE-2024-30103 regression (issue #24): `phrase()` used to rescan
+/// for the next `=?` encoded-word opener from the current token on
+/// every iteration, making a value of many whitespace-separated
+/// tokens closed by a lone `=?` sentinel quadratic — 16000 tokens
+/// (32 KiB) took ~4.2 s pre-fix. The cached next-opener position
+/// keeps the scan one forward pass; the budget below is two-plus
+/// orders of magnitude above the post-fix cost (~10 ms) and fails
+/// the pre-fix behavior deterministically. The full-size corpus
+/// (64 KiB and 256 KiB payloads, end-to-end open-mail) lives in the
+/// `cve` crate (`cve/src/CVE-2024-30103.rs`).
+#[test]
+fn test_email_parser_phrase_token_run_is_bounded() {
+    let mut input = String::with_capacity(2 * 16000 + 3);
+    for _ in 0..16000 {
+        input.push_str("a ");
+    }
+    input.push_str("=?x");
+    let start = std::time::Instant::now();
+    let (rest, out) = phrase(input.as_bytes(), false).unwrap();
+    let elapsed = start.elapsed();
+    assert!(rest.is_empty());
+    assert_eq!(out, input.as_bytes());
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "phrase() must stay linear on token runs: {elapsed:?} for a 32 KiB value"
+    );
+}
+
 #[test]
 fn test_email_parser_phrase() {
     for word in MIME_ENCODED_WORDS {

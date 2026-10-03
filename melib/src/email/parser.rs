@@ -2386,6 +2386,19 @@ pub mod encodings {
         let mut input = input.ltrim();
         let mut acc: Vec<u8> = Vec::new();
         let mut ptr = 0;
+        // First `=?` encoded-word opener at or after `ptr`, or `None`
+        // when the rest of `input` has none. Rescanning from `ptr` on
+        // every iteration made `phrase` quadratic in the value length:
+        // a header value of many whitespace-separated tokens with a
+        // lone `=?` sentinel at the end (e.g. 64 KiB of `a a a … a
+        // =?x`) stalled parsing for tens of seconds through every
+        // header, address name, attachment name and IMAP envelope
+        // `phrase()` consumer — an open-mail denial of service
+        // (CWE-407, the incomplete-filtering face of
+        // CVE-2024-30103). The cache only ever moves forward, so each
+        // byte is scanned at most once per phase and `phrase` stays
+        // linear.
+        let mut next_ew = input.find(b"=?");
 
         while ptr < input.len() {
             let mut token_start = ptr;
@@ -2397,6 +2410,7 @@ pub mod encodings {
                 ptr = 0;
                 token_start = 0;
                 acc.extend(v);
+                next_ew = input.find(b"=?");
 
                 // consume whitespace
                 while ptr < input.len() && (is_whitespace!(input[ptr])) {
@@ -2410,9 +2424,13 @@ pub mod encodings {
             if flag && token_start != ptr {
                 acc.extend(ascii_token(&input[token_start..ptr])?.1);
             }
-            let end = input[ptr..].find(b"=?");
-
-            let end = end.unwrap_or(input.len() - ptr) + ptr;
+            // Advance the cached `=?` position only when `ptr` walked
+            // past it; the rescans are disjoint so the whole loop
+            // stays linear (see the comment above `next_ew`).
+            if next_ew.is_some_and(|p| p < ptr) {
+                next_ew = input[ptr..].find(b"=?").map(|i| i + ptr);
+            }
+            let end = next_ew.unwrap_or(input.len());
             let ascii_s = ptr;
             let mut ascii_e = 0;
 
