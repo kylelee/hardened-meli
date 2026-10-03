@@ -43,6 +43,23 @@ use crate::{
     terminal::{draw_rounded_frame, frame_flush_areas},
 };
 
+/// Filename for one message of a thread export: the `Message-ID`
+/// sanitized into a flat, separator-free component plus the `.eml`
+/// suffix.
+///
+/// The `Message-ID` is attacker-controlled header bytes, kept verbatim
+/// by melib when they do not parse as `<id-left@id-right>` — pushing
+/// them unsanitized into the export directory traversed out of it
+/// (`Message-ID: ../evil` wrote outside the chosen directory), the
+/// CWE-35 path-traversal face of CVE-2025-47176. Regression-locked in
+/// `meli/src/mail/view/tests.rs` (`export_thread_filename_is_flat_for_`
+/// `traversal_message_ids`).
+pub(super) fn thread_export_filename(message_id: &melib::MessageID) -> String {
+    let mut filename = message_id.to_string().into();
+    crate::sanitize_filename(&mut filename);
+    format!("{filename}.eml")
+}
+
 #[derive(Debug)]
 struct ThreadEntry {
     index: (usize, ThreadNodeHash, usize),
@@ -1447,7 +1464,7 @@ impl ThreadView {
                             env_view: _,
                             stack: _,
                         } => {
-                            path.push(format!("{}.eml", env.message_id()));
+                            path.push(thread_export_filename(env.message_id()));
                             if let Err(err) = save_attachment(&path, bytes) {
                                 tracing::error!(
                                     "Failed to create file at {}: {err}",

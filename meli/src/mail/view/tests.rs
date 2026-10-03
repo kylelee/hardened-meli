@@ -27,7 +27,7 @@ use super::{state::PendingReplyAction, MailView, MailViewTab, ThreadView, Thread
 use crate::{
     accounts::{MailboxEntry, MailboxStatus},
     command::{
-        actions::{Action, ComposeAction, ListingAction, TabAction, ViewAction},
+        actions::{Action, ComposeAction, FileAction, ListingAction, TabAction, ViewAction},
         MailingListAction,
     },
     components::{Component, ComponentId, ComponentPath},
@@ -1990,5 +1990,90 @@ fn view_filter_deep_rfc822_nesting_renders_inert_text_without_overflow() {
             .join()
             .expect("view filter must survive deep rfc822 nesting"),
         "the deep corpus must still produce a view filter"
+    );
+}
+
+/// `export-thread` must sanitize each message's `Message-ID` into a flat
+/// filename component: the raw header bytes are kept verbatim by melib
+/// whenever they do not parse as `<id-left@id-right>`, so an unbracketed
+/// traversal spelling reaches the export filename as-is — the CWE-35
+/// path-traversal class of CVE-2025-47176 (`'.../...//'` in Outlook).
+/// Locked on the exact spellings of that class.
+#[test]
+fn export_thread_filename_is_flat_for_traversal_message_ids() {
+    use super::thread::thread_export_filename;
+
+    for id in [
+        "../evil",
+        "../../evil",
+        ".../...//evil",
+        r"..\..\evil",
+        r"..\/..//evil",
+        "/absolute/evil",
+        r"\\attacker\share\evil",
+        r"C:\Temp\evil",
+        "%2e%2e%2fevil",
+        "evil\x00name",
+        "..",
+    ] {
+        let filename = thread_export_filename(&crate::melib::MessageID::new(id));
+        assert!(!filename.contains('/'), "{id:?} -> {filename:?}");
+        assert!(!filename.contains('\\'), "{id:?} -> {filename:?}");
+        assert!(!filename.contains('\0'), "{id:?} -> {filename:?}");
+        assert_eq!(
+            Path::new(&filename).components().count(),
+            1,
+            "{id:?} -> {filename:?} must be one flat component"
+        );
+        assert!(filename.ends_with(".eml"), "{id:?} -> {filename:?}");
+    }
+}
+
+/// `save-attachment 0 <dir>` saves the whole mail as `<Message-ID>.eml`
+/// inside `dir`: with a raw (unparseable, hence stored-verbatim)
+/// traversal `Message-ID`, the file must land as a single flat entry of
+/// `dir` — pre-fix, the unsanitized `path.push` escaped the directory
+/// (`../escaped` wrote one level up). End-to-end lock of the
+/// CVE-2025-47176 CWE-35 fix in `EnvelopeView::save_attachment`.
+#[test]
+fn save_whole_mail_to_dir_sanitizes_traversal_message_id() {
+    let mut ctx = mock_context();
+    // No angle brackets: `msg_id` parsing fails, so the raw header bytes
+    // are stored verbatim as the envelope's `Message-ID`.
+    let bytes = b"From: a@b.example\r\nTo: c@d.example\r\nSubject: whole-mail export\r\nMessage-ID: ../escaped\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\nContent-Type: text/plain\r\n\r\nbody\r\n";
+    let mail = Mail::new(bytes.to_vec(), None).expect("could not parse test mail");
+    let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("out");
+    std::fs::create_dir(&dir).unwrap();
+    let mut event = UIEvent::Action(Action::View(ViewAction::SaveAttachment(
+        0,
+        FileAction::Path(dir.display().to_string()),
+    )));
+    _ = view.process_event(&mut event, &mut ctx);
+
+    // The escaped target must not exist …
+    assert!(
+        !root.path().join("escaped.eml").try_exists().unwrap(),
+        "the traversal Message-ID must not write outside the target directory"
+    );
+    // … and the whole mail landed as exactly one flat file inside `dir`.
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .expect("target directory must be readable")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        vec![".._escaped.eml".to_string()],
+        "the whole-mail export must be one flat file inside the target directory"
+    );
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies.iter().any(|ev| matches!(ev, UIEvent::Notification { body, .. }
+            if body.contains("Saved at"))),
+        "a success notification must report the save, got {replies:?}"
     );
 }

@@ -803,7 +803,14 @@ impl EnvelopeView {
         } else if a_i == 0 {
             // Save entire message as eml
             if path.is_dir() {
-                path.push(format!("{}.eml", self.mail.message_id()));
+                // The `Message-ID` is attacker-controlled header bytes
+                // (kept verbatim when they do not parse as
+                // `<id-left@id-right>`); pushing them unsanitized
+                // traversed out of the target directory — the CWE-35
+                // face of CVE-2025-47176.
+                let mut filename = self.mail.message_id().to_string().into();
+                crate::sanitize_filename(&mut filename);
+                path.push(format!("{filename}.eml",));
             }
             if path.is_relative() {
                 path = context.current_dir().join(&path);
