@@ -1,0 +1,30 @@
+/*
+ * cve - lib.rs
+ *
+ * Copyright 2026 Kyle Lee
+ *
+ * SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+ */
+
+//! Security CVE workspace of the hardened-meli fork.
+//!
+//! This crate is the scaffolding for CVE-driven regression tests that target
+//! the `meli` and `melib` crates without adding test-only dependencies to
+//! the shipped binaries. Every regression follows one pattern: a CVE (or a
+//! CVE family), its verbatim attack payload as a fixture, and an inertness
+//! or round-trip assertion against the hardened code path — see for example
+//! the CVE-2025-66376 tag-splitting corpus that already locks down meli's
+//! built-in HTML sanitizer from the `meli` crate.
+//!
+//! The source-verified research reports live next to this crate:
+//!
+//! - [SECURITY-CVE-RESEARCH.md](../SECURITY-CVE-RESEARCH.md) — survey of
+//!   CVEs delivered through e-mail or directly attacking mail clients and
+//!   their rendering path (tracking/privacy, malware/code execution,
+//!   web/HTML embedding, e-mail-reachable browser engines, protocol and
+//!   crypto trust boundaries);
+//! - [SECURITY-CVE-RESEARCH.zh-CN.md](../SECURITY-CVE-RESEARCH.zh-CN.md) —
+//!   its Simplified Chinese counterpart.
+//!
+//! New regressions go into test files under `src/` (unit) or `tests/`
+//! (integration); run everything with `cargo test -p cve`.

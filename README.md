@@ -73,7 +73,7 @@ For the upstream meli sync log, see [`SYNC.md`](./SYNC.md).
 
 For a curated survey of CVEs against e-mail clients and browsers (tracking,
 malware, web-embedding attacks), see
-[`SECURITY-CVE-RESEARCH.md`](./SECURITY-CVE-RESEARCH.md).
+[`SECURITY-CVE-RESEARCH.md`](./cve/SECURITY-CVE-RESEARCH.md).
 
 ### Cargo Compile-time Features
 

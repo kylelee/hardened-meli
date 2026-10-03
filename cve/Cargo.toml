@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+
+[package]
+name = "cve"
+version = "0.1.0"
+authors = ["Kyle Lee"]
+edition = "2021"
+rust-version = "1.85.0"
+license = "EUPL-1.2 OR GPL-3.0-or-later"
+description = "CVE research reports and regression corpus for the meli e-mail client"
+homepage = "https://github.com/kylelee/hardened-meli"
+repository = "https://github.com/kylelee/hardened-meli"
+
+[lib]
+name = "cve"
+path = "src/lib.rs"
