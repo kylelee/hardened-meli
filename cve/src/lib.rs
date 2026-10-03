@@ -1024,3 +1024,33 @@ mod cve_2023_4875;
 #[cfg(test)]
 #[path = "CVE-2003-0376.rs"]
 mod cve_2003_0376;
+
+/// CVE-2003-0302 (Eudora 5.2.1, no CVSS score assigned) IMAP
+/// literal integer-overflow regression (issue #46, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// malicious IMAP server returned a huge literal size declaration
+/// (`{4294967295}` and friends); Eudora parsed the declared octet
+/// count into a signed 32-bit integer, and the sign/overflow error
+/// crashed the client or possibly executed attacker code (the
+/// signedness face of CWE-190). meli's IMAP literal path is
+/// unsigned-checked Rust throughout — `digit1` grammar +
+/// `usize::from_str` + nom's checked `take`, with no signed or
+/// narrowing cast anywhere a declared size flows — so the
+/// equivalent surface the issue prescribes
+/// (`melib/src/imap/protocol_parser.rs`: [`literal`], the
+/// string/astring token grammar, the ENVELOPE field parsers' literal
+/// guard, the `fetch_response()` carriers and the line splitter's
+/// saturating skip) is locked by [`cve_2003_0302`] on the issue's
+/// verbatim corpus — `{4294967295}` and `{-1}` (the same
+/// 0xFFFFFFFF bit pattern in its two spellings), the `2^16`/`2^31`/
+/// `2^32` type boundaries, the 非数字 grammar class (`{abc}`, `{ 5}`,
+/// `{5+}`, `{5}\n` …) and the 与实际数据不符 mismatch class — with
+/// the honest literals still round-tripping as the carriers. The
+/// result is **immune, no gap found**: the walls are issue #27's
+/// saturating line-skip arithmetic, #31's framing cursor clamps and
+/// #32's fail-closed mismatch policy, re-locked at this CVE's own
+/// sign/grammar/mismatch corpus — a declared number saturates,
+/// never wraps, never panics; no production code needed changing.
+#[cfg(test)]
+#[path = "CVE-2003-0302.rs"]
+mod cve_2003_0302;
