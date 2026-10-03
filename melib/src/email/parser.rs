@@ -1873,6 +1873,17 @@ pub mod attachments {
         .parse(input)
     }
 
+    /// Skip RFC 822 linear whitespace (SP/HTAB) — the optional run a
+    /// boundary delimiter line may carry between the boundary bytes and
+    /// its line ending (RFC 2046 §5.1.1: `"--" boundary *LWSP CRLF`).
+    fn skip_lwsp(input: &[u8]) -> &[u8] {
+        let mut i = 0;
+        while i < input.len() && matches!(input[i], b' ' | b'\t') {
+            i += 1;
+        }
+        &input[i..]
+    }
+
     pub fn multipart_parts<'a>(
         input: &'a [u8],
         boundary: &[u8],
@@ -1911,12 +1922,19 @@ pub mod attachments {
                         (input, "multipart_parts(): found EOF").into(),
                     ));
                 }
-                if input[0] == b'\n' {
-                    offset += 1;
-                    input = &input[1..];
-                } else if input[0..].starts_with(b"\r\n") {
-                    offset += 2;
-                    input = &input[2..];
+                // RFC 2046 §5.1.1: the delimiter line may carry optional
+                // linear whitespace between the boundary bytes and its
+                // line ending (`"--" boundary *LWSP CRLF`); skipping it
+                // keeps a `--BOUND   <CRLF>` delimiter a delimiter
+                // instead of a false boundary occurrence that silently
+                // skipped the part it opened (CVE-2002-0833 regression).
+                let rest = skip_lwsp(input);
+                if rest[0..].starts_with(b"\n") {
+                    offset += input.len() - rest.len() + 1;
+                    input = &rest[1..];
+                } else if rest[0..].starts_with(b"\r\n") {
+                    offset += input.len() - rest.len() + 2;
+                    input = &rest[2..];
                 } else {
                     continue;
                 }
@@ -1954,18 +1972,26 @@ pub mod attachments {
                 }
                 offset += end + boundary.len();
                 input = &input[end + boundary.len()..];
-                if input.len() < 2
-                    || (input[0] != b'\n' && &input[0..2] != b"\r\n")
-                    || &input[0..2] == b"--"
+                // RFC 2046 §5.1.1 LWSP tolerance, same as the first loop
+                // above: after an optional linear-whitespace run the line
+                // either ends (mid-delimiter: keep scanning) or carries
+                // the closing `--` (close-delimiter: done). Pre-fix, a
+                // mid-delimiter with trailing whitespace broke the scan
+                // here and silently dropped every part after it
+                // (CVE-2002-0833 regression).
+                let rest = skip_lwsp(input);
+                if rest.len() < 2
+                    || (rest[0] != b'\n' && &rest[0..2] != b"\r\n")
+                    || &rest[0..2] == b"--"
                 {
                     break;
                 }
-                if input[0] == b'\n' {
-                    offset += 1;
-                    input = &input[1..];
-                } else if input[0..].starts_with(b"\r\n") {
-                    offset += 2;
-                    input = &input[2..];
+                if rest[0] == b'\n' {
+                    offset += input.len() - rest.len() + 1;
+                    input = &rest[1..];
+                } else {
+                    offset += input.len() - rest.len() + 2;
+                    input = &rest[2..];
                 }
                 if input.is_empty() {
                     // EOF right after a non-closing delimiter line ends the
@@ -2016,10 +2042,13 @@ pub mod attachments {
                         // Same CWE-1287 guard as in `multipart_parts` above.
                         return Err(nom::Err::Error((input, "parts_f(): found EOF").into()));
                     }
-                    if input[0] == b'\n' {
-                        input = &input[1..];
-                    } else if input[0..].starts_with(b"\r\n") {
-                        input = &input[2..];
+                    // RFC 2046 §5.1.1 LWSP tolerance, same as
+                    // `multipart_parts` above (CVE-2002-0833 regression).
+                    let rest = skip_lwsp(input);
+                    if rest[0..].starts_with(b"\n") {
+                        input = &rest[1..];
+                    } else if rest[0..].starts_with(b"\r\n") {
+                        input = &rest[2..];
                     } else {
                         continue;
                     }
@@ -2045,16 +2074,19 @@ pub mod attachments {
                         ret.push(&input[..end.saturating_sub(3)]);
                     }
                     input = &input[end + boundary.len()..];
-                    if input.len() < 2
-                        || (input[0] != b'\n' && &input[0..2] != b"\r\n")
-                        || &input[0..2] == b"--"
+                    // RFC 2046 §5.1.1 LWSP tolerance, same as
+                    // `multipart_parts` above (CVE-2002-0833 regression).
+                    let rest = skip_lwsp(input);
+                    if rest.len() < 2
+                        || (rest[0] != b'\n' && &rest[0..2] != b"\r\n")
+                        || &rest[0..2] == b"--"
                     {
                         break;
                     }
-                    if input[0] == b'\n' {
-                        input = &input[1..];
-                    } else if input[0..].starts_with(b"\r\n") {
-                        input = &input[2..];
+                    if rest[0] == b'\n' {
+                        input = &rest[1..];
+                    } else {
+                        input = &rest[2..];
                     }
                     if input.is_empty() {
                         // Same EOF-after-delimiter rule as `multipart_parts`
@@ -2122,6 +2154,29 @@ pub mod attachments {
                } )
                ));
         */
+    }
+
+    /// Extract a `multipart/*` type's `boundary` parameter, RFC 2046
+    /// §5.1.1-normalized.
+    ///
+    /// The boundary grammar (`0*69<bchars> bcharsnospace`) cannot end
+    /// in linear whitespace, so a trailing SP/HTAB run belongs to the
+    /// header line, not to the boundary bytes. Eudora-era writers emit
+    /// `boundary=BOUND   ` while writing honest `--BOUND` delimiter
+    /// lines; keeping the verbatim bytes made the whole part list (and
+    /// the 📎 listing flag) vanish on such mails (CVE-2002-0833
+    /// regression). An all-whitespace value stays verbatim — nothing
+    /// conforming remains to trim, and it degrades through the
+    /// degenerate-boundary error paths.
+    pub fn multipart_boundary<'a>(params: &[(&'a [u8], &'a [u8])]) -> Option<&'a [u8]> {
+        let (_, v) = params
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(b"boundary"))?;
+        let mut end = v.len();
+        while end > 0 && matches!(v[end - 1], b' ' | b'\t') {
+            end -= 1;
+        }
+        Some(if end == 0 { v } else { &v[..end] })
     }
 
     /* Caution: values should be passed through phrase() */
