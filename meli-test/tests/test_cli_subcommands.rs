@@ -28,14 +28,17 @@ use std::{
 
 use assert_cmd::{assert::OutputAssertExt, Command};
 use predicates::prelude::*;
-use rusty_fork::rusty_fork_test;
 use tempfile::TempDir;
 
-rusty_fork_test! {
+/// Runs on a dedicated `tokio` runtime via `tokio-test`, replacing the
+/// `rusty-fork` process fork this suite used to rely on. This target is a
+/// single-test binary, so the process-global environment scrub below stays
+/// isolated without forking.
 #[test]
 fn test_cli_subcommands() {
-    run_cli_subcommands();
-}
+    tokio_test::block_on(async {
+        run_cli_subcommands();
+    });
 }
 
 type Env = BTreeMap<&'static str, PathBuf>;

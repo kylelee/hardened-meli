@@ -23,27 +23,41 @@
 
 #![cfg(feature = "notmuch")]
 
-use rusty_fork::rusty_fork_test;
+/// Tests in this target rewrite process-global environment variables
+/// (XDG/HOME sandbox setup for the mock-account config), so they must not
+/// run concurrently on the test harness's parallel threads. Each test
+/// clears and re-establishes its own environment while holding this lock,
+/// replacing the per-test process isolation `rusty-fork` used to provide.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-rusty_fork_test! {
-    #[test]
-    fn test_notmuch_watch() {
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+fn test_notmuch_watch() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_notmuch_watch();
-    }
+    });
 }
 
-rusty_fork_test! {
-    #[test]
-    fn test_notmuch_raw_search() {
+#[test]
+fn test_notmuch_raw_search() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_notmuch_raw_search();
-    }
+    });
 }
 
-rusty_fork_test! {
-    #[test]
-    fn test_notmuch_refresh() {
+#[test]
+fn test_notmuch_refresh() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_notmuch_refresh();
-    }
+    });
 }
 
 mod tests {

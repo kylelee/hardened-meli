@@ -23,27 +23,25 @@
 
 #![cfg(feature = "maildir")]
 
-use rusty_fork::rusty_fork_test;
-
-rusty_fork_test! {
-    #[test]
-    fn test_maildir_watch() {
+#[test]
+fn test_maildir_watch() {
+    tokio_test::block_on(async {
         run_maildir_watch();
-    }
+    });
 }
 
-rusty_fork_test! {
-    #[test]
-    fn test_maildir_refresh() {
+#[test]
+fn test_maildir_refresh() {
+    tokio_test::block_on(async {
         run_maildir_refresh();
-    }
+    });
 }
 
-rusty_fork_test! {
-    #[test]
-    fn test_maildir_raw_search_not_supported() {
+#[test]
+fn test_maildir_raw_search_not_supported() {
+    tokio_test::block_on(async {
         run_maildir_raw_search_not_supported();
-    }
+    });
 }
 
 use std::{

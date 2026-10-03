@@ -103,9 +103,7 @@ regex = { workspace = true }
 syn = { version = "1", features = [] }
 
 [dev-dependencies]
-assert_cmd = { version = "2" }
 flate2 = { workspace = true }
-predicates = { version = "3" }
 regex = { workspace = true }
 rusty-fork = { workspace = true }
 serde_test2 = { workspace = true }

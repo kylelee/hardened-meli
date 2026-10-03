@@ -2121,7 +2121,7 @@ mod tests {
      * name and must transmit it in the RFC 3501 §5.1.3 wire encoding
      * (modified UTF-7), then derive the returned `MailboxHash` from that
      * same wire path. The mock integration server in
-     * `melib/tests/imap/main.rs` has no `CREATE`/`RENAME`/`SUBSCRIBE`
+     * `melib-test/tests/imap/main.rs` has no `CREATE`/`RENAME`/`SUBSCRIBE`
      * handling (it panics with `Unexpected cmd`), so the command-assertion
      * route is not reachable; these unit tests pin the pure transformation
      * the two methods apply instead. */

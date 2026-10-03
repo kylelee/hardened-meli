@@ -17,9 +17,13 @@ on:
       - 'melib/src/**'
       - 'melib/tests/**'
       - 'melib/Cargo.toml'
+      - 'melib-test/tests/**'
+      - 'melib-test/Cargo.toml'
       - 'meli/src/**'
       - 'meli/tests/**'
       - 'meli/Cargo.toml'
+      - 'meli-test/tests/**'
+      - 'meli-test/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
 

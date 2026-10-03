@@ -824,7 +824,7 @@ fn test_multipart_parts_first_loop_terminates() {
     // Pre-fix: a boundary occurrence NOT preceded by `--` made the first
     // loop slice to the exact same position forever (100% CPU hang). The
     // canonical 113-byte repro mail (headers + first hang form) lives in
-    // `meli/tests/test_c8a_parts_poc.rs`; here the bodies are fed directly
+    // `meli-test/tests/test_c8a_parts_poc.rs`; here the bodies are fed directly
     // to both twin loops.
     let hang_forms: &[(&[u8], bool)] = &[
         // (body, parts() outcome): the alt fallback needs a `--` to skip to;
