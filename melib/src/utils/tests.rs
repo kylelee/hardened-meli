@@ -27,242 +27,300 @@ use std::{
     path::Path,
 };
 
-use rusty_fork::rusty_fork_test;
 use tempfile::TempDir;
 
-rusty_fork_test! {
+/// Environment variables the environment-rewriting tests may overwrite.
+/// [`env_lock`] snapshots them and restores the snapshot when its guard
+/// drops, so a rewritten environment never leaks into sibling tests of the
+/// same process.
+const ENV_VARS: &[&str] = &[
+    "GPG_AGENT_INFO",
+    "GNUPGHOME",
+    "HOME",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_DIRS",
+    "XDG_CONFIG_HOME",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_DATA_DIRS",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+];
+
+/// Unit tests that rewrite process-global environment variables (HOME, the
+/// XDG_* locations, GNUPGHOME, ...) must not run concurrently on the test
+/// harness's parallel threads. [`env_lock`] serializes them against each
+/// other through this lock and restores the environment on release,
+/// replacing the per-test process isolation `rusty-fork` used to provide.
+/// Shared crate-wide: the `xdg` and `gpgme` test modules take it too.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Guard returned by [`env_lock`]: holds the shared environment lock and
+/// restores the snapshotted environment when dropped.
+pub struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    snapshot: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (var, value) in self.snapshot.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+    }
+}
+
+/// Acquire the shared environment lock and snapshot the environment
+/// variables the tests may rewrite; see [`ENV_LOCK`].
+pub fn env_lock() -> EnvGuard {
+    EnvGuard {
+        _lock: ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        snapshot: ENV_VARS
+            .iter()
+            .map(|var| (*var, std::env::var_os(var)))
+            .collect(),
+    }
+}
+
 #[test]
 #[ignore]
 fn test_shellexpandtrait() {
-    use super::shellexpand::*;
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        use super::shellexpand::*;
 
-    fn create_file_util(path: &str) {
-        let path = Path::new(path).expand();
-        let mut f = File::create(&path).unwrap();
-        let mut permissions = f.metadata().unwrap().permissions();
-        permissions.set_mode(0o600); // Read/write for owner only.
-        f.set_permissions(permissions).unwrap();
-        f.write_all(b"\n").unwrap();
-        f.flush().unwrap();
-        assert!(path.exists());
-    }
+        fn create_file_util(path: &str) {
+            let path = Path::new(path).expand();
+            let mut f = File::create(&path).unwrap();
+            let mut permissions = f.metadata().unwrap().permissions();
+            permissions.set_mode(0o600); // Read/write for owner only.
+            f.set_permissions(permissions).unwrap();
+            f.write_all(b"\n").unwrap();
+            f.flush().unwrap();
+            assert!(path.exists());
+        }
 
-    fn create_dir_util(path: &str) {
-        let path = Path::new(path).expand();
-        std::fs::create_dir(&path).unwrap();
-        assert!(path.exists());
-        assert!(path.is_dir());
-    }
+        fn create_dir_util(path: &str) {
+            let path = Path::new(path).expand();
+            std::fs::create_dir(&path).unwrap();
+            assert!(path.exists());
+            assert!(path.is_dir());
+        }
 
-    std::env::remove_var("HOME");
+        std::env::remove_var("HOME");
 
-    let tmp_dir = TempDir::new().unwrap();
+        let tmp_dir = TempDir::new().unwrap();
 
-    std::env::set_var("HOME", tmp_dir.path());
+        std::env::set_var("HOME", tmp_dir.path());
 
-    assert_eq!(&Path::new("~").expand(), tmp_dir.path());
+        assert_eq!(&Path::new("~").expand(), tmp_dir.path());
 
-    assert_eq!(
-        &tmp_dir.path().join("~/doc.pdf").expand(),
-        &tmp_dir.path().join("~/doc.pdf")
-    );
+        assert_eq!(
+            &tmp_dir.path().join("~/doc.pdf").expand(),
+            &tmp_dir.path().join("~/doc.pdf")
+        );
 
-    assert_eq!(
-        Path::new("~").expand().complete(false, false),
-        Completions::IsDirectory
-    );
-    assert_eq!(
-        Path::new("~").expand().complete(true, false),
-        Completions::Entries(vec!["/".to_string()]),
-        r#" ~<TAB> should append a "/": "~/""#,
-    );
-    assert_eq!(
-        Path::new("~").expand().complete(true, true),
-        Completions::Entries(vec![]),
-        r#"~/<TAB> should return directory entries."#
-    );
+        assert_eq!(
+            Path::new("~").expand().complete(false, false),
+            Completions::IsDirectory
+        );
+        assert_eq!(
+            Path::new("~").expand().complete(true, false),
+            Completions::Entries(vec!["/".to_string()]),
+            r#" ~<TAB> should append a "/": "~/""#,
+        );
+        assert_eq!(
+            Path::new("~").expand().complete(true, true),
+            Completions::Entries(vec![]),
+            r#"~/<TAB> should return directory entries."#
+        );
 
-    create_file_util("~/doc.pdf");
+        create_file_util("~/doc.pdf");
 
-    assert_eq!(
-        Path::new("~").expand().complete(false, false),
-        Completions::IsDirectory
-    );
-    assert_eq!(
-        Path::new("~").expand().complete(true, false),
-        Completions::Entries(vec!["/".to_string()]),
-        r#"~<TAB> should again append a "/": "~/""#
-    );
-    assert_eq!(
-        Path::new("~").expand().complete(true, true),
-        Completions::Entries(vec!["doc.pdf".to_string()]),
-        r#"~/<TAB> should return directory entries."#
-    );
-    assert_eq!(
-        Path::new("~/doc").expand().complete(true, false),
-        Completions::Entries(vec![".pdf".to_string()]),
-        r#"~/pattern<TAB> should return directory entries matching ~/pattern* glob."#
-    );
-    create_file_util("~/doc2.pdf");
-    assert_eq!(
-        Path::new("~/doc").expand().complete(true, false),
-        Completions::Entries(vec![".pdf".to_string(), "2.pdf".to_string()]),
-        r#"~/pattern<TAB> should again return directory entries matching ~/pattern* glob."#
-    );
-    create_dir_util("~/doc");
-    create_file_util("~/doc/2.pdf");
-    assert_eq!(
-        Path::new("~/doc").expand().complete(true, false),
-        Completions::Entries(vec![
-            ".pdf".to_string(),
-            "/".to_string(),
-            "2.pdf".to_string(),
-        ]),
-        r#"~/pattern<TAB> should again return directory entries matching ~/pattern* glob."#
-    );
-    assert_eq!(
-        Path::new("~/doc").expand().complete(true, false),
-        Completions::Entries(vec![
-            ".pdf".to_string(),
-            "/".to_string(),
-            "2.pdf".to_string(),
-        ]),
-        r#"~/pattern<TAB> should again return directory entries matching ~/pattern* glob."#
-    );
-    assert_eq!(
-        Path::new("~/doc").expand().complete(false, false),
-        Completions::IsDirectory,
-        r#"~/doc/<TAB> should not return ~/ entries matching ~/doc* glob."#
-    );
-    assert_eq!(
-        Path::new("~/doc").expand().complete(true, true),
-        Completions::Entries(vec!["2.pdf".to_string()])
-    );
-    assert_eq!(
-        Path::new("/").expand().complete(false, false),
-        Completions::IsDirectory
-    );
-    assert_eq!(
-        Path::new("/").expand().complete(true, false),
-        Completions::IsDirectory
-    );
-    assert!(matches!(Path::new("/").expand().complete(true, true),
-        Completions::Entries(entries) if !entries.is_empty()));
-    _ = tmp_dir.close();
-}
+        assert_eq!(
+            Path::new("~").expand().complete(false, false),
+            Completions::IsDirectory
+        );
+        assert_eq!(
+            Path::new("~").expand().complete(true, false),
+            Completions::Entries(vec!["/".to_string()]),
+            r#"~<TAB> should again append a "/": "~/""#
+        );
+        assert_eq!(
+            Path::new("~").expand().complete(true, true),
+            Completions::Entries(vec!["doc.pdf".to_string()]),
+            r#"~/<TAB> should return directory entries."#
+        );
+        assert_eq!(
+            Path::new("~/doc").expand().complete(true, false),
+            Completions::Entries(vec![".pdf".to_string()]),
+            r#"~/pattern<TAB> should return directory entries matching ~/pattern* glob."#
+        );
+        create_file_util("~/doc2.pdf");
+        assert_eq!(
+            Path::new("~/doc").expand().complete(true, false),
+            Completions::Entries(vec![".pdf".to_string(), "2.pdf".to_string()]),
+            r#"~/pattern<TAB> should again return directory entries matching ~/pattern* glob."#
+        );
+        create_dir_util("~/doc");
+        create_file_util("~/doc/2.pdf");
+        assert_eq!(
+            Path::new("~/doc").expand().complete(true, false),
+            Completions::Entries(vec![
+                ".pdf".to_string(),
+                "/".to_string(),
+                "2.pdf".to_string(),
+            ]),
+            r#"~/pattern<TAB> should again return directory entries matching ~/pattern* glob."#
+        );
+        assert_eq!(
+            Path::new("~/doc").expand().complete(true, false),
+            Completions::Entries(vec![
+                ".pdf".to_string(),
+                "/".to_string(),
+                "2.pdf".to_string(),
+            ]),
+            r#"~/pattern<TAB> should again return directory entries matching ~/pattern* glob."#
+        );
+        assert_eq!(
+            Path::new("~/doc").expand().complete(false, false),
+            Completions::IsDirectory,
+            r#"~/doc/<TAB> should not return ~/ entries matching ~/doc* glob."#
+        );
+        assert_eq!(
+            Path::new("~/doc").expand().complete(true, true),
+            Completions::Entries(vec!["2.pdf".to_string()])
+        );
+        assert_eq!(
+            Path::new("/").expand().complete(false, false),
+            Completions::IsDirectory
+        );
+        assert_eq!(
+            Path::new("/").expand().complete(true, false),
+            Completions::IsDirectory
+        );
+        assert!(matches!(Path::new("/").expand().complete(true, true),
+            Completions::Entries(entries) if !entries.is_empty()));
+        _ = tmp_dir.close();
+    });
 }
 
 #[cfg(target_os = "linux")]
-rusty_fork_test! {
 #[test]
 #[ignore]
 fn test_shellexpandtrait_impls() {
-    use super::shellexpand::*;
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        use super::shellexpand::*;
 
-    fn create_file_util(path: &str) {
-        let path = Path::new(path).expand();
-        let mut f = File::create(&path).unwrap();
-        let mut permissions = f.metadata().unwrap().permissions();
-        permissions.set_mode(0o600); // Read/write for owner only.
-        f.set_permissions(permissions).unwrap();
-        f.write_all(b"\n").unwrap();
-        f.flush().unwrap();
-        assert!(path.exists());
-    }
+        fn create_file_util(path: &str) {
+            let path = Path::new(path).expand();
+            let mut f = File::create(&path).unwrap();
+            let mut permissions = f.metadata().unwrap().permissions();
+            permissions.set_mode(0o600); // Read/write for owner only.
+            f.set_permissions(permissions).unwrap();
+            f.write_all(b"\n").unwrap();
+            f.flush().unwrap();
+            assert!(path.exists());
+        }
 
-    fn create_dir_util(path: &str) {
-        let path = Path::new(path).expand();
-        std::fs::create_dir(&path).unwrap();
-        assert!(path.exists());
-        assert!(path.is_dir());
-    }
+        fn create_dir_util(path: &str) {
+            let path = Path::new(path).expand();
+            std::fs::create_dir(&path).unwrap();
+            assert!(path.exists());
+            assert!(path.is_dir());
+        }
 
-    std::env::remove_var("HOME");
+        std::env::remove_var("HOME");
 
-    let tmp_dir = TempDir::new().unwrap();
+        let tmp_dir = TempDir::new().unwrap();
 
-    std::env::set_var("HOME", tmp_dir.path());
+        std::env::set_var("HOME", tmp_dir.path());
 
-    assert_eq!(&Path::new("~").expand(), tmp_dir.path());
+        assert_eq!(&Path::new("~").expand(), tmp_dir.path());
 
-    macro_rules! assert_complete {
-        (($path:expr, $force:literal, $treat_as_dir:literal), $($expected:tt)*) => {{
-            assert_eq!(
-                impls::inner_complete_linux($path, $force, $treat_as_dir),
-                impls::inner_complete_generic($path, $force, $treat_as_dir),
-                concat!("Expected ", stringify!($($expected)*)),
-            );
-            assert_eq!(
-                impls::inner_complete_generic($path, $force, $treat_as_dir),
-                $($expected)*,
-            );
-        }};
-    }
+        macro_rules! assert_complete {
+            (($path:expr, $force:literal, $treat_as_dir:literal), $($expected:tt)*) => {{
+                assert_eq!(
+                    impls::inner_complete_linux($path, $force, $treat_as_dir),
+                    impls::inner_complete_generic($path, $force, $treat_as_dir),
+                    concat!("Expected ", stringify!($($expected)*)),
+                );
+                assert_eq!(
+                    impls::inner_complete_generic($path, $force, $treat_as_dir),
+                    $($expected)*,
+                );
+            }};
+        }
 
-    assert_complete!(
-        (&Path::new("~").expand(), false, false),
-        Completions::IsDirectory
-    );
-    assert_complete!(
-        (&Path::new("~").expand(), true, false),
-        Completions::Entries(vec!["/".to_string()])
-    );
-    assert_complete!(
-        (&Path::new("~").expand(), true, true),
-        Completions::Entries(vec![])
-    );
+        assert_complete!(
+            (&Path::new("~").expand(), false, false),
+            Completions::IsDirectory
+        );
+        assert_complete!(
+            (&Path::new("~").expand(), true, false),
+            Completions::Entries(vec!["/".to_string()])
+        );
+        assert_complete!(
+            (&Path::new("~").expand(), true, true),
+            Completions::Entries(vec![])
+        );
 
-    create_file_util("~/doc.pdf");
+        create_file_util("~/doc.pdf");
 
-    assert_complete!(
-        (&Path::new("~").expand(), false, false),
-        Completions::IsDirectory
-    );
-    assert_complete!(
-        (&Path::new("~").expand(), true, false),
-        Completions::Entries(vec!["/".to_string()])
-    );
-    assert_complete!(
-        (&Path::new("~").expand(), true, true),
-        Completions::Entries(vec!["doc.pdf".to_string()])
-    );
-    assert_complete!(
-        (&Path::new("~/doc").expand(), true, false),
-        Completions::Entries(vec![".pdf".to_string()])
-    );
-    create_file_util("~/doc2.pdf");
-    assert_complete!(
-        (&Path::new("~/doc").expand(), true, false),
-        Completions::Entries(vec![".pdf".to_string(), "2.pdf".to_string()])
-    );
-    create_dir_util("~/doc");
-    create_file_util("~/doc/2.pdf");
-    assert_complete!(
-        (&Path::new("~/doc").expand(), true, false),
-        Completions::Entries(vec![
-            ".pdf".to_string(),
-            "/".to_string(),
-            "2.pdf".to_string(),
-        ])
-    );
-    assert_complete!(
-        (&Path::new("~/doc").expand(), false, false),
-        Completions::IsDirectory
-    );
-    assert_complete!(
-        (&Path::new("~/doc").expand(), true, true),
-        Completions::Entries(vec!["2.pdf".to_string()])
-    );
-    assert_complete!(
-        (&Path::new("/").expand(), false, false),
-        Completions::IsDirectory
-    );
-    assert_complete!(
-        (&Path::new("/").expand(), true, false),
-        Completions::IsDirectory
-    );
-    _ = tmp_dir.close();
-}
+        assert_complete!(
+            (&Path::new("~").expand(), false, false),
+            Completions::IsDirectory
+        );
+        assert_complete!(
+            (&Path::new("~").expand(), true, false),
+            Completions::Entries(vec!["/".to_string()])
+        );
+        assert_complete!(
+            (&Path::new("~").expand(), true, true),
+            Completions::Entries(vec!["doc.pdf".to_string()])
+        );
+        assert_complete!(
+            (&Path::new("~/doc").expand(), true, false),
+            Completions::Entries(vec![".pdf".to_string()])
+        );
+        create_file_util("~/doc2.pdf");
+        assert_complete!(
+            (&Path::new("~/doc").expand(), true, false),
+            Completions::Entries(vec![".pdf".to_string(), "2.pdf".to_string()])
+        );
+        create_dir_util("~/doc");
+        create_file_util("~/doc/2.pdf");
+        assert_complete!(
+            (&Path::new("~/doc").expand(), true, false),
+            Completions::Entries(vec![
+                ".pdf".to_string(),
+                "/".to_string(),
+                "2.pdf".to_string(),
+            ])
+        );
+        assert_complete!(
+            (&Path::new("~/doc").expand(), false, false),
+            Completions::IsDirectory
+        );
+        assert_complete!(
+            (&Path::new("~/doc").expand(), true, true),
+            Completions::Entries(vec!["2.pdf".to_string()])
+        );
+        assert_complete!(
+            (&Path::new("/").expand(), false, false),
+            Completions::IsDirectory
+        );
+        assert_complete!(
+            (&Path::new("/").expand(), true, false),
+            Completions::IsDirectory
+        );
+        _ = tmp_dir.close();
+    });
 }
 
 // Only test on platforms that support OFD locking.

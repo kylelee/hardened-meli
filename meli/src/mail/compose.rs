@@ -3950,6 +3950,7 @@ hello world.
             std::fs::Permissions::from_mode(0o755),
         )
         .unwrap();
+        let _env = crate::utilities::tests::env_lock_shared();
         let previous_path = std::env::var_os("PATH").unwrap_or_default();
         std::env::set_var(
             "PATH",

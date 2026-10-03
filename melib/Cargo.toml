@@ -77,7 +77,7 @@ uuid = { version = "^1", features = ["serde", "v4", "v5"] }
 xdg = { version = "2.1.0" }
 
 [dev-dependencies]
-rusty-fork = { workspace = true }
 serde_test2 = { workspace = true }
 tempfile = { workspace = true }
+tokio-test = { workspace = true }
 toml = { workspace = true }

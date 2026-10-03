@@ -683,6 +683,7 @@ impl<'a> Iterator for MailcapParser<'a> {
 mod tests {
     use std::collections::VecDeque;
 
+    use super::*;
     use melib::{
         email::{
             attachment_types::{Charset, ContentTransferEncoding, ContentType, Text},
@@ -690,9 +691,6 @@ mod tests {
         },
         utils::logging::{LogLevel, Logger},
     };
-    use rusty_fork::rusty_fork_test;
-
-    use super::*;
 
     #[test]
     fn test_mailcap_parser() {
@@ -2158,11 +2156,12 @@ is 50 \% Greek to me" \; cat %s; copiousoutput"#;
         assert!(parser.is_empty(), "{parser:?}");
     }
 
-    rusty_fork_test! {
-        #[test]
-        fn test_mailcap_execution() {
+    #[test]
+    fn test_mailcap_execution() {
+        let _env = crate::utilities::tests::env_lock();
+        tokio_test::block_on(async {
             run_mailcap_execution();
-        }
+        });
     }
 
     fn run_mailcap_execution() {

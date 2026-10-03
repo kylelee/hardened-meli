@@ -189,8 +189,7 @@ fn test_conf_config_parse() {
     // validator (with a clear error if it ends up unused); the v0.10.0
     // migration rewrites it to `server_password = { command = "..." }`.
     // Here we just check the bare config still parses.
-    FileSettings::validate(new_file.path.clone(), true)
-        .expect("could not parse IMAP config");
+    FileSettings::validate(new_file.path.clone(), true).expect("could not parse IMAP config");
 
     /* Test sample config */
 
@@ -1378,6 +1377,7 @@ mod toggle_theme_ui {
     /// picker overlay and applying a theme change.
     #[test]
     fn toggle_theme_command_opens_picker_and_persists() {
+        let _env = crate::utilities::tests::env_lock_shared();
         let temp_dir = tempfile::tempdir().unwrap();
         let config_toml = format!(
             "[accounts.test]\n\
@@ -1423,6 +1423,7 @@ mod toggle_theme_ui {
     /// the persist event must rewrite the file.
     #[test]
     fn change_theme_event_flow() {
+        let _env = crate::utilities::tests::env_lock_shared();
         let temp_dir = tempfile::tempdir().unwrap();
         let config_toml = format!(
             "[accounts.test]\n\

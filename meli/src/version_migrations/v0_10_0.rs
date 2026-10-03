@@ -219,15 +219,13 @@ impl Migration for ServerPasswordCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_fork::rusty_fork_test;
-
     use melib::utils::logging::{LogLevel, Logger};
 
-    rusty_fork_test! {
-        #[test]
-        fn test_version_migration_server_password_command() {
+    #[test]
+    fn test_version_migration_server_password_command() {
+        tokio_test::block_on(async {
             run_version_migration_server_password_command()
-        }
+        });
     }
 
     fn run_version_migration_server_password_command() {

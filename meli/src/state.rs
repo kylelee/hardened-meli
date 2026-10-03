@@ -274,6 +274,13 @@ impl Context {
     pub fn new_mock(dir: &tempfile::TempDir) -> Self {
         use crate::conf::tests::{ConfigFile, IMAP_CONFIG};
 
+        // Serialize against the environment-rewriting tests: constructing a
+        // mock `Context` derives the contacts and log-file locations from
+        // the current environment, which must not be another test's
+        // transient sandbox. Re-entrant with `env_lock()` holders (e.g. the
+        // gpgme key-selection test).
+        let _env = crate::utilities::tests::env_lock_shared();
+
         let (sender, receiver) =
             crossbeam::channel::bounded(32 * ::std::mem::size_of::<ThreadEvent>());
         let job_executor = Arc::new(JobExecutor::new(sender.clone()));
