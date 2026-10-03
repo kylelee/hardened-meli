@@ -544,8 +544,17 @@ impl MboxFormat {
                     } else {
                         return Ok(None);
                     };
+                    // `header_value` parses from the *value*: the
+                    // slice must start past the field name, and it
+                    // requires a line terminator — the caller
+                    // guarantees both. (Handing it the name-start
+                    // slice made the value parse as the whole
+                    // `Content-Length: N` line, so every
+                    // `usize::from_str` failed: the mboxcl/mboxcl2
+                    // length path never parsed a single value.)
+                    let value_start = content_length + b"Content-Length: ".len();
                     let Ok((_, value)) =
-                        crate::email::parser::headers::header_value(&input[content_length..])
+                        crate::email::parser::headers::header_value(&input[value_start..])
                     else {
                         return Err(Error::new("Invalid Content-length header"));
                     };
@@ -561,7 +570,22 @@ impl MboxFormat {
                     Ok(Some(bytes))
                 }
 
-                let Some(bytes) = find_content_length(&input[..headers_end])
+                // `header_value` requires a line terminator, but
+                // `headers_end` points at the first newline of the
+                // blank-line pair — which strips the terminator off
+                // a final `Content-Length` header (the position the
+                // built-in mboxcl2 writer always writes it to), so
+                // every such file failed with "Invalid Content-length
+                // header". Include the terminator in the block handed
+                // to the header parser.
+                let headers_block = if is_crlf && input.get(headers_end) == Some(&b'\r') {
+                    &input[..headers_end + 2]
+                } else if input.get(headers_end) == Some(&b'\n') {
+                    &input[..headers_end + 1]
+                } else {
+                    &input[..headers_end]
+                };
+                let Some(bytes) = find_content_length(headers_block)
                     .map_err(|err| (&input[..headers_end], Box::new(err)))?
                 else {
                     return Err((
@@ -573,12 +597,28 @@ impl MboxFormat {
                         ))),
                     ));
                 };
-                let mut env = Envelope::from_bytes(&input[..headers_end + bytes], None)
+                // The declared `Content-Length` is untrusted mbox
+                // bytes: a declaration near `usize::MAX` used to
+                // overflow `headers_end + bytes` and a declaration
+                // merely larger than the file indexed the slice out
+                // of bounds — both panicking the reader (CWE-190).
+                // Clamp the message end to what is actually present
+                // instead of trusting the declared size; an
+                // oversized declaration therefore degrades to "the
+                // rest of the file is this one message".
+                let message_end = headers_end
+                    .checked_add(bytes)
+                    .filter(|&end| end <= input.len())
+                    .unwrap_or(input.len());
+                let mut env = Envelope::from_bytes(&input[..message_end], None)
                     .map_err(|err| (input, Box::new(err)))?;
                 apply_status_flags(&mut env);
-                input = input
-                    .get(headers_end + bytes + if is_crlf { 6 } else { 3 }..)
-                    .unwrap_or(&[]);
+                let separator_len = if is_crlf { 6 } else { 3 };
+                let next = message_end
+                    .checked_add(separator_len)
+                    .filter(|&end| end <= input.len())
+                    .unwrap_or(input.len());
+                input = &input[next..];
                 Ok((input, env))
             }
         }
@@ -1560,5 +1600,53 @@ body two\n";
                 drain(input, MboxFormat::MboxO, is_crlf);
             }
         }
+    }
+
+    /// CVE-2026-70329 (issue #27): the `Content-Length` message cut used
+    /// unchecked `&input[..headers_end + bytes]` on the header-declared
+    /// length, so a near-`usize::MAX` declaration overflowed the addition
+    /// and a merely-larger-than-the-file declaration indexed out of
+    /// bounds — both crashed the reader (CWE-190/CWE-125). The cut must
+    /// clamp to what is actually present, and a value that does not fit
+    /// `usize` stays a clean rejection.
+    #[test]
+    fn oversized_content_length_clamps_instead_of_panicking() {
+        for declared in ["18446744073709551615", "4294967296", "1000000000000"] {
+            let file = format!(
+                "From a@example.org Mon Jan  1 00:00:00 2024\n\
+                 From: a@example.org\n\
+                 To: b@example.org\n\
+                 Subject: oversized\n\
+                 Message-ID: <oversized@example.org>\n\
+                 Content-Length: {declared}\n\
+                 \n\
+                 body\n"
+            )
+            .into_bytes();
+            for format in [MboxFormat::MboxCl, MboxFormat::MboxCl2] {
+                let result = std::panic::catch_unwind(|| format.parse(&file, false))
+                    .unwrap_or_else(|_| panic!("Content-Length {declared} must not panic"));
+                let (rest, env) = result.unwrap_or_else(|(at, err)| {
+                    panic!("parse failed at {:?}: {err}", String::from_utf8_lossy(at))
+                });
+                assert_eq!(env.subject().as_ref(), "oversized");
+                assert!(
+                    rest.is_empty(),
+                    "an oversized declaration consumes the rest of the file as one message"
+                );
+            }
+        }
+
+        // One past `usize::MAX` does not fit the type: a clean error.
+        let file = b"From a@example.org Mon Jan  1 00:00:00 2024\n\
+             From: a@example.org\n\
+             Content-Length: 18446744073709551616\n\
+             \n\
+             body\n"
+            .to_vec();
+        assert!(
+            MboxFormat::MboxCl2.parse(&file, false).is_err(),
+            "usize::MAX + 1 must be rejected as an invalid value"
+        );
     }
 }
