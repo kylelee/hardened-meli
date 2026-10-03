@@ -71,6 +71,10 @@ For detailed building instructions, see [`BUILD.md`](./BUILD.md)
 
 For the upstream meli sync log, see [`SYNC.md`](./SYNC.md).
 
+For a curated survey of CVEs against e-mail clients and browsers (tracking,
+malware, web-embedding attacks), see
+[`SECURITY-CVE-RESEARCH.md`](./SECURITY-CVE-RESEARCH.md).
+
 ### Cargo Compile-time Features
 
 `meli` supports opting in and out of features at compile time with cargo features.
