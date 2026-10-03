@@ -460,3 +460,38 @@ mod cve_2026_70329;
 #[cfg(test)]
 #[path = "CVE-2006-1305.rs"]
 mod cve_2006_1305;
+
+/// CVE-2020-9818 (Apple iOS Mail, iOS 12–13.4.1, no CVSS assigned)
+/// zero-click out-of-bounds write regression (issue #31, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// malformed e-mail corrupted iOS Mail's memory the moment the
+/// background fetch received it — no tap, no open (ZecOps; exploited
+/// in the wild since at least 2018 per their report, unconfirmed by
+/// Apple). meli links no MFMessage framework and no Objective-C heap,
+/// so the equivalent surface is the issue-prescribed zero-interaction
+/// 「receive → parse」 path: IMAP FETCH responses
+/// (`melib/src/imap/protocol_parser.rs`) plus the mail bytes they
+/// carry (`melib/src/email/parser.rs`). [`cve_2020_9818`] locks that
+/// layer by layer and exposes one real gap, fixed with this
+/// regression: the `FLAGS`/`MODSEQ` branches advanced the scan cursor
+/// with a `+ 1` that skips the list-closing `)` — on a response
+/// truncated right after the flags list or the MODSEQ digits there
+/// was no `)` left, the cursor overshot `input.len()` and the
+/// `raw_fetch_value` slice panicked with an out-of-range end index
+/// (CWE-125, the contained face of this CVE's write class): five
+/// one-line server bytes crashed every IMAP account's unsolicited
+/// fetch. The cursor now clamps at the buffer end, and the `flags()`
+/// token scan terminates at CR/LF (an IMAP atom never contains them)
+/// so a line-cut `\Seen` degrades to the real flag. The corpus also
+/// re-locks the neighboring walls at the IMAP framing: malformed
+/// frames (truncated literals, bare prefixes, past-`usize` digit
+/// runs, truncated ENVELOPE, 500-deep BODYSTRUCTURE) reject or
+/// saturate cleanly, the malformed-MIME mail corpus (truncated,
+/// nested, illegal UTF-8, boundary bytes, NUL, bare CR/LF, broken
+/// base64, kitchen sink, 5000-level nesting) parses zero-click with
+/// no panic through envelope and MIME tree, and hostile
+/// illegal-UTF-8 ENVELOPE literals flow through the tolerance layers
+/// to a lossy-decoded envelope.
+#[cfg(test)]
+#[path = "CVE-2020-9818.rs"]
+mod cve_2020_9818;
