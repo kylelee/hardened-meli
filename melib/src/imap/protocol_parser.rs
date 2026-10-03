@@ -748,7 +748,16 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
             i += b"FLAGS (".len();
             if let Ok((rest, flags)) = flags(&input[i..]) {
                 ret.flags = Some(flags);
-                i += (input.len() - i - rest.len()) + 1;
+                // `flags()` stops at the closing `)` — `rest` starts
+                // with it — or at end-of-input on a truncated
+                // response (`rest` empty). The `+ 1` skips the `)`,
+                // but must never step past the buffer: on a truncated
+                // response the old unchecked addition overshot
+                // `input.len()` and made the `&input[..i]`
+                // raw-fetch-value slice below panic with an
+                // out-of-range end index (CWE-125; CVE-2020-9818
+                // regression corpus).
+                i = (input.len() - rest.len() + 1).min(input.len());
             } else {
                 tracing::debug!(
                     "Unexpected input while parsing UID FETCH response. Could not parse FLAGS: {}.",
@@ -768,7 +777,13 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                 take_while::<_, &[u8], (&[u8], nom::error::ErrorKind)>(|c: u8| c.is_dec_digit())
                     .parse(&input[i..])
             {
-                i += (input.len() - i - rest.len()) + 1;
+                // Same clamp as the `FLAGS` branch above: the `+ 1`
+                // skips the `)` that closes `MODSEQ (…)`, but a
+                // truncated response whose digits run to end-of-input
+                // leaves no `)` to skip — the unchecked addition
+                // overshot `input.len()` and panicked the
+                // raw-fetch-value slice (CWE-125; CVE-2020-9818).
+                i = (input.len() - rest.len() + 1).min(input.len());
                 ret.modseq = u64::from_str(to_str!(modseq))
                     .ok()
                     .and_then(std::num::NonZeroU64::new)
@@ -1302,7 +1317,16 @@ pub fn flags(input: &[u8]) -> IResult<&[u8], (Flag, Vec<String>)> {
         }
         let mut match_end = 0;
         while match_end < input.len() {
-            if input[match_end..].starts_with(b" ") || input[match_end..].starts_with(b")") {
+            if input[match_end..].starts_with(b" ")
+                || input[match_end..].starts_with(b")")
+                // CR/LF never belong to an IMAP atom (RFC 3501 formal
+                // syntax), so a flag token cut off by a line terminator
+                // ends there instead of swallowing the CRLF into a
+                // garbage keyword (CVE-2020-9818 truncated-FETCH
+                // corpus).
+                || input[match_end..].starts_with(b"\r")
+                || input[match_end..].starts_with(b"\n")
+            {
                 break;
             }
             match_end += 1;
