@@ -43,6 +43,17 @@
 //! [`cve_2006_1045`] proves every form (`<img src>`/`srcset`, CSS
 //! `background:url()`, `@import`, `<video poster>`, `<source src>` and
 //! relatives) dies in `sanitize` in every embedding context.
+//!
+//! CVE-2008-3068 (issue #16) moves from the rendering path to the
+//! crypto trust boundary: Outlook's CryptoAPI dereferenced AIA/CRL
+//! URLs embedded in an S/MIME certificate during revocation checking,
+//! turning every mail read into an encrypted-receipt beacon.
+//! [`cve_2008_3068`] proves meli's equivalent surface immune with a
+//! genuinely signed corpus: the CMS part stays an opaque
+//! `CMSSignature` blob, the PGP verification gate never dispatches
+//! S/MIME to an engine, and every gpgme context is born offline,
+//! local-only and non-retrieving — so no certificate-borne URL can
+//! ever be fetched.
 
 /// MFSA-2005-11 (Thunderbird 0.6–0.9 / Mozilla Suite 1.7–1.7.3)
 /// cookie-tracking regression (issue #13): an HTML-mail beacon corpus
@@ -77,3 +88,22 @@ mod cve_2005_2512;
 #[cfg(test)]
 #[path = "CVE-2006-1045.rs"]
 mod cve_2006_1045;
+
+/// CVE-2008-3068 (Outlook, Windows Live Mail, Office 2007 CryptoAPI)
+/// encrypted-receipt beacon regression (issue #16): an S/MIME mail
+/// whose embedded certificate carries attacker AIA/CRL-distribution-
+/// point URLs; the victim's client fetched them automatically during
+/// CRL revocation checking, leaking read time and IP. The corpus is a
+/// genuinely valid openssl-signed S/MIME mail, and the regression
+/// proves the equivalent meli surface immune layer by layer: the CMS
+/// part parses as an opaque blob whose URLs surface nowhere in mail
+/// metadata, the only signature-verification gate rejects non-OpenPGP
+/// protocols (and a smuggled carrier still hands the engine opaque
+/// bytes only), and every production gpgme context is created offline
+/// with local-only key location — per the GPGME manual, offline mode
+/// bars Dirmngr's CRL/OCSP validation for CMS and disables Dirmngr
+/// entirely for OpenPGP, so no certificate-borne URL is ever
+/// dereferenced.
+#[cfg(test)]
+#[path = "CVE-2008-3068.rs"]
+mod cve_2008_3068;
