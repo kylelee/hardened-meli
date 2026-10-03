@@ -23,6 +23,10 @@
 
 //! Built-in HTML rendering for the mail view: sanitize untrusted HTML with
 //! [`ammonia`], then render it to plain text with [`html2text`].
+//!
+//! [`sanitize`] and [`render`] are `pub` (not `pub(crate)`) on purpose: the
+//! `cve` regression crate and the integration test suites exercise this
+//! exact hardened path — the same functions the mail view calls.
 
 use std::{
     borrow::Cow,
@@ -46,7 +50,7 @@ use melib::{Error, Result};
 /// 末尾同样 trim 一次。nh3 自身不裁这些，留给消费者做后处理；meli 在
 /// sanitize 阶段直接处理，因为 sanitize 输出紧接着喂给 `html2text`
 /// 渲染，过早的不可见填充会让文本宽度错算并出现"幽灵"链接脚注。
-pub(crate) fn sanitize(input: &str) -> String {
+pub fn sanitize(input: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
         "b",
@@ -159,7 +163,7 @@ fn trim_predicate(c: char) -> bool {
 ///
 /// Never panics: invalid UTF-8 input is replaced lossily, sanitization always
 /// returns a `String`, and rendering failures are reported as [`Error`].
-pub(crate) fn render(bytes: &[u8], width: usize) -> Result<String> {
+pub fn render(bytes: &[u8], width: usize) -> Result<String> {
     let html = sanitize(&String::from_utf8_lossy(bytes));
     html2text::config::plain()
         .string_from_read(html.as_bytes(), width)

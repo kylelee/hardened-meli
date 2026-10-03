@@ -28,3 +28,17 @@
 //!
 //! New regressions go into test files under `src/` (unit) or `tests/`
 //! (integration); run everything with `cargo test -p cve`.
+//!
+//! First in-crate regression: MFSA-2005-11 (issue #13), the Thunderbird
+//! cookie-tracking advisory — [`mfsa_2005_11`] locks the sanitize →
+//! html2text pipeline's immunity against cookie-beacon mail.
+
+/// MFSA-2005-11 (Thunderbird 0.6–0.9 / Mozilla Suite 1.7–1.7.3)
+/// cookie-tracking regression (issue #13): an HTML-mail beacon corpus
+/// proving the render pipeline performs no remote reference loading —
+/// every auto-load vector loses tag and URL in `sanitize`, and the
+/// rendered mail is plain terminal text whose only remote references are
+/// user-facing link footnotes meli never fetches.
+#[cfg(test)]
+#[path = "MFSA-2005-11.rs"]
+mod mfsa_2005_11;
