@@ -172,8 +172,17 @@ impl HeaderName {
     /// For information over which header bytes are invalid, see documentation
     /// module constant [`HEADER_CHARS`] and its source code.
     ///
+    /// The name must be non-empty: `field-name = 1*ftext` requires at
+    /// least one byte. An empty name could otherwise become a
+    /// [`HeaderMap`](super::HeaderMap) key and serialize to a
+    /// malformed `": value"` header line (CVE-2026-14899 class, the
+    /// length-0 boundary below the grammar's minimum of 1).
+    ///
     /// [RFC5322]: https://datatracker.ietf.org/doc/html/rfc5322#autoid-35
     pub fn from_bytes(src: &[u8]) -> Result<Self, InvalidHeaderName> {
+        if src.is_empty() {
+            return Err(InvalidHeaderName::new());
+        }
         if let Some(std) = StandardHeader::from_bytes(src.trim()) {
             Ok(Self {
                 inner: Repr::Standard(std),
