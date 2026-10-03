@@ -460,3 +460,34 @@ mod cve_2026_70329;
 #[cfg(test)]
 #[path = "CVE-2006-1305.rs"]
 mod cve_2006_1305;
+
+/// CVE-2008-0039 (Apple Mail, Mac OS X 10.4.11 / Server 10.4.11,
+/// CVSS v2 6.8) file-URL application-launch RCE regression (issue
+/// #33, table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code
+/// execution): APPLE-SA-2008-02-11 — 「An implementation issue exists
+/// in Mail's handling of file:// URLs, which may allow arbitrary
+/// applications to be launched without warning when a user clicks a
+/// URL in a message」, fixed upstream by revealing the location in
+/// Finder instead of launching (CWE-94). meli links no Launch
+/// Services, Finder integration or AppleScript bridge, so the issue's
+/// prescribed equivalent surface — the `meli/src/mail/view.rs` link
+/// scheme whitelist, every place a mail-borne URL spelling can reach
+/// an OS url launcher — is mapped and locked as an immunity proof on
+/// the whole local-executable family (`.app` bundles, `.command`,
+/// `.scpt`, `.sh`, directory, query, fragment, percent-encoded, any
+/// casing, `file://localhost/…` and `file:///…`): [`cve_2008_0039`]
+/// proves the `go_to_url` gate refuses every `file:` spelling behind
+/// an explicit per-URL confirmation (on top of the deliberate
+/// URL-mode keystroke sequence a terminal client already requires —
+/// stronger than Apple's own fix), URL-mode extraction never yields a
+/// launchable `file:` URL (the single-slash and backslash spellings
+/// are not extracted at all — the issue's 「仅以纯文本显示，不可打开」),
+/// the HTML mirror's `file:` hrefs die in `sanitize` casing and
+/// percent-encoding included, the header-derived launch sites
+/// (`List-Unsubscribe`/`List-Archive`) skip `file:` targets, and an
+/// honest carrier keeps its `https`/`mailto` links one-keystroke
+/// usable everywhere the family is refused. No gap was exposed on
+/// this corpus; no production code needed changing.
+#[cfg(test)]
+#[path = "CVE-2008-0039.rs"]
+mod cve_2008_0039;
