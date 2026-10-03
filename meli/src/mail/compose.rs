@@ -629,7 +629,11 @@ To: {}
             let mut attachment = AttachmentBuilder::new(b"");
             let mut disposition: ContentDisposition = ContentDispositionKind::Attachment.into();
             {
-                disposition.filename = Some(format!("{}.eml", env.message_id()));
+                // meli must not emit path-laden attachment filenames to
+                // peers: sanitize the mail-derived name
+                // (CVE-2024-43604 class — malicious attachment
+                // filenames carrying path elements).
+                disposition.filename = Some(crate::eml_filename(env.message_id().as_str()));
             }
             attachment
                 .set_raw(bytes.to_vec())
