@@ -55,6 +55,7 @@ pub enum Charset {
     BIG5,
     ISO2022JP,
     EUCJP,
+    ShiftJIS,
     KOI8R,
     KOI8U,
     KSX1001,
@@ -151,6 +152,21 @@ impl<'a> From<&'a [u8]> for Charset {
             b if b.eq_ignore_ascii_case(b"big5") => Self::BIG5,
             b if b.eq_ignore_ascii_case(b"iso-2022-jp") => Self::ISO2022JP,
             b if b.eq_ignore_ascii_case(b"euc-jp") => Self::EUCJP,
+            b if b.eq_ignore_ascii_case(b"shift_jis")
+                || b.eq_ignore_ascii_case(b"shift-jis")
+                || b.eq_ignore_ascii_case(b"shiftjis")
+                || b.eq_ignore_ascii_case(b"sjis")
+                || b.eq_ignore_ascii_case(b"ms_kanji")
+                || b.eq_ignore_ascii_case(b"ms-kanji")
+                || b.eq_ignore_ascii_case(b"ms932")
+                || b.eq_ignore_ascii_case(b"windows-31j")
+                || b.eq_ignore_ascii_case(b"windows31j")
+                || b.eq_ignore_ascii_case(b"cp932")
+                || b.eq_ignore_ascii_case(b"x-sjis")
+                || b.eq_ignore_ascii_case(b"csshiftjis") =>
+            {
+                Self::ShiftJIS
+            }
             b if b.eq_ignore_ascii_case(b"koi8-r") => Self::KOI8R,
             b if b.eq_ignore_ascii_case(b"koi8-u") => Self::KOI8U,
             b if b.eq_ignore_ascii_case(b"ks_c_5601-1987") => Self::KSX1001,
@@ -191,6 +207,7 @@ impl std::fmt::Display for Charset {
             Self::BIG5 => write!(f, "big5"),
             Self::ISO2022JP => write!(f, "iso-2022-jp"),
             Self::EUCJP => write!(f, "euc-jp"),
+            Self::ShiftJIS => write!(f, "Shift_JIS"),
             Self::KSX1001 => write!(f, "ks_c_5601-1987"),
             Self::KOI8R => write!(f, "koi8-r"),
             Self::KOI8U => write!(f, "koi8-u"),
