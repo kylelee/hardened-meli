@@ -64,6 +64,15 @@
 //! save policy (no auto-save, no silent plaintext persistence of an
 //! encryption-armed draft, warnings on explicit saves, encrypted
 //! post-submission copies) is what keeps those bytes off the server.
+//!
+//! CVE-2017-17688 (issue #18) is the EFAIL chapter: OpenPGP CFB
+//! malleability grafts an HTML exfiltration gadget onto decrypted
+//! plaintext. [`cve_2017_17688`] proves the gadget corpus genuine (real
+//! gpg ciphertext, real bit-flip variants, real tampered-decryption
+//! outputs) and locks meli's walls: the gadget dies in `sanitize`
+//! before rendering, parts never splice, and decryption failure
+//! surfaces no plaintext — closing the CLI backend's stdout-echo gap
+//! the issue exposed.
 
 /// MFSA-2005-11 (Thunderbird 0.6–0.9 / Mozilla Suite 1.7–1.7.3)
 /// cookie-tracking regression (issue #13): an HTML-mail beacon corpus
@@ -134,3 +143,24 @@ mod cve_2008_3068;
 #[cfg(test)]
 #[path = "CVE-2008-4491.rs"]
 mod cve_2008_4491;
+
+/// CVE-2017-17688 (EFAIL, OpenPGP variant; 11 clients incl. Apple Mail,
+/// Thunderbird, Outlook) CFB-malleability exfiltration regression
+/// (issue #18): an attacker flips one ciphertext block of an
+/// intercepted PGP/MIME mail so the decrypted plaintext opens an
+/// unclosed `<img src="https:` gadget whose URL tail is the
+/// confidential remainder — and a client that renders it (or echoes it
+/// in a decryption error) exfiltrates the plaintext. The corpus is a
+/// genuine gpg-encrypted mail plus its two bit-flipped variants (real
+/// `gpg --ignore-mdc-error` outputs embedded), and the regression locks
+/// the walls layer by layer: the wire carries no plaintext, the
+/// tampering is pure CFB XOR, the decrypted gadget dies in `sanitize`
+/// before rendering (no fetcher exists to begin with), no code path
+/// splices decrypted bytes with attacker-controlled outer parts, and
+/// decryption failure surfaces no plaintext fragment — the gap this
+/// issue closed: the CLI backend's error used to embed the failing
+/// decrypt script's captured stdout byte-for-byte, which GnuPG fills
+/// with literal data *before* the MDC verdict.
+#[cfg(test)]
+#[path = "CVE-2017-17688.rs"]
+mod cve_2017_17688;

@@ -80,14 +80,29 @@ logger = logger.read()
 is_okay = re.compile(r"^\[GNUPG:\] DECRYPTION_OKAY$", flags=re.M).search(status)
 
 if is_okay:
-    print(json.dumps([b for b in s.stdout]))
-else:
-    # TODO
+    # The CLI backend contract: a JSON object with the decryption
+    # metadata and the data itself as a byte list.
     print(
         json.dumps(
             {
-                "stdout": s.stdout.decode("utf-8"),
-                "stderr": s.stderr.decode("utf-8"),
+                "recipients": [],
+                "file_name": None,
+                "session_key": None,
+                "is_mime": False,
+                "data": [b for b in s.stdout],
+            }
+        )
+    )
+else:
+    # CVE-2017-17688 (EFAIL) regression: GnuPG streams decrypted literal
+    # data before the MDC verdict, so the captured stdout here can carry
+    # (tampered) plaintext. Report diagnostics only — never the stdout
+    # bytes — and exit non-zero so the client treats this as a failure.
+    print(
+        json.dumps(
+            {
+                "returncode": s.returncode,
+                "stderr": s.stderr.decode("utf-8", "replace"),
                 "status_fd": status,
                 "logger_fd": logger,
             }
