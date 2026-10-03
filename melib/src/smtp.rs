@@ -1074,9 +1074,26 @@ async fn read_lines<'r>(
     ret.clear();
     ret.extend(buffer.drain(..));
     let mut last_line_idx: usize = 0;
+    // How far into `ret` the search for the next `\r\n` separator has
+    // already gone without finding one (past the lines already consumed).
+    // The scan resumes one byte earlier — a `\r` at `searched - 1` may
+    // have met its `\n` in the newest chunk — so a separator split
+    // across read chunks is still found, while the accumulated prefix is
+    // never rescanned: a hostile server that keeps sending a reply line
+    // with no CRLF terminator (the CVE-2007-2770 corpus shape) must not
+    // turn every 1 KiB read into a rescan of the whole line accumulated
+    // so far — the quadratic separator rescan (CWE-407) closed here.
+    let mut searched: usize = 0;
     let mut returned_code: Option<ReplyCode> = None;
     'read_loop: loop {
-        while let Some(pos) = ret[last_line_idx..].find("\r\n") {
+        loop {
+            let from = searched.saturating_sub(1).max(last_line_idx);
+            let Some(sep) = ret[from..].find("\r\n").map(|pos| from + pos) else {
+                break;
+            };
+            // `sep` is the absolute offset of the separator; the line
+            // spans `ret[last_line_idx..sep]`.
+            //
             // "Formally, a reply is defined to be the sequence: a three-digit code, `<SP>`,
             // one line of text, and `<CRLF>`, or a multiline reply (as defined in the same
             // section)."
@@ -1097,18 +1114,23 @@ async fn read_lines<'r>(
                     break 'read_loop;
                 }
                 if ret[last_line_idx + 3..].starts_with(' ') {
-                    buffer.extend(ret.drain(last_line_idx + pos + "\r\n".len()..));
+                    buffer.extend(ret.drain(sep + "\r\n".len()..));
                     break 'read_loop;
                 }
             } else {
                 if ret[last_line_idx + 3..].starts_with(' ') {
-                    buffer.extend(ret.drain(last_line_idx + pos + "\r\n".len()..));
+                    buffer.extend(ret.drain(sep + "\r\n".len()..));
                     break 'read_loop;
                 }
                 returned_code = Some(ReplyCode::try_from(&ret[last_line_idx..last_line_idx + 3])?);
             }
-            last_line_idx += pos + "\r\n".len();
+            last_line_idx = sep + "\r\n".len();
+            searched = last_line_idx;
         }
+        // The remainder holds no separator (bar a possible `\r` tail):
+        // remember how far the scan reached so the next chunk is scanned
+        // incrementally.
+        searched = ret.len();
         match timeout(Some(SMTP_READ_TIMEOUT), _self.read(&mut buf)).await? {
             Ok(0) => break,
             Ok(b) => {
@@ -1205,6 +1227,105 @@ mod tests {
                 ret.len(),
                 cap + 1024
             );
+        });
+    }
+
+    /// Regression for the CVE-2007-2770 corpus shape (issue #48): a
+    /// reply line with no CRLF terminator at all — the hostile SMTP
+    /// server's overlong single line — must hit the server response
+    /// size cap and error out instead of accumulating unboundedly.
+    /// Unlike [`test_smtp_read_lines_response_size_cap`], whose server
+    /// keeps sending well-formed `250-` continuation lines, this
+    /// server never sends a single separator byte.
+    #[test]
+    fn test_smtp_read_lines_unterminated_line_size_cap() {
+        cap_test_utils::assert_completes_within(10, || {
+            let cap = max_server_response_size();
+            // No CRLF anywhere in the chunk: the line never terminates.
+            let (mut stream, writer) =
+                cap_test_utils::malicious_server(b"220-never terminating line", cap * 2);
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(
+                &mut stream,
+                &mut ret,
+                Some((ReplyCode::_220, &[])),
+                &mut buffer,
+            ));
+            drop(stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+                ),
+                "unexpected error: {err:?}"
+            );
+            assert!(ret.len() > cap);
+            assert!(
+                ret.len() <= cap + 1024,
+                "accumulation must stay bounded: {} > {}",
+                ret.len(),
+                cap + 1024
+            );
+        });
+    }
+
+    /// Regression for the incremental separator scan of
+    /// [`read_lines`]: a `\r\n` split across two reads — the `\r` is
+    /// the last byte of one 1024-byte chunk, the `\n` the first byte
+    /// of the next — must still terminate the line. The scan cursor
+    /// resumes one byte early exactly for this shape; resuming at the
+    /// cursor itself would drop every line whose separator straddles a
+    /// read boundary.
+    #[test]
+    fn test_smtp_read_lines_crlf_split_across_reads_is_found() {
+        cap_test_utils::assert_completes_within(10, || {
+            // `250-` + 1019 filler bytes + `\r`: the separator's first
+            // byte lands at index 1023, the last byte of the reader's
+            // 1024-byte buffer.
+            let mut first = Vec::with_capacity(1024);
+            first.extend_from_slice(b"250-");
+            first.extend(std::iter::repeat_n(b'x', 1019));
+            first.push(b'\r');
+            assert_eq!(first.len(), 1024);
+            let rest: &[u8] = b"\n250 done\r\n";
+
+            let (reader_sock, mut writer_sock) =
+                std::os::unix::net::UnixStream::pair().unwrap();
+            let conn = Connection::Fd {
+                inner: reader_sock.into(),
+                id: None,
+                trace: false,
+            };
+            let mut stream = smol::Async::new(conn).unwrap();
+            let writer = std::thread::spawn(move || {
+                use std::io::Write as _;
+                writer_sock.write_all(&first).unwrap();
+                // Give the client time to consume the first chunk so the
+                // separator really straddles two reads.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                writer_sock.write_all(rest).unwrap();
+                // Hold the socket open until the client is done reading.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            });
+            let mut ret = String::new();
+            let mut buffer = String::new();
+            let res = smol::block_on(read_lines(
+                &mut stream,
+                &mut ret,
+                Some((ReplyCode::_250, &[])),
+                &mut buffer,
+            ));
+            drop(stream);
+            let _ = writer.join();
+            let reply = res.expect("a CRLF split across reads must still be found");
+            assert_eq!(reply.code, ReplyCode::_250);
+            assert_eq!(reply.lines.len(), 2);
+            assert_eq!(reply.lines[0].len(), 1019);
+            assert_eq!(reply.lines[0].as_bytes()[0], b'x');
+            assert_eq!(reply.lines[1], "done");
         });
     }
 
