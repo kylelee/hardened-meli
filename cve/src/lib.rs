@@ -639,3 +639,30 @@ mod cve_2020_9819;
 #[cfg(test)]
 #[path = "CVE-2008-0039.rs"]
 mod cve_2008_0039;
+
+/// CVE-2026-84639 (Thunderbird, fixed in the MFSA 2026-86/87/88
+/// batch, no CVSS score assigned) uninitialized-memory-use
+/// regression (issue #37, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// specific MIME body triggered an error path in Thunderbird's MIME
+/// processing that used uninitialized memory (CWE-457), surfacing
+/// never-written buffer contents. meli's whole e-mail decode path is
+/// safe Rust (no `MaybeUninit`, no `set_len`), so the literal site
+/// cannot exist — [`cve_2026_84639`] locks the issue-prescribed
+/// equivalent surface, the MIME error paths of
+/// `melib/src/email/parser.rs` + `Attachment::decode`, with the
+/// prescribed corpus (truncated base64, bad quoted-printable,
+/// illegal byte sequences): every error path echoes its input
+/// verbatim or applies a fixed decode table / the fixed U+FFFD
+/// replacement sequence — byte-exact snapshots, identical across two
+/// independent parses and two decodes each, bounded by the proven
+/// expansion factor; the error messages are exact static strings;
+/// and a kitchen-sink mail combining every family is deterministic
+/// end to end through envelope, MIME tree, decode, text extraction,
+/// `Display`/`Debug` and every `ViewOptions` conversion mode — with
+/// an honest carrier proving the decoder does its real work. The
+/// result is **immune, no gap found**: no production code needed
+/// changing.
+#[cfg(test)]
+#[path = "CVE-2026-84639.rs"]
+mod cve_2026_84639;
