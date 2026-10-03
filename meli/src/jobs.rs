@@ -20,29 +20,43 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-//! Async job executor thread pool
+//! Async job executor backed by the `tokio` runtime.
+//!
+//! [`JobExecutor`] owns a multi-thread `tokio` runtime which is the async
+//! backbone of the application:
+//!
+//! - [`IsAsync::Async`] jobs run as `tokio` tasks on the runtime's worker
+//!   threads.
+//! - [`IsAsync::Blocking`] jobs are wrapped in [`tokio::task::spawn_blocking`]
+//!   so blocking work cannot starve async jobs.
+//! - Timers ([`JobExecutor::create_timer`]) are runtime tasks that sleep with
+//!   [`tokio::time::sleep`] and emit [`UIEvent::Timer`] through the main-loop
+//!   channel.
+//!
+//! A panic inside a spawned job is isolated per task: it is caught with
+//! [`futures::FutureExt::catch_unwind`], logged, the job's metadata is marked
+//! as failed and the main loop is still notified with
+//! [`ThreadEvent::JobFinished`]. One bad job therefore can no longer freeze
+//! the UI the way a dead executor lane used to. Cancellation
+//! ([`JoinHandle::cancel`]) aborts the task at its next `.await` point,
+//! dropping the future and releasing its resources.
 
 use std::{
     borrow::Cow,
     future::Future,
-    iter,
-    panic::catch_unwind,
+    panic::AssertUnwindSafe,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    thread,
     time::Duration,
 };
 
-use crossbeam::{
-    channel::Sender,
-    deque::{Injector, Stealer, Worker},
-    sync::{Parker, Unparker},
-};
+use crossbeam::channel::Sender;
 pub use futures::channel::oneshot;
+use futures::future::FutureExt;
 use indexmap::IndexMap;
-use melib::{log, smol, utils::datetime, uuid::Uuid, UnixTimestamp};
+use melib::{log, utils::datetime, uuid::Uuid, UnixTimestamp};
 
 use crate::types::{StatusEvent, ThreadEvent, UIEvent};
 
@@ -51,8 +65,6 @@ pub enum IsAsync {
     Async,
     Blocking,
 }
-
-type AsyncTask = async_task::Runnable;
 
 #[derive(Clone, Debug)]
 struct FinishedTimestamp(Arc<Mutex<UnixTimestamp>>);
@@ -82,28 +94,6 @@ impl FinishedTimestamp {
             }
         }
     }
-}
-
-fn find_task(
-    local: &Worker<MeliTask>,
-    global: &Injector<MeliTask>,
-    stealers: &[Stealer<MeliTask>],
-) -> Option<MeliTask> {
-    // Pop a task from the local queue, if not empty.
-    local.pop().or_else(|| {
-        // Otherwise, we need to look for a task elsewhere.
-        iter::repeat_with(|| {
-            // Try stealing a batch of tasks from the global queue.
-            global
-                .steal_batch_and_pop(local)
-                // Or try stealing a task from one of the other threads.
-                .or_else(|| stealers.iter().map(|s| s.steal()).collect())
-        })
-        // Loop while no task was stolen and any steal operation needs to be retried.
-        .find(|s| !s.is_retry())
-        // Extract the stolen task, if there is one.
-        .and_then(|s| s.success())
-    })
 }
 
 macro_rules! uuid_hash_type {
@@ -142,14 +132,6 @@ macro_rules! uuid_hash_type {
 uuid_hash_type!(JobId);
 uuid_hash_type!(TimerId);
 
-/// A spawned future and its current state.
-pub struct MeliTask {
-    task: AsyncTask,
-    id: JobId,
-    desc: Cow<'static, str>,
-    timer: bool,
-}
-
 #[derive(Clone, Debug)]
 /// A spawned future's metadata for book-keeping.
 pub struct JobMetadata {
@@ -184,10 +166,9 @@ impl JobMetadata {
 
 #[derive(Debug)]
 pub struct JobExecutor {
-    global_queue: Arc<Injector<MeliTask>>,
-    workers: Vec<Stealer<MeliTask>>,
+    /// The `tokio` runtime that drives every spawned job and timer.
+    runtime: tokio::runtime::Runtime,
     sender: Sender<ThreadEvent>,
-    parkers: Vec<Unparker>,
     timers: Arc<Mutex<IndexMap<TimerId, TimerPrivate>>>,
     pub jobs: Arc<Mutex<IndexMap<JobId, JobMetadata>>>,
 }
@@ -199,8 +180,7 @@ struct TimerPrivate {
     /// Time until next expiration.
     value: Duration,
     active: bool,
-    handle: Option<async_task::Task<()>>,
-    cancel: Arc<AtomicBool>,
+    handle: Option<tokio::task::AbortHandle>,
 }
 
 #[derive(Debug)]
@@ -233,99 +213,42 @@ impl Drop for Timer {
     }
 }
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(msg) = payload.downcast_ref::<&'static str>() {
+        (*msg).to_string()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
 impl JobExecutor {
-    /// A queue that holds scheduled tasks.
+    /// Creates the executor with its dedicated multi-thread `tokio` runtime.
+    ///
+    /// Worker threads are named `meli-executor`. Job futures are
+    /// panic-isolated per task (see [`JobExecutor::spawn`]), so no
+    /// supervisor-restart logic is needed here. The runtime is dropped along
+    /// with the executor, cancelling pending tasks at shutdown.
     pub fn new(sender: Sender<ThreadEvent>) -> Self {
-        // Create a queue.
-        let mut ret = Self {
-            global_queue: Arc::new(Injector::new()),
-            workers: vec![],
-            parkers: vec![],
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(
+                std::thread::available_parallelism()
+                    .map(Into::into)
+                    .unwrap_or(1),
+            )
+            .thread_name("meli-executor")
+            // The time driver is required by `tokio::time::sleep` in
+            // `arm_timer`.
+            .enable_all()
+            .build()
+            .expect("could not build the `tokio` runtime for the job executor");
+        Self {
+            runtime,
             sender,
             timers: Arc::new(Mutex::new(IndexMap::default())),
             jobs: Arc::new(Mutex::new(IndexMap::default())),
-        };
-        let mut workers = vec![];
-        for _ in 0..std::thread::available_parallelism()
-            .map(Into::into)
-            .unwrap_or(1)
-        {
-            let new_worker = Worker::new_fifo();
-            ret.workers.push(new_worker.stealer());
-            let p = Parker::new();
-            ret.parkers.push(p.unparker().clone());
-            workers.push((new_worker, p));
         }
-
-        // Reactor / async-job thread.
-        //
-        // Every `IsAsync::Async` job (all remote-backend work: IMAP fetch,
-        // watch, refresh...) runs on this single `smol::Executor`. A panic
-        // inside any of those futures — or inside the `Drop` of a canceled
-        // one, which also runs here — propagates out of `ex.run` and kills
-        // this thread. With the thread gone, every subsequent async job
-        // never runs and never completes: timers stop firing, the watch
-        // stream stops restarting, fetches never resolve — the UI freezes
-        // with the main thread alive but waiting on events that will never
-        // arrive. (Captured with `gdb -p` on a frozen instance: only the
-        // input thread and the main thread remain.)
-        //
-        // So do not let one job's panic take the whole lane down: restart
-        // the executor in a loop and log the panic. State held by the dead
-        // futures (connection handles, canceled jobs) is dropped during
-        // unwinding, which is exactly the resource-release semantics the
-        // cancel path already relies on.
-        thread::Builder::new()
-            .name("meli-reactor".to_string())
-            .spawn(move || {
-                loop {
-                    let executor = smol::Executor::new();
-                    let run = || {
-                        futures::executor::block_on(executor.run(futures::future::pending::<()>()))
-                    };
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).is_err() {
-                        log::error!(
-                            "async job executor panicked; restarting it (a pending \
-                             job may have been lost)"
-                        );
-                        continue;
-                    }
-                    // `ex.run(pending)` never completes; a `Ok` here is
-                    // unreachable, but keep the loop well-typed and avoid a
-                    // spin on a hypothetical immediate return.
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
-            })
-            .unwrap();
-
-        // Spawn executor threads the first time the queue is created.
-        for (i, (local, parker)) in workers.into_iter().enumerate() {
-            let global = ret.global_queue.clone();
-            let stealers = ret.workers.clone();
-            thread::Builder::new()
-                .name(format!("meli-executor-{i}"))
-                .spawn(move || loop {
-                    parker.park_timeout(Duration::from_millis(100));
-                    let task = find_task(&local, &global, stealers.as_slice());
-                    if let Some(meli_task) = task {
-                        let MeliTask {
-                            task,
-                            id,
-                            timer,
-                            desc,
-                        } = meli_task;
-                        if !timer {
-                            log::trace!("Worker {} got task {:?} {:?}", i, desc, id);
-                        }
-                        let _ = catch_unwind(|| task.run());
-                        if !timer {
-                            log::trace!("Worker {} returned after {:?} {:?}", i, desc, id);
-                        }
-                    }
-                })
-                .unwrap();
-        }
-        ret
     }
 
     /// Spawns a future with a generic return value `R`
@@ -357,7 +280,6 @@ impl JobExecutor {
         let (sender, receiver) = oneshot::channel();
         let finished_sender = self.sender.clone();
         let job_id = JobId::new();
-        let injector = self.global_queue.clone();
         // We do not use `AtomicU64` because it's not portable, so ignore the lint.
         #[allow(clippy::mutex_integer)]
         let finished = FinishedTimestamp(Arc::new(Mutex::new(0)));
@@ -374,42 +296,34 @@ impl JobExecutor {
             },
         );
 
-        // Create a task and schedule it for execution.
-        let (handle, task) = {
-            let cancel = cancel.clone();
-            let finished = finished.clone();
-            async_task::spawn(
-                async move {
-                    let res = future.await;
+        let jobs = self.jobs.clone();
+        let finished_task = finished.clone();
+        let task = self.runtime.handle().spawn(async move {
+            // Isolate panics per job: catch the unwind, log it, mark the job
+            // as failed and still notify the main loop, so a panicking job
+            // cannot freeze the UI or take the runtime down.
+            match AssertUnwindSafe(future).catch_unwind().await {
+                Ok(res) => {
                     let _ = sender.send(res);
-                    if let Ok(mut guard) = finished.0.lock() {
-                        *guard = datetime::now();
-                    }
-                    finished_sender
-                        .send(ThreadEvent::JobFinished(job_id))
-                        .unwrap();
-                },
-                move |task| {
-                    if cancel.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    let desc = desc.clone();
-                    injector.push(MeliTask {
-                        task,
-                        id: job_id,
-                        desc,
-                        timer: false,
-                    })
-                },
-            )
-        };
-        handle.schedule();
-        for unparker in self.parkers.iter() {
-            unparker.unpark();
-        }
+                }
+                Err(payload) => {
+                    log::error!(
+                        "job {job_id} `{desc}` panicked: {}",
+                        panic_message(payload.as_ref())
+                    );
+                    jobs.lock().unwrap().entry(job_id).and_modify(|entry| {
+                        entry.succeeded = false;
+                    });
+                }
+            }
+            if let Ok(mut guard) = finished_task.0.lock() {
+                *guard = datetime::now();
+            }
+            let _ = finished_sender.send(ThreadEvent::JobFinished(job_id));
+        });
 
         JoinHandle {
-            task: Arc::new(Mutex::new(Some(task))),
+            abort: task.abort_handle(),
             cancel,
             finished,
             chan: receiver,
@@ -425,16 +339,16 @@ impl JobExecutor {
         F: Future<Output = R> + Send + 'static,
         R: Send + 'static,
     {
-        self.spawn_specialized(
-            desc,
-            smol::unblock(move || futures::executor::block_on(future)),
-        )
+        self.spawn_specialized(desc, async move {
+            tokio::task::spawn_blocking(move || futures::executor::block_on(future))
+                .await
+                .expect("blocking job worker panicked")
+        })
     }
 
     pub fn create_timer(self: Arc<Self>, interval: Duration, value: Duration) -> Timer {
         let timer = TimerPrivate {
             interval,
-            cancel: Arc::new(AtomicBool::new(false)),
             value,
             active: true,
             handle: None,
@@ -458,68 +372,50 @@ impl JobExecutor {
     }
 
     fn arm_timer(&self, id: TimerId, value: Duration) {
-        let job_id = JobId::new();
         let sender = self.sender.clone();
-        let injector = self.global_queue.clone();
         let timers = self.timers.clone();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (task, handle) = {
-            let cancel = cancel.clone();
-            async_task::spawn(
-                async move {
-                    let mut value = value;
-                    loop {
-                        smol::Timer::after(value).await;
-                        if sender
-                            .send(ThreadEvent::UIEvent(UIEvent::Timer(id)))
-                            .is_err()
-                        {
-                            break;
-                        }
-                        if let Some(interval) = timers.lock().unwrap().get(&id).and_then(|timer| {
-                            if timer.interval.as_millis() == 0 && timer.interval.as_secs() == 0 {
-                                None
-                            } else if timer.active {
-                                Some(timer.interval)
-                            } else {
-                                None
-                            }
-                        }) {
-                            value = interval;
-                        } else {
-                            break;
-                        }
+        let handle = self.runtime.handle().spawn(async move {
+            let mut value = value;
+            loop {
+                tokio::time::sleep(value).await;
+                if sender
+                    .send(ThreadEvent::UIEvent(UIEvent::Timer(id)))
+                    .is_err()
+                {
+                    break;
+                }
+                if let Some(interval) = timers.lock().unwrap().get(&id).and_then(|timer| {
+                    if timer.interval.as_millis() == 0 && timer.interval.as_secs() == 0 {
+                        None
+                    } else if timer.active {
+                        Some(timer.interval)
+                    } else {
+                        None
                     }
-                },
-                move |task| {
-                    if cancel.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    injector.push(MeliTask {
-                        task,
-                        id: job_id,
-                        desc: Cow::Borrowed("timer"),
-                        timer: true,
-                    })
-                },
-            )
-        };
+                }) {
+                    value = interval;
+                } else {
+                    break;
+                }
+            }
+        });
         self.timers.lock().unwrap().entry(id).and_modify(|timer| {
-            timer.handle = Some(handle);
-            timer.cancel = cancel;
+            // Abort a superseded arming so re-arming a periodic timer never
+            // leaves two tasks ticking for the same `TimerId`.
+            if let Some(old) = timer.handle.replace(handle.abort_handle()) {
+                old.abort();
+            }
             timer.active = true;
         });
-        task.schedule();
-        for unparker in self.parkers.iter() {
-            unparker.unpark();
-        }
     }
 
     fn disable_timer(&self, id: TimerId) {
         let mut timers_lck = self.timers.lock().unwrap();
         if let Some(timer) = timers_lck.get_mut(&id) {
             timer.active = false;
-            timer.cancel.store(true, Ordering::SeqCst);
+            if let Some(handle) = timer.handle.take() {
+                handle.abort();
+            }
         }
     }
 
@@ -548,7 +444,7 @@ pub type JobChannel<T> = oneshot::Receiver<T>;
 /// `JoinHandle` for the future that allows us to cancel the task.
 #[derive(Debug)]
 pub struct JoinHandle<T> {
-    pub task: Arc<Mutex<Option<async_task::Task<()>>>>,
+    abort: tokio::task::AbortHandle,
     pub chan: JobChannel<T>,
     pub cancel: Arc<AtomicBool>,
     finished: FinishedTimestamp,
@@ -558,6 +454,9 @@ pub struct JoinHandle<T> {
 impl<T> JoinHandle<T> {
     pub fn cancel(&self) -> Option<StatusEvent> {
         let was_active = self.cancel.swap(true, Ordering::SeqCst);
+        // Abort the runtime task at its next `.await` point (dropping the
+        // future and releasing its resources); repeated calls are no-ops.
+        self.abort.abort();
         if was_active {
             self.finished.set_finished(Some(datetime::now()));
             Some(StatusEvent::JobCanceled(self.job_id))
@@ -584,5 +483,144 @@ impl<T> std::cmp::PartialEq<JobId> for JoinHandle<T> {
 impl<T> Drop for JoinHandle<T> {
     fn drop(&mut self) {
         _ = self.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::future::pending;
+
+    use super::*;
+
+    /// Wait for the next `ThreadEvent` on the main-loop channel, mirroring
+    /// how the real event loop consumes job completions.
+    fn next_event(rx: &crossbeam::channel::Receiver<ThreadEvent>) -> Option<ThreadEvent> {
+        rx.recv_timeout(Duration::from_secs(5)).ok()
+    }
+
+    #[test]
+    fn test_spawn_async_job_completes() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = JobExecutor::new(sender);
+        let mut handle = executor.spawn(
+            Cow::Borrowed("async test job"),
+            async { 1 + 1 },
+            IsAsync::Async,
+        );
+        let job_id = handle.job_id;
+        assert!(
+            matches!(next_event(&receiver), Some(ThreadEvent::JobFinished(id)) if id == job_id),
+            "async job must report completion exactly once"
+        );
+        assert_eq!(handle.chan.try_recv().ok().flatten(), Some(2));
+        let jobs = executor.jobs.lock().unwrap();
+        let metadata = jobs.get(&job_id).expect("job metadata must exist");
+        assert_eq!(metadata.description(), "async test job");
+        assert!(metadata.finished().is_some());
+        assert!(metadata.succeeded());
+    }
+
+    #[test]
+    fn test_spawn_blocking_job_completes() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = JobExecutor::new(sender);
+        let mut handle = executor.spawn(
+            Cow::Borrowed("blocking test job"),
+            async {
+                std::thread::sleep(Duration::from_millis(10));
+                "done"
+            },
+            IsAsync::Blocking,
+        );
+        let job_id = handle.job_id;
+        assert!(
+            matches!(next_event(&receiver), Some(ThreadEvent::JobFinished(id)) if id == job_id),
+            "blocking job must report completion exactly once"
+        );
+        assert_eq!(handle.chan.try_recv().ok().flatten(), Some("done"));
+    }
+
+    #[test]
+    fn test_cancel_aborts_pending_job() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = JobExecutor::new(sender);
+        let handle = executor.spawn(
+            Cow::Borrowed("never-ending test job"),
+            async { pending::<i32>().await },
+            IsAsync::Async,
+        );
+        let job_id = handle.job_id;
+        // The first cancel stops the job; the `JobCanceled` status is only
+        // reported by a subsequent cancel (behavior kept from the previous
+        // executor).
+        assert!(handle.cancel().is_none());
+        assert!(handle.is_canceled());
+        assert!(matches!(
+            handle.cancel(),
+            Some(StatusEvent::JobCanceled(id)) if id == job_id
+        ));
+        drop(handle);
+        // The aborted job must never report completion.
+        receiver
+            .recv_timeout(Duration::from_millis(200))
+            .unwrap_err();
+    }
+
+    #[test]
+    fn test_panicking_job_is_isolated_and_reported() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = JobExecutor::new(sender);
+        let mut handle = executor.spawn(
+            Cow::Borrowed("panicking test job"),
+            async { panic!("boom") },
+            IsAsync::Async,
+        );
+        let job_id = handle.job_id;
+        assert!(
+            matches!(next_event(&receiver), Some(ThreadEvent::JobFinished(id)) if id == job_id),
+            "a panicking job must still be reported as finished"
+        );
+        handle.chan.try_recv().unwrap_err();
+        assert!(!executor.jobs.lock().unwrap()[&job_id].succeeded());
+    }
+
+    #[test]
+    fn test_timer_fires_and_can_be_disabled() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = Arc::new(JobExecutor::new(sender));
+        // Periodic timer: interval == value == 10ms.
+        let timer = executor.create_timer(Duration::from_millis(10), Duration::from_millis(10));
+        let timer_id = timer.id();
+        let is_timer_tick = |event: ThreadEvent| matches!(event, ThreadEvent::UIEvent(UIEvent::Timer(id)) if id == timer_id);
+        assert!(
+            next_event(&receiver).is_some_and(is_timer_tick),
+            "periodic timer must tick"
+        );
+        timer.disable();
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(200)).is_err(),
+            "disabled timer must not tick again"
+        );
+    }
+
+    #[test]
+    fn test_timer_rearm_does_not_duplicate() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = Arc::new(JobExecutor::new(sender));
+        // One-shot timer: zero interval fires once and stops.
+        let timer = executor.create_timer(Duration::ZERO, Duration::from_millis(30));
+        let timer_id = timer.id();
+        timer.rearm();
+        timer.rearm();
+        let mut ticks = 0;
+        while let Ok(event) = receiver.recv_timeout(Duration::from_millis(300)) {
+            if matches!(&event, ThreadEvent::UIEvent(UIEvent::Timer(id)) if *id == timer_id) {
+                ticks += 1;
+            }
+        }
+        assert_eq!(
+            ticks, 1,
+            "re-arming must replace the pending tick, not duplicate it"
+        );
     }
 }

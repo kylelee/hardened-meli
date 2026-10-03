@@ -252,11 +252,6 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
                 ))
                 .set_kind(ErrorKind::Configuration));
             };
-            std::thread::spawn(move || {
-                let ex = melib::smol::Executor::new();
-                futures::executor::block_on(ex.run(futures::future::pending::<()>()));
-            });
-
             let mut conn = futures::executor::block_on(
                 melib::smtp::SmtpConnection::new_connection(smtp_conf),
             )?;
@@ -300,11 +295,6 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
                 Default::default(),
                 melib::BackendEventConsumer::new(std::sync::Arc::new(|_, _| ())),
             )?;
-
-            std::thread::spawn(move || {
-                let ex = melib::smol::Executor::new();
-                futures::executor::block_on(ex.run(futures::future::pending::<()>()));
-            });
 
             let mut conn = melib::imap::ImapConnection::new_connection(
                 &imap.server_conf,
@@ -380,10 +370,6 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
                 } => {
                     let lore = PublicInboxHTTP::new(url.as_str())?;
                     let msg_id = MessageID::new(message_id);
-                    std::thread::spawn(move || {
-                        let ex = melib::smol::Executor::new();
-                        futures::executor::block_on(ex.run(futures::future::pending::<()>()));
-                    });
 
                     if thread {
                         use std::io::{BufWriter, Write};
