@@ -32,6 +32,10 @@
 //! First in-crate regression: MFSA-2005-11 (issue #13), the Thunderbird
 //! cookie-tracking advisory — [`mfsa_2005_11`] locks the sanitize →
 //! html2text pipeline's immunity against cookie-beacon mail.
+//! CVE-2005-2512 (issue #14) extends the corpus approach to the second
+//! renders Mail.app leaked on — [`cve_2005_2512`] proves reply-quote,
+//! pipe/print, forward and export paths never relax remote-content
+//! stripping.
 
 /// MFSA-2005-11 (Thunderbird 0.6–0.9 / Mozilla Suite 1.7–1.7.3)
 /// cookie-tracking regression (issue #13): an HTML-mail beacon corpus
@@ -42,3 +46,15 @@
 #[cfg(test)]
 #[path = "MFSA-2005-11.rs"]
 mod mfsa_2005_11;
+
+/// CVE-2005-2512 (Apple Mail.app ≤ 10.4.2) tracking-pixel regression
+/// (issue #14): Mail.app fetched remote images when printing or
+/// forwarding HTML mail, ignoring the "don't load remote images"
+/// preference. This corpus proves meli's equivalent surfaces immune:
+/// there is exactly one HTML display pipeline (sanitize → html2text,
+/// no fetcher), every second render (reply-quote, pipe/print, forward,
+/// export, nested .eml view) reuses or re-enters it with the same
+/// strength, and no operation type relaxes beacon stripping.
+#[cfg(test)]
+#[path = "CVE-2005-2512.rs"]
+mod cve_2005_2512;
