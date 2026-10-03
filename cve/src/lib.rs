@@ -1125,3 +1125,30 @@ mod cve_2007_3166;
 #[cfg(test)]
 #[path = "CVE-2007-2770.rs"]
 mod cve_2007_2770;
+
+/// CVE-2004-1944 (Qualcomm Eudora 6.1 / 6.0.3 for Windows, CVSS v2
+/// 5.0) nested-MIME denial-of-service regression (issue #51, table 2
+/// of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution):
+/// Paul Szabo's bugtraq PoC (BID 10137) crashed Eudora with a stack
+/// overflow at 580 levels of nested `multipart/mixed` (570 was fine)
+/// — a pure availability attack. [`cve_2004_1944`] locks meli's
+/// equivalent surface, the multipart recursion of
+/// `melib/src/email/attachments.rs`, with the verbatim generator at
+/// both advisory thresholds and far past them: the C4 builder cap
+/// keeps every spelling (bare-`\\n` verbatim, `CRLF` mirror,
+/// shared-boundary self-similar piles, alternating subtypes,
+/// thousands of levels) at a 100-level tree with the remaining
+/// subtree as one opaque leaf — and exposes one real gap of the same
+/// class, fixed with this regression: the reply path's recursive
+/// re-parse (`Attachment::decode_rec_helper`'s inline
+/// `message/rfc822` arm) recursed once per hop with no bound, each
+/// hop handing `AttachmentBuilder::new` a fresh multipart budget, so
+/// a mail nested ≈1700 `message/rfc822` levels deep (measured
+/// pre-fix, 2 MiB stack) aborted the process the moment a reply was
+/// drafted from it. The fix caps the hop recursion at
+/// `MAX_RFC822_DECODE_NESTING_DEPTH` (8, matching the display path's
+/// issue-#23 cap), regression-locked in
+/// `melib/src/email/attachments.rs` together with the corpus here.
+#[cfg(test)]
+#[path = "CVE-2004-1944.rs"]
+mod cve_2004_1944;
