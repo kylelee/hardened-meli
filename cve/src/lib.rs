@@ -1054,3 +1054,39 @@ mod cve_2003_0376;
 #[cfg(test)]
 #[path = "CVE-2003-0302.rs"]
 mod cve_2003_0302;
+
+/// CVE-2007-3166 (Qualcomm Eudora 7.1.0.9, no CVSS score assigned)
+/// IMAP FLAGS response buffer-overflow regression (issue #49,
+/// table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code
+/// execution): a malicious IMAP server answered with an over-long
+/// FLAGS response — a single flag atom past the client's fixed
+/// buffer, or an explosion of flag tokens — and the copy into the
+/// fixed-size buffer overflowed (CWE-120; user interaction
+/// required). [`cve_2007_3166`] maps the attack onto the
+/// issue-prescribed FLAGS 应答 face (`melib/src/imap/
+/// protocol_parser.rs`: the [`flags`] list parser, its FETCH /
+/// untagged / UID-FETCH-FLAGS / SELECT `* FLAGS (` and
+/// `PERMANENTFLAGS` carriers, and the `split_rn` framing below them
+/// all) and locks it layer by layer on the verbatim corpus — 单个
+/// flag 超长 (1 KiB era-scale, 1 MiB, one byte past
+/// `Connection::MAX_SERVER_RESPONSE_SIZE` — no fixed-size buffer
+/// exists at any length) and 数量爆炸 (1 024 / 65 536 / 524 288
+/// one-byte keywords, retained memory inside a documented 32×
+/// response-byte bound) — and exposes one real gap, fixed with this
+/// regression in `ImapLineIterator::next`: the literal-declaration
+/// probe re-ran `find(CRLF)` over the line tail once per failing
+/// `{` candidate, so a `{`-dense over-long FLAGS line framed in
+/// O(N²) before any parser ran (measured ≈8 s at 32 KiB debug; the
+/// transport cap admits 64 MiB lines) — one hostile response
+/// hanging the watch/select/read loops of every IMAP account
+/// (CWE-407, the availability twin of this CVE's overflow, the
+/// same class issue #24 closed in `phrase()`). The probe now walks
+/// the `{` candidates inside the already-found line — one pass —
+/// with the literal semantics (issue #27's saturating skip, the
+/// honest merges) unchanged, regression-locked in
+/// `melib/src/imap/protocol_parser/tests.rs::
+/// test_imap_line_iterator_brace_dense_line_is_linear` together
+/// with the corpus here.
+#[cfg(test)]
+#[path = "CVE-2007-3166.rs"]
+mod cve_2007_3166;
