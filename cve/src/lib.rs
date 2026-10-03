@@ -359,3 +359,30 @@ mod cve_2024_30103;
 #[cfg(test)]
 #[path = "CVE-2025-21361.rs"]
 mod cve_2025_21361;
+/// CVE-2025-47176 (Microsoft Office Outlook, M365 Apps for Enterprise
+/// / Office LTSC 2024, June 2025 Patch Tuesday) path-traversal RCE
+/// regression (issue #26, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution):
+/// `'.../...//' in Microsoft Office Outlook allows an authorized
+/// attacker to execute code locally` (CWE-35/CWE-22, CVSS 3.1 7.8).
+/// meli links no MAPI store and no Windows path normalization, so the
+/// equivalent surfaces are the issue-prescribed 「open mail parses
+/// it」 class (`melib/src/email/parser.rs` +
+/// `melib/src/email/attachments.rs`: malformed structure and extreme
+/// sizes must parse without panics, bounded, with deterministic
+/// errors) plus the advisory's own face: every path a mail-controlled
+/// identifier (attachment `filename`/`name`, raw `Message-ID`) can
+/// reach the filesystem. [`cve_2025_47176`] locks both, and exposes
+/// two real gaps, fixed with this regression: the whole-mail export
+/// sites (`save-attachment 0 <dir>` and `export-thread`) pushed the
+/// raw `Message-ID` into the export directory with no sanitization,
+/// so a mail with `Message-ID: ../evil` wrote outside the directory
+/// the user chose — and `sanitize_separator` stripped only the
+/// host's native separator, leaving the other spelling alive on the
+/// other platform family. The exports now run the header bytes
+/// through `sanitize_filename` (regression-locked in
+/// `meli/src/mail/view/tests.rs`), and the separator sanitizer
+/// strips both separators everywhere.
+#[cfg(test)]
+#[path = "CVE-2025-47176.rs"]
+mod cve_2025_47176;

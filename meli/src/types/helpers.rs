@@ -199,11 +199,20 @@ pub fn pipe() -> Result<(OwnedFd, OwnedFd)> {
     })
 }
 
-/// Remove system path separator from filename
+/// Remove path separators (`/` and `\`) from filename, replacing them
+/// with `_`.
+///
+/// Both separators are stripped on every platform, not only the native
+/// [`std::path::MAIN_SEPARATOR`]: a traversal spelling must not survive
+/// sanitization on any host, because the non-native separator is live on
+/// the other family (Windows path APIs accept `/`; backslash spellings
+/// still name SMB/ZIP-derived paths elsewhere) — the CWE-35 path
+/// traversal class of CVE-2025-47176 (`'.../...//'` in Microsoft
+/// Outlook).
 #[inline(always)]
 pub fn sanitize_separator(value: &mut Cow<'_, str>) {
-    if value.contains(std::path::MAIN_SEPARATOR) {
-        *value = Cow::Owned(value.replace(std::path::MAIN_SEPARATOR, "_"))
+    if value.contains('/') || value.contains('\\') {
+        *value = Cow::Owned(value.replace(['/', '\\'], "_"));
     };
 }
 
@@ -345,5 +354,38 @@ mod tests {
             filename,
             Cow::<'static, str>::Owned("-bang-s@example.com".to_string())
         );
+    }
+
+    /// CVE-2025-47176 regression (issue #26): the separator sanitizer must
+    /// strip both `/` and `\` on every platform, so that no spelling of
+    /// the path-traversal lexeme family survives into a `Path::push`:
+    /// the literal `'.../...//'` of the advisory, plain and backslash
+    /// `../..` variants, mixed spellings, absolute paths, UNC shares and
+    /// drive letters.
+    #[test]
+    fn test_file_sanitize_separator_path_traversal() {
+        for (raw, flat) in [
+            (".../...//evil.exe", "..._...__evil.exe"),
+            ("../..//evil.exe", ".._..__evil.exe"),
+            (r"..\..\evil.exe", ".._.._evil.exe"),
+            (r"..\/..//evil.exe", "..__..__evil.exe"),
+            ("/absolute/evil.exe", "_absolute_evil.exe"),
+            (r"\\attacker\share\evil.exe", "__attacker_share_evil.exe"),
+            (r"C:\Temp\evil.exe", "C:_Temp_evil.exe"),
+            ("plain.exe", "plain.exe"),
+        ] {
+            let mut value = Cow::Borrowed(raw);
+            sanitize_separator(&mut value);
+            assert_eq!(value, Cow::<'static, str>::Borrowed(flat), "raw {raw:?}");
+            let mut full = Cow::Borrowed(raw);
+            sanitize_filename(&mut full);
+            assert!(
+                !full.contains('/')
+                    && !full.contains('\\')
+                    && !full.contains('\0')
+                    && std::path::Path::new(full.as_ref()).components().count() == 1,
+                "sanitize_filename must leave a flat component, got {full:?} (raw {raw:?})"
+            );
+        }
     }
 }
