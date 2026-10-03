@@ -147,6 +147,7 @@ pub fn view(
     path: PathBuf,
     sender: Sender<ThreadEvent>,
     receiver: Receiver<ThreadEvent>,
+    job_executor: std::sync::Arc<crate::jobs::JobExecutor>,
 ) -> Result<State> {
     let path = path.expand();
     if !path.exists() {
@@ -181,7 +182,7 @@ pub fn view(
         );
         settings.accounts.insert("mbox".into(), ac.into());
 
-        let mut state = State::new(Some(settings), sender, receiver)?;
+        let mut state = State::new(Some(settings), sender, receiver, job_executor)?;
 
         let window = Box::new(Tabbed::new(
             vec![Box::new(listing::Listing::new(&mut state.context))],
@@ -198,6 +199,7 @@ pub fn view(
         Some(Settings::without_accounts().unwrap_or_default()),
         sender,
         receiver,
+        job_executor,
     )?;
     let main_loop_handler = state.context.main_loop_handler.clone();
 

@@ -114,6 +114,13 @@ impl InputHandler {
             .expect("Fatal: Could not dup() input pipe file descriptor");
         let tx = self.state_tx.clone();
         let resize_tx = self.state_tx.clone();
+        // A dedicated OS thread on purpose, not a task on the job
+        // executor's `tokio` runtime: the loop parks in `poll(2)` on the
+        // tty and the kill pipe (see `get_events`), must be restartable
+        // on panic, and must simply die with the process at exit. A
+        // `spawn_blocking` task would pin a blocking-pool thread forever
+        // and hold up `Runtime::drop`, which waits for running blocking
+        // tasks - an input wedge could then hang shutdown.
         thread::Builder::new()
             .name("input-thread".to_string())
             .spawn(move || loop {
@@ -492,7 +499,11 @@ impl State {
         settings: Option<Settings>,
         sender: Sender<ThreadEvent>,
         receiver: Receiver<ThreadEvent>,
+        job_executor: Arc<JobExecutor>,
     ) -> Result<Self> {
+        // `job_executor` is created once in `main.rs` before signal
+        // watching so the same runtime drives jobs, timers, heartbeats
+        // and signal delivery.
         // Create async channel to block the input-thread if we need to fork and stop it
         // from reading stdin, see get_events() for details
         let input_thread = unbounded();
@@ -522,7 +533,6 @@ impl State {
         })?;
         let (cols, rows) = (cols as usize, rows as usize);
 
-        let job_executor = Arc::new(JobExecutor::new(sender.clone()));
         let accounts = {
             settings
                 .accounts

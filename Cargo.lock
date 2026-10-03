@@ -1832,8 +1832,6 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "serde_test2",
- "signal-hook",
- "signal-hook-registry",
  "smallvec",
  "structopt",
  "syn 1.0.109",
@@ -3569,7 +3567,11 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "libc",
+ "mio",
  "pin-project-lite",
+ "signal-hook-registry",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

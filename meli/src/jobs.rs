@@ -36,6 +36,11 @@
 //!   runtime task: while armed ([`Pulse::arm`]) it emits
 //!   [`ThreadEvent::Pulse`] at a fixed cadence, and it idles - no thread, no
 //!   wakeups - until the next arm.
+//! - Signal watching ([`crate::signal_handlers::notify`]) runs on the same
+//!   runtime as infrastructure tasks
+//!   ([`JobExecutor::spawn_infrastructure`]): each watched signal is a task
+//!   parked on `tokio::signal`, woken by the runtime's signal driver - no
+//!   polling thread, no sleep loop.
 //!
 //! A panic inside a spawned job is isolated per task: it is caught with
 //! [`futures::FutureExt::catch_unwind`], logged, the job's metadata is marked
@@ -422,7 +427,7 @@ impl JobExecutor {
         let notify = Arc::new(tokio::sync::Notify::new());
         let task_notify = Arc::clone(&notify);
         let sender = self.sender.clone();
-        let handle = self.runtime.handle().spawn(async move {
+        let handle = self.spawn_infrastructure(async move {
             loop {
                 // Idle until armed: no parked OS thread, no periodic
                 // wakeup.
@@ -446,10 +451,33 @@ impl JobExecutor {
             }
         });
         Pulse {
-            abort: handle.abort_handle(),
+            abort: handle,
             notify,
             job_executor: self,
         }
+    }
+
+    /// Marks the calling thread as inside the runtime, so runtime-context
+    /// APIs (`tokio::signal::unix::signal`, `tokio::time::interval`, ...)
+    /// can be constructed synchronously. See
+    /// [`crate::signal_handlers::notify`].
+    pub fn enter(&self) -> tokio::runtime::EnterGuard<'_> {
+        self.runtime.enter()
+    }
+
+    /// Spawns a long-lived infrastructure task directly on the runtime.
+    ///
+    /// Unlike [`JobExecutor::spawn`], the task is not registered in the
+    /// job bookkeeping and never shows up in the jobs manager UI:
+    /// permanent machinery (signal watchers, the main-loop heartbeat)
+    /// must not pollute the job list. The task ends when its work
+    /// channels report the main loop is gone, or is dropped along with
+    /// the runtime at shutdown.
+    pub fn spawn_infrastructure<F>(&self, future: F) -> tokio::task::AbortHandle
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.runtime.handle().spawn(future).abort_handle()
     }
 
     pub fn rearm(&self, timer_id: TimerId) {
@@ -464,7 +492,7 @@ impl JobExecutor {
     fn arm_timer(&self, id: TimerId, value: Duration) {
         let sender = self.sender.clone();
         let timers = self.timers.clone();
-        let handle = self.runtime.handle().spawn(async move {
+        let handle = self.spawn_infrastructure(async move {
             let mut value = value;
             loop {
                 tokio::time::sleep(value).await;
@@ -492,7 +520,7 @@ impl JobExecutor {
         self.timers.lock().unwrap().entry(id).and_modify(|timer| {
             // Abort a superseded arming so re-arming a periodic timer never
             // leaves two tasks ticking for the same `TimerId`.
-            if let Some(old) = timer.handle.replace(handle.abort_handle()) {
+            if let Some(old) = timer.handle.replace(handle) {
                 old.abort();
             }
             timer.active = true;
