@@ -187,3 +187,29 @@ mod cve_2017_17688;
 #[cfg(test)]
 #[path = "CVE-2017-17689.rs"]
 mod cve_2017_17689;
+
+/// CVE-2026-0818 (Thunderbird < 147.0.1, ESR < 140.7.1; MFSA
+/// 2026-07/08) CSS-exfiltration regression (issue #20): an HTML+CSS
+/// mail wraps an inline OpenPGP block in a stylesheet of extraction
+/// oracles — attribute-prefix selectors, `@font-face`
+/// `unicode-range` font probes and a `@keyframes`/`steps()` timing
+/// probe — and a client that decrypts in place renders the decrypted
+/// content *inside the attacker document's CSS context*, leaking the
+/// secret one fetch (or one timed tick) per character. The corpus is
+/// a genuine gpg-encrypted inline-PGP mail (real cv25519 armor,
+/// CRC-24-verified in-test, decrypt-verified round-trip to the
+/// embedded plaintext) in both delivery forms — the advisory's
+/// `multipart/alternative` (armor mid-prose, never dispatching in
+/// meli) and the strongest dispatchable `multipart/mixed` (armor-only
+/// part, whose decrypt output re-enters as its own attachment) — and
+/// the regression locks the walls layer by layer: the wire carries no
+/// plaintext, the whole kit (`<style>`, `style=`, `<link>`, `<font>`,
+/// every marker) dies in `sanitize` in every embedding context, the
+/// decrypted view renders through its own `sanitize` with the secret
+/// delivered but zero probe references, and even the Thunderbird
+/// splice (outer kit document concatenated with decrypted HTML, both
+/// orders) sanitizes to an inert fixed point — meli's terminal-text
+/// pipeline has no CSS engine to inherit from at all.
+#[cfg(test)]
+#[path = "CVE-2026-0818.rs"]
+mod cve_2026_0818;
