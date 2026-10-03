@@ -60,6 +60,24 @@ fn is_rfc2045_token_byte(b: u8) -> bool {
 /// `application/octet-stream` leaf attachment.
 const MAX_MULTIPART_NESTING_DEPTH: usize = 100;
 
+/// Maximum number of nested inline `message/rfc822` hops the recursive
+/// decoder ([`Attachment::decode_rec`]) descends into.
+///
+/// `decode_rec_helper` used to recurse once per inline hop with no
+/// bound, and every hop re-enters [`AttachmentBuilder::new`] with a
+/// fresh [`MAX_MULTIPART_NESTING_DEPTH`] budget — so the C4 multipart
+/// cap never applied to a `message/rfc822` chain — and a mail nested
+/// roughly 1700 levels deep (measured, debug build, 2 MiB stack; the
+/// Eudora advisory's own trigger was 580) walked the stack pointer
+/// into its guard page and aborted the process the moment a reply was
+/// drafted from it (CWE-674; CVE-2004-1944, issue #51). 8 matches the
+/// display path's `MAX_RFC822_DISPLAY_NESTING_DEPTH` (issue #23): far
+/// above any legitimate forwarded chain, an order of magnitude under
+/// the overflow threshold; past it, the remaining subtree decodes to
+/// the inert `message/rfc822 attachment` marker instead of being
+/// walked.
+const MAX_RFC822_DECODE_NESTING_DEPTH: usize = 8;
+
 #[derive(Default)]
 /// Options for decoding an [`Attachment`].
 pub struct DecodeOptions<'att> {
@@ -1095,6 +1113,18 @@ impl Attachment {
     }
 
     fn decode_rec_helper(&self, options: &mut DecodeOptions<'_>) -> Vec<u8> {
+        self.decode_rec_helper_with_depth(options, 0)
+    }
+
+    /// [`Self::decode_rec_helper`] with `depth` being the number of
+    /// inline `message/rfc822` hops already decoded (bounded by
+    /// [`MAX_RFC822_DECODE_NESTING_DEPTH`]; `multipart/*` nesting does
+    /// not count — the attachment builder already bounds it).
+    fn decode_rec_helper_with_depth(
+        &self,
+        options: &mut DecodeOptions<'_>,
+        depth: usize,
+    ) -> Vec<u8> {
         match self.content_type {
             ContentType::Other { .. } => Vec::new(),
             ContentType::Text { .. } => self.decode_helper(options),
@@ -1108,9 +1138,18 @@ impl Attachment {
             ContentType::CMSSignature | ContentType::PGPSignature => Vec::new(),
             ContentType::MessageRfc822 => {
                 if self.content_disposition.kind.is_inline() {
-                    AttachmentBuilder::new(self.body())
-                        .build()
-                        .decode_rec_helper(options)
+                    if depth >= MAX_RFC822_DECODE_NESTING_DEPTH {
+                        tracing::debug!(
+                            "inline message/rfc822 nesting depth {} exceeded; decoding the \
+                             remaining subtree as an inert marker",
+                            MAX_RFC822_DECODE_NESTING_DEPTH
+                        );
+                        b"message/rfc822 attachment".to_vec()
+                    } else {
+                        AttachmentBuilder::new(self.body())
+                            .build()
+                            .decode_rec_helper_with_depth(options, depth + 1)
+                    }
                 } else {
                     b"message/rfc822 attachment".to_vec()
                 }
@@ -1134,7 +1173,7 @@ impl Attachment {
                 MultipartType::Signed => {
                     let mut vec = Vec::new();
                     for a in parts {
-                        vec.extend(a.decode_rec_helper(options));
+                        vec.extend(a.decode_rec_helper_with_depth(options, depth));
                     }
                     vec.extend(self.decode_helper(options));
                     vec
@@ -1143,7 +1182,7 @@ impl Attachment {
                     let mut vec = Vec::new();
                     for a in parts {
                         if a.content_type == "application/octet-stream" {
-                            vec.extend(a.decode_rec_helper(options));
+                            vec.extend(a.decode_rec_helper_with_depth(options, depth));
                         }
                     }
                     vec.extend(self.decode_helper(options));
@@ -1153,7 +1192,7 @@ impl Attachment {
                     let mut vec = Vec::new();
                     for a in parts {
                         if a.content_disposition.kind.is_inline() {
-                            vec.extend(a.decode_rec_helper(options));
+                            vec.extend(a.decode_rec_helper_with_depth(options, depth));
                         }
                     }
                     vec
@@ -1365,6 +1404,85 @@ Content-Disposition: inline
                 "attachment part with filename x.bin missing from the tree"
             );
         }
+    }
+
+    /// Nested inline `message/rfc822` mail `depth` levels deep: every
+    /// level's body is the next level's whole mail, and with no
+    /// `Content-Disposition` header the inline default takes the
+    /// recursive decode arm at every hop.
+    fn nested_inline_rfc822(depth: usize) -> Vec<u8> {
+        let mut m = String::from(
+            "From: a@b.example\r\nSubject: nest\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+             Content-Type: message/rfc822\r\n\r\n",
+        );
+        for _ in 0..depth {
+            m.push_str(
+                "From: a@b.example\r\nSubject: inner\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+                 Content-Type: message/rfc822\r\n\r\n",
+            );
+        }
+        m.push_str("From: a@b.example\r\nSubject: core\r\n\r\nhello");
+        m.into_bytes()
+    }
+
+    /// CVE-2004-1944 regression (issue #51): the reply path's recursive
+    /// decoder (`Attachment::decode_rec` -> `decode_rec_helper`) recursed
+    /// once per inline `message/rfc822` hop with no bound — and every
+    /// hop re-enters `AttachmentBuilder::new` with a fresh
+    /// [`MAX_MULTIPART_NESTING_DEPTH`] budget, so the C4 multipart cap
+    /// never applied — making a mail nested a few hundred levels deep
+    /// walk the stack pointer into its guard page and abort the process
+    /// the moment it was replied to (CWE-674; the deep-nesting class of
+    /// the Eudora advisory). The fix caps the hop recursion at
+    /// `MAX_RFC822_DECODE_NESTING_DEPTH`: 2000 levels must decode to
+    /// completion on the strictest stack a caller uses (2 MiB), with
+    /// exactly the subtree past the cap collapsing to the inert
+    /// `message/rfc822 attachment` marker.
+    #[test]
+    fn test_decode_rec_deep_inline_rfc822_nest_is_capped() {
+        const STACK: usize = 2 * 1024 * 1024;
+        let mail = nested_inline_rfc822(2_000);
+        let worker = std::thread::Builder::new()
+            .stack_size(STACK)
+            .spawn(move || {
+                AttachmentBuilder::new(&mail)
+                    .build()
+                    .decode_rec(Default::default())
+            })
+            .expect("spawn worker thread");
+        let decoded = worker.join().expect("no stack overflow or panic");
+        assert_eq!(
+            String::from_utf8_lossy(&decoded),
+            "message/rfc822 attachment",
+            "the subtree past the cap must decode to exactly the inert marker"
+        );
+    }
+
+    /// CVE-2004-1944 regression companion: legitimate forwarded chains
+    /// (a handful of hops) must still decode through to the core text
+    /// with no inert marker, and the cap boundary is exact —
+    /// `nested_inline_rfc822(d)` has `d + 1` `message/rfc822` levels,
+    /// all preserved while `d + 1 <= MAX_RFC822_DECODE_NESTING_DEPTH`,
+    /// with the first level past it collapsing to the marker.
+    #[test]
+    fn test_decode_rec_shallow_inline_rfc822_nest_decodes_fully() {
+        for depth in [1_usize, 3, 7] {
+            let mail = nested_inline_rfc822(depth);
+            let att = AttachmentBuilder::new(&mail).build();
+            let decoded = att.decode_rec(Default::default());
+            assert_eq!(
+                String::from_utf8_lossy(&decoded),
+                "hello",
+                "chain of {depth} hops must decode fully"
+            );
+        }
+        let mail = nested_inline_rfc822(MAX_RFC822_DECODE_NESTING_DEPTH);
+        let att = AttachmentBuilder::new(&mail).build();
+        assert_eq!(
+            String::from_utf8_lossy(&att.decode_rec(Default::default())),
+            "message/rfc822 attachment",
+            "the first level past the cap must collapse to the marker"
+        );
     }
 
     /// Regression: `Display for ContentTransferEncoding` used to `panic!` on
