@@ -1561,7 +1561,17 @@ impl ThreadView {
                                 )
                                 .into()
                             };
-                            crate::sanitize_separator(&mut filename);
+                            // The default name embeds the mail-controlled
+                            // Message-ID: sanitize it into one safe path
+                            // component (CVE-2024-43604 equivalent
+                            // surface).
+                            if !crate::sanitize_filename_component(&mut filename) {
+                                filename = format!(
+                                    "meli_export_{}.mbox",
+                                    melib::uuid::Uuid::new_v4().as_simple()
+                                )
+                                .into();
+                            }
                             path.push(filename.as_ref());
                         }
                         let mut file = BufWriter::new(

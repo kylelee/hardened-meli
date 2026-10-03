@@ -27,7 +27,7 @@ use super::{state::PendingReplyAction, MailView, MailViewTab, ThreadView, Thread
 use crate::{
     accounts::{MailboxEntry, MailboxStatus},
     command::{
-        actions::{Action, ComposeAction, ListingAction, TabAction, ViewAction},
+        actions::{Action, ComposeAction, FileAction, ListingAction, TabAction, ViewAction},
         MailingListAction,
     },
     components::{Component, ComponentId, ComponentPath},
@@ -1763,6 +1763,281 @@ fn save_all_attachments_solo_inline() {
     assert!(
         String::from_utf8_lossy(&content).contains("SOLO-fake"),
         "saved solo.png must contain the fixture body"
+    );
+}
+
+/// CVE-2024-43604 corpus (Outlook for Android local privilege escalation,
+/// mapped onto meli's attachment-save surface): a multipart/mixed mail
+/// whose every attachment filename carries a path element or hostile
+/// byte — a relative `../` chain aimed one level above the destination,
+/// an absolute path (which `PathBuf::push` treats as full replacement),
+/// an RFC 2047-encoded traversal (decoded verbatim by
+/// `Attachment::filename`), a Windows-style backslash chain, an
+/// RFC 2047-encoded ANSI control sequence, and the bare `..` special
+/// component. The `../../` chains are calibrated to land inside the
+/// test sandbox's root (exactly two levels up) so an escaping save is
+/// observable without touching the real filesystem outside `tempdir`.
+const TRAVERSAL_MULTIPART_BODY: &str = "MIME-Version: 1.0\r\n\
+     Content-Type: multipart/mixed; boundary=\"=_cve-43604\"\r\n\
+     \r\n\
+     --=_cve-43604\r\n\
+     Content-Type: application/octet-stream\r\n\
+     Content-Disposition: attachment; filename=\"../../pwned-relative.txt\"\r\n\
+     \r\n\
+     RELATIVE-fake\r\n\
+     --=_cve-43604\r\n\
+     Content-Type: application/octet-stream\r\n\
+     Content-Disposition: attachment; filename=\"/../../pwned-absolute.txt\"\r\n\
+     \r\n\
+     ABSOLUTE-fake\r\n\
+     --=_cve-43604\r\n\
+     Content-Type: application/octet-stream\r\n\
+     Content-Disposition: attachment; filename=\"=?UTF-8?Q?..=2F..=2Fpwned-rfc2047.txt?=\"\r\n\
+     \r\n\
+     RFC2047-fake\r\n\
+     --=_cve-43604\r\n\
+     Content-Type: application/octet-stream\r\n\
+     Content-Disposition: attachment; filename=\"..\\..\\pwned-backslash.txt\"\r\n\
+     \r\n\
+     BACKSLASH-fake\r\n\
+     --=_cve-43604\r\n\
+     Content-Type: application/octet-stream\r\n\
+     Content-Disposition: attachment; filename=\"=?UTF-8?Q?evil=1B=5B2Jpwned-control.txt?=\"\r\n\
+     \r\n\
+     CONTROL-fake\r\n\
+     --=_cve-43604\r\n\
+     Content-Type: application/octet-stream\r\n\
+     Content-Disposition: attachment; filename=\"..\"\r\n\
+     \r\n\
+     DOTDOT-fake\r\n\
+     --=_cve-43604--\r\n";
+
+/// Fire the `save-attachment <idx> <path>` view action at `view`, like
+/// the parsed user command would.
+fn trigger_save_attachment(
+    view: &mut EnvelopeView,
+    context: &mut Context,
+    idx: usize,
+    path: &Path,
+) {
+    let mut event = UIEvent::Action(Action::View(ViewAction::SaveAttachment(
+        idx,
+        FileAction::Path(path.display().to_string()),
+    )));
+    _ = view.process_event(&mut event, context);
+}
+
+/// Names directly inside `dir`.
+fn dir_entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("{} must be readable: {err}", dir.display()))
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Every name written by the save paths must be a single flat
+/// component: no separators, no control characters, no `.`/`..`.
+fn assert_flat_names(dir: &Path) -> Vec<String> {
+    let names = dir_entries(dir);
+    for name in &names {
+        assert!(!name.contains('/'), "escaped separator in {name:?}");
+        assert!(!name.contains('\\'), "escaped backslash in {name:?}");
+        assert!(
+            name.chars().all(|c| !c.is_control()),
+            "control character in {name:?}"
+        );
+        assert!(
+            !matches!(name.as_str(), "" | "." | ".."),
+            "special name {name:?}"
+        );
+    }
+    names
+}
+
+/// CVE-2024-43604 regression (single attachment save): saving each
+/// corpus attachment into an existing directory must land a flat,
+/// sanitized file inside it — never a `../` escape into the parent,
+/// never an absolute-path replacement of the destination, and the bare
+/// `..` filename must fall back to a generated name.
+#[test]
+fn save_attachment_directory_traversal_is_flattened() {
+    let mut ctx = mock_context();
+    let mut view = attachments_envelope_view(
+        &ctx,
+        "cve-43604-single",
+        "traversal-single@x.example",
+        TRAVERSAL_MULTIPART_BODY,
+    );
+
+    let tempdir = tempfile::tempdir().unwrap();
+    // Two levels deep: the corpus `../../` chains would land directly in
+    // the sandbox root if they ever escaped.
+    let dir = tempdir.path().join("d1").join("d2");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for idx in 1..=6 {
+        trigger_save_attachment(&mut view, &mut ctx, idx, &dir);
+    }
+
+    let names = assert_flat_names(&dir);
+    assert_eq!(
+        names.len(),
+        6,
+        "all six corpus attachments must land inside the directory: {names:?}"
+    );
+    // Each sanitized name keeps enough of its original to stay
+    // distinguishable, and the bare `..` fell back to a generated name.
+    let joined = names.join(" ");
+    assert!(
+        joined.contains("pwned-relative.txt") && joined.contains("pwned-absolute.txt"),
+        "sanitized names must stay recognizable: {names:?}"
+    );
+    assert!(
+        joined.contains("pwned-rfc2047.txt"),
+        "the RFC 2047-decoded traversal must be flattened: {names:?}"
+    );
+    assert!(
+        joined.contains("pwned-control.txt"),
+        "the ANSI control-character name must be cleaned: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("meli_attachment_")),
+        "the bare `..` filename must fall back to a generated name: {names:?}"
+    );
+    // No escape: the two parent levels and the sandbox root contain
+    // nothing but the chain of directories leading to `dir`.
+    assert_eq!(
+        dir_entries(&tempdir.path().join("d1")),
+        vec!["d2".to_string()],
+        "nothing may escape into d1"
+    );
+    assert_eq!(
+        dir_entries(tempdir.path()),
+        vec!["d1".to_string()],
+        "the calibrated `../../` chains must not land in the sandbox root"
+    );
+    // The right bytes landed: every marker is present exactly once
+    // across the saved files.
+    let mut markers = [
+        "RELATIVE-fake",
+        "ABSOLUTE-fake",
+        "RFC2047-fake",
+        "BACKSLASH-fake",
+        "CONTROL-fake",
+        "DOTDOT-fake",
+    ]
+    .iter()
+    .map(|m| (m.to_string(), 0))
+    .collect::<IndexMap<String, usize>>();
+    for name in &names {
+        let content = std::fs::read(dir.join(name)).unwrap();
+        let text = String::from_utf8_lossy(&content);
+        for (marker, count) in markers.iter_mut() {
+            if text.contains(marker.as_str()) {
+                *count += 1;
+            }
+        }
+    }
+    for (marker, count) in markers {
+        assert_eq!(count, 1, "marker {marker} must land in exactly one file");
+    }
+}
+
+/// CVE-2024-43604 regression (whole-message save): the `.eml` filename
+/// derived from the mail-controlled `Message-ID` used to reach
+/// `PathBuf::push` unsanitized, so `save-attachment 0 <dir>` on a mail
+/// with `Message-ID: <../../pwned-eml>` wrote outside the destination
+/// (and an absolute `Message-ID` replaced it outright). It must be
+/// sanitized into one flat component.
+#[test]
+fn save_attachment_eml_message_id_traversal_is_flattened() {
+    for hostile_msgid in [
+        "../../pwned-eml",
+        "/../../pwned-eml",
+        "..",
+        "evil=1B-control",
+    ] {
+        let mut ctx = mock_context();
+        let mut view = attachments_envelope_view(
+            &ctx,
+            "cve-43604-eml",
+            hostile_msgid,
+            "MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\neml \
+             body\r\n",
+        );
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let dir = tempdir.path().join("d1").join("d2");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        trigger_save_attachment(&mut view, &mut ctx, 0, &dir);
+
+        let names = assert_flat_names(&dir);
+        assert_eq!(
+            names.len(),
+            1,
+            "exactly one .eml file must land inside the directory: {names:?}"
+        );
+        let content = std::fs::read(dir.join(&names[0])).unwrap();
+        assert!(
+            String::from_utf8_lossy(&content).contains("eml body"),
+            "the whole mail must be saved"
+        );
+        assert_eq!(
+            dir_entries(&tempdir.path().join("d1")),
+            vec!["d2".to_string()],
+            "the Message-ID traversal must not escape d1"
+        );
+        assert_eq!(
+            dir_entries(tempdir.path()),
+            vec!["d1".to_string()],
+            "the Message-ID traversal must not reach the sandbox root"
+        );
+    }
+}
+
+/// CVE-2024-43604 regression (batch save): `save-all-attachments` on the
+/// corpus mail must write every part flat inside the fresh
+/// `meli-<subject>` directory — nothing in `Downloads` besides it,
+/// nothing in the sandbox root, no separators or control bytes in any
+/// name, and the bare `..` filename falls back to a generated one.
+#[test]
+fn save_all_attachments_traversal_stays_inside_directory() {
+    let mut ctx = mock_context();
+    let view = attachments_envelope_view(
+        &ctx,
+        "cve-43604-batch",
+        "traversal-batch@x.example",
+        TRAVERSAL_MULTIPART_BODY,
+    );
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let downloads = tempdir.path().join("Downloads");
+    view.save_all_attachments_to(&mut ctx, Some(&downloads));
+
+    assert_eq!(
+        dir_entries(&downloads),
+        vec!["meli-cve-43604-batch".to_string()],
+        "Downloads must contain exactly the fresh save directory"
+    );
+    let dir = downloads.join("meli-cve-43604-batch");
+    let names = assert_flat_names(&dir);
+    assert_eq!(
+        names.len(),
+        6,
+        "all six corpus parts must be saved flat: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("meli_attachment_")),
+        "the bare `..` filename must fall back to a generated name: {names:?}"
+    );
+    assert_eq!(
+        dir_entries(tempdir.path()),
+        vec!["Downloads".to_string()],
+        "no traversal may reach the sandbox root"
     );
 }
 
