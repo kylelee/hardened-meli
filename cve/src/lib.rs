@@ -321,3 +321,25 @@ mod cve_2024_21378;
 #[cfg(test)]
 #[path = "CVE-2024-30103.rs"]
 mod cve_2024_30103;
+
+/// CVE-2006-2386 (Microsoft Outlook Express ≤ 6, CVSS 2.0 6.8,
+/// MS06-076) address-book contact-record RCE regression (issue #29,
+/// table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code
+/// execution): a crafted contact record in a mail-distributed Windows
+/// Address Book (WAB) file executed code in Outlook Express'
+/// address book parser. meli links no WAB engine, so the equivalent
+/// surfaces the issue prescribes are meli's address book as a class:
+/// the vobject vCard parser (`melib/src/utils/vobject`), the
+/// production contacts load path (`vcard_folder` → `load_cards` →
+/// `CardDeserializer` → `Card`) and the mail-carriage layer that
+/// keeps `.vcf`/`.wab` attachments inert. [`cve_2006_2386`] locks
+/// malformed contact entries — overlong fields, deep structures,
+/// binary garbage — panic-free, bounded and deterministically
+/// rejected on all three, and exposes two real gaps fixed with this
+/// regression: one binary-garbage `.vcf` in the `vcard_folder` used
+/// to abort the whole address book load and blank every contact
+/// (CWE-754, now quarantined per file), and multi-card `.vcf` streams
+/// loaded only their first contact (RFC 6350 streams, now complete).
+#[cfg(test)]
+#[path = "CVE-2006-2386.rs"]
+mod cve_2006_2386;
