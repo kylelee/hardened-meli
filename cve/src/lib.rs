@@ -428,3 +428,35 @@ mod cve_2025_47176;
 #[cfg(test)]
 #[path = "CVE-2026-70329.rs"]
 mod cve_2026_70329;
+
+/// CVE-2006-1305 (Microsoft Outlook 2000/2002/2003, no CVSS score
+/// assigned) parsing-DoS regression (issue #30, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution family,
+/// DoS face): a remote attacker's malformed headers — an oversized
+/// `Subject` and a mass of `To`/`Cc` recipients — exhausted Outlook's
+/// memory and interrupted e-mail recovery (CWE-400). meli links none
+/// of Outlook's PST/MAPI machinery, so the equivalent surface is the
+/// issue-prescribed header path (`melib/src/email/headers.rs`, the
+/// `headers` module of `melib/src/email/parser.rs` and
+/// `Envelope::populate_headers`), and the invariant reads in meli's
+/// memory model as *no amplification*: the mail is already in memory
+/// when parsing starts, so a header can only exhaust memory by
+/// expanding past its encoded form, re-scanning earlier bytes per
+/// token, or compounding per-header work. [`cve_2006_1305`] locks
+/// that layer by layer — MB-level subjects (plain, folded,
+/// invalid-UTF-8 lossy, 32 768 valid encoded words, 1 MiB of
+/// unterminated `=?charset?encoding?` prefixes), ten-thousand-strong
+/// recipient storms (interleaved headers, one 10 000-address list,
+/// one 10 000-member group), a hundred-thousand custom-header storm,
+/// and the combined mail with its recovery pass (`Draft::new_reply`,
+/// the meli face of Outlook's interrupted e-mail recovery) — and the
+/// result is **immune, no gap found**: every layer parses linear in
+/// time and memory, the malformed-prefix subject degrades to a
+/// dropped subject instead of a stall, and the honest carrier proves
+/// the budgets come from linearity, not truncation. The corpus
+/// composes with #24 (CVE-2024-30103): the malformed-prefix subject
+/// re-locks that issue's `phrase()` rescan-cache fix at this CVE's
+/// own MB scale.
+#[cfg(test)]
+#[path = "CVE-2006-1305.rs"]
+mod cve_2006_1305;
