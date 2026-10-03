@@ -321,3 +321,45 @@ mod cve_2024_21378;
 #[cfg(test)]
 #[path = "CVE-2024-30103.rs"]
 mod cve_2024_30103;
+
+/// CVE-2026-70329 (Microsoft Outlook, Office 2019/2021/M365, CVSS
+/// 8.8) integer-overflow RCE regression (issue #27, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution):
+/// integer wraparound on an attacker-declared size delivered over
+/// the network vector corrupted Outlook memory and executed code
+/// (CWE-190). meli links no MAPI store and none of Outlook's
+/// Windows protocol machinery, so the equivalent surfaces the issue
+/// prescribes are every place meli computes a length from a
+/// *declared* size — IMAP literal declarations (`{4294967295}`) in
+/// `melib/src/imap/protocol_parser.rs`, the mbox `Content-Length`
+/// header in `melib/src/mbox/mod.rs`, and multipart boundary offset
+/// arithmetic in `melib/src/email/parser.rs` — and the invariant is
+/// checked semantics throughout: no wraparound, oversized
+/// declarations rejected or clamped, never trusted for a slice, a
+/// skip or an allocation. [`cve_2026_70329`] locks that layer by
+/// layer and exposes four real bugs across the declared-size
+/// surfaces, all fixed with this regression: the IMAP line splitter
+/// skipped literal continuation lines with unchecked `i += pos + 2
+/// + len` on the server-declared length — a
+/// `{18446744073709551615}` declaration overflowed it (CWE-190),
+/// panicking debug builds of every IMAP session and wrapping
+/// release builds past the buffer; the fix saturates the skip. The
+/// `mboxcl`/`mboxcl2` reader cut each message with
+/// `&input[..headers_end + bytes]` on the header-declared length —
+/// a near-`usize::MAX` declaration overflowed the addition and a
+/// merely-larger-than-the-file declaration indexed out of bounds
+/// directly (CWE-190/CWE-125): one crafted line crashed the reader;
+/// the fix computes the message end with `checked_add` and clamps
+/// it to what is actually present. And the same reader's
+/// `find_content_length` never worked at all: it handed
+/// `header_value` the slice starting at the field name — so the
+/// parsed "value" was the whole header line and every
+/// `usize::from_str` failed — and `headers_end` stripped the line
+/// terminator off a final `Content-Length` header, the position
+/// the built-in mboxcl2 writer always writes it to; both fixed, so
+/// the honest writer→reader round-trip passes for the first time.
+/// The IMAP literal parser itself and the boundary scanner's
+/// guarded bookkeeping are proven immune on the same corpus.
+#[cfg(test)]
+#[path = "CVE-2026-70329.rs"]
+mod cve_2026_70329;

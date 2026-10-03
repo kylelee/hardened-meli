@@ -1210,3 +1210,34 @@ fn test_imap_search_results_non_utf8_is_error() {
     assert!(rest.is_empty());
     assert_eq!(v, vec![1, 2, 3]);
 }
+
+#[test]
+fn test_imap_line_iterator_literal_skip_saturates() {
+    // CVE-2026-70329 (issue #27): the literal continuation skip used
+    // unchecked `i += pos + 2 + len` on the server-declared length, so
+    // a near-`usize::MAX` declaration overflowed the addition —
+    // panicking debug builds and wrapping release builds past the
+    // buffer (CWE-190). The skip must saturate: an oversized
+    // declaration waits for more bytes instead of wrapping.
+    let oversize = &b"* 1 FETCH (BODY[] {18446744073709551615}\r\n"[..];
+    let count = std::panic::catch_unwind(|| oversize.split_rn().count())
+        .expect("a usize::MAX literal declaration must not panic");
+    assert!(
+        count <= 1,
+        "no line past the declared literal may be fabricated"
+    );
+
+    let issue_sample = &b"* 1 FETCH (BODY[] {4294967295}\r\n"[..];
+    let count = std::panic::catch_unwind(|| issue_sample.split_rn().count())
+        .expect("the {4294967295} declaration must not panic");
+    assert_eq!(
+        count, 0,
+        "an oversized literal must wait for more bytes, not split lines"
+    );
+
+    // The honest literal continuation line still merges into one
+    // logical line, bytes verbatim.
+    let honest = &b"* 1 FETCH (BODY[] {3}\r\nabc)\r\n"[..];
+    let lines: Vec<&[u8]> = honest.split_rn().collect();
+    assert_eq!(lines, vec![honest]);
+}
