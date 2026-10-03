@@ -550,3 +550,30 @@ mod cve_2006_2386;
 #[cfg(test)]
 #[path = "CVE-2024-43604.rs"]
 mod cve_2024_43604;
+
+/// CVE-2006-6505 (Mozilla Thunderbird ≤ 1.5.0.8 / SeaMonkey ≤ 1.0.6,
+/// MFSA 2006-74, Critical) mail-header heap-overflow RCE regression
+/// (issue #34, table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// virus / code execution): processing an external message body
+/// whose overlong `Content-Type` header and overlong RFC 2047
+/// encoded-word headers overflowed a fixed heap buffer and ran
+/// attacker code. meli's RFC 2047 decoder is safe Rust, so
+/// [`cve_2006_6505`] locks the equivalent walls the issue
+/// prescribes on `melib/src/email/parser`: oversized encoded words
+/// (100 KiB–1 MiB B/Q words, charset-converting words, 20k-word
+/// chains) decode to output bounded by a small multiple of input in
+/// linear time (the CVE-2024-30103 `phrase()` linearity rework
+/// re-locked), malformed words (truncated, oversized charset tag,
+/// bad base64, bogus transfer encoding) degrade deterministically
+/// without panicking, the oversized `Content-Type` carrier parses
+/// with every parameter byte-identical (no cross-parameter
+/// corruption — the overflow's observable face), and the
+/// external-body URL stays inert text: the part is an opaque
+/// `Other` leaf whose `decode()` yields only the local body bytes —
+/// meli has no external-body fetcher (its only HTTP client is the
+/// user-configured JMAP backend; patch retrieval is an explicit
+/// user command). An immunity proof: no meli/melib gap was found
+/// on this surface.
+#[cfg(test)]
+#[path = "CVE-2006-6505.rs"]
+mod cve_2006_6505;
