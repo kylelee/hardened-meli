@@ -854,3 +854,31 @@ mod cve_2014_9116;
 #[cfg(test)]
 #[path = "CVE-1999-0940.rs"]
 mod cve_1999_0940;
+
+/// CVE-2023-4874 (mutt > 1.5.2, < 2.2.12, CVSS 4.3) NULL-pointer
+/// dereference DoS regression (issue #43, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): mutt
+/// crashed when *viewing* a specially crafted mail whose structural
+/// fields are missing (the drafting twin of the same advisory is
+/// CVE-2023-4875). meli's memory model has no NULL to dereference —
+/// a missing `From` is an empty `SmallVec`, a missing `Message-ID`
+/// an allocated-but-empty `MessageID`, a missing `Subject` an empty
+/// `Cow`, a missing `Date` the epoch timestamp — so
+/// [`cve_2023_4874`] locks the issue-prescribed corpus family (无
+/// Message-ID、无 From、空 body、无 Content-Type, down to the
+/// zero-byte mail and the void-value `From: `/`Message-ID: `
+/// spellings) as panic-free 「receive → parse → display」 with every
+/// gap degrading to its documented default (an absent or void
+/// Message-ID is synthesized from the envelope hash — the allocated
+/// identifier mutt's `NULL` pointer never had; the absent
+/// Content-Type degrades to the RFC 2045 `text/plain`). The full `EnvelopeView` rendering
+/// (constructor display build, `draw` at real and degenerate
+/// terminal sizes, sticky-header walk) is locked in
+/// `meli/src/mail/view/tests.rs`
+/// (`missing_structural_fields_mail_renders_degraded_in_envelope_view`)
+/// — the view constructors need a `MainLoopHandler` from a mock
+/// context, which this crate deliberately does not add as a
+/// test-only dependency (same split as CVE-2024-21378).
+#[cfg(test)]
+#[path = "CVE-2023-4874.rs"]
+mod cve_2023_4874;

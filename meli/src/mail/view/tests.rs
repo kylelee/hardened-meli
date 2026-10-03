@@ -2352,3 +2352,182 @@ fn save_whole_mail_to_dir_sanitizes_traversal_message_id() {
         "a success notification must report the save, got {replies:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CVE-2023-4874 (issue #43): viewing structurally-void mails
+// ---------------------------------------------------------------------------
+
+/// The CVE-2023-4874 corpus family — mutt > 1.5.2, < 2.2.12 crashed
+/// on a NULL-pointer dereference when *viewing* a crafted mail whose
+/// structural fields are missing. The family: 无 Message-ID、无
+/// From、空 body、无 Content-Type, alone and combined down to the
+/// zero-byte mail, plus the void-value spellings (`From: `,
+/// `Message-ID: ` headers that exist but carry no value). The
+/// envelope-level drives over the same family live in
+/// `cve/src/CVE-2023-4874.rs`; this module locks the view rendering
+/// itself.
+const STRUCTURAL_GAP_CORPUS: &[(&str, &[u8])] = &[
+    ("SEPARATOR_ONLY_CRLF", b"\r\n\r\n"),
+    ("SEPARATOR_ONLY_LF", b"\n\n"),
+    ("BODY_ONLY", b"no header block\r\nno separator\r\njust body bytes\r\n"),
+    // The issue's canonical attack shape: no From, no Message-ID, no
+    // Content-Type, empty body.
+    (
+        "MINIMAL_ATTACK",
+        b"To: victim@victim.example\r\n\
+Subject: crafted\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+\r\n",
+    ),
+    (
+        "EMPTY_BODY",
+        b"From: a@b.example\r\n\
+To: c@d.example\r\n\
+Subject: empty body\r\n\
+Message-ID: <empty-body@x.example>\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+\r\n",
+    ),
+    (
+        "NO_FROM",
+        b"To: c@d.example\r\n\
+Subject: no from\r\n\
+Message-ID: <no-from@x.example>\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+\r\n\
+body\r\n",
+    ),
+    (
+        "NO_MESSAGE_ID",
+        b"From: a@b.example\r\n\
+To: c@d.example\r\n\
+Subject: no message id\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+\r\n\
+body\r\n",
+    ),
+    (
+        "NO_CONTENT_TYPE",
+        b"From: a@b.example\r\n\
+To: c@d.example\r\n\
+Subject: legacy plain mail\r\n\
+Message-ID: <legacy-plain@x.example>\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+\r\n\
+plain body without any MIME metadata\r\n",
+    ),
+    (
+        "NO_DATE_NO_SUBJECT",
+        b"From: a@b.example\r\n\
+To: c@d.example\r\n\
+Message-ID: <no-date-no-subject@x.example>\r\n\
+\r\n\
+body\r\n",
+    ),
+    (
+        "EMPTY_FROM_VALUE",
+        b"From: \r\n\
+To: c@d.example\r\n\
+Subject: void sender\r\n\
+Message-ID: <void-from@x.example>\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+\r\n\
+body\r\n",
+    ),
+    (
+        "EMPTY_MESSAGE_ID_VALUE",
+        b"From: a@b.example\r\n\
+To: c@d.example\r\n\
+Subject: void message id\r\n\
+Message-ID: \r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+\r\n\
+body\r\n",
+    ),
+    (
+        "ALL_VOID_VALUES",
+        b"From: \r\n\
+To: \r\n\
+Subject: \r\n\
+Message-ID: \r\n\
+Date: \r\n\
+\r\n",
+    ),
+];
+
+/// CVE-2023-4874 regression (mutt `< 2.2.12` NULL dereference `DoS` when
+/// viewing a crafted mail): meli's `EnvelopeView` must render every
+/// structurally-void corpus mail degraded — the sticky header labels
+/// (Date/From/To/Subject/Message-ID) still paint over their void or
+/// synthesized values, and the body pager still paints — at real and
+/// degenerate terminal sizes and through the sticky-header walk,
+/// without panicking. In meli's memory model every structural gap is
+/// an allocated default (empty address slices, hash-synthesized
+/// Message-ID, epoch timestamp), so the mutt NULL-deref semantics
+/// have no pointer to dereference.
+#[test]
+fn missing_structural_fields_mail_renders_degraded_in_envelope_view() {
+    let mut ctx = mock_context();
+    let theme_default = crate::conf::value(&ctx, "theme_default");
+
+    let mut rendered = 0usize;
+    for (name, raw) in STRUCTURAL_GAP_CORPUS {
+        let Ok(mail) = Mail::new(raw.to_vec(), None) else {
+            // A clean typed rejection is the receive path's own safe
+            // degradation; the envelope-level drive over every corpus
+            // mail (rejections included) is locked in
+            // `cve/src/CVE-2023-4874.rs`.
+            continue;
+        };
+        rendered += 1;
+        let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+        _ = view.process_event(&mut UIEvent::Resize, &mut ctx);
+
+        // Real terminal size first: the header labels must paint —
+        // degraded display instead of the crash.
+        {
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            assert!(screen.resize(80, 24), "{name}: screen must resize");
+            let area = screen.area();
+            view.draw(screen.grid_mut(), area, &mut ctx);
+            let grid = screen.grid();
+            let text: String = (0..grid.rows())
+                .flat_map(|y| (0..grid.cols()).map(move |x| grid[(x, y)].ch()))
+                .collect();
+            for label in ["Date:", "From:", "To:", "Subject:", "Message-ID:"] {
+                assert!(
+                    text.contains(label),
+                    "{name}: the {label} header label must render degraded, not crash"
+                );
+            }
+        }
+
+        // The sticky-header walk and the pager scroll — every key
+        // redraw must stay panic-free.
+        for _ in 0..6 {
+            let _ = view.process_event(&mut UIEvent::Input(Key::Down), &mut ctx);
+            view.set_dirty(true);
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            assert!(screen.resize(80, 24));
+            let area = screen.area();
+            view.draw(screen.grid_mut(), area, &mut ctx);
+        }
+
+        // Degenerate terminal sizes: the pane shorter than the header
+        // block must degrade to a bounded render, not a crash.
+        for (cols, rows) in [(8usize, 4usize), (2, 1)] {
+            let mut screen = Screen::<Virtual>::new(theme_default);
+            assert!(screen.resize(cols, rows), "{name}: ({cols}x{rows}) must resize");
+            let area = screen.area();
+            view.draw(screen.grid_mut(), area, &mut ctx);
+        }
+    }
+    // The corpus must not silently go vacuous: every mail that
+    // parses (all entries but the separator-less BODY_ONLY, which
+    // the envelope rejects cleanly) must have rendered through the
+    // full view path.
+    assert!(
+        rendered >= 11,
+        "at least 11 corpus mails must render through the view path, got {rendered}"
+    );
+}
