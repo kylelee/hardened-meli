@@ -791,3 +791,39 @@ mod cve_2026_84639;
 #[cfg(test)]
 #[path = "CVE-2001-0473.rs"]
 mod cve_2001_0473;
+
+/// CVE-2014-9116 (mutt 1.5.23, CVSS v2 5.0) header-processing
+/// heap-overflow regression (issue #41, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): mutt's
+/// `write_one_header` mishandled newline characters at the beginning
+/// of a header, and 「a header with an empty body」 — the verbatim
+/// trigger is an mbox mail whose header section is `From:\n` followed
+/// by a bare-CR line — made `mutt_substrdup` receive a `begin` one
+/// past its `end` at write-out time; the wrapped `-1` became
+/// `SIZE_MAX`, and `memcpy` into the zero-size block overflowed the
+/// heap (crash/DoS). [`cve_2014_9116`] maps the attack onto meli's
+/// issue-prescribed equivalent surface — the 头区/正文边界 handling of
+/// `melib/src/email/parser` — drives it with the trigger families
+/// (the openwall PoC, 「空头」 empty-header-section mails in every
+/// separator spelling, empty-body headers, bare-CR lines, separator
+/// truncations) and locks the walls layer by layer, exposing two real
+/// gaps, both fixed with this regression in
+/// `melib/src/email/parser.rs`: `parser::mail`'s `many1` header list
+/// rejected RFC 5322-valid 「空头」 mails outright — and since the
+/// maildir receive path silently skips envelopes that fail
+/// `Envelope::from_bytes`, such mails were invisible (this CVE's
+/// availability face, one crash-proofed refusal away from mutt's
+/// 「开头换行符处理不当」); and `headers_raw` — the `mutt_substrdup`
+/// analogue — mis-cut both separator spellings: the CRLF form
+/// truncated the last header line's terminator so `HeaderIterator`
+/// dropped the header (an identical CRLF multipart mail lost its
+/// `has_attachments` listing indicator), both spellings leaked the
+/// empty line's bytes into the body, and the mixed spellings did not
+/// split at all. The exact PoC mail itself fails closed — meli's
+/// strict field-name grammar rejects its colon-less bare-CR line (the
+/// CVE-2026-84640-locked class), so no header list and no write-out
+/// exist to crash on — while every parseable corpus mail proves inert
+/// through receive, display list, reply composer and mbox export.
+#[cfg(test)]
+#[path = "CVE-2014-9116.rs"]
+mod cve_2014_9116;
