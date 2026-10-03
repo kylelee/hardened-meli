@@ -1209,3 +1209,36 @@ mod cve_1999_0427;
 #[cfg(test)]
 #[path = "CVE-2015-8708.rs"]
 mod cve_2015_8708;
+
+/// CVE-2015-8614 (Claws Mail < 3.13.1, no CVSS score assigned)
+/// Japanese character-set conversion stack-overflow regression
+/// (issue #52, table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// virus / code execution): a crafted e-mail drove Claws Mail's
+/// `codeconv.c` converters (three functions around the
+/// ISO-2022-JP / Shift_JIS / EUC-JP family) into multiple stack
+/// buffer overflows via malformed ISO-2022-JP escape sequences and
+/// half-cut Shift_JIS / EUC-JP multibyte sequences (CWE-121;
+/// CVE-2015-8708 later bypassed the incomplete fix). meli's whole
+/// conversion surface is one checked `encoding_rs` decoder call
+/// per charset behind `decode_charset`, so
+/// [`cve_2015_8614`] locks the issue-prescribed surfaces — body
+/// decode, RFC 2047 encoded-word headers, `melib/src/text` display
+/// layout — over the prescribed corpus (illegal escapes with
+/// exhaustive escape-final/byte/pair sweeps, half-cut multibyte
+/// families, MB-scale masses) as bounded, deterministic, U+FFFD-
+/// replacing conversion — and exposes one real gap, fixed with
+/// this regression: `Charset` had no Shift_JIS variant at all, so
+/// every alias of the family (`shift_jis`, `Shift-JIS`, `sjis`,
+/// `ms_kanji`, `windows-31j`, `cp932`, `x-sjis`, …) fell through
+/// to the lossy ASCII default and an honestly labeled Shift_JIS
+/// mail rendered as mojibake — the CVE-2015-8708 「variant bypass」
+/// face. The fix maps the whole family onto `encoding_rs`'s WHATWG
+/// Shift_JIS (Windows-31J) decoder in `melib/src/email/
+/// attachment_types.rs` + `parser.rs`'s `decode_charset` (and the
+/// mail view's force-charset selector), regression-locked in
+/// `melib/src/email/parser/tests.rs::
+/// test_charset_shift_jis_label_family_converts` together with the
+/// corpus here.
+#[cfg(test)]
+#[path = "CVE-2015-8614.rs"]
+mod cve_2015_8614;
