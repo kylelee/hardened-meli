@@ -758,3 +758,36 @@ mod cve_2026_84640;
 #[cfg(test)]
 #[path = "CVE-2026-84639.rs"]
 mod cve_2026_84639;
+
+/// CVE-2001-0473 (mutt < 1.2.5, no CVSS score assigned) IMAP
+/// format-string remote-code-execution regression (issue #40, table
+/// 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution):
+/// a malicious IMAP server answered commands with response text
+/// carrying printf format-string metacharacters, and mutt passed
+/// that text to a printf-style error reporter *as the format
+/// string* — `%s`/`%x` walked the stack, `%n` wrote attacker-chosen
+/// pointers into it, and arbitrary commands executed (CWE-134).
+/// [`cve_2001_0473`] maps the attack onto meli's
+/// issue-prescribed equivalent surface — `melib/src/imap` response
+/// text flowing into `melib/src/error` values, log records and
+/// display — and locks it layer by layer as an immunity proof:
+/// response text parses into `ResponseCode::Alert` byte-preserved
+/// (metacharacter inventory constant, `%%` never collapsed, width
+/// bombs never expanded, NUL/illegal-UTF-8 degraded only by the
+/// fixed lossy decoder, Dovecot timing-suffix strips keep the
+/// payload), and every downstream sink — the
+/// `From<ImapResponse>` error embedding, the `BackendEvent::Notice`
+/// and state.rs status format, the `imap_log!`/`tracing` log faces,
+/// the BYE 「Offline」 face and the `Error` display chain — carries
+/// the payload as a *value* argument of a compile-time literal
+/// template; display is proven idempotent (no hop secondarily
+/// formats), the `{`-family rides the framing as IMAP literal
+/// *declarations* (lengths, never formats) that degrade to the
+/// payload verbatim, untagged injections stay raw bytes, and the
+/// whole corpus flows panic-free and deterministically. In Rust the
+/// mutt primitive is inexpressible — no varargs, and
+/// `format!`/`write!`/`tracing` accept no runtime format template —
+/// so no gap exists to fix: no production code needed changing.
+#[cfg(test)]
+#[path = "CVE-2001-0473.rs"]
+mod cve_2001_0473;
