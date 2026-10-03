@@ -192,6 +192,11 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
     let pty = Arc::new(Mutex::new(embedded_pty));
     let pty_ = pty.clone();
 
+    // A dedicated OS thread on purpose, not a job-executor task: the loop
+    // blocks in `read(2)` on the pty frontend until the embedded child
+    // exits. On the runtime's blocking pool it would pin a pool thread and
+    // hold up `Runtime::drop`, which waits for running blocking tasks; as
+    // a detached thread it simply dies with the process.
     std::thread::Builder::new()
         .spawn(move || {
             let frontend_fd = frontend_fd.into_raw_fd();

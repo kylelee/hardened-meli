@@ -75,18 +75,24 @@ fn run_app(mut opt: Opt) -> Result<()> {
      * watches SIGWINCH in the input thread and reports `Event::Resize`. */
     let signals = &[
         /* Catch SIGCHLD for embedded applications status change */
-        signal_hook::consts::SIGCHLD,
+        libc::SIGCHLD,
     ];
 
-    let signal_recvr = signal_handlers::notify(signals, sender.clone())?;
+    // The executor's runtime is the process's async backbone. It is
+    // created before signal watching so signal delivery runs on it as
+    // infrastructure tasks (see `signal_handlers`), and is handed to the
+    // application state so jobs, timers, heartbeats and signals all share
+    // one runtime.
+    let job_executor = std::sync::Arc::new(jobs::JobExecutor::new(sender.clone()));
+    let signal_recvr = signal_handlers::notify(signals, sender.clone(), &job_executor)?;
 
     /* Create the application State. */
     let mut state;
 
     if let Some(SubCommand::View { path }) = view_subcmd {
-        state = subcommands::view(path, sender, receiver.clone())?;
+        state = subcommands::view(path, sender, receiver.clone(), job_executor)?;
     } else {
-        state = State::new(None, sender, receiver.clone())?;
+        state = State::new(None, sender, receiver.clone(), job_executor)?;
         let window = Box::new(Tabbed::new(
             vec![
                 Box::new(listing::Listing::new(&mut state.context)),
@@ -260,7 +266,7 @@ fn run_app(mut opt: Opt) -> Result<()> {
                 },
                 recv(signal_recvr) -> sig => {
                     match sig.unwrap() {
-                        signal_hook::consts::SIGCHLD => {
+                        libc::SIGCHLD => {
                             state.try_wait_on_children();
                             state.redraw();
 
