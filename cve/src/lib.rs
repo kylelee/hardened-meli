@@ -550,3 +550,37 @@ mod cve_2006_2386;
 #[cfg(test)]
 #[path = "CVE-2024-43604.rs"]
 mod cve_2024_43604;
+
+/// CVE-2026-14899 (Thunderbird < 153, ESR < 140.13; MFSA / OpenCVE,
+/// CVSS 7.5) MIME-header off-by-one regression (issue #35, table 2
+/// of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution):
+/// forwarding a mail with 「显示全部头」 enabled hit an off-by-one
+/// in MIME header parsing that read one byte past the end of the
+/// buffer, potentially crashing the client. meli links no
+/// Gecko/XPCOM MIME parser, so the equivalent surface the issue
+/// prescribes is the header parsing boundary itself —
+/// `melib/src/email/headers` plus the `headers` module of
+/// `melib/src/email/parser.rs` and their
+/// 「receive → parse → display → forward」 consumers — driven by the
+/// corpus family of header **name**, **value** and
+/// **folding-whitespace** lengths at parsing-boundary values ±1
+/// byte. [`cve_2026_14899`] locks that layer by layer — the corpus
+/// parses panic-free with byte-precise slices, the exact
+/// `(name, value, rest)` bytes of every canonical boundary shape
+/// are asserted, the CVE's trigger (header iteration with all
+/// headers shown + the forward/reply composers) is mapped immune —
+/// and exposes one real gap, fixed with this regression:
+/// `HeaderName::from_bytes` accepted the **empty** byte slice and
+/// returned an empty header name, the length-0 boundary one below
+/// the grammar's `field-name = 1*ftext` minimum of 1 (this CVE's
+/// own ±1 class): an empty name could become a `HeaderMap` key and
+/// a `": value"` malformed line through the composer's
+/// `Draft::set_header`. The fix rejects the empty input at
+/// `from_bytes` (every `TryFrom` spelling and serde route through
+/// it), regression-locked in
+/// `melib/src/email/headers/tests.rs::
+/// test_email_headers_names_empty_name_is_invalid` together with
+/// the corpus here.
+#[cfg(test)]
+#[path = "CVE-2026-14899.rs"]
+mod cve_2026_14899;
