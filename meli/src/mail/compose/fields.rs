@@ -150,15 +150,14 @@ pub(super) fn generic_address_validate_fn() -> Option<ValidateFn> {
 
 #[cfg(test)]
 mod tests {
-    use rusty_fork::rusty_fork_test;
-
     use super::*;
 
-    rusty_fork_test! {
-        #[test]
-        fn test_compose_address_complete() {
-            run_compose_address_complete();
-        }
+    /// No `tokio_test::block_on` wrapper here: `Context::new_mock` brings
+    /// its own multi-thread `tokio` runtime via `JobExecutor`, which must
+    /// not be created (and dropped) inside another runtime's context.
+    #[test]
+    fn test_compose_address_complete() {
+        run_compose_address_complete();
     }
 
     fn run_compose_address_complete() {

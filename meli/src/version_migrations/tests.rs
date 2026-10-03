@@ -21,8 +21,6 @@
 //
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 
-use rusty_fork::rusty_fork_test;
-
 use super::*;
 
 #[test]
@@ -134,211 +132,221 @@ fn test_calculate_migrations_unrecognized_version() {
     assert_eq!(ids(Some("0.10.5")), Vec::<&str>::new());
 }
 
-rusty_fork_test! {
 #[test]
 fn test_version_migrations_ignores_newer_version() {
-    const MAX: VersionIdentifier = VersionIdentifier {
-        string: "255.255.255",
-        major: u8::MAX,
-        minor: u8::MAX,
-        patch: u8::MAX,
-        pre: "",
-    };
-    let tempdir = tempfile::tempdir().unwrap();
-    for var in [
-        "MELI_CONFIG",
-        "HOME",
-        "XDG_CACHE_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CONFIG_DIRS",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_DIRS",
-        "XDG_DATA_HOME",
-    ] {
-        std::env::remove_var(var);
-    }
-    std::env::set_var("HOME", tempdir.path());
-    std::env::set_var("XDG_DATA_HOME", tempdir.path());
-    let version_file = version_file().unwrap();
-    std::fs::write(&version_file, MAX.as_str()).unwrap();
-    let config_path = tempdir.path().join("meli.toml");
-    std::fs::write(&config_path,
-br#"
-[accounts.imap]
-root_mailbox = "INBOX"
-format = "imap"
-send_mail = 'false'
-identity="username@example.com"
-server_username = "null"
-server_hostname = "example.com"
-server_password_command = "false"
-"#).unwrap();
-
-    {
-        let mut stdout = vec![];
-        let mut stdin = &b"y\n"[..];
-        let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
-        version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
-        let expected_output = format!("This version of meli, {latest}, appears to be older than the previously used one stored in the file {version_file}: {max_version}.\nCertain configuration options might not be compatible with this version, refer to release changelogs if you need to troubleshoot configuration options problems.\nUpdate .version file to make this warning go away? (CAUTION: current configuration and stored data might not be compatible with this version!!) [y/N] ", latest = LATEST.as_str(), version_file = version_file.display(), max_version = MAX.as_str());
-        assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
-        assert_eq!(stdin_buf_reader.buffer(), b"");
-        let updated_version =
-            std::fs::read_to_string(&version_file).unwrap();
-        assert_eq!(updated_version.trim(), LATEST.as_str());
-    }
-    {
-        use std::io::BufRead;
-
-        let mut stdout = vec![];
-        let mut stdin = &b"N\n"[..];
-        let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
-
-        version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
-        assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), "");
-        assert_eq!(stdin_buf_reader.fill_buf().unwrap(), b"N\n");
-    }
-    {
+    let _env = crate::utilities::tests::env_lock();
+    tokio_test::block_on(async {
+        const MAX: VersionIdentifier = VersionIdentifier {
+            string: "255.255.255",
+            major: u8::MAX,
+            minor: u8::MAX,
+            patch: u8::MAX,
+            pre: "",
+        };
+        let tempdir = tempfile::tempdir().unwrap();
+        for var in [
+            "MELI_CONFIG",
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_DIRS",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_DIRS",
+            "XDG_DATA_HOME",
+        ] {
+            std::env::remove_var(var);
+        }
+        std::env::set_var("HOME", tempdir.path());
+        std::env::set_var("XDG_DATA_HOME", tempdir.path());
+        let version_file = version_file().unwrap();
         std::fs::write(&version_file, MAX.as_str()).unwrap();
-        let mut stdout = vec![];
-        let mut stdin = &b"n\n"[..];
-        let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
-        version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
-        let expected_output = format!("This version of meli, {latest}, appears to be older than the previously used one stored in the file {version_file}: {max_version}.\nCertain configuration options might not be compatible with this version, refer to release changelogs if you need to troubleshoot configuration options problems.\nUpdate .version file to make this warning go away? (CAUTION: current configuration and stored data might not be compatible with this version!!) [y/N] ", latest = LATEST.as_str(), version_file = version_file.display(), max_version = MAX.as_str());
-        assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
-        assert_eq!(stdin_buf_reader.buffer(), b"");
-        let stored_version =
-            std::fs::read_to_string(&version_file).unwrap();
-        assert_eq!(stored_version.trim(), MAX.as_str());
-    }
-}
+        let config_path = tempdir.path().join("meli.toml");
+        std::fs::write(
+            &config_path,
+            br#"
+    [accounts.imap]
+    root_mailbox = "INBOX"
+    format = "imap"
+    send_mail = 'false'
+    identity="username@example.com"
+    server_username = "null"
+    server_hostname = "example.com"
+    server_password_command = "false"
+    "#,
+        )
+        .unwrap();
+
+        {
+            let mut stdout = vec![];
+            let mut stdin = &b"y\n"[..];
+            let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
+            version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
+            let expected_output = format!("This version of meli, {latest}, appears to be older than the previously used one stored in the file {version_file}: {max_version}.\nCertain configuration options might not be compatible with this version, refer to release changelogs if you need to troubleshoot configuration options problems.\nUpdate .version file to make this warning go away? (CAUTION: current configuration and stored data might not be compatible with this version!!) [y/N] ", latest = LATEST.as_str(), version_file = version_file.display(), max_version = MAX.as_str());
+            assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
+            assert_eq!(stdin_buf_reader.buffer(), b"");
+            let updated_version = std::fs::read_to_string(&version_file).unwrap();
+            assert_eq!(updated_version.trim(), LATEST.as_str());
+        }
+        {
+            use std::io::BufRead;
+
+            let mut stdout = vec![];
+            let mut stdin = &b"N\n"[..];
+            let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
+
+            version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
+            assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), "");
+            assert_eq!(stdin_buf_reader.fill_buf().unwrap(), b"N\n");
+        }
+        {
+            std::fs::write(&version_file, MAX.as_str()).unwrap();
+            let mut stdout = vec![];
+            let mut stdin = &b"n\n"[..];
+            let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
+            version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
+            let expected_output = format!("This version of meli, {latest}, appears to be older than the previously used one stored in the file {version_file}: {max_version}.\nCertain configuration options might not be compatible with this version, refer to release changelogs if you need to troubleshoot configuration options problems.\nUpdate .version file to make this warning go away? (CAUTION: current configuration and stored data might not be compatible with this version!!) [y/N] ", latest = LATEST.as_str(), version_file = version_file.display(), max_version = MAX.as_str());
+            assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
+            assert_eq!(stdin_buf_reader.buffer(), b"");
+            let stored_version = std::fs::read_to_string(&version_file).unwrap();
+            assert_eq!(stored_version.trim(), MAX.as_str());
+        }
+    });
 }
 
-rusty_fork_test! {
 #[test]
 fn test_version_migrations_ignores_unrecognized_version() {
-    let tempdir = tempfile::tempdir().unwrap();
-    for var in [
-        "MELI_CONFIG",
-        "HOME",
-        "XDG_CACHE_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CONFIG_DIRS",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_DIRS",
-        "XDG_DATA_HOME",
-    ] {
-        std::env::remove_var(var);
-    }
-    std::env::set_var("HOME", tempdir.path());
-    std::env::set_var("XDG_DATA_HOME", tempdir.path());
-    let version_file = version_file().unwrap();
-    std::fs::write(&version_file, "meli-git").unwrap();
-    let config_path = tempdir.path().join("meli.toml");
-    std::fs::write(&config_path,
-br#"
-[accounts.imap]
-root_mailbox = "INBOX"
-format = "imap"
-send_mail = 'false'
-identity="username@example.com"
-server_username = "null"
-server_hostname = "example.com"
-"#).unwrap();
+    let _env = crate::utilities::tests::env_lock();
+    tokio_test::block_on(async {
+        let tempdir = tempfile::tempdir().unwrap();
+        for var in [
+            "MELI_CONFIG",
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_DIRS",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_DIRS",
+            "XDG_DATA_HOME",
+        ] {
+            std::env::remove_var(var);
+        }
+        std::env::set_var("HOME", tempdir.path());
+        std::env::set_var("XDG_DATA_HOME", tempdir.path());
+        let version_file = version_file().unwrap();
+        std::fs::write(&version_file, "meli-git").unwrap();
+        let config_path = tempdir.path().join("meli.toml");
+        std::fs::write(
+            &config_path,
+            br#"
+    [accounts.imap]
+    root_mailbox = "INBOX"
+    format = "imap"
+    send_mail = 'false'
+    identity="username@example.com"
+    server_username = "null"
+    server_hostname = "example.com"
+    "#,
+        )
+        .unwrap();
 
-    // No `addressbook` data file exists, and the config has no
-    // `server_password_command` (so v0.10.0's migration is not applicable
-    // either): the unrecognized value must self-heal without any
-    // interactive question.
-    let mut stdout = vec![];
-    let mut stdin = &b""[..];
-    let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
-    version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
-    let expected_output = format!(
-        "warning: version file {} contains an unrecognized value {:?}; treating it as predating \
-         {} and checking for applicable migrations\n",
-        version_file.display(),
-        "meli-git",
-        LATEST.as_str()
-    );
-    assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
-    // No interactive question was asked.
-    assert_eq!(stdin_buf_reader.buffer(), b"");
-    // The unrecognized value was replaced with the current version.
-    let updated_version = std::fs::read_to_string(&version_file).unwrap();
-    assert_eq!(updated_version.trim(), LATEST.as_str());
-}
+        // No `addressbook` data file exists, and the config has no
+        // `server_password_command` (so v0.10.0's migration is not applicable
+        // either): the unrecognized value must self-heal without any
+        // interactive question.
+        let mut stdout = vec![];
+        let mut stdin = &b""[..];
+        let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
+        version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
+        let expected_output = format!(
+            "warning: version file {} contains an unrecognized value {:?}; treating it as predating \
+             {} and checking for applicable migrations\n",
+            version_file.display(),
+            "meli-git",
+            LATEST.as_str()
+        );
+        assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
+        // No interactive question was asked.
+        assert_eq!(stdin_buf_reader.buffer(), b"");
+        // The unrecognized value was replaced with the current version.
+        let updated_version = std::fs::read_to_string(&version_file).unwrap();
+        assert_eq!(updated_version.trim(), LATEST.as_str());
+    });
 }
 
-rusty_fork_test! {
 #[test]
 fn test_version_migrations_unrecognized_version_performs_migrations() {
-    let tempdir = tempfile::tempdir().unwrap();
-    for var in [
-        "MELI_CONFIG",
-        "HOME",
-        "XDG_CACHE_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CONFIG_DIRS",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_DIRS",
-        "XDG_DATA_HOME",
-    ] {
-        std::env::remove_var(var);
-    }
-    std::env::set_var("HOME", tempdir.path());
-    std::env::set_var("XDG_DATA_HOME", tempdir.path());
-    let version_file = version_file().unwrap();
-    std::fs::write(&version_file, "meli-git").unwrap();
-    let config_path = tempdir.path().join("meli.toml");
-    std::fs::write(&config_path,
-br#"
-[accounts.imap]
-root_mailbox = "INBOX"
-format = "imap"
-send_mail = 'false'
-identity="username@example.com"
-server_username = "null"
-server_hostname = "example.com"
-server_password_command = "false"
-"#).unwrap();
-    // An `addressbook` data file exists, so the v0.8.8 AddressbookRename
-    // migration is applicable. (The v0.10.0 ServerPasswordCommand
-    // migration also applies because the test config contains
-    // `server_password_command`, but `is_applicable` returns false when
-    // stdin is empty / no work was attempted — actually it returns true,
-    // so we provide decline inputs for both migrations.)
-    let addressbook = tempdir.path().join("meli").join("imap").join("addressbook");
-    std::fs::create_dir_all(addressbook.parent().unwrap()).unwrap();
-    std::fs::write(&addressbook, "addressbook contents\n").unwrap();
+    let _env = crate::utilities::tests::env_lock();
+    tokio_test::block_on(async {
+        let tempdir = tempfile::tempdir().unwrap();
+        for var in [
+            "MELI_CONFIG",
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_DIRS",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_DIRS",
+            "XDG_DATA_HOME",
+        ] {
+            std::env::remove_var(var);
+        }
+        std::env::set_var("HOME", tempdir.path());
+        std::env::set_var("XDG_DATA_HOME", tempdir.path());
+        let version_file = version_file().unwrap();
+        std::fs::write(&version_file, "meli-git").unwrap();
+        let config_path = tempdir.path().join("meli.toml");
+        std::fs::write(
+            &config_path,
+            br#"
+    [accounts.imap]
+    root_mailbox = "INBOX"
+    format = "imap"
+    send_mail = 'false'
+    identity="username@example.com"
+    server_username = "null"
+    server_hostname = "example.com"
+    server_password_command = "false"
+    "#,
+        )
+        .unwrap();
+        // An `addressbook` data file exists, so the v0.8.8 AddressbookRename
+        // migration is applicable. (The v0.10.0 ServerPasswordCommand
+        // migration also applies because the test config contains
+        // `server_password_command`, but `is_applicable` returns false when
+        // stdin is empty / no work was attempted — actually it returns true,
+        // so we provide decline inputs for both migrations.)
+        let addressbook = tempdir.path().join("meli").join("imap").join("addressbook");
+        std::fs::create_dir_all(addressbook.parent().unwrap()).unwrap();
+        std::fs::write(&addressbook, "addressbook contents\n").unwrap();
 
-    let mut stdout = vec![];
-    // Decline performing both migrations, then accept updating the
-    // `.version` file anyway.
-    let mut stdin = &b"n\ny\n"[..];
-    let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
-    version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
-    let expected_output = format!(
-        "warning: version file {vf} contains an unrecognized value {prev:?}; treating it as \
-         predating {latest} and checking for applicable migrations\nYou might need to migrate \
-         your configuration data for the new version to work.\nYou can skip any changes you \
-         don't want to happen and you can quit at any time.\n2 migrations are about to be \
-         performed:\nv0.8.8/AddressbookRename: {desc}\nv0.10.0/ServerPasswordCommand: \
-         Transform `server_password_command` to new syntax: `server_password = {{ command = \"...\" }}`\nPerform 2 migrations? [Y/n] Update \
-         .version file despite not attempting migrations? [y/N] ",
-        vf = version_file.display(),
-        prev = "meli-git",
-        latest = LATEST.as_str(),
-        desc = "The storage file for contacts, stored in the application's data folder, was \
-                renamed from `addressbook` to `contacts` to better reflect its purpose."
-    );
-    assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
-    assert_eq!(stdin_buf_reader.buffer(), b"");
-    // The addressbook file was not touched since the migration was declined.
-    assert_eq!(
-        std::fs::read_to_string(&addressbook).unwrap(),
-        "addressbook contents\n"
-    );
-    let updated_version = std::fs::read_to_string(&version_file).unwrap();
-    assert_eq!(updated_version.trim(), LATEST.as_str());
-}
+        let mut stdout = vec![];
+        // Decline performing both migrations, then accept updating the
+        // `.version` file anyway.
+        let mut stdin = &b"n\ny\n"[..];
+        let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
+        version_setup(&config_path, &mut stdout, &mut stdin_buf_reader).unwrap();
+        let expected_output = format!(
+            "warning: version file {vf} contains an unrecognized value {prev:?}; treating it as \
+             predating {latest} and checking for applicable migrations\nYou might need to migrate \
+             your configuration data for the new version to work.\nYou can skip any changes you \
+             don't want to happen and you can quit at any time.\n2 migrations are about to be \
+             performed:\nv0.8.8/AddressbookRename: {desc}\nv0.10.0/ServerPasswordCommand: \
+             Transform `server_password_command` to new syntax: `server_password = {{ command = \"...\" }}`\nPerform 2 migrations? [Y/n] Update \
+             .version file despite not attempting migrations? [y/N] ",
+            vf = version_file.display(),
+            prev = "meli-git",
+            latest = LATEST.as_str(),
+            desc = "The storage file for contacts, stored in the application's data folder, was \
+                    renamed from `addressbook` to `contacts` to better reflect its purpose."
+        );
+        assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
+        assert_eq!(stdin_buf_reader.buffer(), b"");
+        // The addressbook file was not touched since the migration was declined.
+        assert_eq!(
+            std::fs::read_to_string(&addressbook).unwrap(),
+            "addressbook contents\n"
+        );
+        let updated_version = std::fs::read_to_string(&version_file).unwrap();
+        assert_eq!(updated_version.trim(), LATEST.as_str());
+    });
 }

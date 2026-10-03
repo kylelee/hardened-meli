@@ -352,15 +352,14 @@ fn drop_right_whitespace(mut vec: Vec<u8>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use rusty_fork::rusty_fork_test;
-
     use super::*;
 
-    rusty_fork_test! {
-        #[test]
-        fn test_xdg_various_mimes() {
+    #[test]
+    fn test_xdg_various_mimes() {
+        let _env = crate::utils::tests::env_lock();
+        tokio_test::block_on(async {
             run_various_mimes();
-        }
+        });
     }
 
     fn run_various_mimes() {

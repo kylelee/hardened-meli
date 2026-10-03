@@ -4869,6 +4869,7 @@ mod listing_menu_tests {
     fn shared_test_home() -> &'static tempfile::TempDir {
         static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
         HOME.get_or_init(|| {
+            let _env = crate::utilities::tests::env_lock_shared();
             let tempdir = tempfile::tempdir().unwrap();
             std::env::set_var("HOME", tempdir.path());
             std::env::set_var("XDG_CONFIG_HOME", tempdir.path().join(".config"));

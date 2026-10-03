@@ -105,6 +105,6 @@ syn = { version = "1", features = [] }
 [dev-dependencies]
 flate2 = { workspace = true }
 regex = { workspace = true }
-rusty-fork = { workspace = true }
 serde_test2 = { workspace = true }
 tempfile = { workspace = true }
+tokio-test = { workspace = true }

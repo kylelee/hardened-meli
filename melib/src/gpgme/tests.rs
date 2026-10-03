@@ -22,8 +22,6 @@
 
 use std::{borrow::Cow, ffi::CString, future::Future};
 
-use rusty_fork::rusty_fork_test;
-
 use crate::{
     gpgme::{Context, EngineInfo, Key, LocateKey, Protocol},
     Address, Result,
@@ -33,12 +31,15 @@ const PUBKEY: &[u8] = b"-----BEGIN PGP PUBLIC KEY BLOCK-----\r\nVersion: GnuPG v
 
 const PRIVKEY: &[u8] = b"-----BEGIN PGP PRIVATE KEY BLOCK-----\r\nVersion: GnuPG v2.1.0-gitb3c71eb (GNU/Linux)\r\n\r\nlQHpBDo41NoRBADSfQazKGYf8nokq6zUKH/6INtV6MypSzSGmX2XErnARkIIPPYj\r\ncQRQ8zCbGV7ZU2ezVbzhFLUSJveE8PZUzzCrLp1O2NSyBTRcR5HVSXW95nJfY8eV\r\npOvZRAKul0BVLh81kYTsrfzaaCjh9VWNP26LoeN2r+PjZyktXe7gM3C4SwCgoTxK\r\nWUVi9HoT2HCLY7p7oig5hEcEALdCJal0UYomX3nJapIVLVZg3vkidr1RICYMb2vz\r\n58i17h8sxEtobD1vdIKNejulntaRAXs4n0tDYD9z7pRlwG1CLz1R9WxYzeOOqUDr\r\nfnVXdmU8L/oVWABat8v1V7QQhjMMf+41fuzVwDMMGqjVPLhu4X6wp3A8uyM3YDnQ\r\nVMN1A/4n2G5gHoOvjqxn8Ch5tBAdMGfO8gH4RjQOwzm2R1wPQss/yzUN1+tlMZGX\r\nK2dQ2FCWC/hDUSNaEQRlI15wxxBNZ2RQwlzE2A8v113DpvyzOtv0QO95gJ1teCXC\r\n7j/BN9asgHaBBc39JLO/TcpuI7Hf8PQ5VcP2F0UE3lczGhXbLP4HAwL0A7A1a/jY\r\n6s5JxysLUpKA31U2SrKxePmkmzYSuAiValUVdfkmLRrLSwmNJSy5NcrBHGimja1O\r\nfUUmPTg465j1+vD/tERKb2UgUmFuZG9tIEhhY2tlciAodGVzdCBrZXkgd2l0aCBw\r\nYXNzcGhyYXNlICJhYmMiKSA8am9lQGV4YW1wbGUuY29tPohiBBMRAgAiBQJNt1ep\r\nAhsjBgsJCAcDAgYVCAIJCgsEFgIDAQIeAQIXgAAKCRCvgiRPnNn9VRwIAJ9C9I+L\r\n//3+AG/xJWsro7gOLIP6MACfcsSd8XXiPoyPCWpdOqiXZWBCfXKdAWAEOjjU3RAE\r\nAJ50lvtCGbnQlI97VX6tJkosdPmdzeXaTWfv//A2wmSANbYnuychGMa1LN43Ew+H\r\n6FXMWJ3MB/exs6UBFCgGsw88qmcla2bosQN/aVLA7fqXT9ujqoNGaIVEmgdbK1Mk\r\nSPFXBFyVW3hteod83D0UqFlltwp4A3ageCYFVJTp50d3AAMFA/44YCQQbg9x9Jvz\r\nHX3VH7CRX+raEDkDL3Pbz0PHas7bwI7gzZ+GFyNKaCvrHQOyuR8RIKIbjtQYnXr1\r\n675ConCTceIXhysY32sTn5V6UFUW2t0xaRfas8sZBbLDyIJkpt4fyD+6OaRoui9K\r\nZqXMNwt7i/XFIto/sWd/OK3SIgZkAf4HAwIoimqPHVJZM85dNw6JtvLKFvvmkm3X\r\nuoCUG5nU6cgk6vetUYiykuKpU4zG3mDtdZdIZf76hJJ6lZTSHH9frLy7bRYPfu/k\r\nU1AFd1T1OxENiEYEGBECAAYFAjo41N0ACgkQr4IkT5zZ/VVUmgCffq49ZSEJ0Zdt\r\nIvEaJth8G3t63vUAn0mBZ5GVMNMihdg3wn6qw83RgLG2iEYEGBECAAYFAjo41N4A\r\nCgkQr4IkT5zZ/VXuIgCfRaxjJRUe7Phln9bHE3nsq7YSqz0An0qXP2KbO9mhSO4T\r\n38iGvTLnq1We\r\n=m0YJ\r\n-----END PGP PRIVATE KEY BLOCK-----\r\n";
 
-rusty_fork_test! {
+/// Test that listing keys with gpgme works.
 #[test]
-    /// Test that listing keys with gpgme works.
-    fn test_gpgme_keylist() {
+fn test_gpgme_keylist() {
+    // Rewrites GNUPGHOME/GPG_AGENT_INFO: serialize against the other
+    // environment-rewriting tests.
+    let _env = crate::utils::tests::env_lock();
+    tokio_test::block_on(async {
         run_gpgme_keylist();
-    }
+    });
 }
 
 fn run_gpgme_keylist() {
