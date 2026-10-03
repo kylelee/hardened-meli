@@ -2546,6 +2546,55 @@ text/html; less; needsterminal;
         assert!(err.to_string().contains("%x"), "{err}");
     }
 
+    /// `%s` temp files take their name hint from the mail-controlled
+    /// attachment filename (through `nametemplate`); the landing path
+    /// must be one sanitized component — no traversal into or out of
+    /// the temp root, no control characters (CVE-2024-43604 equivalent
+    /// surface; full regression corpus in `cve/src/CVE-2024-43604.rs`).
+    #[test]
+    fn expand_args_s_temp_file_name_is_sanitized() {
+        let attachment = test_attachment(
+            "",
+            ContentType::Other {
+                name: Some("../../../etc/cron.d/pwn".to_string()),
+                tag: b"application/octet-stream".to_vec(),
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let (needs_stdin, expanded) =
+            expand_args("cmd %s", None, &mut temporary_files, &attachment).unwrap();
+        assert!(!needs_stdin, "%s must switch the handler to file mode");
+        assert!(
+            expanded.starts_with("cmd '"),
+            "quoted path expected: {expanded}"
+        );
+        let [file] = temporary_files.as_slice() else {
+            panic!("exactly one temp file expected");
+        };
+        let path = file.path();
+        assert!(
+            path.starts_with(std::env::temp_dir().join("meli")),
+            "temp file must land under the meli temp root, got {}",
+            path.display()
+        );
+        let name = path.file_name().unwrap().to_str().unwrap();
+        // With every separator gone the name is one flat component: the
+        // `..` fragments it may still contain are inert filename bytes,
+        // not parent-directory references.
+        assert!(!name.contains('/'), "separator survived: {name:?}");
+        assert!(!name.contains('\\'), "backslash survived: {name:?}");
+        assert!(
+            name.chars().all(|c| !c.is_control()),
+            "control character survived: {name:?}"
+        );
+        assert!(
+            !name.starts_with('.') || name.chars().any(|c| c != '.'),
+            "the name must not be all dots: {name:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
     /// A `nametemplate` ending in `%s` must not panic and must keep the whole
     /// template around the substituted name.
     #[test]

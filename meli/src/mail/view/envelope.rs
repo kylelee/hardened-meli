@@ -768,15 +768,15 @@ impl EnvelopeView {
 
         if let Some(u) = self.open_attachment(a_i, context) {
             if path.is_dir() {
-                if let Some(mut filename) = u.filename() {
-                    crate::sanitize_separator(&mut filename);
-                    path.push(filename.as_ref());
-                } else {
-                    path.push(format!(
-                        "meli_attachment_{a_i}_{}",
-                        Uuid::new_v4().as_simple()
-                    ));
+                // The filename is mail-controlled: sanitize it into one
+                // safe path component (CVE-2024-43604 equivalent surface,
+                // regression in `mail/view/tests.rs`).
+                let mut filename = u.filename().unwrap_or_default();
+                if !crate::sanitize_filename_component(&mut filename) {
+                    filename =
+                        format!("meli_attachment_{a_i}_{}", Uuid::new_v4().as_simple()).into();
                 }
+                path.push(filename.as_ref());
             }
             if path.is_relative() {
                 path = context.current_dir().join(&path);
@@ -803,14 +803,11 @@ impl EnvelopeView {
         } else if a_i == 0 {
             // Save entire message as eml
             if path.is_dir() {
-                // The `Message-ID` is attacker-controlled header bytes
-                // (kept verbatim when they do not parse as
-                // `<id-left@id-right>`); pushing them unsanitized
-                // traversed out of the target directory — the CWE-35
-                // face of CVE-2025-47176.
-                let mut filename = self.mail.message_id().to_string().into();
-                crate::sanitize_filename(&mut filename);
-                path.push(format!("{filename}.eml",));
+                // The Message-ID is mail-controlled: sanitize it into one
+                // safe path component so a hostile identifier cannot
+                // traverse out of the directory or replace it with an
+                // absolute path (CVE-2024-43604 equivalent surface).
+                path.push(crate::eml_filename(self.mail.message_id().as_str()));
             }
             if path.is_relative() {
                 path = context.current_dir().join(&path);
@@ -918,13 +915,13 @@ impl EnvelopeView {
                         .as_deref()
                         .map(std::borrow::Cow::from)
                 })
-                .map(|mut f| {
-                    crate::sanitize_separator(&mut f);
-                    f
-                })
-                .unwrap_or_else(|| {
-                    format!("meli_attachment_{idx}_{}", Uuid::new_v4().as_simple()).into()
-                });
+                .unwrap_or_default();
+            // The filename is mail-controlled: sanitize it into one safe
+            // path component (CVE-2024-43604 equivalent surface,
+            // regression in `mail/view/tests.rs`).
+            if !crate::sanitize_filename_component(&mut filename) {
+                filename = format!("meli_attachment_{idx}_{}", Uuid::new_v4().as_simple()).into();
+            }
             if !used_names.insert(filename.to_string()) {
                 let duplicate = filename.to_string();
                 let (stem, dot_ext) = duplicate
