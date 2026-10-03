@@ -20,11 +20,7 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::{
-    collections::BTreeSet,
-    convert::TryFrom,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, convert::TryFrom, sync::Arc};
 
 use futures::lock::Mutex as FutureMutex;
 use serde::Serialize;

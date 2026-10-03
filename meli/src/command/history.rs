@@ -34,13 +34,7 @@ thread_local!(static CMD_HISTORY_FILE: Arc<Mutex<Option<std::fs::File>>> = Arc::
 /// path, or a poisoned lock must never abort the process, so failures are
 /// logged and reported as `None`.
 fn open_history_file() -> Option<std::fs::File> {
-    let data_dir = match xdg::BaseDirectories::with_prefix("meli") {
-        Ok(d) => d,
-        Err(err) => {
-            tracing::error!("Could not locate data directory for command history: {err}");
-            return None;
-        }
-    };
+    let data_dir = xdg::BaseDirectories::with_prefix("meli");
     let path = match data_dir.place_data_file("cmd_history") {
         Ok(p) => p,
         Err(err) => {

@@ -24,4 +24,4 @@ meli = { path = "../meli" }
 melib = { path = "../melib" }
 predicates = { version = "3" }
 tempfile = { workspace = true }
-tokio-test = { version = "0.4" }
+tokio-test = { workspace = true }

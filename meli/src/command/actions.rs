@@ -50,8 +50,14 @@ pub enum ListingAction {
     SetThreaded,
     SetCompact,
     SetConversations,
-    Search { term: String, raw_search: bool },
-    Select { term: String, raw_search: bool },
+    Search {
+        term: String,
+        raw_search: bool,
+    },
+    Select {
+        term: String,
+        raw_search: bool,
+    },
     SetSeen,
     SetUnseen,
     SendToTrash,

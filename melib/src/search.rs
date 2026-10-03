@@ -311,7 +311,7 @@ pub mod query_parser {
             pair(
                 suffix(
                     whitespace_wrap(move |input| {
-                        is_not(b",").parse(input).and_then(|(last_input, _)| {
+                        is_not(&b","[..]).parse(input).and_then(|(last_input, _)| {
                             {
                                 |s| {
                                     <HeaderName as std::str::FromStr>::from_str(s)

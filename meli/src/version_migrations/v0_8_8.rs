@@ -80,9 +80,7 @@ impl Migration for AddressbookRename {
         };
         let mut any = false;
         for account in settings.accounts.keys() {
-            let Ok(data_dir) = xdg::BaseDirectories::with_profile("meli", account) else {
-                return Some(false);
-            };
+            let data_dir = xdg::BaseDirectories::with_profile("meli", account);
             if let Ok(addressbook) = data_dir.place_data_file("addressbook") {
                 any |= addressbook.try_exists().unwrap_or(false);
             }
@@ -98,7 +96,7 @@ impl Migration for AddressbookRename {
                 .chain_err_summary(|| "No files were renamed.")?;
         }
         for account in settings.accounts.keys() {
-            let data_dir = xdg::BaseDirectories::with_profile("meli", account)?;
+            let data_dir = xdg::BaseDirectories::with_profile("meli", account);
             if let (Ok(addressbook), Ok(contacts)) = (
                 data_dir.place_data_file("addressbook"),
                 data_dir.place_data_file("contacts"),
@@ -146,7 +144,7 @@ impl Migration for AddressbookRename {
                 .chain_err_summary(|| "No files were renamed.")?;
         }
         for account in settings.accounts.keys() {
-            let data_dir = xdg::BaseDirectories::with_profile("meli", account)?;
+            let data_dir = xdg::BaseDirectories::with_profile("meli", account);
             if let (Ok(addressbook), Ok(contacts)) = (
                 data_dir.place_data_file("addressbook"),
                 data_dir.place_data_file("contacts"),

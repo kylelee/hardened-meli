@@ -464,10 +464,10 @@ impl Context {
             };
         }
         let Some(ptr) = NonNull::new(key) else {
-            return Err(Error::new(format!(
-                "libgpgme: No key found with key id {fingerprint}."
-            ))
-            .set_kind(ErrorKind::NotFound));
+            return Err(
+                Error::new(format!("libgpgme: No key found with key id {fingerprint}."))
+                    .set_kind(ErrorKind::NotFound),
+            );
         };
         let key = Key::new(KeyInner { ptr }, self.inner.lib.clone());
 
@@ -900,22 +900,14 @@ impl crate::email::pgp::PGPBackend for Context {
         self.get_auto_key_locate()
     }
 
-    fn get_key(
-        &self,
-        secret: bool,
-        pattern: String,
-    ) -> ResultFuture<crate::email::pgp::Key> {
+    fn get_key(&self, secret: bool, pattern: String) -> ResultFuture<crate::email::pgp::Key> {
         let ctx = self.clone();
         Ok(Box::pin(async move {
             Ok(ctx.get_key(secret, &pattern)?.into())
         }))
     }
 
-    fn verify(
-        &mut self,
-        signature: &[u8],
-        text: &[u8],
-    ) -> ResultFuture<SignaturesMetadata> {
+    fn verify(&mut self, signature: &[u8], text: &[u8]) -> ResultFuture<SignaturesMetadata> {
         let signature = self.new_data_mem(signature)?;
         let text = self.new_data_mem(text)?;
         let fut = self.verify(signature, text)?;
@@ -961,7 +953,11 @@ impl crate::email::pgp::PGPBackend for Context {
         }))
     }
 
-    fn encrypt(&mut self, encrypt_keys: Vec<crate::email::pgp::Key>, plain: &[u8]) -> ResultFuture<Vec<u8>> {
+    fn encrypt(
+        &mut self,
+        encrypt_keys: Vec<crate::email::pgp::Key>,
+        plain: &[u8],
+    ) -> ResultFuture<Vec<u8>> {
         let plain = self.new_data_mem(plain)?;
         let mut ctx = self.clone();
         Ok(Box::pin(async move {
@@ -973,10 +969,7 @@ impl crate::email::pgp::PGPBackend for Context {
         }))
     }
 
-    fn decrypt(
-        &mut self,
-        cipher: &[u8],
-    ) -> ResultFuture<(DecryptionMetadata, Vec<u8>)> {
+    fn decrypt(&mut self, cipher: &[u8]) -> ResultFuture<(DecryptionMetadata, Vec<u8>)> {
         let cipher = self.new_data_mem(cipher)?;
         let fut = self.decrypt(cipher)?;
         Ok(Box::pin(fut))

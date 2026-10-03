@@ -23,6 +23,7 @@
 use nom::{
     bytes::complete::{is_not, tag},
     combinator::opt,
+    Parser,
 };
 
 use super::*;
@@ -99,28 +100,28 @@ pub fn over_article(input: &str) -> IResult<&str, (UID, Envelope)> {
     // Parse the article number as a non-empty run of digits, so that a
     // non-numeric or overflowing field yields a parse error instead of a panic
     // when it is converted below.
-    let (input, num) = is_not("\t")(input)?;
+    let (input, num) = is_not("\t").parse(input)?;
     if !num.bytes().all(|b| b.is_ascii_digit()) {
         return Err(nom::Err::Error(
             (input, "over_article(): invalid article number").into(),
         ));
     }
-    let (input, _) = tag("\t")(input)?;
-    let (input, subject) = opt(is_not("\t"))(input)?;
-    let (input, _) = tag("\t")(input)?;
-    let (input, from) = opt(is_not("\t"))(input)?;
-    let (input, _) = tag("\t")(input)?;
-    let (input, date) = opt(is_not("\t"))(input)?;
-    let (input, _) = tag("\t")(input)?;
-    let (input, message_id) = opt(is_not("\t"))(input)?;
-    let (input, _) = tag("\t")(input)?;
-    let (input, references) = opt(is_not("\t"))(input)?;
-    let (input, _) = tag("\t")(input)?;
-    let (input, _bytes) = opt(is_not("\t"))(input)?;
-    let (input, _) = tag("\t")(input)?;
-    let (input, _lines) = opt(is_not("\t\r\n"))(input)?;
-    let (input, _other_headers) = opt(is_not("\r\n"))(input)?;
-    let (input, _) = tag("\r\n")(input)?;
+    let (input, _) = tag("\t").parse(input)?;
+    let (input, subject) = opt(is_not("\t")).parse(input)?;
+    let (input, _) = tag("\t").parse(input)?;
+    let (input, from) = opt(is_not("\t")).parse(input)?;
+    let (input, _) = tag("\t").parse(input)?;
+    let (input, date) = opt(is_not("\t")).parse(input)?;
+    let (input, _) = tag("\t").parse(input)?;
+    let (input, message_id) = opt(is_not("\t")).parse(input)?;
+    let (input, _) = tag("\t").parse(input)?;
+    let (input, references) = opt(is_not("\t")).parse(input)?;
+    let (input, _) = tag("\t").parse(input)?;
+    let (input, _bytes) = opt(is_not("\t")).parse(input)?;
+    let (input, _) = tag("\t").parse(input)?;
+    let (input, _lines) = opt(is_not("\t\r\n")).parse(input)?;
+    let (input, _other_headers) = opt(is_not("\r\n")).parse(input)?;
+    let (input, _) = tag("\r\n").parse(input)?;
     Ok((
         input,
         ({

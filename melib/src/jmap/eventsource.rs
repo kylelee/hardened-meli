@@ -226,13 +226,19 @@ impl EventSourceConnection {
                 let mut request = Request::get(self.url.as_str())
                     .header(http::header::ACCEPT, "text/event-stream")
                     .header(http::header::CACHE_CONTROL, "no-cache")
-                    .ssl_options(if self.server_conf.danger_accept_invalid_certs {
-                        isahc::config::SslOption::DANGER_ACCEPT_INVALID_CERTS
-                            | isahc::config::SslOption::DANGER_ACCEPT_INVALID_HOSTS
-                            | isahc::config::SslOption::DANGER_ACCEPT_REVOKED_CERTS
-                    } else {
-                        isahc::config::SslOption::NONE
-                    })
+                    .tls_config(
+                        isahc::tls::TlsConfig::builder()
+                            .danger_accept_invalid_certs(
+                                self.server_conf.danger_accept_invalid_certs,
+                            )
+                            .danger_accept_invalid_hosts(
+                                self.server_conf.danger_accept_invalid_certs,
+                            )
+                            .danger_accept_revoked_certs(
+                                self.server_conf.danger_accept_invalid_certs,
+                            )
+                            .build(),
+                    )
                     // The fork follows redirects manually and refuses
                     // cross-origin ones, so the SSE request must not let isahc
                     // re-send credentials to an arbitrary redirect target.

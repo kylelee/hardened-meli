@@ -238,10 +238,8 @@ impl NntpStream {
                     // Resolve Secret right before use; keep plaintext out of
                     // any error/trace path.
                     let password_value = server_conf.server_password.value()?;
-                    ret.send_command(
-                        format!("AUTHINFO PASS {password_value}").as_bytes(),
-                    )
-                    .await?;
+                    ret.send_command(format!("AUTHINFO PASS {password_value}").as_bytes())
+                        .await?;
                     ret.read_response(&mut res, false, command_to_replycodes("AUTHINFO PASS"))
                         .await
                         .chain_err_summary(|| format!("Authentication state error: {res}"))

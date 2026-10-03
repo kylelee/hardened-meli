@@ -1312,7 +1312,7 @@ fn embedded_themes() -> &'static IndexMap<String, Theme> {
     static THEMES: std::sync::LazyLock<IndexMap<String, Theme>> = std::sync::LazyLock::new(|| {
         let mut themes = IndexMap::new();
         for text in EMBEDDED_THEME_FILES {
-            let value: toml::Value = text
+            let value: toml::Table = text
                 .parse()
                 .unwrap_or_else(|err| panic!("embedded theme file is invalid TOML: {err}"));
             let table = value

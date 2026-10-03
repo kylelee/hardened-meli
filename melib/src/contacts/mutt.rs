@@ -52,7 +52,7 @@ use crate::utils::parsec::{is_not, map_res, match_literal_anycase, prefix, Parse
 pub fn parse_mutt_contact<'a>() -> impl Parser<'a, Card> {
     move |input| {
         map_res(
-            prefix(match_literal_anycase("alias "), is_not(b"\r\n")),
+            prefix(match_literal_anycase("alias "), is_not(&b"\r\n"[..])),
             |l| {
                 let mut tokens = l.split_whitespace().collect::<VecDeque<&str>>();
 

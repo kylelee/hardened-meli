@@ -269,13 +269,11 @@ impl MailcapEntry<'static> {
         let mut file_candidates = vec![];
         let find_xdg_dir_meli = || {
             xdg::BaseDirectories::with_prefix("meli")
-                .ok()?
                 .place_config_file("mailcap")
                 .ok()
         };
         let find_xdg_dir = || {
             xdg::BaseDirectories::new()
-                .ok()?
                 .place_config_file("mailcap")
                 .ok()
         };

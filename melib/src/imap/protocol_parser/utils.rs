@@ -23,7 +23,7 @@
 
 //! # IMAP Parsing utility functions
 
-use nom::{branch::alt, bytes::complete::tag, combinator::map};
+use nom::{branch::alt, bytes::complete::tag, combinator::map, Parser};
 
 use crate::email::parser::IResult;
 
@@ -31,5 +31,5 @@ use crate::email::parser::IResult;
 pub fn nil_to_none<'i, T>(
     parser: fn(&'i [u8]) -> IResult<&'i [u8], T>,
 ) -> impl FnMut(&'i [u8]) -> IResult<&'i [u8], Option<T>> {
-    alt((map(tag("NIL"), |_| None), map(parser, Some)))
+    move |i| alt((map(tag("NIL"), |_| None), map(parser, Some))).parse(i)
 }

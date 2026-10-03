@@ -37,43 +37,46 @@ tls-static = ["tls", "native-tls/vendored"]
 [dependencies]
 async-fn-stream = { version = "0.3" }
 async-io = { version = "2" }
-base64 = { version = ">= 0.21, <= 0.22" }
+base64 = { version = "0.23" }
 bitflags = { workspace = true }
 cfg-if = { version = "^1.0.0" }
 chrono = { version = "^0.4", default-features = false }
-data-encoding = { version = "2.9" }
-encoding_rs = { version = "^0.8" }
+data-encoding = { version = "2.11" }
+# encoding_rs 0.8.40+ requires rustc 1.88, above this crate's MSRV (1.85).
+encoding_rs = { version = "=0.8.35" }
 flate2 = { workspace = true }
 futures = { workspace = true }
-imap-codec = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
-imap-types = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
+imap-codec = { workspace = true, optional = true }
+imap-types = { workspace = true, optional = true }
 indexmap = { workspace = true }
-isahc = { version = "^1.7.2", optional = true, default-features = false, features = ["http2", "json", "text-decoding"] }
+isahc = { workspace = true, optional = true }
 libc = { workspace = true }
+# libloading 0.9 requires rustc 1.88, above this crate's MSRV (1.85).
 libloading = { version = "0.8" }
 native-tls = { version = "0.2", default-features = false, optional = true }
 nix = { workspace = true, default-features = false, features = ["fs", "socket", "dir", "hostname"] }
-nom = { version = "7" }
+nom = { version = "8" }
 notify = { version = "8", optional = true }
 polling = { version = "3" }
 regex = { workspace = true }
-rusqlite = { version = "^0.37", default-features = false, features = ["array", "modern_sqlite"], optional = true }
+rusqlite = { workspace = true, optional = true }
 serde = { workspace = true, features = ["rc"] }
 serde_derive = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error = { version = "0.1" }
 smallvec = { workspace = true }
-smol = { version = "2" }
-socket2 = { version = "0.6", features = [] }
+smol = { workspace = true }
+socket2 = { workspace = true }
 # `release_max_level_error` compiles every `tracing` event below `ERROR`
 # out of release builds entirely — zero formatting or branch cost; debug
 # builds log normally (to `./log/` by default).
-tracing = { version = "0.1", default-features = false, features = ["std", "release_max_level_error"] }
-unicode-segmentation = { version = "1.2.1", default-features = false }
+tracing = { workspace = true, features = ["release_max_level_error"] }
+unicode-segmentation = { version = "1.13", default-features = false }
 unicode-width = { workspace = true }
-url = { version = "2.5", optional = true }
-uuid = { version = "^1", features = ["serde", "v4", "v5"] }
-xdg = { version = "2.1.0" }
+url = { workspace = true, optional = true }
+# uuid 1.27+ requires rustc 1.89, above this crate's MSRV (1.85).
+uuid = { version = "=1.26.1", features = ["serde", "v4", "v5"] }
+xdg = { workspace = true }
 
 [dev-dependencies]
 serde_test2 = { workspace = true }

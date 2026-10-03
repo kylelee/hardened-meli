@@ -3770,7 +3770,7 @@ hello world 2.
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|l| l.contains("UID FETCH 1,2 ")),
+                .any(|l| l.contains("UID FETCH 1:2 ")),
             "a full explicit-UID fresh fetch must have run; commands: {:?}",
             main_commands.lock().unwrap()
         );
@@ -3906,7 +3906,7 @@ hello world 2.
             "a full `UID SEARCH ALL` fresh fetch must have run; commands: {commands:?}"
         );
         assert!(
-            commands.iter().any(|l| l.contains("UID FETCH 1,2 ")),
+            commands.iter().any(|l| l.contains("UID FETCH 1:2 ")),
             "a full explicit-UID fresh fetch must have run; commands: {commands:?}"
         );
         // A NULL-skeleton mailbox must be routed straight to the single
@@ -4628,11 +4628,12 @@ hello world 4.
                 // See the drift note in
                 // [`crate::imap::fetch::FetchStage::FreshFetch`]: the
                 // fresh-fetch path now drives `UID FETCH` with an
-                // explicit comma-separated UID list (`1,2,3`) sourced
-                // from `UID SEARCH ALL`, so the additional round-trip
-                // also bumps the UID FETCH tag from M17 to M18.
+                // explicit UID set (`1:3`, compressed from the `UID
+                // SEARCH ALL` result) sourced from `UID SEARCH ALL`, so
+                // the additional round-trip also bumps the UID FETCH tag
+                // from M17 to M18.
                 "M17 UID SEARCH ALL\r\n",
-                "M18 UID FETCH 1,2,3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
+                "M18 UID FETCH 1:3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
                  BODYSTRUCTURE)\r\n",
             ]
             .iter()
@@ -5143,9 +5144,10 @@ hello world 3.
         // the cache stages first, adding one `SELECT INBOX` round-trip,
         // which shifts the initial full fetch's tag from M16 to M17.
         //
-        // Drift note (UID SEARCH ALL → explicit UID list):
+        // Drift note (UID SEARCH ALL → explicit UID set):
         // [`FetchStage::FreshFetch`] now drives `UID FETCH` with an
-        // explicit comma-separated UID list (`1,2,3`) instead of the
+        // explicit UID set (`1:3`, compressed from the SEARCH result)
+        // instead of the
         // `1:max_uid` range that the historic `FreshFetch { max_uid }`
         // arm emitted. The list is sourced from `UID SEARCH ALL` in
         // [`FetchStage::InitialFresh`], so the additional round-trip
@@ -5153,10 +5155,10 @@ hello world 3.
         // doc-comment on `FetchStage::FreshFetch` for the rationale
         // (long-lived Coremail mailboxes with sparse UIDs).
         let frozen_uid_fetch = if enabled {
-            "M18 UID FETCH 1,2,3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
+            "M18 UID FETCH 1:3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)] \
              BODYSTRUCTURE)\r\n"
         } else {
-            "M18 UID FETCH 1,2,3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)])\r\n"
+            "M18 UID FETCH 1:3 (UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (REFERENCES)])\r\n"
         };
         {
             let lck = received_commands.lock().unwrap();
@@ -12019,13 +12021,13 @@ hello new world.
             // out UIDs from `next_uid`, so the 2 seed mails have UIDs
             // 1 and 2, exactly the value the mock's own `next_uid` /
             // `STATUS` layer would have reported. The fetch carries an
-            // explicit `UID FETCH 1,2` list rather than the historic
-            // `1:max_uid` range; the latter would degenerate into the
-            // ≈528 000 round-trip walk on Coremail long-lived
-            // mailboxes.
+            // explicit `UID FETCH 1:2` set (compressed from the SEARCH
+            // result) rather than the historic `1:max_uid` range; the
+            // latter would degenerate into the ≈528 000 round-trip
+            // walk on Coremail long-lived mailboxes.
             let saw_envelope_fetch = lck
                 .iter()
-                .any(|line| line.contains(" UID FETCH 1,2 ") && line.contains("ENVELOPE"));
+                .any(|line| line.contains(" UID FETCH 1:2 ") && line.contains("ENVELOPE"));
             assert!(
                 saw_envelope_fetch,
                 "envelope UID FETCH did not use the SEARCH-derived explicit UID list \
@@ -12425,12 +12427,15 @@ hello underdelivered {i}.
                 .map(|env| env.message_id().to_string())
                 .collect()
         };
-        // The `FreshFetch` explicit-UID list (`UID FETCH 1,2,...`); the
-        // resync/incremental fetches use ranges (`UID FETCH 9:*`) and have
-        // no comma in the sequence set.
+        // The `FreshFetch` explicit-UID set (`UID FETCH 1:2,4` style —
+        // concrete UIDs only, no `*`); the resync/incremental fetches use
+        // open ranges (`UID FETCH 9:*`) and always carry a `*` in the
+        // sequence set.
         let explicit_uid_fetch_count = |cmds: &[String]| -> usize {
             cmds.iter()
-                .filter(|l| l.contains(" UID FETCH ") && l.contains(',') && l.contains("ENVELOPE"))
+                .filter(|l| {
+                    l.contains(" UID FETCH ") && l.contains("ENVELOPE") && !l.contains('*')
+                })
                 .count()
         };
 

@@ -144,18 +144,14 @@ fn pp_inner(path: &Path) -> Result<String> {
     };
 
     let mut ret = expand_config(&p_buf)?;
-    if let Ok(xdg_dirs) = xdg::BaseDirectories::with_prefix("meli") {
-        for theme_mailbox in xdg_dirs.find_config_files("themes") {
-            let read_dir =
-                std::fs::read_dir(&theme_mailbox).chain_err_related_path(&theme_mailbox)?;
-            for theme in read_dir {
-                let theme_path = theme?.path();
-                if let Some(extension) = theme_path.extension() {
-                    if extension == "toml" {
-                        ret.push_str(
-                            &pp_helper(&theme_path, 0).chain_err_related_path(&theme_path)?,
-                        );
-                    }
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("meli");
+    for theme_mailbox in xdg_dirs.find_config_files("themes") {
+        let read_dir = std::fs::read_dir(&theme_mailbox).chain_err_related_path(&theme_mailbox)?;
+        for theme in read_dir {
+            let theme_path = theme?.path();
+            if let Some(extension) = theme_path.extension() {
+                if extension == "toml" {
+                    ret.push_str(&pp_helper(&theme_path, 0).chain_err_related_path(&theme_path)?);
                 }
             }
         }

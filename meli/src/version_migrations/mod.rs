@@ -442,7 +442,7 @@ impl std::fmt::Debug for dyn Migration + Send + Sync {
 ///
 /// The actual path examined is `${XDG_DATA_HOME}/meli/.version`.
 pub fn version_file() -> Result<PathBuf> {
-    let xdg_dirs = xdg::BaseDirectories::with_prefix("meli")?;
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("meli");
     Ok(xdg_dirs.place_data_file(".version")?)
 }
 

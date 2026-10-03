@@ -26,6 +26,8 @@ use std::{
     time::SystemTime,
 };
 
+use nom::Parser;
+
 use super::{ImapConnection, ImapProtocol, ImapServerConf, UIDStore};
 use crate::{
     conf::AccountSettings,
@@ -148,7 +150,7 @@ impl ManageSieveConnection {
             .read_response(&mut ret, RequiredResponses::empty())
             .await?;
         let (_rest, scripts) =
-            parser::terminated(parser::listscripts, parser::tag_no_case(b"OK"))(&ret)?;
+            parser::terminated(parser::listscripts, parser::tag_no_case(&b"OK"[..])).parse(&ret)?;
         Ok(scripts
             .into_iter()
             .map(|(n, a)| (n.to_vec(), a))
@@ -217,7 +219,7 @@ impl ManageSieveConnection {
             .into());
         }
         let (_rest, script) =
-            parser::terminated(parser::getscript, parser::tag_no_case(b"OK"))(&ret)?;
+            parser::terminated(parser::getscript, parser::tag_no_case(&b"OK"[..])).parse(&ret)?;
         Ok(script.to_vec())
     }
 
@@ -253,6 +255,7 @@ pub mod parser {
         combinator::{iterator, map, opt},
         multi::separated_list1,
         sequence::separated_pair,
+        Parser,
     };
     pub use nom::{
         bytes::complete::{is_not, tag_no_case},
@@ -280,12 +283,13 @@ pub mod parser {
 
     pub fn managesieve_capabilities(input: &[u8]) -> Result<Vec<(&[u8], &[u8])>> {
         let (_, ret) = separated_list1(
-            tag(b"\r\n"),
+            tag(&b"\r\n"[..]),
             alt((
-                separated_pair(quoted_raw, tag(b" "), quoted_raw),
+                separated_pair(quoted_raw, tag(&b" "[..]), quoted_raw),
                 map(quoted_raw, |q| (q, &b""[..])),
             )),
-        )(input)?;
+        )
+        .parse(input)?;
         Ok(ret)
     }
 
@@ -300,7 +304,7 @@ pub mod parser {
             input,
             alt((
                 terminated(
-                    map(terminated(sieve_name, tag_no_case(b" ACTIVE")), |r| {
+                    map(terminated(sieve_name, tag_no_case(&b" ACTIVE"[..])), |r| {
                         (r, true)
                     }),
                     crlf,
@@ -327,13 +331,13 @@ pub mod parser {
                 terminated(
                     pair(
                         preceded(
-                            tag_no_case(b"ok"),
+                            tag_no_case(&b"ok"[..]),
                             opt(preceded(
-                                tag(b" "),
-                                delimited(tag(b"("), is_not(")"), tag(b")")),
+                                tag(&b" "[..]),
+                                delimited(tag(&b"("[..]), is_not(")"), tag(&b")"[..])),
                             )),
                         ),
-                        opt(preceded(tag(b" "), sieve_name)),
+                        opt(preceded(tag(&b" "[..]), sieve_name)),
                     ),
                     crlf,
                 ),
@@ -343,19 +347,20 @@ pub mod parser {
                 terminated(
                     pair(
                         preceded(
-                            alt((tag_no_case(b"no"), tag_no_case(b"bye"))),
+                            alt((tag_no_case(&b"no"[..]), tag_no_case(&b"bye"[..]))),
                             opt(preceded(
-                                tag(b" "),
-                                delimited(tag(b"("), is_not(")"), tag(b")")),
+                                tag(&b" "[..]),
+                                delimited(tag(&b"("[..]), is_not(")"), tag(&b")"[..])),
                             )),
                         ),
-                        opt(preceded(tag(b" "), sieve_name)),
+                        opt(preceded(tag(&b" "[..]), sieve_name)),
                     ),
                     crlf,
                 ),
                 |(code, message)| ManageSieveResponse::NoBye { code, message },
             ),
-        ))(input)
+        ))
+        .parse(input)
     }
 
     #[cfg(test)]
@@ -366,7 +371,7 @@ pub mod parser {
         fn test_managesieve_listscripts() {
             let input_1 = b"\"summer_script\"\r\n\"vacation_script\"\r\n{13}\r\nclever\"script\r\n\"main_script\" ACTIVE\r\nOK";
             assert_eq!(
-                terminated(listscripts, tag_no_case(b"OK"))(input_1),
+                terminated(listscripts, tag_no_case(&b"OK"[..])).parse(input_1),
                 Ok((
                     &b""[..],
                     vec![
@@ -380,7 +385,7 @@ pub mod parser {
 
             let input_2 = b"\"summer_script\"\r\n\"main_script\" active\r\nok";
             assert_eq!(
-                terminated(listscripts, tag_no_case(b"OK"))(input_2),
+                terminated(listscripts, tag_no_case(&b"OK"[..])).parse(input_2),
                 Ok((
                     &b""[..],
                     vec![(&b"summer_script"[..], false), (&b"main_script"[..], true)]
@@ -388,7 +393,7 @@ pub mod parser {
             );
             let input_3 = b"ok";
             assert_eq!(
-                terminated(listscripts, tag_no_case(b"OK"))(input_3),
+                terminated(listscripts, tag_no_case(&b"OK"[..])).parse(input_3),
                 Ok((&b""[..], vec![]))
             );
         }

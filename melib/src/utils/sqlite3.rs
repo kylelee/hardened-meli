@@ -104,21 +104,7 @@ impl DatabaseDescription {
             }
             return Ok(directory.join(name.as_ref()));
         }
-        let data_dir =
-            xdg::BaseDirectories::with_prefix(self.application_prefix).map_err(|err| {
-                Error::new(format!(
-                    "Could not create sqlite3 database file for `{}{}{}` in XDG data directory.",
-                    self.identifier.as_deref().unwrap_or_default(),
-                    if self.identifier.is_none() { "" } else { ":" },
-                    self.name,
-                ))
-                .set_details(format!(
-                    "Could not open XDG data directory with prefix {}",
-                    self.application_prefix
-                ))
-                .set_kind(ErrorKind::Platform)
-                .set_source(Some(Arc::new(err)))
-            })?;
+        let data_dir = xdg::BaseDirectories::with_prefix(self.application_prefix);
         data_dir.place_data_file(name.as_ref()).map_err(|err| {
             Error::new(format!(
                 "Could not create sqlite3 database file for `{}{}{}` in XDG data directory.",

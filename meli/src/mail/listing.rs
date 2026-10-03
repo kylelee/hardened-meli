@@ -823,10 +823,11 @@ pub trait MailListingTrait: ListingTrait {
                             .as_slice()
                             .try_into()
                         {
-                            let fut = backend
-                                .lock()
-                                .unwrap()
-                                .set_flags(set, mailbox_hash, vec![FlagOp::Set(flag)])?;
+                            let fut = backend.lock().unwrap().set_flags(
+                                set,
+                                mailbox_hash,
+                                vec![FlagOp::Set(flag)],
+                            )?;
                             fut.await?;
                         }
                         if let Ok(unset) = envs
@@ -842,10 +843,11 @@ pub trait MailListingTrait: ListingTrait {
                             .as_slice()
                             .try_into()
                         {
-                            let fut = backend
-                                .lock()
-                                .unwrap()
-                                .set_flags(unset, mailbox_hash, vec![FlagOp::UnSet(flag)])?;
+                            let fut = backend.lock().unwrap().set_flags(
+                                unset,
+                                mailbox_hash,
+                                vec![FlagOp::UnSet(flag)],
+                            )?;
                             fut.await?;
                         }
                         Ok(())
@@ -2493,7 +2495,8 @@ impl Component for Listing {
                                     return true;
                                 }
                             };
-                            let (sender, mut receiver) = crate::jobs::oneshot::channel::<Vec<Mail>>();
+                            let (sender, mut receiver) =
+                                crate::jobs::oneshot::channel::<Vec<Mail>>();
                             #[cfg(not(feature = "http"))]
                             let fut = async move {
                                 _ = sender;
@@ -2540,8 +2543,8 @@ impl Component for Listing {
                                         num = msgs.len(),
                                         plural = if msgs.len() == 1 { "" } else { "s" }
                                     );
-                                    let on_confirm_cb = Box::new(
-                                        move |_: ComponentId, result: bool| {
+                                    let on_confirm_cb =
+                                        Box::new(move |_: ComponentId, result: bool| {
                                             if !result {
                                                 return None;
                                             }
@@ -2576,8 +2579,7 @@ impl Component for Listing {
                                                     }
                                                 },
                                             ))))
-                                        },
-                                    );
+                                        });
                                     context.replies.push_back(UIEvent::GlobalUIDialog {
                                         value: Box::new(UIConfirmationDialog::new(
                                             question,
@@ -6048,7 +6050,9 @@ mod listing_menu_tests {
             .expect("first query must scan")
             .envelopes;
             assert_eq!(results.len(), 1, "{style:?}: solo precondition");
-            listing.component.filter("from:s@x.example".to_string(), results, &ctx);
+            listing
+                .component
+                .filter("from:s@x.example".to_string(), results, &ctx);
             listing.draw(screen.grid_mut(), area, &mut ctx);
 
             // Second search: the chain root is not in the narrowed row set,
@@ -6061,7 +6065,9 @@ mod listing_menu_tests {
             .expect("second query must scan")
             .envelopes;
             assert_eq!(results.len(), 1, "{style:?}: root precondition");
-            listing.component.filter("from:a@b.example".to_string(), results, &ctx);
+            listing
+                .component
+                .filter("from:a@b.example".to_string(), results, &ctx);
             listing.draw(screen.grid_mut(), area, &mut ctx);
 
             let rendered: String = (0..24)
