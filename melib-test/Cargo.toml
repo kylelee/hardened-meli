@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+
+[package]
+name = "melib-test"
+version = "0.9.0"
+authors = ["Kyle Lee"]
+edition = "2021"
+rust-version = "1.85.0"
+license = "EUPL-1.2 OR GPL-3.0-or-later"
+description = "Integration test suite for the melib e-mail library"
+homepage = "https://github.com/kylelee/hardened-meli"
+repository = "https://github.com/kylelee/hardened-meli"
+keywords = ["mail", "testing"]
+categories = ["email", "development-tools::testing"]
+
+[lib]
+name = "melib_test"
+path = "src/lib.rs"
+
+[features]
+default = ["imap", "jmap", "maildir", "notmuch", "smtp", "sqlite3"]
+imap = ["dep:imap-codec", "dep:imap-types", "melib/imap"]
+jmap = ["dep:isahc", "dep:url", "melib/jmap"]
+maildir = ["melib/maildir"]
+notmuch = ["melib/notmuch"]
+smtp = ["melib/smtp"]
+sqlite3 = ["dep:rusqlite", "melib/sqlite3"]
+
+[dependencies]
+flate2 = { workspace = true }
+futures = { workspace = true }
+imap-codec = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
+imap-types = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
+indexmap = { workspace = true }
+isahc = { version = "^1.7.2", default-features = false, features = ["http2", "json", "text-decoding"], optional = true }
+log = { version = "0.4" }
+melib = { path = "../melib" }
+nix = { workspace = true }
+regex = { workspace = true }
+rusqlite = { version = "^0.37", default-features = false, features = ["array", "modern_sqlite"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+smol = { version = "2" }
+socket2 = { version = "0.6", features = [] }
+tempfile = { workspace = true }
+tokio-test = { version = "0.4" }
+toml = { workspace = true }
+url = { version = "2.5", optional = true }

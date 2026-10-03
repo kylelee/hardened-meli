@@ -27,18 +27,18 @@
 
 #![cfg(feature = "smtp")]
 
-use rusty_fork::rusty_fork_test;
-
-rusty_fork_test! {
-    #[test]
-    fn test_smtp_transaction() {
+#[test]
+fn test_smtp_transaction() {
+    tokio_test::block_on(async {
         tests::run_smtp_transaction();
-    }
+    });
+}
 
-    #[test]
-    fn test_smtp_transaction_rcpt_rejected() {
+#[test]
+fn test_smtp_transaction_rcpt_rejected() {
+    tokio_test::block_on(async {
         tests::run_smtp_transaction_rcpt_rejected();
-    }
+    });
 }
 
 pub mod server {

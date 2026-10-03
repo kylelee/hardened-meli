@@ -273,10 +273,10 @@ fn test_sqlite3_reindex() {
         };
     }
     let mail_batch: Vec<(Vec<u8>, MailboxHash, Option<Flag>)> = vec![
-        batch_entry!("../../../melib/tests/data/PATCH-Put-sha1dc-on-a-diet_op.mbox.gz"),
-        batch_entry!("../../../melib/tests/data/PATCH-Put-sha1dc-on-a-diet.mbox.gz"),
-        batch_entry!("../../../melib/tests/data/git-am-breakage-with-MIME-decoding_op.mbox.gz"),
-        batch_entry!("../../../melib/tests/data/git-am-breakage-with-MIME-decoding.mbox.gz"),
+        batch_entry!("../../../melib-test/tests/data/PATCH-Put-sha1dc-on-a-diet_op.mbox.gz"),
+        batch_entry!("../../../melib-test/tests/data/PATCH-Put-sha1dc-on-a-diet.mbox.gz"),
+        batch_entry!("../../../melib-test/tests/data/git-am-breakage-with-MIME-decoding_op.mbox.gz"),
+        batch_entry!("../../../melib-test/tests/data/git-am-breakage-with-MIME-decoding.mbox.gz"),
     ];
 
     eprintln_ok();

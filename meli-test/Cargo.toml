@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+
+[package]
+name = "meli-test"
+version = "0.10.0"
+authors = ["Kyle Lee"]
+edition = "2021"
+rust-version = "1.88.0"
+license = "EUPL-1.2 OR GPL-3.0-or-later"
+description = "Integration test suite for the meli terminal e-mail client"
+homepage = "https://github.com/kylelee/hardened-meli"
+repository = "https://github.com/kylelee/hardened-meli"
+keywords = ["mail", "mua", "testing"]
+categories = ["email", "development-tools::testing"]
+
+[lib]
+name = "meli_test"
+path = "src/lib.rs"
+
+[dev-dependencies]
+assert_cmd = { version = "2" }
+flate2 = { workspace = true }
+meli = { path = "../meli" }
+melib = { path = "../melib" }
+predicates = { version = "3" }
+tempfile = { workspace = true }
+tokio-test = { version = "0.4" }

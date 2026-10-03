@@ -1808,7 +1808,6 @@ version = "0.10.0"
 dependencies = [
  "aho-corasick",
  "ammonia",
- "assert_cmd",
  "bitflags 2.13.2",
  "crossbeam",
  "crossterm",
@@ -1824,7 +1823,6 @@ dependencies = [
  "nix 0.30.1",
  "notify-rust",
  "nucleo-matcher",
- "predicates",
  "proc-macro2",
  "quote",
  "ratatui",
@@ -1847,6 +1845,19 @@ dependencies = [
  "unicode-width 0.2.2",
  "url",
  "xdg",
+]
+
+[[package]]
+name = "meli-test"
+version = "0.10.0"
+dependencies = [
+ "assert_cmd",
+ "flate2",
+ "meli",
+ "melib",
+ "predicates",
+ "tempfile",
+ "tokio-test",
 ]
 
 [[package]]
@@ -1893,6 +1904,32 @@ dependencies = [
  "url",
  "uuid",
  "xdg",
+]
+
+[[package]]
+name = "melib-test"
+version = "0.9.0"
+dependencies = [
+ "flate2",
+ "futures",
+ "imap-codec",
+ "imap-types",
+ "indexmap",
+ "isahc",
+ "log",
+ "melib",
+ "nix 0.30.1",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "smol",
+ "socket2",
+ "tempfile",
+ "tokio-test",
+ "toml",
+ "url",
 ]
 
 [[package]]
@@ -3514,6 +3551,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
  "pin-project-lite",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-test"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12bc5db7778a8e08ee255090861e0e7aac55e784300077e7ed293c7be36168b2"
+dependencies = [
+ "futures-core",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

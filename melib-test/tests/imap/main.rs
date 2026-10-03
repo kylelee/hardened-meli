@@ -23,430 +23,596 @@
 
 #![cfg(feature = "imap")]
 
-use rusty_fork::rusty_fork_test;
+/// Tests in this target rewrite process-global environment variables
+/// (XDG/HOME sandbox setup, shared with the sqlite3 cache file under
+/// `XDG_DATA_HOME`), so they must not run concurrently on the test
+/// harness's parallel threads. Each test clears and re-establishes its
+/// own environment while holding this lock, replacing the per-test
+/// process isolation `rusty-fork` used to provide.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-rusty_fork_test! {
-    #[test]
-    fn test_imap_watch() {
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+fn test_imap_watch() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_refresh_after_initial_fetch_new_mail() {
+#[test]
+fn test_imap_refresh_after_initial_fetch_new_mail() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_refresh_after_initial_fetch();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_after_initial_fetch_new_mail() {
+#[test]
+fn test_imap_watch_after_initial_fetch_new_mail() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_after_initial_fetch();
-    }
+    });
+}
 
-    /// Gmail X-GM-RAW raw search through the mock's literal continuation
-    /// arm. See `tests::run_imap_raw_search_gmail`.
-    #[test]
-    fn test_imap_raw_search_gmail() {
+/// Gmail X-GM-RAW raw search through the mock's literal continuation
+/// arm. See `tests::run_imap_raw_search_gmail`.
+#[test]
+fn test_imap_raw_search_gmail() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_raw_search_gmail();
-    }
+    });
+}
 
-    /// Non-ASCII `SEARCH` term must travel as an RFC 3501 literal. See
-    /// `tests::run_imap_search_subject_cjk_literal`.
-    #[test]
-    fn test_imap_search_subject_cjk_literal() {
+/// Non-ASCII `SEARCH` term must travel as an RFC 3501 literal. See
+/// `tests::run_imap_search_subject_cjk_literal`.
+#[test]
+fn test_imap_search_subject_cjk_literal() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_search_subject_cjk_literal();
-    }
+    });
+}
 
-    /// QQ Mail never answers a synchronizing-literal `SEARCH` with a `+ `
-    /// continuation, so the search must fail within a bounded wait instead of
-    /// hanging. See `tests::run_imap_search_qq_literal_no_continuation`.
-    #[test]
-    fn test_imap_search_qq_literal_no_continuation() {
+/// QQ Mail never answers a synchronizing-literal `SEARCH` with a `+ `
+/// continuation, so the search must fail within a bounded wait instead of
+/// hanging. See `tests::run_imap_search_qq_literal_no_continuation`.
+#[test]
+fn test_imap_search_qq_literal_no_continuation() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_search_qq_literal_no_continuation();
-    }
+    });
+}
 
-    /// A `LITERAL+` server receives the whole non-ASCII `SEARCH` command in
-    /// one write (`{N+}`, no continuation request). It must parse the
-    /// `* SEARCH` result. See `tests::run_imap_search_literal_plus`.
-    #[test]
-    fn test_imap_search_literal_plus() {
+/// A `LITERAL+` server receives the whole non-ASCII `SEARCH` command in
+/// one write (`{N+}`, no continuation request). It must parse the
+/// `* SEARCH` result. See `tests::run_imap_search_literal_plus`.
+#[test]
+fn test_imap_search_literal_plus() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_search_literal_plus();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_refresh_status_stale_when_selected() {
+#[test]
+fn test_imap_refresh_status_stale_when_selected() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_refresh_status_stale_when_selected();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_idle_no_push() {
+#[test]
+fn test_imap_watch_idle_no_push() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_idle_no_push();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_push_glued_to_idling_greeting() {
+#[test]
+fn test_imap_watch_push_glued_to_idling_greeting() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_push_glued_to_idling_greeting();
-    }
+    });
+}
 
-    /// Replay fixture: the IDLE-arm glued payload uses the byte shape
-    /// captured from the real server's push path. See
-    /// `tests::run_imap_watch_replay_real_push_bytes`.
-    #[test]
-    fn test_imap_watch_replay_real_push_bytes() {
+/// Replay fixture: the IDLE-arm glued payload uses the byte shape
+/// captured from the real server's push path. See
+/// `tests::run_imap_watch_replay_real_push_bytes`.
+#[test]
+fn test_imap_watch_replay_real_push_bytes() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_replay_real_push_bytes();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_startup_compensation() {
+#[test]
+fn test_imap_watch_startup_compensation() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_startup_compensation();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_push_exists_multi_mail() {
+#[test]
+fn test_imap_watch_push_exists_multi_mail() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_push_exists_multi_mail();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_uidvalidity_change_rescan() {
+#[test]
+fn test_imap_watch_uidvalidity_change_rescan() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_uidvalidity_change_rescan();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_done_no_response_errors() {
+#[test]
+fn test_imap_watch_done_no_response_errors() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_done_no_response_errors();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_sweep_interval_conf_default() {
+#[test]
+fn test_imap_watch_sweep_interval_conf_default() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_sweep_interval_conf_default();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_sweep_interval_short_sweep_fires() {
+#[test]
+fn test_imap_watch_sweep_interval_short_sweep_fires() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_sweep_interval_short_sweep_fires();
-    }
+    });
+}
 
-    /// Pins the sweep's main-connection re-selection of the watched
-    /// mailbox under the multi-session push suppression mock mode,
-    /// plus the startup UNSELECT half of the single-session invariant.
-    /// Was RED pre-T6 (archived in
-    /// `.omo/evidence/fix-imap-idle-push/task-4-gated-mocks.txt`). See
-    /// `tests::run_imap_watch_multi_session_no_push`.
-    #[test]
-    fn test_imap_watch_multi_session_no_push() {
+/// Pins the sweep's main-connection re-selection of the watched
+/// mailbox under the multi-session push suppression mock mode,
+/// plus the startup UNSELECT half of the single-session invariant.
+/// Was RED pre-T6 (archived in
+/// `.omo/evidence/fix-imap-idle-push/task-4-gated-mocks.txt`). See
+/// `tests::run_imap_watch_multi_session_no_push`.
+#[test]
+fn test_imap_watch_multi_session_no_push() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_multi_session_no_push();
-    }
+    });
+}
 
-    /// Failing-first pin for the watch-startup half of the single-session
-    /// invariant (T6): the main connection must UNSELECT the watched
-    /// mailbox at watch startup. See `tests::run_imap_watch_startup_unselect`.
-    #[test]
-    fn test_imap_watch_startup_unselect() {
+/// Failing-first pin for the watch-startup half of the single-session
+/// invariant (T6): the main connection must UNSELECT the watched
+/// mailbox at watch startup. See `tests::run_imap_watch_startup_unselect`.
+#[test]
+fn test_imap_watch_startup_unselect() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_startup_unselect();
-    }
+    });
+}
 
-    /// Regression pin for the `RequiredResponses::NO` zero-valued bit-flag
-    /// bug on a server that does not advertise `UNSELECT`: the RFC 3691
-    /// fallback (`SELECT` a nonexistent mailbox, expect a tagged `NO`) must
-    /// clear the main connection's selection without emitting an
-    /// ERROR-level `BackendEvent`, and the watch must reach `IDLE`. See
-    /// `tests::run_imap_watch_startup_unselect_fallback_no`.
-    #[test]
-    fn test_imap_watch_startup_unselect_fallback_no() {
+/// Regression pin for the `RequiredResponses::NO` zero-valued bit-flag
+/// bug on a server that does not advertise `UNSELECT`: the RFC 3691
+/// fallback (`SELECT` a nonexistent mailbox, expect a tagged `NO`) must
+/// clear the main connection's selection without emitting an
+/// ERROR-level `BackendEvent`, and the watch must reach `IDLE`. See
+/// `tests::run_imap_watch_startup_unselect_fallback_no`.
+#[test]
+fn test_imap_watch_startup_unselect_fallback_no() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_startup_unselect_fallback_no();
-    }
+    });
+}
 
-    #[test]
-    fn test_imap_watch_id_gated_push() {
+#[test]
+fn test_imap_watch_id_gated_push() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_id_gated_push();
-    }
+    });
+}
 
-    /// Test that `imap_id_name` customizes the RFC 2971 `ID` handshake.
-    /// See `tests::run_imap_id_name_custom`.
-    #[test]
-    fn test_imap_id_name_custom() {
+/// Test that `imap_id_name` customizes the RFC 2971 `ID` handshake.
+/// See `tests::run_imap_id_name_custom`.
+#[test]
+fn test_imap_id_name_custom() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_id_name_custom();
-    }
+    });
+}
 
-    /// Regression pin for the Coremail (网易 163/126/188) UIDNEXT gap:
-    /// `SELECT`/`EXAMINE` omit `UIDNEXT` and `STATUS (UIDNEXT)` returns
-    /// `()`; the client must complete the initial fetch and a heartbeat
-    /// resync without error by issuing `UID SEARCH *` to derive
-    /// `UIDNEXT = max_uid + 1`.
-    #[test]
-    fn test_imap_init_uidnext_via_uid_search_star() {
+/// Regression pin for the Coremail (网易 163/126/188) UIDNEXT gap:
+/// `SELECT`/`EXAMINE` omit `UIDNEXT` and `STATUS (UIDNEXT)` returns
+/// `()`; the client must complete the initial fetch and a heartbeat
+/// resync without error by issuing `UID SEARCH *` to derive
+/// `UIDNEXT = max_uid + 1`.
+#[test]
+fn test_imap_init_uidnext_via_uid_search_star() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_init_uidnext_via_uid_search_star();
-    }
+    });
+}
 
-    /// Failing-first regression for long-lived Coremail-style
-    /// mailboxes (e.g. 网易 163) whose UID space is sparse: `UIDVALIDITY`
-    /// stays at `1` while `uidnext` grows into the 10⁹ range, but only a
-    /// handful of real messages exist. The historic fresh-fetch path
-    /// walked `UID FETCH min..max` downward from `uidnext` in
-    /// `batch_size = 2500` steps — i.e. ≈528 000 round-trips at
-    /// `uidnext ≈ 1.3×10⁹`, effectively hanging the cold-start fetch.
-    ///
-    /// The fix issues one `UID SEARCH ALL` to enumerate the real UIDs
-    /// and then `UID FETCH`es them in batches by explicit UID list. With
-    /// only two seed mails (`UID 5` and `UID 1_320_000_000`) the entire
-    /// initial fetch must complete with at most a couple of envelope
-    /// `UID FETCH` round-trips — never the
-    /// `(1_320_000_000 − 5) / 2500 ≈ 528 000` that the old code path
-    /// would have produced.
-    #[test]
-    fn test_imap_fresh_fetch_sparse_uids() {
+/// Failing-first regression for long-lived Coremail-style
+/// mailboxes (e.g. 网易 163) whose UID space is sparse: `UIDVALIDITY`
+/// stays at `1` while `uidnext` grows into the 10⁹ range, but only a
+/// handful of real messages exist. The historic fresh-fetch path
+/// walked `UID FETCH min..max` downward from `uidnext` in
+/// `batch_size = 2500` steps — i.e. ≈528 000 round-trips at
+/// `uidnext ≈ 1.3×10⁹`, effectively hanging the cold-start fetch.
+///
+/// The fix issues one `UID SEARCH ALL` to enumerate the real UIDs
+/// and then `UID FETCH`es them in batches by explicit UID list. With
+/// only two seed mails (`UID 5` and `UID 1_320_000_000`) the entire
+/// initial fetch must complete with at most a couple of envelope
+/// `UID FETCH` round-trips — never the
+/// `(1_320_000_000 − 5) / 2500 ≈ 528 000` that the old code path
+/// would have produced.
+#[test]
+fn test_imap_fresh_fetch_sparse_uids() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fresh_fetch_sparse_uids();
-    }
+    });
+}
 
-    /// Failing-first repro for the 网易 163 "收取全部邮件" scenario: a
-    /// mailbox first seen empty (server-side fetch window closed) is later
-    /// revealed to hold history. The watch `refresh` must emit Create
-    /// events for every revealed mail so the open listing backfills.
-    #[test]
-    fn test_imap_revealed_history_refresh() {
+/// Failing-first repro for the 网易 163 "收取全部邮件" scenario: a
+/// mailbox first seen empty (server-side fetch window closed) is later
+/// revealed to hold history. The watch `refresh` must emit Create
+/// events for every revealed mail so the open listing backfills.
+#[test]
+fn test_imap_revealed_history_refresh() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_revealed_history_refresh();
-    }
+    });
+}
 
-    /// Failing-first repro for the 网易 163 "收取全部邮件" scenario on a
-    /// **warm** cache: the account already cached the mails the 30-day
-    /// window showed, then switching the setting reveals history whose
-    /// UIDs sit below everything cached. `refresh` must detect that the
-    /// persisted envelope count is below the server `EXISTS` and rebuild
-    /// instead of trusting the empty incremental fetch. See
-    /// `tests::run_imap_revealed_history_warm_cache`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_revealed_history_warm_cache() {
+/// Failing-first repro for the 网易 163 "收取全部邮件" scenario on a
+/// **warm** cache: the account already cached the mails the 30-day
+/// window showed, then switching the setting reveals history whose
+/// UIDs sit below everything cached. `refresh` must detect that the
+/// persisted envelope count is below the server `EXISTS` and rebuild
+/// instead of trusting the empty incremental fetch. See
+/// `tests::run_imap_revealed_history_warm_cache`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_revealed_history_warm_cache() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_revealed_history_warm_cache();
-    }
+    });
+}
 
-    /// Failing-first pin for the tag-not-last DONE reply framing: the
-    /// tagged reply and a trailing `* EXISTS` push arrive in one TCP
-    /// write; `read_lines` must stop at the tag line and the trailing
-    /// push must still be processed.
-    #[test]
-    fn test_imap_watch_tag_not_last() {
+/// Failing-first pin for the tag-not-last DONE reply framing: the
+/// tagged reply and a trailing `* EXISTS` push arrive in one TCP
+/// write; `read_lines` must stop at the tag line and the trailing
+/// push must still be processed.
+#[test]
+fn test_imap_watch_tag_not_last() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_tag_not_last();
-    }
+    });
+}
 
-    /// Failing-first pin for the DONE-before-continuation hazard: a push
-    /// arrives before the `+ idling` continuation and the premature DONE
-    /// is answered with a tagged BAD; the push must still be delivered
-    /// and the session must recover.
-    #[test]
-    fn test_imap_watch_push_before_continuation() {
+/// Failing-first pin for the DONE-before-continuation hazard: a push
+/// arrives before the `+ idling` continuation and the premature DONE
+/// is answered with a tagged BAD; the push must still be delivered
+/// and the session must recover.
+#[test]
+fn test_imap_watch_push_before_continuation() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_push_before_continuation();
-    }
+    });
+}
 
-    /// Failing-first pin for the bare `+` keepalive line: it must be
-    /// filtered as keepalive noise (no DONE sent for it) and the watch
-    /// must keep working afterwards.
-    #[test]
-    fn test_imap_watch_bare_plus_keepalive() {
+/// Failing-first pin for the bare `+` keepalive line: it must be
+/// filtered as keepalive noise (no DONE sent for it) and the watch
+/// must keep working afterwards.
+#[test]
+fn test_imap_watch_bare_plus_keepalive() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_bare_plus_keepalive();
-    }
+    });
+}
 
-    /// Regression pin (expected GREEN): a `* BYE` arriving mid-IDLE must
-    /// surface as a disconnect, never a hang.
-    #[test]
-    fn test_imap_watch_bye_mid_idle_unselected() {
+/// Regression pin (expected GREEN): a `* BYE` arriving mid-IDLE must
+/// surface as a disconnect, never a hang.
+#[test]
+fn test_imap_watch_bye_mid_idle_unselected() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_watch_bye_mid_idle_unselected();
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_resync_status_shortcircuit_hit() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_resync_status_shortcircuit_hit() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_resync_status_shortcircuit(true);
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_resync_status_shortcircuit_miss() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_resync_status_shortcircuit_miss() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_resync_status_shortcircuit(false);
-    }
+    });
+}
 
-    /// Failing-first regression for a cache poisoned by an **old**
-    /// binary: the persisted skeleton records a STATUS baseline measured
-    /// after a no-op resync (`messages = 24`) while only 4 envelopes
-    /// actually persist. The RFC 4549 STATUS quick-skip must not trust
-    /// the recorded counters when the persisted envelope count disagrees
-    /// with the recorded `MESSAGES`; otherwise the refresh/F5/watch path
-    /// quick-skips forever and only reopening the mailbox heals it. See
-    /// `tests::run_imap_resync_quickskip_poisoned_cache`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_resync_quickskip_poisoned_cache() {
+/// Failing-first regression for a cache poisoned by an **old**
+/// binary: the persisted skeleton records a STATUS baseline measured
+/// after a no-op resync (`messages = 24`) while only 4 envelopes
+/// actually persist. The RFC 4549 STATUS quick-skip must not trust
+/// the recorded counters when the persisted envelope count disagrees
+/// with the recorded `MESSAGES`; otherwise the refresh/F5/watch path
+/// quick-skips forever and only reopening the mailbox heals it. See
+/// `tests::run_imap_resync_quickskip_poisoned_cache`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_resync_quickskip_poisoned_cache() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_resync_quickskip_poisoned_cache();
-    }
+    });
+}
 
-    /// Failing-first regression for the "poisoned cache" intermediate
-    /// state: a persisted mailbox skeleton with matching STATUS counters
-    /// and an empty `envelopes` table must not short-circuit the initial
-    /// fetch to an empty listing; it must fall back to the full
-    /// `UID SEARCH ALL` fresh fetch. See
-    /// `tests::run_imap_fetch_poisoned_cache_backfills`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_poisoned_cache_backfills() {
+/// Failing-first regression for the "poisoned cache" intermediate
+/// state: a persisted mailbox skeleton with matching STATUS counters
+/// and an empty `envelopes` table must not short-circuit the initial
+/// fetch to an empty listing; it must fall back to the full
+/// `UID SEARCH ALL` fresh fetch. See
+/// `tests::run_imap_fetch_poisoned_cache_backfills`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_poisoned_cache_backfills() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_poisoned_cache_backfills();
-    }
+    });
+}
 
-    /// Regression pin for the NULL-skeleton "poisoned cache" shape: the
-    /// `mailbox` row exists but `max_uid` and every STATUS counter are
-    /// NULL, and the `envelopes` table is empty. `CacheFirst` reports
-    /// `lastseenuid() == Ok(None)` and the initial fetch must still reach
-    /// the full `UID SEARCH ALL` fresh fetch instead of ending as an
-    /// empty listing. See
-    /// `tests::run_imap_fetch_null_skeleton_cache_backfills`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_null_skeleton_cache_backfills() {
+/// Regression pin for the NULL-skeleton "poisoned cache" shape: the
+/// `mailbox` row exists but `max_uid` and every STATUS counter are
+/// NULL, and the `envelopes` table is empty. `CacheFirst` reports
+/// `lastseenuid() == Ok(None)` and the initial fetch must still reach
+/// the full `UID SEARCH ALL` fresh fetch instead of ending as an
+/// empty listing. See
+/// `tests::run_imap_fetch_null_skeleton_cache_backfills`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_null_skeleton_cache_backfills() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_null_skeleton_cache_backfills();
-    }
+    });
+}
 
-    /// Failing-first pin for the UID-less `UID FETCH` reply regression:
-    /// a server that omits the mandatory `UID` data item from a `UID
-    /// FETCH` reply (RFC 3501 §6.4.8 violation) must make the FLAGS
-    /// resync fail with a protocol error; it used to panic on an
-    /// `Option::unwrap()` in `resync_basic`. The RED run's panic output
-    /// is archived in
-    /// `.omo/evidence/fix-imap-idle-push/task-d2-uid-panic.txt`. See
-    /// `tests::run_imap_uid_fetch_reply_without_uid_item`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_uid_fetch_reply_without_uid_item() {
+/// Failing-first pin for the UID-less `UID FETCH` reply regression:
+/// a server that omits the mandatory `UID` data item from a `UID
+/// FETCH` reply (RFC 3501 §6.4.8 violation) must make the FLAGS
+/// resync fail with a protocol error; it used to panic on an
+/// `Option::unwrap()` in `resync_basic`. The RED run's panic output
+/// is archived in
+/// `.omo/evidence/fix-imap-idle-push/task-d2-uid-panic.txt`. See
+/// `tests::run_imap_uid_fetch_reply_without_uid_item`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_uid_fetch_reply_without_uid_item() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_uid_fetch_reply_without_uid_item();
-    }
+    });
+}
 
-    /// Regression pin for the UID-less `UID FETCH` reply regression on
-    /// the envelope-fetch path (resync Step 2i): a server that omits
-    /// the mandatory `UID` data item from *every* `UID FETCH` reply
-    /// (RFC 3501 §6.4.8 violation, via the general
-    /// `uid_fetch_drop_uid_all` mock flag) must never panic the
-    /// client; the resync must fail cleanly with a protocol error. The
-    /// protocol error surfaces at the FLAGS resync step (Step 2ii):
-    /// the UID-less envelope reply of Step 2i is absorbed by the
-    /// client's untagged FETCH handling, which resolves the sequence
-    /// number with a `UID SEARCH` (so the Step 2i `uid.unwrap()` guard
-    /// is not reached; see the task evidence file for the reachability
-    /// analysis). See
-    /// `tests::run_imap_uid_fetch_reply_without_uid_item_envelope`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_uid_fetch_reply_without_uid_item_envelope() {
+/// Regression pin for the UID-less `UID FETCH` reply regression on
+/// the envelope-fetch path (resync Step 2i): a server that omits
+/// the mandatory `UID` data item from *every* `UID FETCH` reply
+/// (RFC 3501 §6.4.8 violation, via the general
+/// `uid_fetch_drop_uid_all` mock flag) must never panic the
+/// client; the resync must fail cleanly with a protocol error. The
+/// protocol error surfaces at the FLAGS resync step (Step 2ii):
+/// the UID-less envelope reply of Step 2i is absorbed by the
+/// client's untagged FETCH handling, which resolves the sequence
+/// number with a `UID SEARCH` (so the Step 2i `uid.unwrap()` guard
+/// is not reached; see the task evidence file for the reachability
+/// analysis). See
+/// `tests::run_imap_uid_fetch_reply_without_uid_item_envelope`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_uid_fetch_reply_without_uid_item_envelope() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_uid_fetch_reply_without_uid_item_envelope();
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_cache_first_before_select() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_cache_first_before_select() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_cache_first(true);
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_cache_first_empty_cache_commands_unchanged() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_cache_first_empty_cache_commands_unchanged() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_cache_first(false);
-    }
+    });
+}
 
-    /// Semantic-port regression for upstream meli 4f2414a3 ("fetch from
-    /// cache then resync"): with an empty local cache and an online open,
-    /// the server's truth is authoritative for the delivered payload and
-    /// the unseen/exists sets. See `tests::run_imap_fetch_cache_then_resync_no_ghost`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_cache_then_resync_no_ghost() {
+/// Semantic-port regression for upstream meli 4f2414a3 ("fetch from
+/// cache then resync"): with an empty local cache and an online open,
+/// the server's truth is authoritative for the delivered payload and
+/// the unseen/exists sets. See `tests::run_imap_fetch_cache_then_resync_no_ghost`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_cache_then_resync_no_ghost() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_cache_then_resync_no_ghost();
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_msn_index_persisted() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_msn_index_persisted() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_msn_index_persisted(true);
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_msn_index_uidvalidity_change() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_msn_index_uidvalidity_change() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_msn_index_persisted(false);
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_body_structure_disabled() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_body_structure_disabled() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_body_structure_flag(false);
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_body_structure_default_commands_unchanged() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_body_structure_default_commands_unchanged() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_body_structure_flag(true);
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_no_cache_offline_errors() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_no_cache_offline_errors() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_no_cache_offline_errors();
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_mailboxes_cache_first() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_mailboxes_cache_first() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_mailboxes_cache_first();
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_refresh_mailboxes_live() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_refresh_mailboxes_live() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_refresh_mailboxes_live();
-    }
+    });
+}
 
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_offline_startup_uses_cache() {
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_offline_startup_uses_cache() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_offline_startup_uses_cache();
-    }
+    });
+}
 
-    /// Failing-first regression for the Coremail 网易 163 under-delivering
-    /// `FETCH`: the server reports `EXISTS` larger than the number of
-    /// messages it actually returns. The cache-completeness guard must
-    /// rebuild at most once per session, not wipe and re-fetch the mailbox
-    /// on every poll. See `tests::run_imap_fetch_underdelivered_exists`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_underdelivered_exists() {
+/// Failing-first regression for the Coremail 网易 163 under-delivering
+/// `FETCH`: the server reports `EXISTS` larger than the number of
+/// messages it actually returns. The cache-completeness guard must
+/// rebuild at most once per session, not wipe and re-fetch the mailbox
+/// on every poll. See `tests::run_imap_fetch_underdelivered_exists`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_underdelivered_exists() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_underdelivered_exists();
-    }
+    });
+}
 
-    /// Failing-first regression for resuming a `FreshFetch` after the
-    /// connection drops mid-batch: the retry must reconnect and complete
-    /// the same batch instead of aborting the whole fetch stream. See
-    /// `tests::run_imap_fetch_resumes_after_conn_drop`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_fetch_resumes_after_conn_drop() {
+/// Failing-first regression for resuming a `FreshFetch` after the
+/// connection drops mid-batch: the retry must reconnect and complete
+/// the same batch instead of aborting the whole fetch stream. See
+/// `tests::run_imap_fetch_resumes_after_conn_drop`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_fetch_resumes_after_conn_drop() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_fetch_resumes_after_conn_drop();
-    }
+    });
+}
 
-    /// Failing-first regression for the **destructive** cache-completeness
-    /// rebuild: when the refill that follows the guard is cut short by a
-    /// connection drop, the already-cached envelopes must survive. The
-    /// guard must report "no incremental data" without wiping the mailbox
-    /// (`init_mailbox` used to cascade-delete every `envelopes` row). See
-    /// `tests::run_imap_rebuild_nondestructive_on_conn_drop`.
-    #[cfg(feature = "sqlite3")]
-    #[test]
-    fn test_imap_rebuild_nondestructive_on_conn_drop() {
+/// Failing-first regression for the **destructive** cache-completeness
+/// rebuild: when the refill that follows the guard is cut short by a
+/// connection drop, the already-cached envelopes must survive. The
+/// guard must report "no incremental data" without wiping the mailbox
+/// (`init_mailbox` used to cascade-delete every `envelopes` row). See
+/// `tests::run_imap_rebuild_nondestructive_on_conn_drop`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_rebuild_nondestructive_on_conn_drop() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_rebuild_nondestructive_on_conn_drop();
-    }
+    });
+}
 
-    /// Setting or unsetting `Flag::PASSED` (a maildir-only flag) must be
-    /// ignored by the IMAP backend instead of being rejected with
-    /// "more than one flag bit set" (upstream 5151e75c), while regular
-    /// flags still reach the wire. See
-    /// `tests::run_imap_set_flags_ignores_passed`.
-    #[test]
-    fn test_imap_set_flags_ignores_passed() {
+/// Setting or unsetting `Flag::PASSED` (a maildir-only flag) must be
+/// ignored by the IMAP backend instead of being rejected with
+/// "more than one flag bit set" (upstream 5151e75c), while regular
+/// flags still reach the wire. See
+/// `tests::run_imap_set_flags_ignores_passed`.
+#[test]
+fn test_imap_set_flags_ignores_passed() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
         tests::run_imap_set_flags_ignores_passed();
-    }
+    });
 }
 
 pub mod server {
