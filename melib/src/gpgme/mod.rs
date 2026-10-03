@@ -234,7 +234,16 @@ impl Context {
             }
         };
         let val = self.get_flag_inner(raw_flag);
-        Ok(!val.is_null())
+        if val.is_null() {
+            return Ok(false);
+        }
+        // SAFETY: `val` is a NUL-terminated C string returned by libgpgme.
+        // Context flags are boolean options whose "on" spelling is `"1"`:
+        // libgpgme returns an empty string (not a NULL pointer) for a
+        // flag that is switched off, so nullness alone cannot tell the
+        // states apart and would report e.g. `auto-key-retrieve` as
+        // enabled right after disabling it.
+        Ok(unsafe { CStr::from_ptr(val) == c"1" })
     }
 
     pub fn set_auto_key_locate(&mut self, val: LocateKey) -> Result<&mut Self> {

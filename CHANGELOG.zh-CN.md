@@ -16,6 +16,7 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+- CVE-2008-3068 加密回执信标回归语料（issue #16）：Outlook/Windows Live Mail/Office 2007 在 CryptoAPI 吊销检查时自动访问 S/MIME 证书内嵌的 AIA/CRL 分发点 URL，每次读信都向攻击者泄露阅读时间与 IP。`cve/src/CVE-2008-3068.rs` 携带一封密码学上真实有效的 openssl 签名 S/MIME 语料（内嵌证书向 `attacker.example` 宣告 OCSP、CA Issuers 与 CRL 分发点三类信标 URL）以及协议走私变体，逐层证明 meli 等价面的免疫性：CMS 部件解析为不透明 `CMSSignature` 数据块、信标 URL 不出现在任何邮件元数据；唯一的签名验证入口拒绝非 OpenPGP 协议，走私载体也只把不透明字节交给引擎；且每个 gpgme 上下文创建即离线/仅本地/不自动取钥（GPGME 离线模式：CMS 禁 Dirmngr CRL/OCSP、OpenPGP 彻底禁用 Dirmngr）——证书内嵌 URL 永远不会被访问。
 - MFSA-2005-11 Cookie 追踪回归语料，`cve` crate 首个逐 CVE 回归（issue #13）：该通告（Thunderbird 0.6–0.9 / Mozilla Suite 1.7–1.7.3）中 HTML 邮件内嵌内容发出带 Cookie 的 HTTP 请求（`<img>` 追踪像素、样式表 `<link>`、CSS `@import`/`url()`），无视“邮件中禁用 Cookie”偏好，垃圾邮件可借此追踪收件人。`cve/src/MFSA-2005-11.rs`（经 `cve/src/lib.rs` 以 `#[cfg(test)] #[path]` 挂载）含 20 个自动加载信标向量与一封完整追踪垃圾邮件，从结构上证明 meli 的免疫性：每个向量在 `sanitize` 后标签与 URL 一并消失（由独立的标签/属性白名单 oracle 校验）、渲染输出为纯终端文本、仅存的远程引用是用户可见且 meli 绝不主动抓取的链接脚注、`sanitize` 对语料为不动点（无二次解析重组）。`meli::mail::view::html_render::{sanitize, render}` 由 `pub(crate)` 改为 `pub`，使 `cve` crate（如 meli-test 一样）测试的就是邮件视图实际调用的加固路径本尊；渲染管线仍是纯内存文本处理、无抓取器也无 Cookie 存储，未发现 meli 防御缺口。
 - 逐 CVE 攻击模拟任务 issue（issue #6）：按调研报告为每个 CVE（含 MFSA-2005-11）各建一个 Gitea issue，共 78 个；每个 issue 含 CVE 背景、映射到的 meli 攻击面（HTML 清理器、MIME/IMAP/SMTP 解析、mailcap、gpgme、TLS/STARTTLS）、攻击样例构造要点、预期断言与 `cve/src/<cve-id>.rs` 回归语料验收标准；索引见 `cve/README.md`。CVE-2025-66376 已由 issue #5 的语料覆盖，不重复建单。
 - 新增 `cve` workspace crate（issue #8）：建立脚手架（`Cargo.toml`、`src/`、`README.md`），承载针对 `meli`/`melib` 的 CVE 驱动回归测试，避免给发布 crate 添加测试专用依赖；根目录 CVE 调研报告 `SECURITY-CVE-RESEARCH.md`（含中文版）移入 `cve/`，根 README 双语链接同步更新。
@@ -80,6 +81,7 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 修复（Fixed）
 
+- `melib::gpgme::Context::get_flag` 在刚关闭 `auto-key-retrieve` 后仍报告其为开启：libgpgme 对关闭的上下文 flag 返回空 C 字符串（并非 NULL 指针），而该 getter 只判空不判值。现已改为与 `"1"` 比较，并由 CVE-2008-3068 回归在真实 libgpgme 上运行锁定。
 - IMAP `set_flags` 忽略 `Flag::PASSED`（上游 `5151e75c`）：IMAP 协议无 PASSED 的线上表示，设置/取消它会落入「more than one flag bit」应用错误分支并让整条 `UID STORE` 失败；现为显式空操作。mock 服务器回归测试 `test_imap_set_flags_ignores_passed`（修复前验证为红，精确复现上游错误）。
 
 - 账户 `extra` 数值/布尔配置在 `serde_json::Value` 迁移后静默回落默认值（`a0cd...` 移植上游 `97a08539`+`254cee97` 引入）：imap/nntp/jmap/mbox 的 `get_conf_val!` 宏只按 `as_str()` 取值，TOML 的 `server_port = 993`、`timeout = 90`、`use_idle = true` 等变成 `Value::Number`/`Value::Bool` 后永远匹配不上。症状：`server_port` 回落到 143，连带 `use_starttls` 默认翻转为 `true`——QQ 邮箱（imap.qq.com / imap.exmail.qq.com，143 端口拒 STARTTLS 回 `* BAD Command!`）连不上，而 163（Coremail 容忍 143 STARTTLS）侥幸能用。新增 `AccountSettings::extra_conf_string` 把 `Number`/`Bool` 标量强转为字符串，恢复旧版全字符串语义；`Value::Object`（Secret 表）仍返回 `None`。回归测试 `test_account_settings_extra_conf_string`、`test_conf_numeric_and_boolean_extra_values_reach_imap_server_conf`（修复前验证为红：端口解析成 143）。
