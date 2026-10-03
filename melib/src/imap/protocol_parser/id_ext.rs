@@ -85,6 +85,15 @@ pub fn id_ext_params_list(input: &[u8]) -> IResult<&[u8], Option<IDResponse>> {
     let mut retval = IDResponse::default();
 
     let (mut input, _) = tag("(").parse(input)?;
+    if input.starts_with(b")") {
+        // RFC 2971: `id_params_list ::= "(" #(string SPACE nstring) ")" / nil`
+        // — the `#` repetition is *zero* or more, so `()` is the legal
+        // "no information" answer, equivalent to `NIL`. Rejecting it made
+        // every connection to such a server log a spurious
+        // "Could not parse ID command response" warning (found by the
+        // CVE-2026-84641 corpus, issue #36).
+        return Ok((&input[1..], None));
+    }
 
     let mut hits = 0;
     // Implementations MUST NOT send more than 30 field-value pairs.
@@ -211,6 +220,14 @@ fn test_imap_id_ext() {
     assert_eq!(
         id_ext_response(b"* ID NIL").unwrap(),
         (b"".as_slice(), None)
+    );
+    // RFC 2971 `#(string SPACE nstring)` is zero-or-more: the empty list
+    // `()` is the legal "no information" form and used to be a parse error
+    // (CVE-2026-84641 corpus, issue #36).
+    assert_eq!(id_ext_response(b"* ID ()").unwrap(), (b"".as_slice(), None));
+    assert_eq!(
+        id_ext_response(b"* ID ()\r\nM1 OK ID completed\r\n").unwrap(),
+        (b"\r\nM1 OK ID completed\r\n".as_slice(), None)
     );
     assert_eq!(
         id_ext_params_list(b"NIL").unwrap(),
