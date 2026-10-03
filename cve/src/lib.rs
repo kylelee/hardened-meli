@@ -702,3 +702,32 @@ mod cve_2026_84641;
 #[cfg(test)]
 #[path = "CVE-2026-14899.rs"]
 mod cve_2026_14899;
+
+/// CVE-2026-84640 (Thunderbird; MFSA 2026-86/87/88, same advisory
+/// batch as CVE-2026-84641) mail-header one-byte out-of-bounds
+/// read regression (issue #38, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// maliciously constructed mail header made Thunderbird's parser
+/// read one byte past the end of its header buffer. meli links no
+/// Gecko/XPCOM header parser, so the equivalent surface the issue
+/// prescribes is the header parsing boundary itself —
+/// `melib/src/email/headers` plus the `headers` module of
+/// `melib/src/email/parser.rs` and their 「receive → parse →
+/// display」 consumers — driven by the issue's prescribed corpus
+/// family: header byte sequences whose length sits exactly on a
+/// parsing boundary — the empty value, the single-byte value, the
+/// no-colon line and the input without a trailing newline.
+/// [`cve_2026_84640`] locks the class layer by layer — no-colon
+/// lines reject at the `field-name` scan guards, empty and
+/// single-byte values cut exact byte slices with their one-past
+/// neighbours rejecting, the exhaustive truncation sweep (every
+/// prefix of canonical LF/CRLF/multipart mails) proves no parser
+/// position consults the byte one past the buffer end, and the
+/// receive → parse → display pipeline over a mail whose every
+/// header sits on a boundary stays inert and byte-faithful. On
+/// this corpus meli holds by construction — checked slicing leaves
+/// the one-past read nowhere to land — so the class is locked
+/// immune without needing a `melib` fix.
+#[cfg(test)]
+#[path = "CVE-2026-84640.rs"]
+mod cve_2026_84640;
