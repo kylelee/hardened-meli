@@ -1241,3 +1241,40 @@ fn test_imap_line_iterator_literal_skip_saturates() {
     let lines: Vec<&[u8]> = honest.split_rn().collect();
     assert_eq!(lines, vec![honest]);
 }
+
+#[test]
+fn test_imap_fetch_response_truncated_flags_and_modseq_do_not_panic() {
+    // CVE-2020-9818 (issue #31): a FETCH response truncated right after
+    // the FLAGS list or the MODSEQ digits leaves no byte for the `+ 1`
+    // that skips the closing `)`, so the cursor overshot `input.len()`
+    // and the raw-fetch-value slice `&input[..i]` panicked with an
+    // out-of-range end index (CWE-125). The cursor must clamp at the
+    // buffer end and parse what is there.
+    for input in [
+        &b"* 1 FETCH (FLAGS (\\Seen"[..],
+        &b"* 1 FETCH (FLAGS ("[..],
+        &b"* 1 FETCH (FLAGS (\\Seen\r\n"[..],
+        &b"* 1 FETCH (MODSEQ (12345"[..],
+        &b"* 1 FETCH (MODSEQ ("[..],
+    ] {
+        let (rest, ret, _) = fetch_response(input).unwrap();
+        assert!(rest.is_empty(), "nothing follows a truncated response");
+        assert_eq!(ret.raw_fetch_value, input);
+    }
+
+    // A flag token cut off by the line terminator is the real flag, not
+    // a garbage keyword with the CRLF swallowed into it.
+    let (_, ret, _) = fetch_response(b"* 1 FETCH (FLAGS (\\Seen\r\n").unwrap();
+    assert!(
+        ret.flags.unwrap().0.contains(Flag::SEEN),
+        "\\Seen must be recognized up to the line terminator"
+    );
+
+    // The honest response still parses to the same values as before.
+    let (rest, ret, _) =
+        fetch_response(b"* 1 FETCH (UID 7 FLAGS (\\Seen) MODSEQ (9))\r\n").unwrap();
+    assert!(rest.is_empty());
+    assert_eq!(ret.uid, Some(7));
+    assert!(ret.flags.unwrap().0.contains(Flag::SEEN));
+    assert_eq!(ret.modseq.map(|m| m.0.get()), Some(9));
+}
