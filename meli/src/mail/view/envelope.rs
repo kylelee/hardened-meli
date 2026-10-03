@@ -41,6 +41,22 @@ enum EnvelopeViewMessage {
 /// for confirmation first.
 const DEFAULT_LAUNCHABLE_SCHEMES: &[&str] = &["http", "https", "mailto"];
 
+/// Maximum number of nested `message/rfc822` levels the mail view
+/// recurses into while building display structures
+/// ([`crate::mail::view::envelope::EnvelopeView`] attachment trees and
+/// [`crate::mail::view::ViewFilter`] body-text pipelines).
+///
+/// Both recursions open each nested message with `Mail::new` before
+/// recursing, and the whole chain runs on UI/job threads whose smallest
+/// stack is 2 MiB (tokio workers). Measured pre-fix on a 2 MiB thread
+/// (debug build), the display recursion overflows the stack at ~26
+/// nested levels (~80 KiB per level), so a crafted mail a few kilobytes
+/// long aborted meli the moment it was opened. The cap keeps the
+/// deepest legal recursion an order of magnitude below the measured
+/// overflow threshold; past it the remaining subtree is presented as an
+/// inert attachment/text instead of being walked.
+pub(crate) const MAX_RFC822_DISPLAY_NESTING_DEPTH: usize = 8;
+
 /// Extract the scheme of `url`, if it has a syntactically valid one.
 ///
 /// Follows RFC 3986 §3.1: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` before
@@ -185,6 +201,7 @@ impl EnvelopeView {
             &mut ret.active_jobs,
             &mut display,
             &ret.view_settings,
+            0,
         );
         let (attachment_paths, attachment_tree) = ret.attachment_displays_to_tree(&display);
         ret.display = display;
@@ -281,12 +298,25 @@ impl EnvelopeView {
         view_settings.pgp_backend.instantiate().is_ok()
     }
 
+    /// Build the display tree of an attachment. `rfc822_depth` counts how
+    /// many nested `message/rfc822` levels have been opened so far:
+    /// multipart recursion does not grow the counter (the attachment
+    /// builder already caps multipart nesting), only the
+    /// `message/rfc822` arm does — past
+    /// [`MAX_RFC822_DISPLAY_NESTING_DEPTH`] the remaining subtree is
+    /// presented as an inert attachment instead of being walked. Each
+    /// opened level costs tens of KiB of stack (`Mail::new` plus this
+    /// recursion); without the cap, a crafted mail a few KiB long
+    /// overflowed the 2 MiB stack of the view/filter threads the moment
+    /// it was opened (CWE-674; CVE-2024-21378 regression in
+    /// `meli/src/mail/view/tests.rs`).
     fn attachment_to_display_helper(
         a: &Attachment,
         main_loop_handler: &MainLoopHandler,
         active_jobs: &mut HashSet<JobId>,
         acc: &mut Vec<AttachmentDisplay>,
         view_settings: &ViewSettings,
+        rfc822_depth: usize,
     ) {
         if a.content_disposition.kind.is_attachment() {
             acc.push(AttachmentDisplay::Attachment {
@@ -363,6 +393,16 @@ impl EnvelopeView {
                 });
             }
         } else if a.content_type == "message/rfc822" {
+            if rfc822_depth >= MAX_RFC822_DISPLAY_NESTING_DEPTH {
+                // Depth cap: see the method documentation. The remaining
+                // subtree is kept as an inert attachment the user can
+                // still open on its own, instead of costing another
+                // recursion level of stack.
+                acc.push(AttachmentDisplay::Attachment {
+                    inner: Box::new(a.clone()),
+                });
+                return;
+            }
             let bytes = a.decode(view_settings.charset.into());
             let text = String::from_utf8_lossy(&bytes).to_string();
             if let Ok(mail) = Mail::new(bytes, None) {
@@ -376,6 +416,7 @@ impl EnvelopeView {
                         active_jobs,
                         &mut v,
                         view_settings,
+                        rfc822_depth + 1,
                     );
                     v
                 };
@@ -429,6 +470,7 @@ impl EnvelopeView {
                             active_jobs,
                             &mut display,
                             view_settings,
+                            rfc822_depth,
                         );
                     }
                     acc.push(AttachmentDisplay::Alternative {
@@ -477,6 +519,7 @@ impl EnvelopeView {
                                         active_jobs,
                                         &mut v,
                                         view_settings,
+                                        rfc822_depth,
                                     );
                                 }
                                 v
@@ -495,6 +538,7 @@ impl EnvelopeView {
                                         active_jobs,
                                         &mut v,
                                         view_settings,
+                                        rfc822_depth,
                                     );
                                 }
                                 v
@@ -558,6 +602,7 @@ impl EnvelopeView {
                             active_jobs,
                             &mut display,
                             view_settings,
+                            rfc822_depth,
                         );
                     }
                     acc.push(AttachmentDisplay::Mixed {
@@ -1583,6 +1628,7 @@ impl Component for EnvelopeView {
                                             &mut self.active_jobs,
                                             &mut plaintext_display,
                                             &self.view_settings,
+                                            0,
                                         );
                                         *d = AttachmentDisplay::EncryptedSuccess {
                                             inner: std::mem::replace(

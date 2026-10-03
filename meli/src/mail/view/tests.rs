@@ -39,7 +39,9 @@ use crate::{
     terminal::{Key, Screen, Virtual},
     types::{Link, LinkKind, UIEvent},
     utilities::{Tabbed, UIDialog},
-    view::{EnvelopeView, ViewFilter, ViewFilterContent, ViewOptions, ViewSettings},
+    view::{
+        AttachmentDisplay, EnvelopeView, ViewFilter, ViewFilterContent, ViewOptions, ViewSettings,
+    },
     AccountHash, Context, EnvelopeHash, MailboxHash, StatusEvent,
 };
 
@@ -1838,5 +1840,155 @@ fn mailview_tab_children_resolve() {
         path.resolve(components[&tabbed_id]).unwrap().id(),
         mailview_id,
         "the MailView path must resolve to itself through MailViewTab::children()"
+    );
+}
+
+/// Build a `message/rfc822` mail nested `depth` levels deep: each level
+/// is a complete inner mail whose sole body is the next level, with a
+/// plain `text/plain` core. This is the CVE-2024-21378 class payload
+/// for meli's open-mail surface: opening the mail must drive every
+/// nesting level through the display recursion.
+fn nested_rfc822_mail(depth: usize) -> Vec<u8> {
+    let mut m = String::from(
+        "From: a@b.example\r\nSubject: nest\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+         Content-Type: message/rfc822\r\n\r\n",
+    );
+    for _ in 0..depth {
+        m.push_str(
+            "From: a@b.example\r\nSubject: inner\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+             Content-Type: message/rfc822\r\n\r\n",
+        );
+    }
+    m.push_str("From: a@b.example\r\nSubject: core\r\n\r\nhello");
+    m.into_bytes()
+}
+
+/// Maximum `InlineRfc822` chain length in a display tree.
+fn rfc822_display_depth(display: &[AttachmentDisplay]) -> usize {
+    display
+        .iter()
+        .map(|d| match d {
+            AttachmentDisplay::InlineRfc822 { display, .. } => 1 + rfc822_display_depth(display),
+            AttachmentDisplay::Alternative { display, .. }
+            | AttachmentDisplay::Mixed { display, .. } => rfc822_display_depth(display),
+            AttachmentDisplay::SignedPending { display, .. }
+            | AttachmentDisplay::SignedFailed { display, .. }
+            | AttachmentDisplay::SignedVerified { display, .. }
+            | AttachmentDisplay::SignedUnverified { display, .. } => rfc822_display_depth(display),
+            AttachmentDisplay::InlineText { .. }
+            | AttachmentDisplay::InlineOther { .. }
+            | AttachmentDisplay::Attachment { .. }
+            | AttachmentDisplay::EncryptedPending { .. }
+            | AttachmentDisplay::EncryptedFailed { .. }
+            | AttachmentDisplay::EncryptedSuccess { .. } => 0,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// CVE-2024-21378 (issue #23, table 2 of the CVE research report —
+/// virus / code execution): opening a crafted mail must never corrupt
+/// the client. meli's equivalent surface is the open-mail display
+/// recursion: `attachment_to_display_helper` used to recurse once per
+/// `message/rfc822` level with no bound, and each level costs tens of
+/// KiB of stack (`Mail::new` + envelope parsing + this recursion) — a
+/// mail a few KiB long, nested a few thousand levels deep, overflowed
+/// the 2 MiB stack of the view/filter threads and aborted meli the
+/// moment it was opened (CWE-674; measured pre-fix threshold: ~26
+/// levels on a 2 MiB debug-build thread). The fix caps the recursion
+/// at `MAX_RFC822_DISPLAY_NESTING_DEPTH` and presents the remaining
+/// subtree as an inert attachment. This regression opens a mail nested
+/// 16000 levels deep on the strictest stack a caller uses (2 MiB) and
+/// locks both properties: no abort, and a display tree truncated at
+/// the cap.
+#[test]
+fn deeply_nested_rfc822_opens_without_stack_overflow() {
+    use std::sync::Arc;
+
+    use crate::{
+        jobs::JobExecutor,
+        state::MainLoopHandler,
+        view::{envelope::MAX_RFC822_DISPLAY_NESTING_DEPTH, EnvelopeView},
+    };
+
+    let child = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            let (sender, _receiver) = crossbeam::channel::unbounded();
+            let handler = MainLoopHandler {
+                job_executor: Arc::new(JobExecutor::new(sender.clone())),
+                sender,
+            };
+            let mail = melib::Mail::new(nested_rfc822_mail(16000), None).unwrap();
+            let view = EnvelopeView::new(mail, None, None, None, handler);
+            (
+                view.attachment_tree.len(),
+                rfc822_display_depth(&view.display),
+            )
+        })
+        .unwrap();
+    let (tree_len, depth) = child.join().expect(
+        "opening a deeply nested message/rfc822 mail must not overflow the stack (CVE-2024-21378)",
+    );
+    assert!(tree_len > 0, "attachment tree must still be built");
+    assert_eq!(
+        depth, MAX_RFC822_DISPLAY_NESTING_DEPTH,
+        "display recursion must stop at the nesting cap"
+    );
+}
+
+/// The cap must not clip legitimate mail: a normally-nested forwarded
+/// message (a `message/rfc822` inside a `message/rfc822`) still renders
+/// fully inline through the whole chain.
+#[test]
+fn shallow_rfc822_nesting_still_renders_fully_inline() {
+    use std::sync::Arc;
+
+    use crate::{jobs::JobExecutor, state::MainLoopHandler, view::EnvelopeView};
+
+    let child = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            let (sender, _receiver) = crossbeam::channel::unbounded();
+            let handler = MainLoopHandler {
+                job_executor: Arc::new(JobExecutor::new(sender.clone())),
+                sender,
+            };
+            let mail = melib::Mail::new(nested_rfc822_mail(2), None).unwrap();
+            let view = EnvelopeView::new(mail, None, None, None, handler);
+            rfc822_display_depth(&view.display)
+        })
+        .unwrap();
+    // `nested_rfc822_mail(2)` is three `message/rfc822` declarations in
+    // total (the outer mail plus two wrapped levels), all of which must
+    // render fully inline.
+    assert_eq!(
+        child.join().unwrap(),
+        3,
+        "shallow nesting must render every InlineRfc822 level"
+    );
+}
+
+/// The body-text filter pipeline (`ViewFilter::new_attachment`) recurses
+/// into `message/rfc822` through the same unbounded path and shares the
+/// fix's depth cap: past the cap the remaining subtree renders as inert
+/// text. Locked on the strictest caller stack (2 MiB) at a depth that
+/// used to abort the process pre-fix.
+#[test]
+fn view_filter_deep_rfc822_nesting_renders_inert_text_without_overflow() {
+    let att = melib::AttachmentBuilder::new(&nested_rfc822_mail(16000)).build();
+    let settings = ViewSettings::default();
+    let child = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            let ctx = mock_context();
+            ViewFilter::new_attachment(&att, &settings, &ctx).is_ok()
+        })
+        .unwrap();
+    assert!(
+        child
+            .join()
+            .expect("view filter must survive deep rfc822 nesting"),
+        "the deep corpus must still produce a view filter"
     );
 }
