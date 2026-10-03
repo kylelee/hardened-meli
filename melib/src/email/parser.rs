@@ -1954,7 +1954,10 @@ pub mod attachments {
                 }
                 offset += end + boundary.len();
                 input = &input[end + boundary.len()..];
-                if input.len() < 2 || input[0] != b'\n' || &input[0..2] == b"--" {
+                if input.len() < 2
+                    || (input[0] != b'\n' && &input[0..2] != b"\r\n")
+                    || &input[0..2] == b"--"
+                {
                     break;
                 }
                 if input[0] == b'\n' {
@@ -1963,6 +1966,16 @@ pub mod attachments {
                 } else if input[0..].starts_with(b"\r\n") {
                     offset += 2;
                     input = &input[2..];
+                }
+                if input.is_empty() {
+                    // EOF right after a non-closing delimiter line ends the
+                    // body (RFC 2046: a missing close-delimiter body runs to
+                    // end-of-input), so the parts scanned so far stand. The
+                    // `\r\n` continuation used to fall through to the
+                    // loop-top EOF error and drop every part of a CRLF mail;
+                    // LF-only endings already broke out at the `len < 2`
+                    // guard above.
+                    break;
                 }
             } else {
                 ret.push(StrBuilder {
@@ -2042,6 +2055,14 @@ pub mod attachments {
                         input = &input[1..];
                     } else if input[0..].starts_with(b"\r\n") {
                         input = &input[2..];
+                    }
+                    if input.is_empty() {
+                        // Same EOF-after-delimiter rule as `multipart_parts`
+                        // above: a consumed `\r\n` running into
+                        // end-of-input ends the body with the scanned parts
+                        // intact instead of erroring into the `parts()` alt
+                        // fallback that returns none of them.
+                        break;
                     }
                 } else {
                     ret.push(input);
