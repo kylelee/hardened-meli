@@ -1820,7 +1820,16 @@ pub mod headers {
             if input[i..].starts_with(b"\n\n") {
                 return Ok((&input[(i + 1)..], &input[0..=i]));
             } else if input[i..].starts_with(b"\r\n\r\n") {
-                return Ok((&input[(i + 2)..], &input[0..=i]));
+                // The raw block ends in a *complete* `\r\n` line ending:
+                // pre-CVE-1999-0940 it stopped at the bare `\r` (`0..=i`),
+                // a terminator no `header_value()` can end a value at, so
+                // `HeaderIterator` silently dropped the *last* header of
+                // every CRLF part — in practice the `Content-Disposition`
+                // of an attachment part, the `Envelope::has_attachments`
+                // false negative of issue #39. The `rest` keeps the blank
+                // line's second `\r\n` as its leading bytes, the CRLF
+                // counterpart of the LF branch's leading `\n`.
+                return Ok((&input[(i + 2)..], &input[0..=(i + 1)]));
             }
         }
         Err(nom::Err::Error(
@@ -1930,7 +1939,10 @@ pub mod attachments {
                 }
                 offset += end + boundary.len();
                 input = &input[end + boundary.len()..];
-                if input.len() < 2 || input[0] != b'\n' || &input[0..2] == b"--" {
+                if input.len() < 2
+                    || (input[0] != b'\n' && &input[0..2] != b"\r\n")
+                    || &input[0..2] == b"--"
+                {
                     break;
                 }
                 if input[0] == b'\n' {
@@ -1939,6 +1951,16 @@ pub mod attachments {
                 } else if input[0..].starts_with(b"\r\n") {
                     offset += 2;
                     input = &input[2..];
+                }
+                if input.is_empty() {
+                    // EOF right after a non-closing delimiter line ends the
+                    // body (RFC 2046: a missing close-delimiter body runs to
+                    // end-of-input), so the parts scanned so far stand. The
+                    // `\r\n` continuation used to fall through to the
+                    // loop-top EOF error and drop every part of a CRLF mail;
+                    // LF-only endings already broke out at the `len < 2`
+                    // guard above.
+                    break;
                 }
             } else {
                 ret.push(StrBuilder {
@@ -2018,6 +2040,14 @@ pub mod attachments {
                         input = &input[1..];
                     } else if input[0..].starts_with(b"\r\n") {
                         input = &input[2..];
+                    }
+                    if input.is_empty() {
+                        // Same EOF-after-delimiter rule as `multipart_parts`
+                        // above: a consumed `\r\n` running into
+                        // end-of-input ends the body with the scanned parts
+                        // intact instead of erroring into the `parts()` alt
+                        // fallback that returns none of them.
+                        break;
                     }
                 } else {
                     ret.push(input);
