@@ -882,3 +882,34 @@ mod cve_1999_0940;
 #[cfg(test)]
 #[path = "CVE-2023-4874.rs"]
 mod cve_2023_4874;
+
+/// CVE-2002-0833 (Eudora 5.1.1 / 5.0-J, Windows; no CVSS score
+/// assigned) MIME boundary buffer-overflow regression (issue #45,
+/// table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code
+/// execution): a multipart mail whose overlong `boundary=` parameter
+/// overflowed Eudora's fixed-size MIME buffer and executed attacker
+/// code. meli has no fixed-size buffer anywhere on the boundary path,
+/// so [`cve_2002_0833`] locks the issue-prescribed corpus family —
+/// overlong boundaries (>10 KB up to 1 MiB), quoted-string parameter
+/// forms, control bytes inside the quoted boundary and
+/// linear-whitespace runs — as bounded, byte-faithful, panic-free
+/// parsing, and exposes two real gaps behind the 超长空白 face, both
+/// fixed with this regression: RFC 2046 §5.1.1 allows a boundary
+/// delimiter line to carry optional linear whitespace before its line
+/// ending (`"--" boundary *LWSP CRLF`), but both twin scanners treated
+/// a `--BOUND   <CRLF>` delimiter as a false boundary occurrence — a
+/// whitespace-carrying first delimiter skipped the whole first part
+/// and a mid delimiter ended the scan, silently dropping every part
+/// after it (the 📎 listing indicator with it) on a legitimate,
+/// RFC-valid mail; and the boundary *parameter value* grammar
+/// (`bcharsnospace` ending) says trailing SP/HTAB is line junk, not
+/// boundary bytes, but all three extraction sites kept the verbatim
+/// value, so `boundary=BOUND   ` with honest `--BOUND` delimiters
+/// parsed to zero parts. Fixed in `melib/src/email/parser.rs`
+/// (`skip_lwsp` delimiter tolerance in both twin loops) and
+/// `parser::attachments::multipart_boundary` (the shared normalized
+/// extraction), regression-locked in
+/// `melib/src/email/parser/tests.rs` together with the corpus here.
+#[cfg(test)]
+#[path = "CVE-2002-0833.rs"]
+mod cve_2002_0833;
