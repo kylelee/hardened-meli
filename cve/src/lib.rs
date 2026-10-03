@@ -321,3 +321,36 @@ mod cve_2024_21378;
 #[cfg(test)]
 #[path = "CVE-2024-30103.rs"]
 mod cve_2024_30103;
+
+/// CVE-2024-43604 (Microsoft Outlook for Android, CVSS 5.7, October
+/// 2024 Patch Tuesday) local privilege-escalation regression (issue
+/// #28, table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code
+/// execution): the Android attachment-path family — mail-controlled
+/// attachment filenames carrying path elements out of the directory
+/// the app assumed was fixed, planting files with the app's
+/// privileges. meli runs on no Android sandbox, so the equivalent
+/// surface — every place mail-controlled bytes become an on-disk path
+/// component — is mapped and locked: the single/batch attachment
+/// saves and the mbox export defaults sanitized only `/` away
+/// (control characters, backslashes and `.`/`..` survived), and the
+/// `.eml` export names derived from the attacker-authored
+/// `Message-ID` reached `PathBuf::push` with **no sanitization at
+/// all** — `save-attachment 0 <dir>` on `Message-ID:
+/// <../../evil>` wrote outside the destination and an absolute
+/// `Message-ID` replaced it outright, an arbitrary-file plant with
+/// the user's privileges (the direct equivalent of the CVE's
+/// escalation); meli's own forward-as-attachment was even capable of
+/// *mailing out* such filenames. [`cve_2024_43604`] carries the
+/// payload corpus (relative chains, absolute paths, RFC 2047-armored
+/// traversals decoded by `Attachment::filename` before any sink sees
+/// them, backslash chains, ANSI control names, the bare `..`) and
+/// locks the walls: every sink now routes through
+/// `sanitize_filename_component`/`eml_filename` (flat names,
+/// generated fallbacks), the mailcap `%s` temp landing stays
+/// sanitized under the meli temp root with degenerate hints guarded,
+/// and every write stays `create_new` + `0o600` — regression-locked
+/// end to end in `meli/src/mail/view/tests.rs`,
+/// `meli/src/mailcap.rs` and `meli/src/types/helpers.rs`.
+#[cfg(test)]
+#[path = "CVE-2024-43604.rs"]
+mod cve_2024_43604;
