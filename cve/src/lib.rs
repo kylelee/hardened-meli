@@ -164,3 +164,26 @@ mod cve_2008_4491;
 #[cfg(test)]
 #[path = "CVE-2017-17688.rs"]
 mod cve_2017_17688;
+
+/// CVE-2017-17689 (EFAIL, S/MIME variant; 11 clients incl. Apple Mail,
+/// Thunderbird, Outlook) CBC-malleability exfiltration regression
+/// (issue #19): an attacker XORs the IV of an intercepted
+/// `application/pkcs7-mime` enveloped-data mail so the first decrypted
+/// block becomes an unclosed `<img src="https:` gadget whose URL tail
+/// is the confidential remainder — CBC has no integrity check, so the
+/// whole tail still decrypts to the original bytes and the decrypting
+/// client (or its renderer) exfiltrates the plaintext. The corpus is a
+/// genuine openssl S/MIME envelope (AES-128-CBC) plus its IV-flipped
+/// variants (real `openssl smime -decrypt` outputs embedded), and the
+/// regression locks the walls layer by layer, complementing
+/// [`cve_2017_17688`]'s CFB corpus: the wire carries no plaintext,
+/// the tampering is a pure 16-byte IV XOR with no damage trail, meli's
+/// decrypt entry refuses the single-part S/MIME carrier before any
+/// engine is consulted, a smuggled `multipart/encrypted` carrier that
+/// does reach an engine fails without leaking plaintext through
+/// either real backend, the gadget dies in `sanitize` before
+/// rendering, and the direct-exfiltration decoy can never splice with
+/// decrypted bytes.
+#[cfg(test)]
+#[path = "CVE-2017-17689.rs"]
+mod cve_2017_17689;
