@@ -1946,6 +1946,84 @@ fn save_attachment_directory_traversal_is_flattened() {
     }
 }
 
+/// CVE-2003-0376 regression (issue #47, Eudora 5.2.1 "Attachment
+/// Converted" dot-pile overflow): saving an attachment whose
+/// mail-controlled filename is the canonical Eudora dot-pile shape
+/// (`a......................exe`) or a megabyte-scale dot pile must
+/// land one flat, bounded component — the trigger bytes stay inert
+/// filename text, and the over-long name is capped on a character
+/// boundary instead of failing the write.
+#[test]
+fn save_attachment_dot_pile_and_overlength_names_are_flat_and_capped() {
+    let body = format!(
+        "MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"=_cve-2003-0376\"\r\n\
+         \r\n\
+         --=_cve-2003-0376\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"a{}.exe\"\r\n\
+         \r\n\
+         DOTPILE-fake\r\n\
+         --=_cve-2003-0376\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"a{}.exe\"\r\n\
+         \r\n\
+         OVERLONG-fake\r\n\
+         --=_cve-2003-0376--\r\n",
+        ".".repeat(22),
+        ".".repeat(100_000)
+    );
+    let mut ctx = mock_context();
+    let mut view = attachments_envelope_view(&ctx, "cve-2003-0376", "dot-pile@x.example", &body);
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let dir = tempdir.path().join("d1").join("d2");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for idx in 1..=2 {
+        trigger_save_attachment(&mut view, &mut ctx, idx, &dir);
+    }
+
+    let names = assert_flat_names(&dir);
+    assert_eq!(
+        names.len(),
+        2,
+        "both corpus attachments must land inside the directory: {names:?}"
+    );
+    // The canonical 22-dot Eudora shape survives verbatim: a pile of
+    // dots is inert filename text, nothing to normalize away.
+    assert!(
+        names
+            .iter()
+            .any(|n| n == &format!("a{}.exe", ".".repeat(22))),
+        "the dot-pile trigger name must land verbatim: {names:?}"
+    );
+    // The megabyte-scale pile is capped into one usable component —
+    // the cut lands inside the dot run, so the capped name is the
+    // recognizable `a` + dots prefix.
+    assert!(
+        names
+            .iter()
+            .any(|n| n.len() <= crate::types::FILENAME_COMPONENT_MAX_BYTES
+                && n.starts_with('a')
+                && n.chars().skip(1).all(|c| c == '.')),
+        "the over-long name must land capped and recognizable: {names:?}"
+    );
+    assert_eq!(
+        dir_entries(&tempdir.path().join("d1")),
+        vec!["d2".to_string()]
+    );
+    assert_eq!(dir_entries(tempdir.path()), vec!["d1".to_string()]);
+    // The right bytes landed.
+    let joined = names
+        .iter()
+        .map(|n| String::from_utf8_lossy(&std::fs::read(dir.join(n)).unwrap()).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(joined.contains("DOTPILE-fake"), "{joined:?}");
+    assert!(joined.contains("OVERLONG-fake"), "{joined:?}");
+}
+
 /// CVE-2024-43604 regression (whole-message save): the `.eml` filename
 /// derived from the mail-controlled `Message-ID` used to reach
 /// `PathBuf::push` unsanitized, so `save-attachment 0 <dir>` on a mail

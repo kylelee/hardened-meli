@@ -92,6 +92,10 @@ impl File {
         let filename_value: Option<Cow<'_, str>> = filename.map(|f| {
             let mut f = Cow::Borrowed(f);
             sanitize_filename(&mut f);
+            // An arbitrarily long hint must not reach the retry loop:
+            // pre-truncate it to a bounded component (CVE-2003-0376
+            // regression, see [`FILENAME_COMPONENT_MAX_BYTES`]).
+            cap_filename_component_bytes(&mut f);
             f
         });
         let mut filename: Option<&str> = filename_value.as_deref();
@@ -222,6 +226,41 @@ pub fn sanitize_separator(value: &mut Cow<'_, str>) {
     };
 }
 
+/// Longest single-component filename the mail-controlled sinks use.
+///
+/// Chosen under the mainstream filesystem `NAME_MAX` of 255 bytes,
+/// with headroom for the `_<n>`/`_<uuid>` collision suffixes
+/// [`File::create_temp_file`] appends and for an extension.
+///
+/// CVE-2003-0376 regression (issue #47): Eudora 5.2.1 crashed — and
+/// stayed crashed — on an `Attachment Converted` argument that piled
+/// up `.` characters past a fixed-size buffer. meli's equivalent
+/// surface is the mail-controlled attachment-name hint flowing into
+/// temp-file materialization: the per-grapheme `ENAMETOOLONG` retry
+/// in [`File::create_temp_file`] costs O(len²) work on a hostile
+/// name, so one over-long filename in one mail could freeze the
+/// client for minutes — the availability face of this CVE. Every
+/// mail-controlled name sink now pre-truncates on a UTF-8 character
+/// boundary; the per-grapheme fallback remains only for exotic
+/// filesystems whose per-component limit is smaller still.
+///
+/// Public so regression corpora can assert the exact budget (see
+/// `cve/src/CVE-2003-0376.rs`).
+pub const FILENAME_COMPONENT_MAX_BYTES: usize = 192;
+
+/// Truncate `value` to at most [`FILENAME_COMPONENT_MAX_BYTES`] bytes,
+/// cutting on a UTF-8 character boundary (never through a multi-byte
+/// character).
+fn cap_filename_component_bytes(value: &mut Cow<'_, str>) {
+    if value.len() > FILENAME_COMPONENT_MAX_BYTES {
+        let mut end = FILENAME_COMPONENT_MAX_BYTES;
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.to_mut().truncate(end);
+    }
+}
+
 pub fn sanitize_filename(value: &mut Cow<'_, str>) {
     // Replace with <https://docs.rs/regex/latest/regex/macro.regex.html> when we update the regex
     // dependency
@@ -272,6 +311,10 @@ pub fn sanitize_filename(value: &mut Cow<'_, str>) {
 /// or control characters into a save path).
 pub fn sanitize_filename_component(value: &mut Cow<'_, str>) -> bool {
     sanitize_filename(value);
+    // A usable component is also a bounded one: over-length names are
+    // truncated instead of failing the filesystem write later
+    // (CVE-2003-0376 regression, see [`FILENAME_COMPONENT_MAX_BYTES`]).
+    cap_filename_component_bytes(value);
     !matches!(value.as_ref(), "" | "." | "..")
 }
 
@@ -456,6 +499,123 @@ mod tests {
                 !sanitize_filename_component(&mut value),
                 "{raw:?} must be refused as a file name"
             );
+        }
+    }
+
+    /// CVE-2003-0376 regression (issue #47, Eudora 5.2.1 "Attachment
+    /// Converted" dot-pile overflow): the sanitized name hint may be
+    /// arbitrarily long, but temp-file materialization must stay
+    /// bounded and flat. Before the byte cap, a name past `NAME_MAX`
+    /// fell into the per-grapheme `ENAMETOOLONG` retry loop —
+    /// O(len²) work, minutes of frozen client on one hostile mail.
+    #[test]
+    fn test_create_temp_file_caps_overlong_name_hint() {
+        for len in [260usize, 10_000, 100_000] {
+            let name: String = "a".repeat(len - 4) + ".exe";
+            let start = std::time::Instant::now();
+            let file = File::create_temp_file(b"corpus", Some(&name), None, None, false)
+                .unwrap_or_else(|err| panic!("len {len}: {err}"));
+            let elapsed = start.elapsed();
+            let path = file.path().to_path_buf();
+            let component = path.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(
+                path.starts_with(std::env::temp_dir().join("meli")),
+                "len {len}: landed outside the temp root: {}",
+                path.display()
+            );
+            assert!(
+                component.len() <= FILENAME_COMPONENT_MAX_BYTES,
+                "len {len}: component must be capped, got {} bytes: {component:?}",
+                component.len()
+            );
+            assert!(component.starts_with('a'), "len {len}: {component:?}");
+            assert!(!component.contains('/'), "len {len}: {component:?}");
+            assert!(!component.contains('\\'), "len {len}: {component:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"corpus", "len {len}");
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "len {len}: materialization took {elapsed:?} — the retry loop is unbounded again"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// CVE-2003-0376 regression (issue #47): a name that is one huge
+    /// pile of dots — the literal Eudora trigger shape — sanitizes
+    /// into one flat, bounded, usable component; the `.`/`..`
+    /// degenerate spellings keep falling back to the generated name.
+    #[test]
+    fn test_create_temp_file_survives_dot_pile_hints() {
+        for dots in [22usize, 122, 1000, 100_000] {
+            let name = format!("a{}.exe", ".".repeat(dots));
+            let file = File::create_temp_file(b"corpus", Some(&name), None, None, false)
+                .unwrap_or_else(|err| panic!("dots {dots}: {err}"));
+            let path = file.path().to_path_buf();
+            let component = path.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(
+                path.starts_with(std::env::temp_dir().join("meli")),
+                "dots {dots}: landed outside the temp root: {}",
+                path.display()
+            );
+            assert!(
+                !component.contains('/') && !component.contains('\\'),
+                "dots {dots}: {component:?}"
+            );
+            assert!(
+                component.chars().all(|c| !c.is_control()),
+                "dots {dots}: {component:?}"
+            );
+            assert!(
+                !matches!(component.as_str(), "" | "." | ".."),
+                "dots {dots}: {component:?} is not a real file name"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"corpus", "dots {dots}");
+            let _ = std::fs::remove_file(&path);
+        }
+        // The degenerate hints still fall back to a generated name.
+        for raw in ["", ".", ".."] {
+            let file = File::create_temp_file(b"corpus", Some(raw), None, None, false)
+                .unwrap_or_else(|err| panic!("{raw:?}: {err}"));
+            let path = file.path().to_path_buf();
+            let component = path.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(
+                component.len() <= FILENAME_COMPONENT_MAX_BYTES,
+                "{raw:?}: {component:?}"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// CVE-2003-0376 regression (issue #47): the component normalizer
+    /// caps over-length names on a character boundary and keeps them
+    /// usable, while the dot-pile shapes stay flat single components.
+    #[test]
+    fn test_sanitize_filename_component_caps_overlength() {
+        for len in [260usize, 10_000, 100_000] {
+            let name: String = "a".repeat(len - 4) + ".exe";
+            let mut value = Cow::Borrowed(name.as_str());
+            assert!(sanitize_filename_component(&mut value), "len {len}");
+            let out = value.as_ref();
+            assert!(
+                out.len() <= FILENAME_COMPONENT_MAX_BYTES,
+                "len {len}: {out:?} ({} bytes)",
+                out.len()
+            );
+            assert!(out.starts_with('a'), "len {len}: {out:?}");
+            assert!(
+                std::path::Path::new(out).components().count() == 1,
+                "len {len}: {out:?} is not one component"
+            );
+        }
+        // Dot piles — the literal Eudora trigger — stay flat and
+        // usable, never special relative components.
+        for dots in [22usize, 122, 1000, 100_000] {
+            let name = format!("a{}.exe", ".".repeat(dots));
+            let mut value = Cow::Borrowed(name.as_str());
+            assert!(sanitize_filename_component(&mut value), "dots {dots}");
+            let out = value.as_ref();
+            assert!(!out.contains('/'), "dots {dots}: {out:?}");
+            assert!(out.chars().all(|c| !c.is_control()), "dots {dots}: {out:?}");
         }
     }
 
