@@ -777,7 +777,20 @@ impl PGPBackend for PGPBackendInstance {
                             .output()
                             .chain_err_summary(|| format!("Could not launch {decrypt_command}"))?;
                         if !output.status.success() {
-                            return Err(format!("{decrypt_command} exited with {output:?}").into());
+                            // CVE-2017-17688 (EFAIL) regression: GnuPG
+                            // streams decrypted literal data before the MDC
+                            // verdict, so a failing decrypt command's captured
+                            // stdout can carry partial (tampered) plaintext.
+                            // The error surfaced to the mail view must never
+                            // embed the process output byte-for-byte.
+                            return Err(format!(
+                                "{decrypt_command} failed with exit status {}",
+                                output
+                                    .status
+                                    .code()
+                                    .map_or_else(|| "unknown".to_string(), |code| code.to_string())
+                            )
+                            .into());
                         }
                         if let Ok(err) = serde_json::from_slice::<String>(&output.stdout) {
                             return Err(err.into());
