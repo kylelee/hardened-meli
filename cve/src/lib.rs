@@ -1054,3 +1054,31 @@ mod cve_2003_0376;
 #[cfg(test)]
 #[path = "CVE-2003-0302.rs"]
 mod cve_2003_0302;
+
+/// CVE-1999-0427 (Eudora 4.1, no CVSS score assigned; CVE candidate
+/// proposed 1999-07-28) attachment-filename length denial-of-service
+/// regression (issue #50, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): one
+/// mail carrying an attachment with a long enough filename performed
+/// a denial of service on the client — the earliest of the
+/// e-mail-client 「长度即拒绝服务」 family, where the name alone was
+/// the weapon. [`cve_1999_0427`] drives the issue's over-length
+/// corpus class (64 KiB+ filenames, plain / multibyte / RFC 2047
+/// armored / RFC 2231 segmented / legacy `Content-Type name=`
+/// spellings, up to 1 MiB) through the whole length axis of the
+/// surfaces a mail-controlled attachment name travels: melib parsing
+/// keeps the name byte-faithful at full length with no fixed-size
+/// buffer to truncate or overrun (the 📎 receive indicator with it),
+/// the attachment-tree line wraps losslessly and bounded through
+/// both pager line breakers, and every landing sink (save
+/// components, the mailcap `%s` temp hint) caps the name on a UTF-8
+/// character boundary before it touches a filesystem. The
+/// end-to-end meli faces (envelope view tree render, batch save) are
+/// locked in `meli/src/mail/view/tests.rs`. The result is
+/// **immune, no gap found**: the walls are issue #47's pre-landing
+/// component cap and issue #24's linear `phrase()`, re-locked at
+/// this CVE's own pure-length corpus; no production code needed
+/// changing.
+#[cfg(test)]
+#[path = "CVE-1999-0427.rs"]
+mod cve_1999_0427;
