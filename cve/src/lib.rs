@@ -36,6 +36,13 @@
 //! renders Mail.app leaked on — [`cve_2005_2512`] proves reply-quote,
 //! pipe/print, forward and export paths never relax remote-content
 //! stripping.
+//!
+//! CVE-2006-1045 (issue #15) attacks the reference-form side of the
+//! same invariant: Thunderbird's "block remote images" preference
+//! was bypassed by reference forms it did not classify —
+//! [`cve_2006_1045`] proves every form (`<img src>`/`srcset`, CSS
+//! `background:url()`, `@import`, `<video poster>`, `<source src>` and
+//! relatives) dies in `sanitize` in every embedding context.
 
 /// MFSA-2005-11 (Thunderbird 0.6–0.9 / Mozilla Suite 1.7–1.7.3)
 /// cookie-tracking regression (issue #13): an HTML-mail beacon corpus
@@ -58,3 +65,15 @@ mod mfsa_2005_11;
 #[cfg(test)]
 #[path = "CVE-2005-2512.rs"]
 mod cve_2005_2512;
+
+/// CVE-2006-1045 (Mozilla Thunderbird 1.5) tracking-pixel regression
+/// (issue #15): the "block remote images in HTML mail" preference was
+/// bypassed and externally linked resources loaded anyway. This corpus
+/// proves meli's equivalent surface immune: remote-content stripping is
+/// unconditional — every reference form (`<img src>`/`srcset`, CSS
+/// `background:url()`, `@import`, `<video poster>`, `<source src>` and
+/// era relatives) dies in `sanitize` in every embedding context, and
+/// the rendered text keeps only the manual unsubscribe footnote.
+#[cfg(test)]
+#[path = "CVE-2006-1045.rs"]
+mod cve_2006_1045;
