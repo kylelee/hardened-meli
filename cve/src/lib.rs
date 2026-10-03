@@ -913,3 +913,37 @@ mod cve_2023_4874;
 #[cfg(test)]
 #[path = "CVE-2002-0833.rs"]
 mod cve_2002_0833;
+
+/// CVE-2022-1328 (mutt ≥ 0.94.13, < 2.2.3, CVSS 4.3, Tavis Ormandy
+/// / Google Project Zero) uudecode out-of-bounds-read regression
+/// (issue #42, table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// virus / code execution): a mail carried a uuencoded attachment
+/// (`begin 644 name` … `end`) whose data line declared more decoded
+/// bytes than the physical line held, and mutt's uudecode kept
+/// consuming characters per the declaration — past the end of the
+/// line into adjacent memory (CWE-125), surfacing the over-read
+/// bytes in the decoded attachment. [`cve_2022_1328`] maps the
+/// attack onto meli's issue-prescribed equivalent surface
+/// (`melib/src/email/attachments.rs`: attachment type recognition
+/// and decoding) and locks it layer by layer as an immunity proof:
+/// the corpus is a genuine uuencode of a secret payload (verified by
+/// an embedded bounded reference uudecode carrying the mutt 2.2.3
+/// semantics — the declaration never licenses reading past the
+/// actual span), every issue-prescribed malformation family
+/// (「行尾无换行 / 截断 / 超长行 / 非法字符」) is exactly a
+/// declared-vs-actual mismatch the bounded decoder refuses, and meli
+/// never auto-uudecodes anything: the trigger header maps to
+/// `ContentTransferEncoding::Other`'s verbatim passthrough of the
+/// bytes that actually arrived, inline uuencoded text renders as
+/// plain text through the ordinary `InlineText` branch, the secret
+/// never surfaces in any decode/text/display surface, an exhaustive
+/// truncation sweep proves decode output is exactly the actual bytes
+/// at every cut — never longer, never past the (missing) line end —
+/// the `begin` line's traversal name stays text and never migrates
+/// into filename metadata, and the kitchen-sink mail (double
+/// base64-wrapped uuencode included) parses deterministic and
+/// panic-free end to end. meli has no uuencode decoder at all, so
+/// no gap exists to fix: no production code needed changing.
+#[cfg(test)]
+#[path = "CVE-2022-1328.rs"]
+mod cve_2022_1328;
