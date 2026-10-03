@@ -16,6 +16,7 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+- 内置 HTML 清理器新增 CVE-2025-66376 标签切分（tag-splitting）回归语料（issue #5）：Zimbra 的客户端清理器对 HTML *字符串*剥离 `@import` 序列与注释后，把改写结果交回浏览器重新解析，碎片因此重组出可执行的 `<svg onload=eval(atob(…))>` 标签（Proofpoint TA488）。meli 用 html5ever 恰好一次解析、过滤树、带转义再序列化——不存在可供碎片重组的二次解析，输出交给 html2text 渲染纯终端文本而非 JS 引擎。语料（报告原文 exploit 串、三个碎片配方、`display:none` 载体、同族解析差异型 mXSS 经典样本）由惰性 oracle（标签/属性白名单扫描 + `sanitize` 幂等不动点）与渲染不 panic 检查锁定。
 - `flag toggle <FLAG>` 命令（上游 `8404d74a`,修上游 #765）:在选中邮件上切换标志——从 collection 读取每封当前 flags,无该标志的收进 Set 批、有的收进 UnSet 批,合并为一个后台 `toggle-flag` job;已登记命令面板补全表;解析臂按 fork 惯例,doctest 覆盖合法/非法标志名与参数数量错误。
 
 - `TryFrom<Vec<EnvelopeHash>> for EnvelopeHashBatch`（上游 `1218cb74`）:空 vec 返回 `Err`,非空拆为 `first`/`rest`。

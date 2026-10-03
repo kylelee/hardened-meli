@@ -484,4 +484,301 @@ mod tests {
             "valid href should still pass through: {out:?}"
         );
     }
+
+    /// Tag whitelist mirror of [`sanitize`]'s configuration. Deliberately a
+    /// separate copy: it is the independent oracle the adversarial corpus
+    /// below is checked against, so widening `sanitize`'s policy without
+    /// touching this list fails the corpus tests.
+    const INERTNESS_TAG_WHITELIST: &[&str] = &[
+        "a",
+        "b",
+        "blockquote",
+        "br",
+        "code",
+        "em",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "i",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "strong",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    ];
+
+    /// CVE-2025-66376 (Zimbra, Proofpoint TA488 "tag-splitting") corpus:
+    /// `(name, payload)` pairs. Zimbra's client-side sanitizer rewrote the
+    /// HTML *string* — stripping `@import` runs and comments — and handed
+    /// the mutated string back to the browser to re-parse, so fragments
+    /// like `scr@import …;ipt` reassembled into a live `script` /
+    /// `<svg onload=eval(atob(…))>` tag. meli's pipeline parses the input
+    /// exactly once with a spec-compliant tokenizer, filters the resulting
+    /// tree, and re-serializes with escaping — there is no second parse of
+    /// mutated text for fragments to reassemble in, and the output then
+    /// feeds html2text (plain terminal text), not a JS engine. Payload 1 is
+    /// the verbatim exploit string from the Proofpoint report; the rest are
+    /// its fragment recipes, the `display:none` carrier, and mXSS classics
+    /// of the same sanitizer/browser parse-differential family.
+    const TAG_SPLITTING_CORPUS: &[(&str, &str)] = &[
+        // 1. verbatim stored-XSS string from the TA488 report: fake
+        // `@import` directives and comments fragmenting
+        // `<svg onload=eval(atob(...))>` plus a `</s…tyle>` breakout.
+        (
+            "proofpoint_verbatim",
+            r#"</scr@import FHBCuUYUGEQODuCrzISjiZsOR;ipt>WqRodzBMC</s<!--WmxNBeNgyFe@import WjTgoKQtWXrfBKAUnMVGQsKBFCvmwd;JbFJPbKH-->tyle><s_@import;_v__g/___KttsYfUnHEmwoXouXy/___onlo___@import zZhGLNPLxJ;___ad=ev___@import acXApYgYEaXwpIprFa;___al(at__@_import poxscPRqHcoGoodXaFvoY;___ob__("#,
+        ),
+        // 2. the report's three fragment recipes inside the hidden
+        // `display:none` div carrier.
+        (
+            "hidden_div_fragments",
+            r#"<div style="display:none">scr@import FHBCuUYUGEQODuCrzISjiZsOR;ipt onlo@import zZhGLNPLxJ;ad=ev@import acXApYgYEaXwpIprFa;al(at@import poxscPRqHcoGoodXaFvoY;ob('cHcxMjM='))</div>"#,
+        ),
+        // 3. comment-split script tag: after one spec parse it is a single
+        // unknown tag token, never two joinable fragments.
+        (
+            "comment_split_script",
+            r#"<p>hi</p><scr<!--WmxNBeNgyFe-->ipt>alert(1)</scr<!--WmxNBeNgyFe-->ipt>"#,
+        ),
+        // 4. `</s<!--…-->tyle>` breakout riding on a style element.
+        (
+            "style_carried_fragments",
+            r#"<style>x</s<!--c-->tyle><svg onload=eval(atob('Zm9v'))></style>"#,
+        ),
+        // 5. the unsplit payload itself.
+        (
+            "plain_svg_onload",
+            r#"<div style="display:none"><svg onload="eval(atob('Z2Q='))"></svg></div>"#,
+        ),
+        // 6. mXSS classic: SVG-namespace `style` is not raw text, so the
+        // quoted `id` used to smuggle `</style><img onerror=…>` past
+        // innerHTML-round-trip sanitizers.
+        (
+            "mxss_svg_style_a",
+            r#"<svg><style><a id="</style><img src=x onerror=eval()>">"#,
+        ),
+        // 7. mXSS classic: mglyph/mtext MathML integration points plus a
+        // comment-smuggled `</style>`.
+        (
+            "mxss_math_mglyph",
+            r#"<math><mtext><table><mglyph><style><!--</style><img title="--></mglyph><svg onload=eval()>">"#,
+        ),
+        // 8. mXSS classic: noscript scripting-flag differential.
+        (
+            "mxss_noscript",
+            r#"<noscript><p title="</noscript><svg onload=eval()>">"#,
+        ),
+        // 9. mXSS classic: form/math foreign-content breakout.
+        (
+            "mxss_form_math",
+            r#"<form><math><mtext></form><form><mglyph><style></math><img src onerror=eval(1)>"#,
+        ),
+        // 10. whitelisted attribute whose value carries markup-shaped text;
+        //     the serializer must escape it.
+        (
+            "attr_title_carries_markup",
+            r#"<a title="</style><svg onload=eval()>">x</a>"#,
+        ),
+        // 11. comment removal can join adjacent text nodes — the joined
+        //     result must remain escaped text, never markup.
+        ("text_reassembly_only", r#"<p>onlo<!--c-->ad=alert(1)</p>"#),
+        // 12. `@import` cargo inside a style element dies with the whole
+        //     element; it is never stripped piecemeal.
+        (
+            "import_inside_style_only",
+            r#"<style>@import url(evil);s_@import;_v_g/onload=ev</style>ok"#,
+        ),
+    ];
+
+    /// Extract every tag-shaped construct (`<name …>`, `</name>`, `<!…>`,
+    /// `<?…>`) from serialized HTML, skipping text and character
+    /// references. Quoted attribute values are skipped so a `<` inside a
+    /// value cannot be misread as a tag boundary.
+    fn scan_tags(html: &str) -> Vec<String> {
+        let mut tags = Vec::new();
+        let mut chars = html.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '<' {
+                continue;
+            }
+            match chars.peek() {
+                Some(next) if next.is_ascii_alphabetic() || matches!(*next, '/' | '!' | '?') => {}
+                _ => continue,
+            }
+            let mut tag = String::from("<");
+            let mut quote = None;
+            for c2 in chars.by_ref() {
+                tag.push(c2);
+                match quote {
+                    Some(q) if c2 == q => quote = None,
+                    Some(_) => {}
+                    None if c2 == '"' || c2 == '\'' => quote = Some(c2),
+                    None if c2 == '>' => break,
+                    None => {}
+                }
+            }
+            tags.push(tag);
+        }
+        tags
+    }
+
+    /// Assert one serialized tag is inert: a whitelisted (end-)tag name,
+    /// only whitelisted attributes, and `href` values re-validated by the
+    /// module's own scheme rules.
+    fn assert_tag_is_inert(tag: &str) {
+        let inner = tag
+            .strip_prefix('<')
+            .and_then(|rest| rest.strip_suffix('>'))
+            .unwrap_or_default();
+        let body = inner.strip_prefix('/').unwrap_or(inner);
+        let name: String = body
+            .chars()
+            .take_while(|c| !c.is_ascii_whitespace() && *c != '/')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        assert!(
+            INERTNESS_TAG_WHITELIST.contains(&name.as_str()),
+            "non-whitelisted tag survived sanitization: {tag:?}"
+        );
+        // Attribute tokens: whitespace-separated words outside quotes; the
+        // first word is the tag name.
+        let mut words: Vec<String> = Vec::new();
+        let mut word = String::new();
+        let mut quote = None;
+        for c in body.chars() {
+            match quote {
+                Some(q) => {
+                    word.push(c);
+                    if c == q {
+                        quote = None;
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                None if c == '"' || c == '\'' => {
+                    quote = Some(c);
+                    word.push(c);
+                }
+                None if c.is_ascii_whitespace() => {
+                    if !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                None => word.push(c),
+            }
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+        for word in words.iter().skip(1) {
+            let attr = word
+                .split('=')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            assert!(
+                matches!(attr.as_str(), "href" | "title" | "rel" | "lang"),
+                "non-whitelisted attribute survived sanitization: {tag:?}"
+            );
+            if attr == "href" {
+                if let Some((_, value)) = word.split_once('=') {
+                    assert!(
+                        is_safe_url(value.trim_matches(['"', '\''])),
+                        "unsafe href survived sanitization: {tag:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Inertness oracle for adversarial input: every tag-shaped construct
+    /// in the output passes the whitelist scan, and the output is a
+    /// `sanitize` fixed point — a second parse mutates nothing, which is
+    /// precisely the reassembly differential that fuels tag-splitting and
+    /// mXSS.
+    fn assert_sanitized_output_is_inert(name: &str, input: &str) {
+        let out = sanitize(input);
+        for tag in scan_tags(&out) {
+            assert_tag_is_inert(&tag);
+        }
+        assert_eq!(
+            sanitize(&out),
+            out,
+            "{name}: sanitize output is not a fixed point: {out:?}"
+        );
+    }
+
+    /// CVE-2025-66376 tag-splitting corpus: no live markup may survive
+    /// (see [`TAG_SPLITTING_CORPUS`] for the technique and each payload).
+    #[test]
+    fn tag_splitting_corpus_yields_no_live_markup() {
+        for (name, payload) in TAG_SPLITTING_CORPUS {
+            assert_sanitized_output_is_inert(name, payload);
+        }
+    }
+
+    /// The same corpus must render to terminal text without panicking.
+    #[test]
+    fn tag_splitting_corpus_renders_to_text_without_panicking() {
+        for (name, payload) in TAG_SPLITTING_CORPUS {
+            render(payload.as_bytes(), 80)
+                .unwrap_or_else(|err| panic!("{name}: render failed: {err}"));
+        }
+    }
+
+    /// Lock the reassembly semantics that turned the Zimbra bug into RCE:
+    /// - the verbatim exploit string collapses to inert text with the
+    ///   stray `>` escaped, and its fragments (`<svg`, `onload=`, `atob(`,
+    ///   …) never appear contiguously — nothing strips the `@import…;`
+    ///   runs separating them;
+    /// - the hidden-div carrier keeps its fragment separators verbatim;
+    /// - comment removal may join text nodes, but the join stays escaped
+    ///   text (inert in the html2text terminal pipeline), never markup;
+    /// - a `style` element dies whole, `@import` cargo included.
+    #[test]
+    fn tag_splitting_fragments_stay_broken_and_never_reassemble() {
+        let (_, verbatim) = TAG_SPLITTING_CORPUS[0];
+        let out = sanitize(verbatim);
+        for fragment in ["<svg", "<script", "onload=", "onerror=", "atob(", "eval("] {
+            assert!(
+                !out.contains(fragment),
+                "fragment {fragment:?} reassembled in verbatim exploit output: {out:?}"
+            );
+        }
+        assert!(
+            out.contains("tyle&gt;"),
+            "stray `>` not escaped in verbatim exploit output: {out:?}"
+        );
+
+        let (_, hidden_div) = TAG_SPLITTING_CORPUS[1];
+        let out = sanitize(hidden_div);
+        assert!(
+            out.contains("scr@import FHBCuUYUGEQODuCrzISjiZsOR;ipt"),
+            "fragment separator stripped — tag could reassemble: {out:?}"
+        );
+        assert!(
+            out.contains("onlo@import zZhGLNPLxJ;ad=ev"),
+            "fragment separator stripped — tag could reassemble: {out:?}"
+        );
+
+        assert_eq!(
+            sanitize(r#"<p>onlo<!--c-->ad=alert(1)</p>"#),
+            r#"<p>onload=alert(1)</p>"#,
+            "text-node joins must stay inert escaped text"
+        );
+
+        assert_eq!(
+            sanitize(r#"<style>@import url(evil);s_@import;_v_g/onload=ev</style>ok"#),
+            "ok",
+            "style element must die whole with its @import cargo"
+        );
+    }
 }
