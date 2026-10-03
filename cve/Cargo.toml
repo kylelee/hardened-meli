@@ -16,3 +16,6 @@ categories = ["email", "development-tools::testing"]
 [lib]
 name = "cve"
 path = "src/lib.rs"
+
+[dev-dependencies]
+meli = { path = "../meli" }

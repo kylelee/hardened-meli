@@ -659,6 +659,9 @@ dependencies = [
 [[package]]
 name = "cve"
 version = "0.1.0"
+dependencies = [
+ "meli",
+]
 
 [[package]]
 name = "darling"
