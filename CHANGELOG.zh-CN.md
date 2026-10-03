@@ -16,6 +16,7 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+- CVE-2008-4491 加密邮件草稿明文落盘回归语料（issue #17）：Apple Mail 3.5 在开启“草稿存储在服务器”后，把 S/MIME 加密往来的草稿以明文保存在服务器上，机密对话对邮件服务器管理员与链路中间人完全可读。`cve/src/CVE-2008-4491.rs` 携带真实 PGP/MIME 语料——gpg 2.4.9 cv25519 逐字密文（生成时解密回环验证，测试断言 OpenPGP 包头），内容为业务上可信的汇款指令邮件——并把攻击映射到 meli 的撰写草稿生命周期：线上原文与 melib 解析都不暴露会话明文；引用存储密文不泄露任何内容；而引用解密后的会话视图正是把明文写进草稿序列化的那一步——并记录：阻止这些字节静默进入服务器 Drafts 邮箱的闸门是撰写器的保存策略，由下述修复的 meli 回归锁定（草稿从不自动保存；发送启动失败拒绝持久化已武装加密的草稿；显式保存给出明文警告；发送后的存储副本是已加密的线上原文）。
 - CVE-2008-3068 加密回执信标回归语料（issue #16）：Outlook/Windows Live Mail/Office 2007 在 CryptoAPI 吊销检查时自动访问 S/MIME 证书内嵌的 AIA/CRL 分发点 URL，每次读信都向攻击者泄露阅读时间与 IP。`cve/src/CVE-2008-3068.rs` 携带一封密码学上真实有效的 openssl 签名 S/MIME 语料（内嵌证书向 `attacker.example` 宣告 OCSP、CA Issuers 与 CRL 分发点三类信标 URL）以及协议走私变体，逐层证明 meli 等价面的免疫性：CMS 部件解析为不透明 `CMSSignature` 数据块、信标 URL 不出现在任何邮件元数据；唯一的签名验证入口拒绝非 OpenPGP 协议，走私载体也只把不透明字节交给引擎；且每个 gpgme 上下文创建即离线/仅本地/不自动取钥（GPGME 离线模式：CMS 禁 Dirmngr CRL/OCSP、OpenPGP 彻底禁用 Dirmngr）——证书内嵌 URL 永远不会被访问。
 - MFSA-2005-11 Cookie 追踪回归语料，`cve` crate 首个逐 CVE 回归（issue #13）：该通告（Thunderbird 0.6–0.9 / Mozilla Suite 1.7–1.7.3）中 HTML 邮件内嵌内容发出带 Cookie 的 HTTP 请求（`<img>` 追踪像素、样式表 `<link>`、CSS `@import`/`url()`），无视“邮件中禁用 Cookie”偏好，垃圾邮件可借此追踪收件人。`cve/src/MFSA-2005-11.rs`（经 `cve/src/lib.rs` 以 `#[cfg(test)] #[path]` 挂载）含 20 个自动加载信标向量与一封完整追踪垃圾邮件，从结构上证明 meli 的免疫性：每个向量在 `sanitize` 后标签与 URL 一并消失（由独立的标签/属性白名单 oracle 校验）、渲染输出为纯终端文本、仅存的远程引用是用户可见且 meli 绝不主动抓取的链接脚注、`sanitize` 对语料为不动点（无二次解析重组）。`meli::mail::view::html_render::{sanitize, render}` 由 `pub(crate)` 改为 `pub`，使 `cve` crate（如 meli-test 一样）测试的就是邮件视图实际调用的加固路径本尊；渲染管线仍是纯内存文本处理、无抓取器也无 Cookie 存储，未发现 meli 防御缺口。
 - 逐 CVE 攻击模拟任务 issue（issue #6）：按调研报告为每个 CVE（含 MFSA-2005-11）各建一个 Gitea issue，共 78 个；每个 issue 含 CVE 背景、映射到的 meli 攻击面（HTML 清理器、MIME/IMAP/SMTP 解析、mailcap、gpgme、TLS/STARTTLS）、攻击样例构造要点、预期断言与 `cve/src/<cve-id>.rs` 回归语料验收标准；索引见 `cve/README.md`。CVE-2025-66376 已由 issue #5 的语料覆盖，不重复建单。
@@ -79,6 +80,7 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 - 依赖治理：移除根 `Cargo.toml` 的 `[patch.crates-io]` 与 `vendor/crossterm/` 目录，crossterm 回归 crates.io 0.29.0 原版。原补丁防御的「未识别私有 CSI 卡死」改由删除无用启动查询（`CSI ? 2026 $ p` 同步输出支持探测，全代码库无消费者）+ 输入看门狗承担。离线构建改为依赖本地 cargo cache 预取（`cargo fetch`）。
 - `envelope-view.reply_to_all` 默认键由 `C-g` 改为 `C-a`（`reply` 保持 `r`，`reply_to_author` 保持 `C-r`）；底栏 `Reply All` 提示与邮件视图按键派发随同一配置绑定自动同步。
 
+- 撰写器在发送启动失败时静默以明文持久化已武装加密的草稿（CVE-2008-4491 同类，issue #17）：当加密过滤器栈或发信管道同步失败（如已武装加密却无法从草稿 `From` 头解析 `encrypt-for-self` 身份）时，未发送的草稿恰在用户已武装加密之际以明文存入（可能是服务器侧的）Drafts 邮箱。该回退现在改为把草稿留在打开的撰写标签页并说明为何未保存副本；显式保存（`save-draft`、放弃对话框的保存）仍然允许，但会警告存储副本为明文而该邮件设置为加密；发送后的存储因加密过滤器先于序列化运行、保存的本来就是已加密的线上原文。回归测试位于 `meli/src/mail/compose.rs`（`send_setup_failure_with_encryption_armed_keeps_draft_out_of_drafts`、`explicit_save_draft_with_encryption_armed_warns_plaintext`，以及未武装加密时行为冻结的对照测试）。
 ### 修复（Fixed）
 
 - `melib::gpgme::Context::get_flag` 在刚关闭 `auto-key-retrieve` 后仍报告其为开启：libgpgme 对关闭的上下文 flag 返回空 C 字符串（并非 NULL 指针），而该 getter 只判空不判值。现已改为与 `"1"` 比较，并由 CVE-2008-3068 回归在真实 libgpgme 上运行锁定。

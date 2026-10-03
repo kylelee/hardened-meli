@@ -709,6 +709,92 @@ To: {}
         };
     }
 
+    /// Whether the user armed `OpenPGP` encryption for this draft. When
+    /// armed, the message is meant to be confidential — in transit *and*
+    /// at rest — so its as-yet-unencrypted draft must never be persisted
+    /// silently: storing the plaintext body of an encrypted conversation
+    /// in a (possibly server-side) Drafts mailbox is exactly the
+    /// plaintext-at-rest leak of CVE-2008-4491, where Apple Mail stored
+    /// drafts of S/MIME mail unencrypted on the server for the server
+    /// operator and intermediaries to read.
+    #[cfg(feature = "gpgme")]
+    fn encryption_armed(&self) -> bool {
+        self.pgp_state
+            .encrypt_mail
+            .unwrap_or(ActionFlag::False)
+            .is_true()
+    }
+
+    /// Message submission could not even be queued: the crypto filter
+    /// stack or the mailer plumbing failed to build (e.g. armed
+    /// encryption could not resolve its `encrypt-for-self` identity from
+    /// the draft's `From` header). The composer stays open, so no work is
+    /// lost — and unless encryption is armed, the draft is additionally
+    /// stored in the Drafts mailbox as a crash-safety copy.
+    ///
+    /// With encryption armed that copy would be the unencrypted body of a
+    /// message the user explicitly meant to keep confidential (the
+    /// CVE-2008-4491 plaintext-draft leak), so it is deliberately *not*
+    /// stored; the draft survives in the open composer tab, and the user
+    /// can still store it consciously with `save-draft` or the discard
+    /// dialog's save option — both warn about the plaintext copy.
+    fn handle_send_setup_error(&mut self, err: melib::Error, context: &mut Context) {
+        context.replies.push_back(UIEvent::Notification {
+            title: None,
+            source: None,
+            body: err.to_string().into(),
+            kind: Some(NotificationType::Error(err.kind)),
+        });
+        #[cfg(feature = "gpgme")]
+        if self.encryption_armed() {
+            context.replies.push_back(UIEvent::Notification {
+                title: Some("Draft not stored".into()),
+                source: None,
+                body: "Sending failed and this message is set to be encrypted. The draft was NOT copied to the Drafts mailbox: stored drafts are kept as written, so the copy would be plaintext. The draft stays open in this tab; run `save-draft` to store it unencrypted deliberately."
+                    .into(),
+                kind: Some(NotificationType::Info),
+            });
+            self.mode = ViewMode::Edit;
+            return;
+        }
+        save_draft(
+            self.draft.clone().finalise().unwrap().as_bytes(),
+            context,
+            SpecialUsageMailbox::Drafts,
+            Flag::SEEN | Flag::DRAFT,
+            self.account_hash,
+        );
+        self.mode = ViewMode::Edit;
+    }
+
+    /// Store the draft in the Drafts mailbox on an explicit user request
+    /// (`save-draft`, or the discard dialog's save-and-close). Explicit
+    /// saves stay allowed — the user asked for them — but when encryption
+    /// is armed they are not silent about the confidentiality downgrade:
+    /// encryption is applied when the message is *sent*, never to the
+    /// stored draft, whose plaintext copy is readable by anyone with
+    /// access to the mailbox, server operator included (the
+    /// CVE-2008-4491 class of leak).
+    fn save_draft_with_unencrypted_warning(&self, context: &mut Context) {
+        save_draft(
+            self.draft.clone().finalise().unwrap().as_bytes(),
+            context,
+            SpecialUsageMailbox::Drafts,
+            Flag::SEEN | Flag::DRAFT,
+            self.account_hash,
+        );
+        #[cfg(feature = "gpgme")]
+        if self.encryption_armed() {
+            context.replies.push_back(UIEvent::Notification {
+                title: Some("Draft stored unencrypted".into()),
+                source: None,
+                body: "This message is set to be encrypted, but the stored draft is plaintext and readable by anyone with access to the mailbox. Delete it once the message is sent."
+                    .into(),
+                kind: Some(NotificationType::Info),
+            });
+        }
+    }
+
     fn update_form(&mut self, context: &Context) {
         let old_cursor = self.form.cursor();
         let shortcuts = self.shortcuts(context);
@@ -1672,20 +1758,7 @@ impl Component for Composer {
                             );
                         }
                         Err(err) => {
-                            context.replies.push_back(UIEvent::Notification {
-                                title: None,
-                                source: None,
-                                body: err.to_string().into(),
-                                kind: Some(NotificationType::Error(err.kind)),
-                            });
-                            save_draft(
-                                self.draft.clone().finalise().unwrap().as_bytes(),
-                                context,
-                                SpecialUsageMailbox::Drafts,
-                                Flag::SEEN | Flag::DRAFT,
-                                self.account_hash,
-                            );
-                            self.mode = ViewMode::Edit;
+                            self.handle_send_setup_error(err, context);
                         }
                     }
                 }
@@ -1804,14 +1877,11 @@ impl Component for Composer {
                         }
                         'n' => {}
                         'y' => {
-                            save_draft(
-                                self.draft.clone().finalise().unwrap().as_bytes(),
-                                context,
-                                SpecialUsageMailbox::Drafts,
-                                Flag::SEEN | Flag::DRAFT,
-                                self.account_hash,
-                            );
-                            context.replies.push_back(UIEvent::Action(Tab(Kill(*u))));
+                            let tab_id = *u;
+                            self.save_draft_with_unencrypted_warning(context);
+                            context
+                                .replies
+                                .push_back(UIEvent::Action(Tab(Kill(tab_id))));
                             return true;
                         }
                         _ => {}
@@ -2675,13 +2745,7 @@ impl Component for Composer {
                     return true;
                 }
                 ComposerTabAction::SaveDraft => {
-                    save_draft(
-                        self.draft.clone().finalise().unwrap().as_bytes(),
-                        context,
-                        SpecialUsageMailbox::Drafts,
-                        Flag::SEEN | Flag::DRAFT,
-                        self.account_hash,
-                    );
+                    self.save_draft_with_unencrypted_warning(context);
                     self.set_dirty(true);
                     return true;
                 }
@@ -4193,6 +4257,170 @@ exit 0
 
     /// Feed pending context replies back into `composer` (like the main
     /// loop drains them) and return every requested `UIMode` switch.
+    /// Returns `true` if `replies` show that a draft was persisted:
+    /// either `save_draft`'s "Message saved" notification, or its
+    /// temp-file fallback "Message was stored" notification.
+    fn replies_contain_saved_draft(replies: &[UIEvent]) -> bool {
+        replies.iter().any(|ev| {
+            matches!(
+                ev,
+                UIEvent::Notification { title, body, .. }
+                    if title.as_ref().is_some_and(|t| t.contains("Message saved"))
+                        || body.contains("Message was stored")
+            )
+        })
+    }
+
+    /// Returns `true` if `replies` carry the notification titled `title`.
+    fn replies_contain_notification_titled(replies: &[UIEvent], title: &str) -> bool {
+        replies.iter().any(|ev| {
+            matches!(
+                ev,
+                UIEvent::Notification { title: t, .. } if t.as_deref() == Some(title)
+            )
+        })
+    }
+
+    /// CVE-2008-4491 regression (issue #17): when submission fails before
+    /// it even starts and encryption is armed for the message, the
+    /// as-yet-unencrypted draft must NOT be persisted to the (possibly
+    /// server-side) Drafts mailbox — that plaintext copy is exactly the
+    /// Apple Mail "drafts of encrypted mail stored in plaintext on the
+    /// server" leak. The draft instead survives in the open composer tab,
+    /// and the user is told why no copy was kept.
+    ///
+    /// The setup failure is triggered the way a real one arises: armed
+    /// encryption with `encrypt-for-self` cannot resolve its identity
+    /// from a malformed `From` header, so `send_draft_async` fails
+    /// synchronously while building the crypto filter stack.
+    #[cfg(feature = "gpgme")]
+    #[test]
+    fn send_setup_failure_with_encryption_armed_keeps_draft_out_of_drafts() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        composer.pgp_state.encrypt_mail = Some(ActionFlag::True);
+        // `encrypt_form` normally populates at first draw; build it now so
+        // the `From` field below can be edited before the send flow.
+        composer.update_form(&ctx);
+        // `encrypt_for_self` defaults to true; make the draft's `From`
+        // unparseable so the self-encryption identity cannot be resolved.
+        // The form field (not the draft header) must be set:
+        // `start_send_confirmation` syncs form values back into the draft.
+        if let Some(Field::Text(ref mut text_field)) =
+            composer.form.values_mut().get_mut(&HeaderName::FROM)
+        {
+            text_field.set_content("Unclosed Angle <victim@example.org".to_string());
+        } else {
+            panic!("the composer form must carry a From text field");
+        }
+        composer.start_send_confirmation(&mut ctx);
+        let dialog_id = match &composer.mode {
+            ViewMode::Send { widget } => widget.id(),
+            _ => panic!("start_send_confirmation must install the send dialog"),
+        };
+        let mut ev = UIEvent::FinishedUIDialog(dialog_id, Box::new(true));
+        assert!(
+            composer.process_event(&mut ev, &mut ctx),
+            "the send confirmation must be consumed"
+        );
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            matches!(composer.mode, ViewMode::Edit),
+            "a failed submission setup must return the composer to edit mode"
+        );
+        assert!(
+            !replies_contain_saved_draft(&replies),
+            "an encryption-armed draft must not be stored in plaintext: {replies:?}"
+        );
+        assert!(
+            replies_contain_notification_titled(&replies, "Draft not stored"),
+            "the user must be told why no draft copy was kept: {replies:?}"
+        );
+    }
+
+    /// Without armed encryption there is no confidentiality to lose: a
+    /// submission setup failure keeps the crash-safety draft copy in the
+    /// Drafts mailbox exactly as before (behavior frozen).
+    #[test]
+    fn send_setup_failure_without_encryption_stores_draft() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        composer.handle_send_setup_error(melib::Error::new("no mailer"), &mut ctx);
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            matches!(composer.mode, ViewMode::Edit),
+            "a failed submission setup must return the composer to edit mode"
+        );
+        assert!(
+            replies_contain_saved_draft(&replies),
+            "without armed encryption the crash-safety draft copy must be kept: {replies:?}"
+        );
+        assert!(
+            !replies_contain_notification_titled(&replies, "Draft not stored"),
+            "no encryption was armed, so no draft-not-stored notice belongs in the replies"
+        );
+    }
+
+    /// CVE-2008-4491 boundary (issue #17): an explicit `save-draft` with
+    /// encryption armed stays allowed — the user asked for it — but must
+    /// not be silent about the downgrade: the stored copy is plaintext
+    /// while the message is meant to be encrypted.
+    #[cfg(feature = "gpgme")]
+    #[test]
+    fn explicit_save_draft_with_encryption_armed_warns_plaintext() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        composer.pgp_state.encrypt_mail = Some(ActionFlag::True);
+        let mut ev = UIEvent::Action(Action::Tab(TabAction::ComposerAction(
+            ComposerTabAction::SaveDraft,
+        )));
+        assert!(
+            composer.process_event(&mut ev, &mut ctx),
+            "the save-draft action must be consumed"
+        );
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies_contain_saved_draft(&replies),
+            "the explicit save must still store the draft: {replies:?}"
+        );
+        assert!(
+            replies_contain_notification_titled(&replies, "Draft stored unencrypted"),
+            "an encryption-armed draft save must warn about the plaintext copy: {replies:?}"
+        );
+    }
+
+    /// Without armed encryption an explicit save stays exactly as quiet
+    /// as before (behavior frozen).
+    #[test]
+    fn explicit_save_draft_without_encryption_saves_without_warning() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        let mut ev = UIEvent::Action(Action::Tab(TabAction::ComposerAction(
+            ComposerTabAction::SaveDraft,
+        )));
+        assert!(
+            composer.process_event(&mut ev, &mut ctx),
+            "the save-draft action must be consumed"
+        );
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies_contain_saved_draft(&replies),
+            "the explicit save must store the draft: {replies:?}"
+        );
+        assert!(
+            !replies_contain_notification_titled(&replies, "Draft stored unencrypted"),
+            "no encryption was armed, so there is nothing to warn about: {replies:?}"
+        );
+    }
+
     fn drain_replies(composer: &mut Composer, context: &mut Context) -> Vec<UIMode> {
         let mut modes = Vec::new();
         for _ in 0..8 {

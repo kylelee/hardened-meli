@@ -55,6 +55,16 @@
 //! local-only and non-retrieving — so no certificate-borne URL can
 //! ever be fetched.
 
+//! CVE-2008-4491 (issue #17) turns to the draft store: Apple Mail kept
+//! drafts of S/MIME-encrypted mail as plaintext on the server.
+//! [`cve_2008_4491`] maps the attack onto meli's composer draft
+//! lifecycle with a genuine gpg-encrypted PGP/MIME corpus: the wire
+//! form and melib parsing surface no session plaintext, quoting the
+//! decrypted view is exactly what serializes it — and the composer's
+//! save policy (no auto-save, no silent plaintext persistence of an
+//! encryption-armed draft, warnings on explicit saves, encrypted
+//! post-submission copies) is what keeps those bytes off the server.
+
 /// MFSA-2005-11 (Thunderbird 0.6–0.9 / Mozilla Suite 1.7–1.7.3)
 /// cookie-tracking regression (issue #13): an HTML-mail beacon corpus
 /// proving the render pipeline performs no remote reference loading —
@@ -107,3 +117,20 @@ mod cve_2006_1045;
 #[cfg(test)]
 #[path = "CVE-2008-3068.rs"]
 mod cve_2008_3068;
+
+/// CVE-2008-4491 (Apple Mail.app 3.5) plaintext-draft-at-rest regression
+/// (issue #17): with "store drafts on server" enabled, drafts of
+/// S/MIME-encrypted mail were saved as plaintext on the server, readable
+/// by the server operator and intermediaries. This corpus maps the
+/// attack onto meli's composer draft lifecycle: a genuine gpg-encrypted
+/// PGP/MIME mail whose secrets exist only off the wire; parsing and
+/// reply-quoting of the stored form leak nothing; quoting the decrypted
+/// session view is what produces the plaintext draft — and the tests
+/// document that the bar keeping it off a server-side Drafts mailbox is
+/// the composer save policy (no auto-save, submission-setup failures
+/// refuse to persist encryption-armed drafts, explicit saves warn,
+/// post-submission copies are the encrypted wire form), locked by the
+/// meli regressions named in the module docs.
+#[cfg(test)]
+#[path = "CVE-2008-4491.rs"]
+mod cve_2008_4491;
