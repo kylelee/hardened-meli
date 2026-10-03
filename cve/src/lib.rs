@@ -992,3 +992,35 @@ mod cve_2022_1328;
 #[cfg(test)]
 #[path = "CVE-2023-4875.rs"]
 mod cve_2023_4875;
+
+/// CVE-2003-0376 (Eudora 5.2.1, CVSS v2 5.0) "Attachment Converted"
+/// buffer-overflow regression (issue #47, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): Eudora
+/// parsed the `Attachment Converted` line of a received mail and
+/// copied its dot-piled quoted argument (`\B.A.A.A … .A.A.A`, 122
+/// repetitions of `.A`) into a fixed-size buffer — crash with
+/// `ACCESS_VIOLATION`, failed restart until the message was removed,
+/// possibly controllable code execution. [`cve_2003_0376`] maps the
+/// attack onto meli's equivalent surfaces — the marker line, the
+/// MIME attachment filename, the mailcap `%s` temp landing and the
+/// save-component sinks — over the verbatim bugtraq trigger shapes
+/// (canonical `a…………exe`, `\B.A.A…` below/at/above the 122-repetition
+/// crash threshold, all-dot and RFC 2047-armored piles, megabyte
+/// names) and locks the walls layer by layer: the marker line is
+/// inert body text (and its header spellings fail closed), dot piles
+/// parse/surface/display verbatim and bounded, executable content
+/// never auto-materializes (temp root untouched by reading) nor lands
+/// with an execute bit, and opening stays gated on the explicit
+/// `open_mailcap` shortcut. One real gap is exposed and fixed with
+/// this regression in `meli/src/types/helpers.rs`: `File::
+/// create_temp_file` left its sanitized name hint arbitrarily long,
+/// so a name past `NAME_MAX` fell into the per-grapheme
+/// `ENAMETOOLONG` retry loop — O(len²) work (measured: ≈109 s for a
+/// 100 000-byte name in a release build), one hostile mail freezing
+/// the client for minutes on the first mailcap open, the availability
+/// face of this CVE; every mail-controlled name sink now
+/// pre-truncates to a bounded component on a UTF-8 character boundary
+/// while the per-grapheme fallback stays for exotic filesystems.
+#[cfg(test)]
+#[path = "CVE-2003-0376.rs"]
+mod cve_2003_0376;
