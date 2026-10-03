@@ -431,44 +431,62 @@ impl<'a> Iterator for ImapLineIterator<'a> {
             // If we are in the middle of reading a literal but the buffer is not filled
             // yet, we should return None.
             let cur_slice = self.slice.get(i..)?;
-            if let Some(pos) = cur_slice.find(CRLF) {
-                // Skip literal continuation line
-                if let Some(literal_start) = cur_slice[..pos].find(b"{") {
-                    if let Ok((_, len)) =
-                        delimited::<_, _, (&[u8], nom::error::ErrorKind), _, _, _>(
-                            tag("{"),
-                            map_res(digit1, |s| {
-                                usize::from_str(unsafe { std::str::from_utf8_unchecked(s) })
-                            }),
-                            tag("}\r\n"),
-                        )
-                        .parse(&cur_slice[literal_start..])
-                    {
-                        // The declared literal length is untrusted server
-                        // data: a declaration near `usize::MAX` (or
-                        // `{4294967295}` on 32-bit targets) used to
-                        // overflow `pos + 2 + len` — panicking debug
-                        // builds of every IMAP session and wrapping
-                        // release builds past the buffer (CWE-190).
-                        // Saturate instead: the skip lands past the
-                        // buffer, `.get(i..)` below returns `None` and
-                        // the iterator reports "buffer not filled yet",
-                        // the honest state for a literal longer than
-                        // the buffered bytes.
-                        i = i.saturating_add(pos + 2).saturating_add(len);
-                    } else {
-                        i += literal_start + 1;
-                    }
-                    continue;
-                }
-                let ret = self.slice.get(..i + pos + 2).unwrap_or_default();
-                self.slice = self.slice.get(i + pos + 2..).unwrap_or_default();
-                return Some(ret);
-            } else {
+            let Some(pos) = cur_slice.find(CRLF) else {
                 let ret = self.slice;
                 self.slice = self.slice.get(ret.len()..).unwrap_or_default();
                 return Some(ret);
+            };
+            // Skip literal continuation line. Probe the `{` candidates of
+            // the line one by one *inside the already-found line*: the old
+            // probe re-ran `find(CRLF)` over the whole tail of the line
+            // once per failing `{` candidate, so a hostile line dense in
+            // `{` bytes (an over-long FLAGS response is the carrier)
+            // framed in O(N²) before any parser ran — one response
+            // hanging the watch/select/read loops (CWE-407; CVE-2007-3166
+            // regression corpus). A successful `{digits}\r\n` parse can
+            // only end exactly at this line's terminator — the first CRLF
+            // bounds the search window — so walking the candidates
+            // left-to-right is semantics-preserving: each failing
+            // candidate advances the probe one byte past its `{` and
+            // nothing is ever rescanned.
+            let mut probe = 0;
+            let mut literal_len = None;
+            while let Some(rel) = cur_slice[probe..pos].find(b"{") {
+                let abs = probe + rel;
+                match delimited::<_, _, (&[u8], nom::error::ErrorKind), _, _, _>(
+                    tag("{"),
+                    map_res(digit1, |s| {
+                        usize::from_str(unsafe { std::str::from_utf8_unchecked(s) })
+                    }),
+                    tag("}\r\n"),
+                )
+                .parse(&cur_slice[abs..])
+                {
+                    Ok((_, len)) => {
+                        literal_len = Some(len);
+                        break;
+                    }
+                    Err(_) => probe = abs + 1,
+                }
             }
+            if let Some(len) = literal_len {
+                // The declared literal length is untrusted server
+                // data: a declaration near `usize::MAX` (or
+                // `{4294967295}` on 32-bit targets) used to
+                // overflow `pos + 2 + len` — panicking debug
+                // builds of every IMAP session and wrapping
+                // release builds past the buffer (CWE-190).
+                // Saturate instead: the skip lands past the
+                // buffer, `.get(i..)` above returns `None` and
+                // the iterator reports "buffer not filled yet",
+                // the honest state for a literal longer than
+                // the buffered bytes.
+                i = i.saturating_add(pos + 2).saturating_add(len);
+                continue;
+            }
+            let ret = self.slice.get(..i + pos + 2).unwrap_or_default();
+            self.slice = self.slice.get(i + pos + 2..).unwrap_or_default();
+            return Some(ret);
         }
     }
 }

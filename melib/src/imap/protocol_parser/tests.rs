@@ -1278,3 +1278,54 @@ fn test_imap_fetch_response_truncated_flags_and_modseq_do_not_panic() {
     assert!(ret.flags.unwrap().0.contains(Flag::SEEN));
     assert_eq!(ret.modseq.map(|m| m.0.get()), Some(9));
 }
+
+#[test]
+fn test_imap_line_iterator_brace_dense_line_is_linear() {
+    // CVE-2007-3166 (issue #49): the literal-declaration probe used to
+    // re-run `find(CRLF)` over the whole tail of the line once per
+    // failing `{` candidate — advancing one byte and rescanning — so a
+    // `{`-dense over-long line (an over-long FLAGS response is the
+    // carrier) framed in O(N²) before any parser ran, hanging the
+    // watch/select/read loops on one response (CWE-407; measured ≈0.5 s
+    // at 8 KiB and ≈8 s at 32 KiB on a debug build, and the transport
+    // cap admits 64 MiB lines). The probe now walks the `{` candidates
+    // inside the already-found line — one pass — so every size frames
+    // bounded, and the literal semantics are unchanged: the honest
+    // declaration behind a wall of failing candidates still merges, a
+    // `{` that is not a declaration splits nothing, and the saturating
+    // skip still waits for more bytes.
+    for len in [8 * 1024, 128 * 1024] {
+        let mut line: Vec<u8> = b"* 1 FETCH (UID 1 FLAGS (".to_vec();
+        line.extend(std::iter::repeat_n(b'{', len));
+        line.extend_from_slice(b"))\r\n");
+        let start = std::time::Instant::now();
+        let lines: Vec<&[u8]> = line.split_rn().collect();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "a `{{`-dense {len}-byte line framed in {elapsed:?}: the candidate \
+             probe must not rescan the tail per `{{`"
+        );
+        assert_eq!(lines, vec![line.as_slice()]);
+    }
+
+    // Semantics preserved: a real declaration behind a wall of failing
+    // candidates still merges the literal into one logical line.
+    let mut merged: Vec<u8> = vec![b'{'; 64];
+    merged.extend_from_slice(b"{3}\r\nabc)\r\n");
+    assert_eq!(
+        merged.split_rn().collect::<Vec<_>>(),
+        vec![merged.as_slice()]
+    );
+
+    // A `{` that is not a declaration splits nothing.
+    let not_a_literal = &b"* 1 FETCH (UID 1 FLAGS (a{b))\r\n"[..];
+    assert_eq!(
+        not_a_literal.split_rn().collect::<Vec<_>>(),
+        vec![not_a_literal]
+    );
+
+    // The saturating skip (CVE-2026-70329 / issue #27) still holds.
+    let oversize = &b"* 1 FETCH (BODY[] {18446744073709551615}\r\n"[..];
+    assert_eq!(oversize.split_rn().count(), 0);
+}
