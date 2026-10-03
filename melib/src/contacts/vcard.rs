@@ -35,7 +35,9 @@ use indexmap::IndexMap;
 use super::*;
 use crate::{
     error::{Error, ErrorKind, Result},
-    utils::parsec::{match_literal_anycase, one_or_more, peek, prefix, take_until, Parser},
+    utils::parsec::{
+        match_literal_anycase, one_or_more, peek, prefix, take_until, whitespace_wrap, Parser,
+    },
 };
 
 /* Supported vcard versions */
@@ -283,12 +285,22 @@ impl<V: VCardVersion> TryInto<Card> for VCard<V> {
     }
 }
 
+/// Parse one or more vCard text blocks out of a `.vcf` file.
+///
+/// A `.vcf` file is a *vCard stream* (RFC 6350 §3.1/§3.2): any number of
+/// `BEGIN:VCARD`…`END:VCARD` blocks separated by (at least) line endings.
+/// [`take_until`] hands over each block *including* its `END:VCARD` token but
+/// not the line ending that follows it, so the leading whitespace skip of
+/// [`whitespace_wrap`] is what lets the next block's `BEGIN:VCARD` peek match
+/// again. Without it, `one_or_more` stopped after the first card and every
+/// further contact in the file was silently dropped (address-book exports are
+/// almost always multi-card files).
 fn parse_card<'a>() -> impl Parser<'a, Vec<&'a str>> {
     move |input| {
-        one_or_more(prefix(
+        one_or_more(whitespace_wrap(prefix(
             peek(match_literal_anycase(HEADER)),
             take_until(match_literal_anycase(FOOTER)),
-        ))
+        )))
         .parse(input)
     }
 }
@@ -307,7 +319,21 @@ pub fn load_cards(p: &std::path::Path) -> Result<Vec<Card>> {
             if f.is_file() {
                 use std::io::Read;
                 contents.clear();
-                std::fs::File::open(&f)?.read_to_string(&mut contents)?;
+                // One unreadable or non-UTF-8 file (a vCard is a UTF-8 text
+                // format, so binary garbage fails `read_to_string`) must cost
+                // only that file. Propagating the error with `?` used to abort
+                // the whole address book load and drop every card from every
+                // other file too (CWE-754).
+                if let Err(err) = std::fs::File::open(&f)
+                    .map_err(|err| err.to_string())
+                    .and_then(|mut file| {
+                        file.read_to_string(&mut contents)
+                            .map_err(|err| err.to_string())
+                    })
+                {
+                    tracing::warn!("Could not read vcard file {}: {}", f.display(), err);
+                    continue;
+                }
                 match parse_card().parse(contents.as_str()) {
                     Ok((_, c)) => {
                         for s in c {
@@ -485,4 +511,79 @@ fn test_vcard_malformed_probes_rejected() {
     CardDeserializer::try_from_str("END:VCARD").unwrap_err();
     CardDeserializer::try_from_str("END:VCARD\r\n").unwrap_err();
     CardDeserializer::try_from_str("BEGIN:VCARD\r\nEND:VCARD\n").unwrap_err();
+}
+
+// Regression tests for CVE-2006-2386 (issue #29, the WAB
+// contact-record attack mapped onto meli's address-book parsing):
+// multi-card `.vcf` files and unreadable/binary-garbage files in the
+// `vcard_folder` are exactly the shapes a mail-distributed address
+// book entry arrives in once saved to disk.
+
+#[test]
+fn test_vcard_parse_card_stream_loads_every_card() {
+    // Regression: `take_until` hands over each block including its
+    // `END:VCARD` but not the following line ending, so without the
+    // whitespace skip the stream parser stopped after the first card
+    // and every further contact was silently dropped.
+    let stream = "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:One\r\nEND:VCARD\r\n\
+                  BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Two\r\nEND:VCARD\r\n\
+                  BEGIN:VCARD\nVERSION:4.0\nFN:Three\nEND:VCARD\n";
+    let (_, cards) = parse_card().parse(stream).unwrap();
+    assert_eq!(
+        cards.len(),
+        3,
+        "every card of a multi-card stream must load"
+    );
+    assert!(cards[0].ends_with("END:VCARD"));
+    assert!(cards[1].ends_with("END:VCARD"));
+    // Mixed newline conventions and surrounding blank lines keep working.
+    let (_, cards) = parse_card()
+        .parse("\r\nBEGIN:VCARD\r\nFN:One\r\nEND:VCARD\r\n\r\nBEGIN:VCARD\nFN:Two\nEND:VCARD\n")
+        .unwrap();
+    assert_eq!(cards.len(), 2);
+    // A lone card keeps parsing unchanged.
+    let (_, cards) = parse_card()
+        .parse("BEGIN:VCARD\r\nVERSION:4.0\r\nFN:One\r\nEND:VCARD\r\n")
+        .unwrap();
+    assert_eq!(cards.len(), 1);
+}
+
+#[test]
+fn test_vcard_load_cards_multi_card_file_loads_every_card() {
+    // End-to-end over `load_cards`: a multi-contact `.vcf` file (the
+    // shape every address-book export produces) must yield one `Card`
+    // per `BEGIN:VCARD` block, not just the first.
+    let tempdir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tempdir.path().join("contacts.vcf"),
+        "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:One\r\nEMAIL:one@x.example\r\nEND:VCARD\r\n\
+         BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Two\r\nEMAIL:two@x.example\r\nEND:VCARD\r\n",
+    )
+    .unwrap();
+    let cards = load_cards(tempdir.path()).unwrap();
+    let mut names: Vec<_> = cards.iter().map(|c| c.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["One", "Two"]);
+}
+
+#[test]
+fn test_vcard_load_cards_isolates_unreadable_files() {
+    // Regression (CWE-754): one binary-garbage `.vcf` file used to
+    // abort the whole `load_cards` call through `?`, dropping every
+    // contact from every other file. A file that cannot be opened or
+    // decoded must cost only itself.
+    let tempdir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tempdir.path().join("good.vcf"),
+        "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Good\r\nEMAIL:good@x.example\r\nEND:VCARD\r\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir.path().join("garbage.vcf"),
+        b"BEGIN:VCARD\r\nFN:\x00\x01\x9c\xba\xff\xfe binary garbage \x80\x81\r\nEND:VCARD\r\n",
+    )
+    .unwrap();
+    let cards = load_cards(tempdir.path()).unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].name, "Good");
 }
