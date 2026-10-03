@@ -1180,3 +1180,32 @@ mod cve_2004_1944;
 #[cfg(test)]
 #[path = "CVE-1999-0427.rs"]
 mod cve_1999_0427;
+
+/// CVE-2015-8708 (Claws Mail 3.13.1, no CVSS score assigned) Japanese
+/// character-set conversion stack-overflow regression (issue #53,
+/// table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code
+/// execution): a stack-based buffer overflow in `conv_euctojis`
+/// (`codeconv.c`) let a crafted e-mail crash the client through the
+/// EUC-JP → ISO-2022-JP re-encoding direction — the incomplete-fix
+/// **bypass** of its same-month sibling CVE-2015-8614 (issue #52),
+/// whose advisory covered the `conv_jistoeuc`/`conv_euctojis`/
+/// `conv_sjistoeuc` triple. [`cve_2015_8708`] locks meli's immune
+/// mapping layer by layer on the issue-prescribed bypass-variant
+/// corpus (混合非法转义 + 多字节边界组合: escape-mid-pair interrupts,
+/// half-cut designators, CS2/CS3 invocations, unknown G1/G3
+/// designators, C1 garbage, claim/byte-stream mismatches, every CTE
+/// wrapping and every truncation boundary): the only conversion
+/// funnel `decode_charset` maps every charset to a memory-safe
+/// `encoding_rs` decoder whose output never exceeds its input and
+/// never panics — exact known-answer verdicts included — and the
+/// overflow's own re-encode direction has no code to run in (the
+/// composer emits UTF-8 only, `charset="utf-8"` and `=?UTF-8?B?…?=`,
+/// never a JIS designator), locked through the RFC 2047 header
+/// paths, the full CTE × claim body matrix, the exhaustive prefix
+/// sweeps and a stacked kitchen-sink mail. The result is **immune,
+/// no gap found**: the Shift_JIS claim's Ascii-lossy degradation is
+/// documented as the mapping, not a gap of this CVE's class; no
+/// production code needed changing.
+#[cfg(test)]
+#[path = "CVE-2015-8708.rs"]
+mod cve_2015_8708;
