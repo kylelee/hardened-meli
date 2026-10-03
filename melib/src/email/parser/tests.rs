@@ -1551,3 +1551,84 @@ fn test_email_parser_headers_raw_boundary_slices() {
     );
     assert_eq!(iterated[0].1, &b"attachment; filename=\"x.bin\""[..]);
 }
+
+// CVE-2015-8614 (issue #52) regression, melib side: the Japanese
+// charset conversion surface. The Shift_JIS decoder used to not exist
+// at all — every label of its alias family fell through to the
+// `Ascii` default of `Charset::from`, so a `charset=Shift_JIS` mail
+// went through `String::from_utf8_lossy` and turned into U+FFFD
+// mojibake (valid and malformed bodies alike). The label family now
+// converges on one converter (`encoding_rs::SHIFT_JIS`, the WHATWG
+// Windows-31J decoder), locked here together with the full attack
+// corpus in `cve/src/CVE-2015-8614.rs`.
+#[test]
+fn test_charset_shift_jis_label_family_converts() {
+    use crate::email::attachment_types::Charset;
+
+    // Every alias of the family (WHATWG label set plus the cp932
+    // spelling mailers emit) converges on the Shift_JIS converter —
+    // no spelling may dodge it back into the lossy ASCII fallback
+    // (the CVE-2015-8708 "incomplete fix bypass" face: a variant
+    // name slipping past the fixed conversion function).
+    for label in [
+        "shift_jis",
+        "Shift-JIS",
+        "SHIFT_JIS",
+        "shiftjis",
+        "Shift_Jis",
+        "sjis",
+        "MS_Kanji",
+        "ms-kanji",
+        "ms932",
+        "Windows-31J",
+        "windows31j",
+        "cp932",
+        "x-sjis",
+        "csshiftjis",
+    ] {
+        assert_eq!(
+            Charset::from(label.as_bytes()),
+            Charset::ShiftJIS,
+            "label {label:?} must map to the Shift_JIS converter"
+        );
+    }
+    // Unknown labels keep degrading to the default.
+    assert_eq!(Charset::from(&b"not-a-charset"[..]), Charset::Ascii);
+
+    // The converter does its real work: honest Shift_JIS bytes decode
+    // to the correct text instead of mojibake…
+    assert_eq!(
+        decode_charset(&[0x93, 0xFA, 0x96, 0x7B], Charset::ShiftJIS).unwrap(),
+        "日本"
+    );
+    // …and a half-cut multibyte sequence (the CVE's truncated-pair
+    // trigger family) degrades to the fixed U+FFFD replacement —
+    // replaced, never past the end of the buffer.
+    assert_eq!(
+        decode_charset(&[0x93, 0xFA, 0x96], Charset::ShiftJIS).unwrap(),
+        "日\u{FFFD}"
+    );
+    assert_eq!(
+        decode_charset(&[0x93], Charset::ShiftJIS).unwrap(),
+        "\u{FFFD}"
+    );
+
+    // The siblings are still their own converters (honest carriers).
+    assert_eq!(
+        decode_charset(b"\x1b$B\x24\x22\x1b(B", Charset::ISO2022JP).unwrap(),
+        "あ"
+    );
+    assert_eq!(decode_charset(&[0xA4, 0xA2], Charset::EUCJP).unwrap(), "あ");
+
+    // End to end: the Content-Type parameter carries the label into
+    // the converter the decode path uses.
+    let builder = crate::email::AttachmentBuilder::new(
+        b"Content-Type: text/plain; charset=Shift_JIS\r\n\r\nhi".as_ref(),
+    );
+    match builder.content_type() {
+        crate::email::attachment_types::ContentType::Text { charset, .. } => {
+            assert_eq!(*charset, Charset::ShiftJIS);
+        }
+        other => panic!("Shift_JIS part must stay a text part, got {other:?}"),
+    }
+}
