@@ -293,3 +293,31 @@ mod cve_2024_21413;
 #[cfg(test)]
 #[path = "CVE-2024-21378.rs"]
 mod cve_2024_21378;
+
+/// CVE-2024-30103 (Microsoft Outlook on Windows, CVSS 8.8, June 2024
+/// Patch Tuesday, discovered by Morphisec) crafted-message RCE
+/// regression (issue #24, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution):
+/// processing a specially crafted e-mail executed code because a
+/// parsing path filtered attacker input incompletely (CWE-184). meli
+/// links no MAPI store, no Outlook Forms engine and no scripting
+/// host, so the equivalent surface the issue prescribes is the
+/// header parsing path (`melib/src/email/headers.rs` +
+/// `melib/src/email/parser.rs`): overlong header values, malformed
+/// parameter lists and abnormal encoding combinations must parse
+/// with bounded time and memory — no panic, no whole-value expansion
+/// allocation. [`cve_2024_30103`] locks that layer by layer and
+/// exposes one real gap, fixed with this regression: `phrase()`
+/// rescanned for the next `=?` encoded-word opener from every token,
+/// so a header value of many whitespace-separated tokens closed by a
+/// lone `=?` sentinel was quadratic (CWE-407) — 64 KiB stalled every
+/// header's decode for ~17 s and 256 KiB for minutes, an open-mail
+/// denial of service through `Subject`, custom headers, display
+/// names, attachment names and IMAP envelope strings alike. The fix
+/// caches the next opener position so the scan is one forward pass —
+/// the width-side sibling of the CVE-2024-21378 depth caps: those
+/// bound recursion depth, this bounds rescan width, and they compose
+/// without overlap.
+#[cfg(test)]
+#[path = "CVE-2024-30103.rs"]
+mod cve_2024_30103;
