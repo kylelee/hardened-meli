@@ -444,7 +444,18 @@ impl<'a> Iterator for ImapLineIterator<'a> {
                         )
                         .parse(&cur_slice[literal_start..])
                     {
-                        i += pos + 2 + len;
+                        // The declared literal length is untrusted server
+                        // data: a declaration near `usize::MAX` (or
+                        // `{4294967295}` on 32-bit targets) used to
+                        // overflow `pos + 2 + len` — panicking debug
+                        // builds of every IMAP session and wrapping
+                        // release builds past the buffer (CWE-190).
+                        // Saturate instead: the skip lands past the
+                        // buffer, `.get(i..)` below returns `None` and
+                        // the iterator reports "buffer not filled yet",
+                        // the honest state for a literal longer than
+                        // the buffered bytes.
+                        i = i.saturating_add(pos + 2).saturating_add(len);
                     } else {
                         i += literal_start + 1;
                     }
