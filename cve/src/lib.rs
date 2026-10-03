@@ -1090,3 +1090,38 @@ mod cve_2003_0302;
 #[cfg(test)]
 #[path = "CVE-2007-3166.rs"]
 mod cve_2007_3166;
+
+/// CVE-2007-2770 (Eudora 7.1, Windows; no CVSS score assigned) SMTP
+/// response stack-overflow regression (issue #48, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// malicious SMTP server returned an overlong reply and Eudora copied
+/// it into a fixed-size stack buffer — arbitrary code executed when
+/// the user clicked through the raised warning. [`cve_2007_2770`]
+/// maps the attack onto the issue-prescribed surface, the server
+/// response reading of `melib/src/smtp.rs` (`read_lines` and both
+/// handshake call sites), and drives it over a real TCP SMTP
+/// handshake with the prescribed corpus family — 超长应答行 单行
+/// MB 级 (terminated and unterminated), 无 CRLF 结尾 (EOF-cut and
+/// pumped past the production cap), 大量多行续应答 (endless
+/// `220-`/`250-` lines), plus NUL/C0/DEL/ANSI/illegal-UTF-8 payloads
+/// at MB scale — at the *production* 64 MiB response cap, not the
+/// 128 KiB test-build one. The literal stack-copy primitive has no
+/// target in meli (safe Rust, no fixed-size response buffer, heap
+/// accumulation already walled by `MAX_SERVER_RESPONSE_SIZE` and the
+/// per-read timeout), and the corpus exposes one real gap, fixed
+/// with this regression in `read_lines` (CWE-407, the
+/// quadratic-rescan class CVE-2024-30103 closed for header values):
+/// the CRLF separator search restarted from the beginning of the
+/// current line after every 1 KiB read, so an unterminated reply
+/// line — this CVE's primary shape — made each chunk rescan the
+/// whole accumulated prefix: ≈ 2.2 TB of scanning before the 64 MiB
+/// cap fired, minutes of CPU per hostile connection (the alert-hang
+/// face of the 2007 advisory). The fix keeps an incremental scan
+/// cursor resuming one byte early — a `\r` at the cursor may have
+/// met its `\n` in the newest chunk — so the read is one forward
+/// pass while a separator split across read chunks is still found
+/// (regression-locked in melib's `smtp.rs` tests together with the
+/// corpus here).
+#[cfg(test)]
+#[path = "CVE-2007-2770.rs"]
+mod cve_2007_2770;
