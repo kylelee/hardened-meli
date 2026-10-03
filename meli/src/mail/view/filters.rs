@@ -45,7 +45,7 @@ use crate::{
     components::*,
     desktop_exec_to_command,
     jobs::{IsAsync, JobId, JoinHandle},
-    mail::view::{html_render, ViewSettings},
+    mail::view::{envelope::MAX_RFC822_DISPLAY_NESTING_DEPTH, html_render, ViewSettings},
     terminal::{Area, CellBuffer},
     try_recv_timeout,
     types::{ForkedProcess, NotificationType},
@@ -376,10 +376,31 @@ impl ViewFilter {
         })
     }
 
+    /// Public entry: builds the body-text view of an attachment with a
+    /// fresh nesting budget.
     pub fn new_attachment(
         att: &Attachment,
         view_settings: &ViewSettings,
         context: &Context,
+    ) -> Result<Self> {
+        Self::new_attachment_with_depth(att, view_settings, context, 0)
+    }
+
+    /// [`Self::new_attachment`] with `rfc822_depth` counting how many
+    /// nested `message/rfc822` levels have been opened so far. Only the
+    /// `message/rfc822` arm grows the counter (multipart recursion is
+    /// already capped by the attachment builder); past
+    /// [`MAX_RFC822_DISPLAY_NESTING_DEPTH`] the remaining subtree is
+    /// rendered as inert text instead of being walked — each opened
+    /// level costs tens of KiB of stack, and without the cap a crafted
+    /// mail a few KiB long overflowed the 2 MiB stack of the view/
+    /// filter threads the moment it was opened (CWE-674; CVE-2024-21378
+    /// regression in `meli/src/mail/view/tests.rs`).
+    fn new_attachment_with_depth(
+        att: &Attachment,
+        view_settings: &ViewSettings,
+        context: &Context,
+        rfc822_depth: usize,
     ) -> Result<Self> {
         if matches!(
             att.content_type,
@@ -452,9 +473,12 @@ impl ViewFilter {
                     }
                 }
             }
-            if let Ok(mut v) =
-                Self::new_attachment(&parts[chosen_attachment_idx], view_settings, context)
-            {
+            if let Ok(mut v) = Self::new_attachment_with_depth(
+                &parts[chosen_attachment_idx],
+                view_settings,
+                context,
+                rfc822_depth,
+            ) {
                 v.event_handler = Some(Self::html_process_event);
                 v.unfiltered = parts[html_attachment_idx].decode(view_settings.charset.into());
                 return Ok(v);
@@ -462,7 +486,7 @@ impl ViewFilter {
             if let Some(Ok(v)) = parts
                 .iter()
                 .find(|p| p.is_text() && !p.body().trim().is_empty())
-                .map(|p| Self::new_attachment(p, view_settings, context))
+                .map(|p| Self::new_attachment_with_depth(p, view_settings, context, rfc822_depth))
             {
                 return Ok(v);
             }
@@ -482,7 +506,7 @@ impl ViewFilter {
                     parts: parts
                         .iter()
                         .map(|p| {
-                            Self::new_attachment(p, view_settings, context)
+                            Self::new_attachment_with_depth(p, view_settings, context, rfc822_depth)
                                 .ok()
                                 .unwrap_or_else(|| Self::new_placeholder(p, view_settings))
                         })
@@ -535,7 +559,7 @@ impl ViewFilter {
                 };
                 return Ok(Self {
                     notice: Some("Unverified signature.".into()),
-                    ..Self::new_attachment(&att, view_settings, context)?
+                    ..Self::new_attachment_with_depth(&att, view_settings, context, rfc822_depth)?
                 });
             }
             if view_settings.pgp_backend.instantiate().is_err() {
@@ -554,9 +578,14 @@ impl ViewFilter {
                         parts: parts
                             .iter()
                             .map(|p| {
-                                Self::new_attachment(p, view_settings, context)
-                                    .ok()
-                                    .unwrap_or_else(|| Self::new_placeholder(p, view_settings))
+                                Self::new_attachment_with_depth(
+                                    p,
+                                    view_settings,
+                                    context,
+                                    rfc822_depth,
+                                )
+                                .ok()
+                                .unwrap_or_else(|| Self::new_placeholder(p, view_settings))
                             })
                             .collect::<Vec<Self>>(),
                     },
@@ -643,14 +672,17 @@ impl ViewFilter {
             if view_settings.pgp_backend.instantiate().is_err() {
                 let msg = "Cannot decrypt: no PGP backend is available. Configure `pgp.backend` \
                      in your configuration.";
-                if let Some(Ok(mut res)) =
-                    parts.iter().find_map(|part| {
-                        match Self::new_attachment(part, view_settings, context) {
-                            v @ Ok(_) => Some(v),
-                            Err(_) => None,
-                        }
-                    })
-                {
+                if let Some(Ok(mut res)) = parts.iter().find_map(|part| {
+                    match Self::new_attachment_with_depth(
+                        part,
+                        view_settings,
+                        context,
+                        rfc822_depth,
+                    ) {
+                        v @ Ok(_) => Some(v),
+                        Err(_) => None,
+                    }
+                }) {
                     match res.notice {
                         Some(ref mut notice) => {
                             let notice = std::mem::take(notice);
@@ -793,11 +825,33 @@ impl ViewFilter {
         }
         if matches!(att.content_type, ContentType::MessageRfc822) {
             let unfiltered = att.decode(view_settings.charset.into());
+            if rfc822_depth >= MAX_RFC822_DISPLAY_NESTING_DEPTH {
+                // Depth cap: see the method documentation. The remaining
+                // subtree is rendered as inert text instead of being
+                // walked.
+                let filtered = String::from_utf8_lossy(unfiltered.as_slice()).into();
+                return Ok(Self {
+                    filter_invocation: String::new(),
+                    content_type: att.content_type.clone(),
+                    size: att.size(),
+                    notice: None,
+                    headers: vec![],
+                    body_text: ViewFilterContent::Filtered { inner: filtered },
+                    unfiltered,
+                    event_handler: None,
+                    id: ComponentId::default(),
+                });
+            }
             if let Ok((env, vf)) = melib::Envelope::from_bytes(&unfiltered, None).and_then(|env| {
                 let root_attachment = env.body_bytes(unfiltered.as_slice());
                 Ok((
                     env,
-                    Self::new_attachment(&root_attachment, view_settings, context)?,
+                    Self::new_attachment_with_depth(
+                        &root_attachment,
+                        view_settings,
+                        context,
+                        rfc822_depth + 1,
+                    )?,
                 ))
             }) {
                 return Ok(Self {

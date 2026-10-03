@@ -268,3 +268,28 @@ mod cve_2023_23397;
 #[cfg(test)]
 #[path = "CVE-2024-21413.rs"]
 mod cve_2024_21413;
+
+/// CVE-2024-21378 (Microsoft Outlook on Windows, CVSS 8.8, February
+/// 2024 Patch Tuesday) open-mail remote-code-execution regression
+/// (issue #23, table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus /
+/// code execution): processing a crafted message corrupted Outlook
+/// memory. meli links no MAPI store, COM runtime or scripting engine,
+/// so the equivalent surface is the whole 「receive → parse →
+/// display」 path as a class-level memory-safety regression:
+/// [`cve_2024_21378`] drives a malformed-MIME corpus (boundary
+/// delimiters that used to spin or slice out of bounds, broken
+/// base64/quoted-printable/RFC 2047/charset decoding, unexpected
+/// nesting combinations) through envelope parsing, tree building,
+/// every decode/display conversion and the HTML pipeline with zero
+/// panics — and exposes one real gap, fixed with this regression:
+/// meli's open-mail display recursion over nested `message/rfc822`
+/// (`EnvelopeView::attachment_to_display_helper` and
+/// `ViewFilter::new_attachment`) was unbounded, and a mail a few KiB
+/// long nested a few thousand levels deep stack-overflowed the 2 MiB
+/// view/filter threads the moment it was opened (CWE-674); the fix
+/// caps the recursion at `MAX_RFC822_DISPLAY_NESTING_DEPTH`,
+/// regression-locked in `meli/src/mail/view/tests.rs` together with
+/// the corpus here.
+#[cfg(test)]
+#[path = "CVE-2024-21378.rs"]
+mod cve_2024_21378;
