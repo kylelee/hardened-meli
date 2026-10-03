@@ -682,6 +682,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::types::FILENAME_COMPONENT_MAX_BYTES;
     use melib::email::{
         attachment_types::{Charset, ContentTransferEncoding, ContentType, Text},
         AttachmentBuilder,
@@ -2591,6 +2592,53 @@ text/html; less; needsterminal;
         assert!(
             !name.starts_with('.') || name.chars().any(|c| c != '.'),
             "the name must not be all dots: {name:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `%s` temp files take their name hint from the mail-controlled
+    /// attachment filename; an over-long hint — the CVE-2003-0376
+    /// (issue #47, Eudora "Attachment Converted" dot-pile) equivalent
+    /// surface — must materialize bounded and flat, not fall into the
+    /// per-grapheme `ENAMETOOLONG` retry loop (O(len²) on the hint).
+    #[test]
+    fn expand_args_s_temp_file_name_is_bounded() {
+        let attachment = test_attachment(
+            "",
+            ContentType::Other {
+                name: Some(format!("a{}.exe", ".".repeat(100_000))),
+                tag: b"application/octet-stream".to_vec(),
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let start = std::time::Instant::now();
+        let (needs_stdin, expanded) =
+            expand_args("cmd %s", None, &mut temporary_files, &attachment).unwrap();
+        let elapsed = start.elapsed();
+        assert!(!needs_stdin, "%s must switch the handler to file mode");
+        assert!(
+            expanded.starts_with("cmd '"),
+            "quoted path expected: {expanded}"
+        );
+        let [file] = temporary_files.as_slice() else {
+            panic!("exactly one temp file expected");
+        };
+        let path = file.path();
+        assert!(
+            path.starts_with(std::env::temp_dir().join("meli")),
+            "temp file must land under the meli temp root, got {}",
+            path.display()
+        );
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.len() <= FILENAME_COMPONENT_MAX_BYTES,
+            "over-long hint must be capped, got {} bytes: {name:?}",
+            name.len()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "materialization took {elapsed:?} — the retry loop is unbounded again"
         );
         let _ = std::fs::remove_file(path);
     }
