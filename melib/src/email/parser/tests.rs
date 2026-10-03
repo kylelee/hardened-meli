@@ -1152,6 +1152,122 @@ fn test_multipart_parts_crlf_unclosed_tail_keeps_scanned_parts() {
     }
 }
 
+// CVE-2002-0833 (Eudora 5.1.1/5.0-J) MIME boundary overflow, meli-side face:
+// RFC 2046 §5.1.1 says a boundary delimiter line is `"--" boundary
+// *LWSP CRLF` — optional linear whitespace (SP/HTAB) before the line
+// ending — and the boundary parameter grammar ends in `bcharsnospace`,
+// so trailing whitespace on the parameter value is line junk, not
+// boundary bytes. Both twin scanners rejected every delimiter line
+// carrying trailing whitespace and kept the boundary value verbatim,
+// so an Eudora-era mail with `boundary=BOUND  ` or `--BOUND  <CRLF>`
+// delimiter lines silently lost every part after the first
+// whitespace-carrying delimiter (and the 📎 flag with it).
+
+#[test]
+fn test_multipart_parts_delimiter_trailing_lwsp_keeps_every_part() {
+    // Both line-ending spellings, both twins: trailing linear whitespace
+    // on first/mid/close delimiter lines must not lose or corrupt parts.
+    for nl in ["\n", "\r\n"] {
+        let ws = "  \t  ";
+        let body = format!(
+            "p{nl}--BOUND{ws}{nl}\
+             Content-Type: text/plain{nl}{nl}one{nl}\
+             --BOUND{nl}{nl}two{nl}\
+             --BOUND{ws}{nl}{nl}three{nl}\
+             --BOUND--{ws}{nl}"
+        );
+        let expected: Vec<Vec<u8>> = vec![
+            format!("Content-Type: text/plain{nl}{nl}one").into_bytes(),
+            format!("{nl}two").into_bytes(),
+            format!("{nl}three").into_bytes(),
+        ];
+        let expected_refs: Vec<&[u8]> = expected.iter().map(|v| v.as_slice()).collect();
+        let (_, parts) = attachments::parts(body.as_bytes(), C8A_BOUNDARY).unwrap();
+        assert_eq!(
+            parts, expected_refs,
+            "{nl:?} twin must keep all three parts"
+        );
+        let (_, builders) = attachments::multipart_parts(body.as_bytes(), C8A_BOUNDARY).unwrap();
+        let rendered: Vec<&[u8]> = builders
+            .iter()
+            .map(|sb| &body.as_bytes()[sb.offset..sb.offset + sb.length])
+            .collect();
+        assert_eq!(
+            rendered, expected_refs,
+            "{nl:?} StrBuilder twin must keep all three parts at exact offsets"
+        );
+    }
+
+    // Pre-fix shapes at the whole-mail level: an attachment part behind a
+    // whitespace-carrying delimiter was invisible to the 📎 quick check
+    // (the mid-delimiter break ended the scan after the first part).
+    let crlf_attach: &[u8] = b"p\r\n--BOUND \t\r\nContent-Type: text/plain\r\n\r\njust \
+                               text\r\n--BOUND\r\nContent-Type: \
+                               application/octet-stream\r\nContent-Disposition: \
+                               attachment; filename=\"a.bin\"\r\n\r\nBINARY\r\n--BOUND--\r\n";
+    assert!(crate::email::Attachment::check_if_has_attachments_quick(
+        crlf_attach,
+        C8A_BOUNDARY
+    ));
+    // First-delimiter whitespace alone (part one used to be skipped
+    // wholesale by the start-scan `continue`).
+    let first_ws: &[u8] = b"p\r\n--BOUND   \r\n\r\none\r\n--BOUND\r\n\r\ntwo\r\n--BOUND--\r\n";
+    let (_, parts) = attachments::parts(first_ws, C8A_BOUNDARY).unwrap();
+    assert_eq!(parts, vec![b"\r\none".as_ref(), b"\r\ntwo".as_ref()]);
+}
+
+#[test]
+fn test_multipart_boundary_parameter_trailing_whitespace_normalized() {
+    // The extraction helper: trailing SP/HTAB is line junk (RFC 2046
+    // §5.1.1 `bcharsnospace` ending), everything else stays verbatim.
+    let cases: &[(&[(&[u8], &[u8])], Option<&[u8]>)] = &[
+        (&[(b"boundary", b"BOUND")], Some(&b"BOUND"[..])),
+        // Trailing whitespace stripped, first (case-insensitive) match wins.
+        (&[(b"BOUNDARY", b"BOUND   ")], Some(&b"BOUND"[..])),
+        (&[(b"boundary", b"BOUND\t \t")], Some(&b"BOUND"[..])),
+        // Mid/leading whitespace is part of the value per the grammar.
+        (&[(b"boundary", b" BOUND")], Some(&b" BOUND"[..])),
+        (&[(b"boundary", b"BOUND TIME")], Some(&b"BOUND TIME"[..])),
+        (&[(b"boundary", b"BOUND ")], Some(&b"BOUND"[..])),
+        // All-whitespace values stay verbatim (degenerate path).
+        (&[(b"boundary", b"   ")], Some(&b"   "[..])),
+        (&[(b"boundary", b"")], Some(&b""[..])),
+        (&[(b"charset", b"utf-8")], None),
+    ];
+    for (params, expected) in cases {
+        assert_eq!(attachments::multipart_boundary(params), *expected);
+    }
+
+    // The tree builder stores the normalized boundary and parses the
+    // part list of a mail whose delimiter lines carry no whitespace.
+    let raw: &[u8] = b"Content-Type: multipart/mixed; boundary=\"BOUND   \"\r\n\r\n\
+                       p\r\n--BOUND\r\n\r\none\r\n--BOUND--\r\n";
+    let builder = crate::email::AttachmentBuilder::new(raw);
+    assert_eq!(
+        builder.body(),
+        &b"p\r\n--BOUND\r\n\r\none\r\n--BOUND--\r\n"[..]
+    );
+    match builder.content_type() {
+        crate::email::attachment_types::ContentType::Multipart {
+            boundary, parts, ..
+        } => {
+            assert_eq!(boundary, b"BOUND");
+            assert_eq!(parts.len(), 1);
+        }
+        other => panic!("whitespace-boundary mail must stay multipart, got {other:?}"),
+    }
+
+    // The envelope quick check normalizes too: a whitespace-suffixed
+    // boundary parameter must not hide the attachment behind it.
+    let raw = b"From: a@b.example\r\nSubject: s\r\nContent-Type: multipart/mixed; \
+                boundary=\"BOUND   \"\r\n\r\np\r\n--BOUND\r\nContent-Type: \
+                text/plain\r\n\r\njust text\r\n--BOUND\r\nContent-Type: \
+                application/octet-stream\r\nContent-Disposition: attachment; \
+                filename=\"a.bin\"\r\n\r\nBINARY\r\n--BOUND--\r\n";
+    let mail = crate::email::Mail::new(raw.to_vec(), None).unwrap();
+    assert!(mail.envelope().has_attachments());
+}
+
 // C9: malformed-address hardening. `display_addr` and `mailto` both used to
 // panic on crafted input (unwrap of a missing `<` in the *decoded* display
 // name, `usize` underflow on a quoted display name shorter than two bytes,

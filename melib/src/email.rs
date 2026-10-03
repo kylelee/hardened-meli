@@ -402,13 +402,11 @@ impl Envelope {
                     {
                         let mut builder = AttachmentBuilder::default();
                         builder.set_content_type_from_bytes(value);
-                        let mut boundary = None;
-                        for (n, v) in params {
-                            if n.eq_ignore_ascii_case(b"boundary") {
-                                boundary = Some(v);
-                                break;
-                            }
-                        }
+                        // Same RFC 2046 §5.1.1 boundary normalization as
+                        // the attachment tree builder: trailing linear
+                        // whitespace is line junk, not boundary bytes
+                        // (`parser::attachments::multipart_boundary`).
+                        let boundary = parser::attachments::multipart_boundary(params);
                         if let Some(boundary) = boundary {
                             self.has_attachments =
                                 Attachment::check_if_has_attachments_quick(body, boundary);

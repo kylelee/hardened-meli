@@ -233,13 +233,10 @@ impl AttachmentBuilder {
                     return self;
                 }
                 if ct.eq_ignore_ascii_case(b"multipart") {
-                    let mut boundary = None;
-                    for (n, v) in &params {
-                        if n.eq_ignore_ascii_case(b"boundary") {
-                            boundary = Some(v);
-                            break;
-                        }
-                    }
+                    // RFC 2046 §5.1.1 boundary normalization (trailing
+                    // linear whitespace is line junk, not boundary bytes):
+                    // `parser::attachments::multipart_boundary`.
+                    let boundary = parser::attachments::multipart_boundary(&params);
                     if let Some(boundary) = boundary {
                         if depth >= MAX_MULTIPART_NESTING_DEPTH {
                             tracing::debug!(
@@ -630,14 +627,11 @@ impl Attachment {
                                 parser::attachments::content_type(v)
                             {
                                 if ct.eq_ignore_ascii_case(b"multipart") {
-                                    let mut boundary = None;
-                                    for (n, v) in params {
-                                        if n.eq_ignore_ascii_case(b"boundary") {
-                                            boundary = Some(v);
-                                            break;
-                                        }
-                                    }
-                                    return boundary;
+                                    // Same RFC 2046 §5.1.1 normalization as
+                                    // the tree builder above, so the quick
+                                    // check and the built tree agree on the
+                                    // boundary bytes.
+                                    return parser::attachments::multipart_boundary(&params);
                                 }
                             }
                             None
