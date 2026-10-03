@@ -2835,12 +2835,20 @@ pub mod address {
     }
 
     ///`no-fold-literal =   "[" *dtext "]"`
+    ///
+    /// The returned span is the *whole* consumed literal, closing `]`
+    /// included (`[` + `ret` dtexts + `]` = `ret.len() + 2` bytes).
+    /// It used to stop one byte short of the `]`, so every
+    /// domain-literal `msg-id` built from it was truncated by its
+    /// last byte — `msg_id` slices `2 + id_left + id_right` and only
+    /// lands exactly before the closing `>` when this span is
+    /// complete (the CVE-2025-21361 regression corpus caught it).
     pub fn no_fold_literal(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
         let orig_input = input;
         let (input, _) = tag("[").parse(input)?;
         let (input, ret) = many0(dtext).parse(input)?;
         let (input, _) = tag("]").parse(input)?;
-        Ok((input, Cow::Borrowed(&orig_input[0..ret.len() + 1])))
+        Ok((input, Cow::Borrowed(&orig_input[0..ret.len() + 2])))
     }
 
     ///`id-left         =   dot-atom-text / obs-id-left`

@@ -321,3 +321,41 @@ mod cve_2024_21378;
 #[cfg(test)]
 #[path = "CVE-2024-30103.rs"]
 mod cve_2024_30103;
+
+/// CVE-2025-21361 (Microsoft Outlook Office/LTSC/M365 apps, macOS
+/// included, CVSS 7.8, January 2025 Patch Tuesday) open-mail RCE
+/// regression (issue #25, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// network attacker could execute code in the client through
+/// malicious input; MSRC did not disclose the primitive. meli links
+/// no MAPI store, COM runtime, forms engine or scripting host, so
+/// the equivalent surface the issue prescribes is
+/// `melib/src/email/parser` under a 「多形态畸形 MIME/头/附件组合」
+/// corpus — and scoped past what #23 (MIME tree/boundary/encoding
+/// shapes, display depth cap) and #24 (value width, token-rescan
+/// linearity) already locked: the *header-value grammars* under
+/// combination. [`cve_2025_21361`] drives the address grammar
+/// (groups, nested comments, quoted display names, domain literals,
+/// obs routes, the regex error-recovery fallback), the date grammar
+/// (obs zones and years, leap seconds, encoded-word dates, the mbox
+/// fallback), the message-id grammar, RFC 2231 segmented attachment
+/// names, RFC 2369 list headers and RFC 6068 mailto URIs, alone and
+/// stacked in kitchen-sink combination mails through the whole
+/// 「receive → parse → display」 pipeline — and exposes one real gap,
+/// fixed with this regression: `no_fold_literal` returned its
+/// `[dtext]` span one byte short of the closing `]`, so every
+/// domain-literal `Message-ID` was stored, keyed and displayed one
+/// byte truncated (`<a@[127.0.0.1` — CWE-193, the incomplete-
+/// filtering face of the CVE family; checked slicing kept it
+/// memory-safe, but threading silently split on literal-form ids).
+/// The fix returns the whole literal, regression-locked in
+/// `melib/src/email/parser/tests.rs::test_email_parser_msg_id`
+/// together with the corpus here. The one measured nuance, kept as
+/// documentation: a nested comment pays a *linear* ~56× alternation
+/// re-parse constant (every `alt` branch of the address grammar
+/// re-enters `opt(cfws())` from the same prefix — 200 KB of nested
+/// parens ≈ 0.7 s release), two orders below the quadratic faces
+/// #23/#24 closed and with no re-scan width to cache.
+#[cfg(test)]
+#[path = "CVE-2025-21361.rs"]
+mod cve_2025_21361;

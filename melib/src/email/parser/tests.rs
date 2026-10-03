@@ -671,6 +671,17 @@ fn test_email_parser_msg_id() {
     let s = b"<3456@example.net>";
     let c = msg_id(s).unwrap().1;
     assert_eq!(&msg_id_list(value).unwrap().1, &[a, c]);
+    // A domain-literal `id-right` keeps its closing `]`: the span
+    // `no_fold_literal` returns must cover the whole literal, and the
+    // `msg_id` slice arithmetic must land exactly before the `>`
+    // (regression: it used to truncate the last byte — see
+    // `no_fold_literal`).
+    let s = b"<a@[127.0.0.1]>";
+    let d = msg_id(s).unwrap().1;
+    assert_eq!(d, "<a@[127.0.0.1]>");
+    let s = b"<b@[dot-atom-literal]>";
+    let e = msg_id(s).unwrap().1;
+    assert_eq!(e, "<b@[dot-atom-literal]>");
 }
 
 #[test]
