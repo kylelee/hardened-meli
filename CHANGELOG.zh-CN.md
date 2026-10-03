@@ -16,6 +16,7 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 新增（Added）
 
+- 逐 CVE 攻击模拟任务 issue（issue #6）：按调研报告为每个 CVE（含 MFSA-2005-11）各建一个 Gitea issue，共 78 个；每个 issue 含 CVE 背景、映射到的 meli 攻击面（HTML 清理器、MIME/IMAP/SMTP 解析、mailcap、gpgme、TLS/STARTTLS）、攻击样例构造要点、预期断言与 `cve/src/<cve-id>.rs` 回归语料验收标准；索引见 `cve/README.md`。CVE-2025-66376 已由 issue #5 的语料覆盖，不重复建单。
 - 新增 `cve` workspace crate（issue #8）：建立脚手架（`Cargo.toml`、`src/`、`README.md`），承载针对 `meli`/`melib` 的 CVE 驱动回归测试，避免给发布 crate 添加测试专用依赖；根目录 CVE 调研报告 `SECURITY-CVE-RESEARCH.md`（含中文版）移入 `cve/`，根 README 双语链接同步更新。
 - 邮件客户端/浏览器 CVE 调研报告（issue #6）：新增 `SECURITY-CVE-RESEARCH.zh-CN.md`（含英文版）——从公开 CVE 库中筛选出以电子邮件为攻击载体或直接攻击邮件客户端的漏洞，按五张主题表整理：追踪与隐私（追踪像素、Cookie 信标、S/MIME AIA 信标、EFAIL、CSS 渗出）、恶意代码执行（1999 年 mutt/Eudora 到 2026 年 Thunderbird 的 MIME 解析内存破坏、Outlook 零点击 NTLM 凭据链、iOS Mail 零点击）、网页嵌入（webmail SVG/附件预览 XSS、URI 处理器与 `file://`/`mhtml:` 滥用）、邮件可达的浏览器引擎（WebKit/libwebp/BLASTPASS）、协议与信任边界（恶意 IMAP 服务器、STARTTLS、签名覆盖范围），并附趋势观察与对照 meli 自身清理器和解析器的加固要点。
 - 内置 HTML 清理器新增 CVE-2025-66376 标签切分（tag-splitting）回归语料（issue #5）：Zimbra 的客户端清理器对 HTML *字符串*剥离 `@import` 序列与注释后，把改写结果交回浏览器重新解析，碎片因此重组出可执行的 `<svg onload=eval(atob(…))>` 标签（Proofpoint TA488）。meli 用 html5ever 恰好一次解析、过滤树、带转义再序列化——不存在可供碎片重组的二次解析，输出交给 html2text 渲染纯终端文本而非 JS 引擎。语料（报告原文 exploit 串、三个碎片配方、`display:none` 载体、同族解析差异型 mXSS 经典样本）由惰性 oracle（标签/属性白名单扫描 + `sanitize` 幂等不动点）与渲染不 panic 检查锁定。
