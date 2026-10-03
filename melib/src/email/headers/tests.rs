@@ -219,3 +219,48 @@ fn test_email_headers_pedantic_coverage() {
         &HeaderName::SUBJECT,
     ));
 }
+
+/// CVE-2026-14899 class regression (issue #35): the header-name
+/// length boundary at the grammar's minimum. `field-name = 1*ftext`
+/// requires at least one byte, but `HeaderName::from_bytes(b"")`
+/// used to accept the empty slice and return an empty name — which
+/// could become a `HeaderMap` key and serialize to a malformed
+/// `": value"` header line. The empty name must be rejected through
+/// every conversion spelling, while the ±1 neighbours (length 1,
+/// the `HEADER_CHARS` table's 126/127 ASCII boundary, and the
+/// `SmallVec` 32-byte inline/spill boundary) keep parsing.
+#[test]
+fn test_email_headers_names_empty_name_is_invalid() {
+    use std::str::FromStr;
+
+    assert!(HeaderName::from_bytes(b"").is_err(), "empty is invalid");
+    assert!(HeaderName::try_from("").is_err(), "empty is invalid (&str)");
+    assert!(HeaderName::try_from(String::new()).is_err(), "empty is invalid (String)");
+    assert!(HeaderName::try_from(b"".to_vec()).is_err(), "empty is invalid (Vec<u8>)");
+    assert!(!HeaderMap::default().contains_key(""));
+    assert!(HeaderName::from_str("").is_err(), "empty is invalid (FromStr)");
+
+    // Length 1 — the minimum the grammar allows — is accepted.
+    assert_eq!(&HeaderName::from_bytes(b"A").unwrap().to_string(), "A");
+    // Whitespace-only input stays invalid (every byte is filtered).
+    assert!(HeaderName::from_bytes(b" ").is_err(), "space is filtered");
+    assert!(HeaderName::from_bytes(b"\t\n").is_err(), "whitespace is filtered");
+
+    // The ASCII boundary of the valid-name table: `~` (126) is the
+    // last valid byte, DEL (127) and everything past the table is
+    // rejected.
+    assert!(HeaderName::from_bytes(b"X~Y").is_ok(), "tilde is the last valid byte");
+    assert!(HeaderName::from_bytes(b"X\x7fY").is_err(), "DEL is invalid");
+    assert!(HeaderName::from_bytes("X\u{80}Y".as_bytes()).is_err(), "past the table is invalid");
+    assert!(HeaderName::from_bytes(b"X\xffY").is_err(), "0xff is invalid");
+
+    // The `SmallVec<[u8; 32]>` inline/spill boundary parses at
+    // 31/32/33 bytes alike.
+    for len in [31_usize, 32, 33] {
+        let name = "a".repeat(len);
+        let parsed = HeaderName::from_bytes(name.as_bytes())
+            .unwrap_or_else(|_| panic!("{len}-byte name must parse"));
+        assert_eq!(parsed.as_str(), name);
+        assert_eq!(parsed.as_str().len(), len);
+    }
+}
