@@ -460,3 +460,34 @@ mod cve_2026_70329;
 #[cfg(test)]
 #[path = "CVE-2006-1305.rs"]
 mod cve_2006_1305;
+
+/// CVE-2020-9819 (iOS Mail, iOS 12–13.4.1) heap-corruption / DoS
+/// regression (issue #32, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution family,
+/// DoS face): processing a malicious mail corrupted the heap — the
+/// zero-click sibling of CVE-2020-9818 (#31) on the memory-exhaustion
+/// face, where a tiny message with giant *declared* sizes exhausts the
+/// heap of a client that trusts declarations over arrived bytes. meli
+/// links no proprietary mail engine, so the equivalent surface is the
+/// issue-prescribed allocation strategy of `melib/src/email/parser.rs`
+/// plus the receive paths, and the invariant — every allocation rides
+/// bytes that actually arrived, declaration/content mismatch fails
+/// closed — reads in meli's zero-copy nom model as immune by
+/// construction. [`cve_2020_9819`] locks that layer by layer with the
+/// prescribed deceptive-declaration corpus — MIME parts declaring
+/// `usize::MAX`/TiB `Content-Length` and `message/external-body`
+/// `size=` values over tiny actual bodies (footprint is a function of
+/// actual bytes only; same-digit-count declarations `10^19` apart cost
+/// byte-identically), a twenty-thousand-header in-part declaration
+/// storm and an 8192-minimal-part explosion with the zero-object
+/// empty delimiter mass (object count and retained bytes ride the
+/// actual delimiters), the IMAP zero-click FETCH batch failing
+/// closed on every literal declaration/content mismatch, and the
+/// `Connection::MAX_SERVER_RESPONSE_SIZE`/`IO_BUF_SIZE` heap backstop
+/// staying finite — and the result is **immune, no gap found**: no
+/// production code needed changing. The corpus is disjoint from #27
+/// (declared-size *arithmetic*), #30 (header *width* amplification
+/// with real MB content) and #31 (malformed-bytes *panic/OOB* safety).
+#[cfg(test)]
+#[path = "CVE-2020-9819.rs"]
+mod cve_2020_9819;
