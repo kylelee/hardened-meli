@@ -854,3 +854,48 @@ mod cve_2014_9116;
 #[cfg(test)]
 #[path = "CVE-1999-0940.rs"]
 mod cve_1999_0940;
+
+/// CVE-2023-4875 (mutt >1.5.2, <2.2.12, CVSS v2 4.3) NULL-dereference
+/// draft-composition regression (issue #44, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): mutt
+/// stored a draft's user headers after checking only that each field
+/// "contains at least a colon", then handed the *entire* field to its
+/// rfc2047 decoder and `safe_strdup`'d the result; the decoder's
+/// base64 path skipped illegal characters instead of aborting, so
+/// `=?utf-8?B?####?=` decoded to an empty string, the empty strdup
+/// landed as a NULL `userhdrs` entry, and the compose write-out
+/// crashed in `strchr(NULL, ':')` — composing from a specially
+/// crafted draft message. [`cve_2023_4875`] maps the attack onto the
+/// issue-prescribed 「从草稿继续撰写」 surface — draft load
+/// (`Draft::from_str`), editor reload (`Draft::update`), draft re-open
+/// (`Draft::edit`) and re-serialisation (`to_edit_string`,
+/// `finalise`) — drives the mutt trigger family (RFC 2047 words of
+/// illegal, empty and mixed base64 payloads, illegal Q-escapes,
+/// unknown charsets, folds, the words planted in the standard
+/// headers) plus the 坏头/坏 MIME 结构/缺失必填字段 families and every
+/// byte-truncation of the canonical trigger draft, and locks the
+/// walls layer by layer: the illegal-base64 decode *aborts* in meli's
+/// `data_encoding` alphabet check (mutt's root fix) with the payload
+/// kept as literal text; the compose path never decodes custom header
+/// values at all, so the trigger words survive load → editor
+/// round-trip → `finalise` byte-identical and the emptied-to-NULL
+/// producer has no code to run in; malformed headers fail closed as
+/// deterministic `ValueError`s; hostile MIME (150-level multiparts
+/// past the 100-level cap, unclosed/empty/missing boundaries,
+/// 500-level `message/rfc822` nests, garbage base64/QP bodies) stays
+/// bounded; missing required fields default instead of crashing. One
+/// real gap is exposed and fixed with this regression in
+/// `melib/src/email/compose.rs`: `Draft::edit` swallowed any
+/// `Envelope::headers` failure with `unwrap_or_else(|_| Vec::new())`
+/// — one hostile non-UTF-8 header value silently wiped **every**
+/// header (To/Subject/From gone) when a stored draft was resumed, the
+/// silent data-loss neighbour of this CVE's availability face; it now
+/// parses the header block with the exact grammar and verdicts of
+/// `Draft::from_str` (`parser::mail` plus per-value UTF-8 conversion),
+/// so the re-open entry reports the unparseable field as a
+/// deterministic `ValueError` the composer surfaces as its "Failed to
+/// open e-mail" notification, while RFC 5322-valid zero-header 「空头」
+/// drafts keep loading with the default fields.
+#[cfg(test)]
+#[path = "CVE-2023-4875.rs"]
+mod cve_2023_4875;
