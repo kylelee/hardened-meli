@@ -187,7 +187,7 @@ pub fn string<'a>() -> impl Parser<'a, String> {
 pub fn number<'a>() -> impl Parser<'a, u64> {
     map_res(
         pair(
-            is_a(b"0123456789"),
+            is_a(&b"0123456789"[..]),
             pred(any_char, |c| {
                 ['k', 'm', 'g'].contains(&c.to_ascii_lowercase())
             }),

@@ -28,6 +28,15 @@ use std::{
 use quote::{format_ident, quote};
 use regex::Regex;
 
+/// Return the token stream inside the first delimited group of `toks`, or an
+/// empty stream if `toks` does not start with a group.
+fn group_inner(toks: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    match toks.clone().into_iter().next() {
+        Some(proc_macro2::TokenTree::Group(g)) => g.stream(),
+        _ => proc_macro2::TokenStream::new(),
+    }
+}
+
 // Write ConfigStructOverride to overrides.rs
 pub(crate) fn override_derive(filenames: &[(&str, &str)]) {
     let mut output_file =
@@ -107,7 +116,7 @@ use crate::conf::{*, data_types::*};
                 let mut field_tokentrees = vec![];
                 let mut attrs_tokens = vec![];
                 for attr in &s.attrs {
-                    if let Ok(syn::Meta::List(ml)) = attr.parse_meta() {
+                    if let syn::Meta::List(ml) = &attr.meta {
                         if ml.path.get_ident().is_some() && ml.path.get_ident().unwrap() == "cfg" {
                             attrs_tokens.push(attr);
                         }
@@ -121,67 +130,69 @@ use crate::conf::{*, data_types::*};
                         .attrs
                         .iter()
                         .filter_map(|f| {
+                            let syn::Meta::List(ml) = &f.meta else {
+                                return Some(f.clone());
+                            };
                             let mut new_attr = f.clone();
-                            if let proc_macro2::TokenTree::Group(g) =
-                                f.tokens.clone().into_iter().next().unwrap()
+                            let attr_inner_stream = ml.tokens.clone();
+                            let set_attr_body = |new_attr: &mut syn::Attribute,
+                                                 body: proc_macro2::TokenStream| {
+                                if let syn::Meta::List(ml) = &mut new_attr.meta {
+                                    ml.tokens = body;
+                                }
+                            };
+                            let mut attr_inner_value = format!("({})", ml.tokens);
+                            if attr_inner_value.contains("skip_serializing_if") {
+                                attr_inner_value = cfg_attr_skip_ser_attr_regex
+                                    .replace_all(&attr_inner_value, "")
+                                    .to_string();
+                                let new_toks: proc_macro2::TokenStream =
+                                    attr_inner_value.parse().unwrap();
+                                set_attr_body(&mut new_attr, group_inner(&new_toks));
+                            }
+                            if cfg_attr_feature_regex.is_match(&attr_inner_value) {
+                                attr_inner_value = cfg_attr_default_val_attr_regex
+                                    .replace_all(&attr_inner_value, "")
+                                    .to_string();
+                                if attr_inner_value.contains("default") {
+                                    attr_inner_value = cfg_attr_default_attr_regex
+                                        .replace_all(&attr_inner_value, "")
+                                        .to_string();
+                                }
+                                let new_toks: proc_macro2::TokenStream =
+                                    attr_inner_value.parse().unwrap();
+                                set_attr_body(&mut new_attr, group_inner(&new_toks));
+                            }
+                            if !attr_inner_value.starts_with("( default")
+                                && !attr_inner_value.starts_with("( default =")
+                                && !attr_inner_value.starts_with("(default")
+                                && !attr_inner_value.starts_with("(default =")
                             {
-                                let mut attr_inner_value = f.tokens.to_string();
-                                if attr_inner_value.contains("skip_serializing_if") {
-                                    attr_inner_value = cfg_attr_skip_ser_attr_regex
-                                        .replace_all(&attr_inner_value, "")
-                                        .to_string();
-                                    let new_toks: proc_macro2::TokenStream =
-                                        attr_inner_value.parse().unwrap();
-                                    new_attr.tokens = quote! { #new_toks };
+                                return Some(new_attr);
+                            }
+                            if attr_inner_value.starts_with("( default =")
+                                || attr_inner_value.starts_with("(default =")
+                            {
+                                let rest: proc_macro2::TokenStream =
+                                    attr_inner_stream.into_iter().skip(4).collect();
+                                if rest.is_empty() {
+                                    return None;
                                 }
-                                if cfg_attr_feature_regex.is_match(&attr_inner_value) {
-                                    attr_inner_value = cfg_attr_default_val_attr_regex
-                                        .replace_all(&attr_inner_value, "")
-                                        .to_string();
-                                    if attr_inner_value.contains("default") {
-                                        attr_inner_value = cfg_attr_default_attr_regex
-                                            .replace_all(&attr_inner_value, "")
-                                            .to_string();
-                                    }
-                                    let new_toks: proc_macro2::TokenStream =
-                                        attr_inner_value.parse().unwrap();
-                                    new_attr.tokens = quote! { #new_toks };
-                                }
-                                if !attr_inner_value.starts_with("( default")
-                                    && !attr_inner_value.starts_with("( default =")
-                                    && !attr_inner_value.starts_with("(default")
-                                    && !attr_inner_value.starts_with("(default =")
+                                set_attr_body(&mut new_attr, rest);
+                            } else if attr_inner_value.starts_with("( default")
+                                || attr_inner_value.starts_with("(default")
+                            {
+                                if attr_inner_value.ends_with("default)")
+                                    || attr_inner_value.ends_with("default )")
                                 {
-                                    return Some(new_attr);
+                                    return None;
                                 }
-                                if attr_inner_value.starts_with("( default =")
-                                    || attr_inner_value.starts_with("(default =")
-                                {
-                                    let rest = g.stream().into_iter().skip(4);
-                                    new_attr.tokens = quote! { ( #(#rest)*) };
-                                    match new_attr.tokens.to_string().as_str() {
-                                        "( )" | "()" => {
-                                            return None;
-                                        }
-                                        _ => {}
-                                    }
-                                } else if attr_inner_value.starts_with("( default")
-                                    || attr_inner_value.starts_with("(default")
-                                {
-                                    if attr_inner_value.ends_with("default)")
-                                        || attr_inner_value.ends_with("default )")
-                                    {
-                                        return None;
-                                    }
-                                    let rest = g.stream().into_iter().skip(2);
-                                    new_attr.tokens = quote! { ( #(#rest)*) };
-                                    match new_attr.tokens.to_string().as_str() {
-                                        "( )" | "()" => {
-                                            return None;
-                                        }
-                                        _ => {}
-                                    }
+                                let rest: proc_macro2::TokenStream =
+                                    attr_inner_stream.into_iter().skip(2).collect();
+                                if rest.is_empty() {
+                                    return None;
                                 }
+                                set_attr_body(&mut new_attr, rest);
                             }
 
                             Some(new_attr)

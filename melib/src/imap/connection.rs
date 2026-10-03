@@ -450,11 +450,9 @@ impl ImapStream {
             let mut socket = AsyncWrapper::new({
                 let addr = (path.clone(), server_conf.server_port);
                 let timeout = server_conf.timeout;
-                Connection::new_tcp(
-                    smol::unblock(move || tcp_stream_connect(addr, timeout)).await?,
-                )
-                .trace(server_conf.trace)
-                .with_id(id.clone())
+                Connection::new_tcp(smol::unblock(move || tcp_stream_connect(addr, timeout)).await?)
+                    .trace(server_conf.trace)
+                    .with_id(id.clone())
             })?;
             if server_conf.use_starttls {
                 let err_fn = || {
@@ -576,11 +574,9 @@ impl ImapStream {
             AsyncWrapper::new({
                 let addr = (path.clone(), server_conf.server_port);
                 let timeout = server_conf.timeout;
-                Connection::new_tcp(
-                    smol::unblock(move || tcp_stream_connect(addr, timeout)).await?,
-                )
-                .trace(server_conf.trace)
-                .with_id(id.clone())
+                Connection::new_tcp(smol::unblock(move || tcp_stream_connect(addr, timeout)).await?)
+                    .trace(server_conf.trace)
+                    .with_id(id.clone())
             })?
         };
         if let Err(err) = stream
@@ -603,10 +599,7 @@ impl ImapStream {
             ret.read_response(&mut res).await?;
             // Resolve Secret right before use, mirroring the IMAP SASL path.
             let password_value = server_conf.server_password.value()?;
-            let credentials = format!(
-                "\0{}\0{}",
-                server_conf.server_username, password_value
-            );
+            let credentials = format!("\0{}\0{}", server_conf.server_username, password_value);
             ret.send_command(CommandBody::authenticate(AuthMechanism::Plain))
                 .await?;
             ret.wait_for_continuation_request().await?;
@@ -770,10 +763,7 @@ impl ImapStream {
                 .any(|cap| cap.eq_ignore_ascii_case(b"AUTH=PLAIN")) =>
             {
                 let password_value = server_conf.server_password.value()?;
-                let credentials = format!(
-                    "\0{}\0{}",
-                    server_conf.server_username, password_value
-                );
+                let credentials = format!("\0{}\0{}", server_conf.server_username, password_value);
                 if has_sasl_ir {
                     ret.send_command(CommandBody::authenticate_with_ir(
                         AuthMechanism::Plain,
@@ -803,8 +793,8 @@ impl ImapStream {
                 let username = AString::try_from(server_conf.server_username.as_str())
                     .chain_err_kind(ErrorKind::Bug)?;
                 let password_value = server_conf.server_password.value()?;
-                let password = AString::try_from(password_value.as_str())
-                    .chain_err_kind(ErrorKind::Bug)?;
+                let password =
+                    AString::try_from(password_value.as_str()).chain_err_kind(ErrorKind::Bug)?;
 
                 ret.send_command(CommandBody::Login {
                     username,

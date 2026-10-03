@@ -29,22 +29,22 @@ sqlite3 = ["dep:rusqlite", "melib/sqlite3"]
 [dependencies]
 flate2 = { workspace = true }
 futures = { workspace = true }
-imap-codec = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
-imap-types = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
+imap-codec = { workspace = true, optional = true }
+imap-types = { workspace = true, optional = true }
 indexmap = { workspace = true }
-isahc = { version = "^1.7.2", default-features = false, features = ["http2", "json", "text-decoding"], optional = true }
+isahc = { workspace = true, optional = true }
 melib = { path = "../melib" }
 nix = { workspace = true }
 regex = { workspace = true }
-rusqlite = { version = "^0.37", default-features = false, features = ["array", "modern_sqlite"], optional = true }
-serde = { version = "1", features = ["derive"] }
+rusqlite = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
-smol = { version = "2" }
-socket2 = { version = "0.6", features = [] }
+smol = { workspace = true }
+socket2 = { workspace = true }
 tempfile = { workspace = true }
-tokio-test = { version = "0.4" }
+tokio-test = { workspace = true }
 toml = { workspace = true }
-tracing = { version = "0.1", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std"] }
-url = { version = "2.5", optional = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true, optional = true }

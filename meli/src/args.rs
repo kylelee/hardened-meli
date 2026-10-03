@@ -277,8 +277,10 @@ impl Opt {
                 Ok(())
             }
             SubCommand::PrintAppDirectories => {
-                let data_dir = ret_err!(xdg::BaseDirectories::with_prefix("meli"));
-                print_path(&data_dir.get_data_file(""));
+                let data_dir = xdg::BaseDirectories::with_prefix("meli");
+                if let Some(data_file) = data_dir.get_data_file("") {
+                    print_path(&data_file);
+                }
                 let mut temp_dir = std::env::temp_dir();
                 temp_dir.push("meli");
                 print_path(&temp_dir);

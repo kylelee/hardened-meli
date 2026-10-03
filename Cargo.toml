@@ -3,25 +3,41 @@ resolver = "2"
 
 members = ["cve", "meli", "meli-test", "melib", "melib-test"]
 
+# Dependencies shared by two or more workspace members are declared here once
+# and inherited with `workspace = true`; member manifests only keep
+# crate-specific (differentiated) entries and per-crate feature additions.
 [workspace.dependencies]
-bitflags = { version = "2.10", features = ["serde"] }
+bitflags = { version = "2.13", features = ["serde"] }
 flate2 = { version = "1" }
 futures = { version = "0.3.34", default-features = false, features = ["async-await", "executor", "std"] }
-indexmap = { version = "^2.3", default-features = false, features = ["serde", "std"] }
+imap-codec = { version = "=2.0.0-alpha.9", features = ["ext_condstore_qresync", "ext_id"] }
+imap-types = { version = "=2.0.0-alpha.7", features = ["ext_condstore_qresync", "ext_id"] }
+indexmap = { version = "2.14", default-features = false, features = ["serde", "std"] }
+# `native-tls` picks the system-OpenSSL curl backend; `tls` exposes
+# `isahc::tls::TlsConfig`; `tls-insecure` gates the `danger_accept_*` knobs
+# required by melib's `danger_accept_invalid_certs` account option.
+isahc = { version = "2", default-features = false, features = ["http2", "json", "text-decoding", "native-tls", "tls-insecure"] }
 libc = { version = "0.2", features = ["extra_traits"] }
-nix = { version = "0.30", default-features = false }
+nix = { version = "0.31", default-features = false }
 regex = { version = "1" }
+rusqlite = { version = "0.40", default-features = false, features = ["array", "modern_sqlite", "fallible_uint"] }
 serde = { version = "1" }
 serde_derive = { version = "1" }
 serde_json = { version = "1" }
 serde_test2 = { version = "2" }
-smallvec = { version = "^1.15", features = ["serde"] }
-tempfile = { version = "3.3" }
+smallvec = { version = "1.16", features = ["serde"] }
+smol = { version = "2" }
+socket2 = { version = "0.6" }
+tempfile = { version = "3.27" }
 tokio-test = { version = "0.4" }
-toml = { version = "0.8", default-features = false, features = ["display", "preserve_order", "parse"] }
-toml_edit = { version = "0.22" }
-
+toml = { version = "1.1", default-features = false, features = ["display", "parse", "preserve_order", "serde"] }
+toml_edit = { version = "0.25" }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std"] }
 unicode-width = "0.2"
+url = "2.5"
+xdg = "3"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

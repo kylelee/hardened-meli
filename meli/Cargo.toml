@@ -51,8 +51,8 @@ libz-static = ["dep:libz-sys", "libz-sys?/static"]
 static = ["tls-static", "http-static", "sqlite3-static", "dbus-static", "libz-static"]
 
 [dependencies]
-aho-corasick = { version = "1.1.3" }
-ammonia = { version = "4.1.4" }
+aho-corasick = { version = "1.1.5" }
+ammonia = { version = "4.2" }
 bitflags = { workspace = true }
 crossbeam = { version = "^0.8" }
 crossterm = "0.29"
@@ -63,7 +63,7 @@ indexmap = { workspace = true }
 itoa = { version = "1", default-features = false }
 libc = { workspace = true }
 libz-sys = { version = "1.1", features = ["static"], optional = true }
-linkify = { version = "^0.10", default-features = false }
+linkify = { version = "0.11", default-features = false }
 melib = { path = "../melib", version = "0.9.0", features = [] }
 nix = { workspace = true, default-features = false, features = ["signal", "poll", "term", "ioctl", "process"] }
 nucleo-matcher = "0.3.1"
@@ -79,25 +79,27 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 # svg_crate = { version = "^0.13", optional = true, package = "svg" }
 toml = { workspace = true }
 toml_edit = { workspace = true }
-tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing = { workspace = true }
 tracing-appender = { version = "0.2", default-features = false }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std"] }
+tracing-subscriber = { workspace = true }
 unicode-width = { workspace = true }
-url = "2"
-xdg = { version = "2.1.0" }
+url = { workspace = true }
+xdg = { workspace = true }
 
 [target.'cfg(target_os="linux")'.dependencies]
+# notify-rust 4.18+ requires rustc 1.89, above this crate's MSRV (1.88).
 notify-rust = { version = ">=4.11, <4.18", default-features = false, features = ["dbus"], optional = true }
 
 [target.'cfg(target_os="macos")'.dependencies]
+# notify-rust 4.18+ requires rustc 1.89, above this crate's MSRV (1.88).
 notify-rust = { version = ">=4.11, <4.18", default-features = false }
 
 [build-dependencies]
 flate2 = { workspace = true, optional = true }
-proc-macro2 = { version = "1.0.37" }
+proc-macro2 = { version = "1" }
 quote = { version = "^1.0" }
 regex = { workspace = true }
-syn = { version = "1", features = [] }
+syn = { version = "3", features = [] }
 
 [dev-dependencies]
 flate2 = { workspace = true }

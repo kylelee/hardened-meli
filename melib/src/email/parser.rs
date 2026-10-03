@@ -33,12 +33,12 @@ use std::{borrow::Cow, convert::TryFrom, fmt::Write};
 use nom::{
     branch::alt,
     bytes::complete::{is_a, is_not, tag, take, take_until, take_while, take_while1},
-    character::{is_alphabetic, is_digit, is_hex_digit},
     combinator::{map, opt, peek},
     error::{context, ErrorKind},
     multi::{many0, many1, separated_list1},
     number::complete::le_u8,
     sequence::{delimited, pair, preceded, separated_pair, terminated},
+    AsChar, Parser,
 };
 use smallvec::SmallVec;
 
@@ -441,11 +441,12 @@ pub fn mail(input: &[u8]) -> Result<(Vec<(HeaderName, &[u8])>, &[u8])> {
     let (rest, result) = alt((
         separated_pair(
             headers::headers,
-            alt((tag(b"\n"), tag(b"\r\n"))),
+            alt((tag(&b"\n"[..]), tag(&b"\r\n"[..]))),
             take_while(|_| true),
         ),
         pair(headers::headers, generic::eof),
-    ))(input)
+    ))
+    .parse(input)
     .chain_err_summary(|| "Could not parse mail")?;
 
     if !rest.is_empty() {
@@ -462,8 +463,8 @@ pub mod dates {
 
     fn take_n_digits(n: usize) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8]> {
         move |input: &[u8]| {
-            let (input, ret) = take(n)(input)?;
-            if !ret.iter().all(|c| is_digit(*c)) {
+            let (input, ret) = take(n).parse(input)?;
+            if !ret.iter().all(|c| c.is_dec_digit()) {
                 return Err(nom::Err::Error(
                     (input, "take_n_digits(): not digits").into(),
                 ));
@@ -518,8 +519,11 @@ pub mod dates {
             map(tag("MST"), |_| (&b"-"[..], &b"0700"[..])),
             map(tag("PDT"), |_| (&b"-"[..], &b"0700"[..])),
             map(tag("PST"), |_| (&b"-"[..], &b"0800"[..])),
-            map(take_while1(is_alphabetic), |_| (&b"-"[..], &b"0000"[..])),
-        ))(input)
+            map(take_while1(|c: u8| c.is_alpha()), |_| {
+                (&b"-"[..], &b"0000"[..])
+            }),
+        ))
+        .parse(input)
     }
 
     /// ```text
@@ -528,12 +532,13 @@ pub mod dates {
     fn zone(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8])> {
         alt((
             |input| {
-                let (input, sign) = alt((tag("+"), tag("-")))(input)?;
-                let (input, zone) = take_n_digits(4)(input)?;
+                let (input, sign) = alt((tag("+"), tag("-"))).parse(input)?;
+                let (input, zone) = take_n_digits(4).parse(input)?;
                 Ok((input, (sign, zone)))
             },
             obs_zone,
-        ))(input)
+        ))
+        .parse(input)
     }
 
     /// ```text
@@ -548,17 +553,17 @@ pub mod dates {
     fn date_time(input: &[u8]) -> IResult<&[u8], UnixTimestamp> {
         let orig_input = input;
         let mut accum: SmallVec<[u8; 32]> = SmallVec::new();
-        let (input, day_of_week) = opt(terminated(day_of_week, tag(",")))(input)?;
+        let (input, day_of_week) = opt(terminated(day_of_week, tag(","))).parse(input)?;
         let (input, day) = day(input)?;
         let (input, month) = month(input)?;
         let (input, year) = year(input)?;
-        let (input, hour) = take_n_digits(2)(input)?;
-        let (input, _) = tag(":")(input)?;
-        let (input, minute) = take_n_digits(2)(input)?;
-        let (input, second) = opt(preceded(tag(":"), take_n_digits(2)))(input)?;
+        let (input, hour) = take_n_digits(2).parse(input)?;
+        let (input, _) = tag(":").parse(input)?;
+        let (input, minute) = take_n_digits(2).parse(input)?;
+        let (input, second) = opt(preceded(tag(":"), take_n_digits(2))).parse(input)?;
         let (input, _) = fws(input)?;
         let (input, (sign, zone)) = zone(input)?;
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         if let Some(day_of_week) = day_of_week {
             accum.extend_from_slice(&day_of_week);
             accum.extend_from_slice(b", ");
@@ -606,20 +611,20 @@ pub mod dates {
     pub fn mbox_date_time(input: &[u8]) -> IResult<&[u8], UnixTimestamp> {
         let orig_input = input;
         let mut accum: SmallVec<[u8; 32]> = SmallVec::new();
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         let (input, day_of_week) = day_of_week(input)?;
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         let (input, month) = month(input)?;
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         let (input, day) = day(input)?;
-        let (input, _) = opt(cfws)(input)?;
-        let (input, hour) = take_n_digits(2)(input)?;
-        let (input, _) = tag(":")(input)?;
-        let (input, minute) = take_n_digits(2)(input)?;
-        let (input, second) = opt(preceded(tag(":"), take_n_digits(2)))(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
+        let (input, hour) = take_n_digits(2).parse(input)?;
+        let (input, _) = tag(":").parse(input)?;
+        let (input, minute) = take_n_digits(2).parse(input)?;
+        let (input, second) = opt(preceded(tag(":"), take_n_digits(2))).parse(input)?;
         let (input, _) = fws(input)?;
-        let (input, zone) = opt(zone)(input)?;
-        let (input, _) = opt(cfws)(input)?;
+        let (input, zone) = opt(zone).parse(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         let (input, year) = year(input)?;
         accum.extend_from_slice(&day_of_week);
         accum.extend_from_slice(b", ");
@@ -667,14 +672,15 @@ pub mod dates {
             tag("Fri"),
             tag("Sat"),
             tag("Sun"),
-        ))(input)?;
+        ))
+        .parse(input)?;
         Ok((input, day_name.into()))
     }
 
     /// `day             =   ([FWS] 1*2DIGIT FWS) / obs-day`
     fn day(input: &[u8]) -> IResult<&[u8], &[u8]> {
-        let (input, _) = opt(fws)(input)?;
-        let (input, ret) = alt((take_n_digits(2), take_n_digits(1)))(input)?;
+        let (input, _) = opt(fws).parse(input)?;
+        let (input, ret) = alt((take_n_digits(2), take_n_digits(1))).parse(input)?;
         let (input, _) = fws(input)?;
 
         Ok((input, ret))
@@ -699,14 +705,15 @@ pub mod dates {
             tag("Oct"),
             tag("Nov"),
             tag("Dec"),
-        ))(input)
+        ))
+        .parse(input)
     }
 
     ///year            =   (FWS 4*DIGIT FWS) / obs-year
     fn year(input: &[u8]) -> IResult<&[u8], &[u8]> {
-        let (input, _) = opt(fws)(input)?;
-        let (input, ret) = take_n_digits(4)(input)?;
-        let (input, _) = opt(fws)(input)?;
+        let (input, _) = opt(fws).parse(input)?;
+        let (input, ret) = take_n_digits(4).parse(input)?;
+        let (input, _) = opt(fws).parse(input)?;
         Ok((input, ret))
     }
 
@@ -782,7 +789,7 @@ pub mod generic {
     fn utf8_non_ascii(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
         /// UTF8-2      = %xC2-DF UTF8-tail
         fn utf8_2(input: &[u8]) -> IResult<&[u8], &[u8]> {
-            let (rest, _) = byte_in_range(0xc2, 0xdf)(input)?;
+            let (rest, _) = byte_in_range(0xc2, 0xdf).parse(input)?;
             let (rest, _) = utf8_tail(rest)?;
             Ok((rest, &input[0..2]))
         }
@@ -791,65 +798,67 @@ pub mod generic {
         fn utf8_3<'a>(input: &'a [u8]) -> IResult<&'a [u8], &'a [u8]> {
             alt((
                 |input: &'a [u8]| -> IResult<&'a [u8], &'a [u8]> {
-                    let (rest, _) = byte_in_range(0xe0, 0xe0)(input)?;
-                    let (rest, _) = byte_in_range(0xa0, 0xbf)(rest)?;
+                    let (rest, _) = byte_in_range(0xe0, 0xe0).parse(input)?;
+                    let (rest, _) = byte_in_range(0xa0, 0xbf).parse(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     Ok((rest, &input[0..3]))
                 },
                 |input: &'a [u8]| -> IResult<&'a [u8], &'a [u8]> {
-                    let (rest, _) = byte_in_range(0xe1, 0xec)(input)?;
+                    let (rest, _) = byte_in_range(0xe1, 0xec).parse(input)?;
                     let (rest, _) = utf8_tail(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     Ok((rest, &input[0..3]))
                 },
                 |input: &'a [u8]| -> IResult<&'a [u8], &'a [u8]> {
-                    let (rest, _) = byte_in_range(0xed, 0xed)(input)?;
-                    let (rest, _) = byte_in_range(0x80, 0x9f)(rest)?;
+                    let (rest, _) = byte_in_range(0xed, 0xed).parse(input)?;
+                    let (rest, _) = byte_in_range(0x80, 0x9f).parse(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     Ok((rest, &input[0..3]))
                 },
                 |input: &'a [u8]| -> IResult<&'a [u8], &'a [u8]> {
-                    let (rest, _) = byte_in_range(0xee, 0xef)(input)?;
+                    let (rest, _) = byte_in_range(0xee, 0xef).parse(input)?;
                     let (rest, _) = utf8_tail(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     Ok((rest, &input[0..3]))
                 },
-            ))(input)
+            ))
+            .parse(input)
         }
         /// UTF8-4      = %xF0 %x90-BF 2( UTF8-tail ) / %xF1-F3 3( UTF8-tail ) /
         /// %xF4 %x80-8F 2( UTF8-tail )
         fn utf8_4<'a>(input: &'a [u8]) -> IResult<&'a [u8], &'a [u8]> {
             alt((
                 |input: &'a [u8]| -> IResult<&'a [u8], &'a [u8]> {
-                    let (rest, _) = byte_in_range(0xf0, 0xf0)(input)?;
-                    let (rest, _) = byte_in_range(0x90, 0xbf)(rest)?;
+                    let (rest, _) = byte_in_range(0xf0, 0xf0).parse(input)?;
+                    let (rest, _) = byte_in_range(0x90, 0xbf).parse(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     Ok((rest, &input[0..4]))
                 },
                 |input: &'a [u8]| {
-                    let (rest, _) = byte_in_range(0xf1, 0xf3)(input)?;
+                    let (rest, _) = byte_in_range(0xf1, 0xf3).parse(input)?;
                     let (rest, _) = utf8_tail(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     Ok((rest, &input[0..4]))
                 },
                 |input: &'a [u8]| {
-                    let (rest, _) = byte_in_range(0xf4, 0xf4)(input)?;
-                    let (rest, _) = byte_in_range(0x80, 0x8f)(rest)?;
+                    let (rest, _) = byte_in_range(0xf4, 0xf4).parse(input)?;
+                    let (rest, _) = byte_in_range(0x80, 0x8f).parse(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     let (rest, _) = utf8_tail(rest)?;
                     Ok((rest, &input[0..4]))
                 },
-            ))(input)
+            ))
+            .parse(input)
         }
         ///  UTF8-tail   = %x80-BF
         fn utf8_tail(input: &[u8]) -> IResult<&[u8], &[u8]> {
-            let (rest, _) = byte_in_range(0x80, 0xbf)(input)?;
+            let (rest, _) = byte_in_range(0x80, 0xbf).parse(input)?;
             Ok((rest, &input[0..1]))
         }
 
-        let (rest, ret) = alt((utf8_2, utf8_3, utf8_4))(input)?;
+        let (rest, ret) = alt((utf8_2, utf8_3, utf8_4)).parse(input)?;
 
         Ok((rest, ret.into()))
     }
@@ -857,7 +866,7 @@ pub mod generic {
     ///`%x21-7E`
     /// RFC6532 adds: `VCHAR   =/  UTF8-non-ascii`
     fn vchar(input: &[u8]) -> IResult<&[u8], u8> {
-        byte_in_range(0x21, 0x7e)(input)
+        byte_in_range(0x21, 0x7e).parse(input)
     }
 
     ///`quoted-pair     =   ("\" (VCHAR / WSP)) / obs-qp`
@@ -869,7 +878,8 @@ pub mod generic {
                 map(vchar, |byte| vec![byte].into()),
                 map(wsp, |byte| vec![byte].into()),
             )),
-        )(input)
+        )
+        .parse(input)
     }
 
     ///```text
@@ -889,12 +899,13 @@ pub mod generic {
                 |_| (),
             ),
             map(utf8_non_ascii, |_| ()),
-        ))(input)
+        ))
+        .parse(input)
     }
 
     /// Invalid version of [`ctext`] that accepts non-ascii characters.
     fn ctext_invalid(input: &[u8]) -> IResult<&[u8], ()> {
-        map(is_not("()\\"), |_| ())(input)
+        map(is_not("()\\"), |_| ()).parse(input)
     }
 
     ///```text
@@ -919,11 +930,12 @@ pub mod generic {
                     (input, "comment(): unclosed comment").into(),
                 ));
             }
-            input = context("comment()", opt(fws))(input)?.0;
+            input = context("comment()", opt(fws)).parse(input)?.0;
             while let Ok((_input, _)) = context(
                 "comment()",
                 alt((ctext, ctext_invalid, map(quoted_pair, |_| ()))),
-            )(input)
+            )
+            .parse(input)
             {
                 input = _input;
             }
@@ -935,7 +947,7 @@ pub mod generic {
                 comment_level += 1;
                 input = &input[1..];
             } else {
-                input = context("comment()", opt(fws))(input)?.0;
+                input = context("comment()", opt(fws)).parse(input)?.0;
             }
         }
         Ok((input, ()))
@@ -943,7 +955,7 @@ pub mod generic {
 
     ///`FWS             =   ([*WSP CRLF] 1*WSP) /  obs-FWS`
     pub fn fws(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        if let Ok((rest, ws)) = terminated(many0(wsp), crlf)(input) {
+        if let Ok((rest, ws)) = terminated(many0(wsp), crlf).parse(input) {
             let mut v: Vec<u8> = ws.into_iter().fold(vec![], |mut acc, x| {
                 acc.push(x);
                 acc
@@ -1000,8 +1012,8 @@ pub mod generic {
     pub fn cfws(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
         alt((
             |input| {
-                let (input, pr) = many1(terminated(opt(fws), comment))(input)?;
-                let (input, end) = opt(fws)(input)?;
+                let (input, pr) = many1(terminated(opt(fws), comment)).parse(input)?;
+                let (input, end) = opt(fws).parse(input)?;
                 let mut pr = pr.into_iter().flatten().fold(vec![], |mut acc, x| {
                     acc.extend_from_slice(&x);
                     acc
@@ -1016,14 +1028,15 @@ pub mod generic {
                 }
             },
             fws,
-        ))(input)
+        ))
+        .parse(input)
     }
 
     ///`unstructured    =   (*([FWS] VCHAR) *WSP) / obs-unstruct`
     pub fn unstructured(input: &[u8]) -> Result<String> {
         let (input, r): (_, Vec<(Option<Cow<'_, [u8]>>, u8)>) =
-            many0(pair(opt(fws), vchar))(input)?;
-        let (input, rest_wsp): (_, Vec<u8>) = many0(wsp)(input)?;
+            many0(pair(opt(fws), vchar)).parse(input)?;
+        let (input, rest_wsp): (_, Vec<u8>) = many0(wsp).parse(input)?;
         let mut ret_s = Vec::new();
         for (opt_slice, b) in r {
             if let Some(slice) = opt_slice {
@@ -1090,25 +1103,34 @@ pub mod generic {
         let end = decoded.as_bytes().iter().position(|e| *e == b'?');
         let end_or_len = end.unwrap_or(decoded.len());
 
-        if let Ok(addr) = percent_decode(&decoded.as_bytes()[..end_or_len])
-            .decode_utf8()
-            .map_err(|_| nom::Err::Error((input, "mailto(): Not valid UTF-8.")))
-            .and_then(|s| {
-                // RFC6068 forbids CR/LF in mailto URIs; a percent-encoded
-                // %0d/%0a in the address part (e.g. inside a quoted display
-                // name) would otherwise reach the To: header value (CWE-93).
-                // Line breaks that are valid folding whitespace are allowed.
-                if super::has_unfoldable_newline(&s) {
-                    return Err(nom::Err::Error((
+        if let Ok(addr) =
+            percent_decode(&decoded.as_bytes()[..end_or_len])
+                .decode_utf8()
+                .map_err(|_| {
+                    nom::Err::<ParsingError<&[u8]>>::Error(ParsingError::<&[u8]>::new(
+                        input,
+                        "mailto(): Not valid UTF-8.".into(),
+                    ))
+                })
+                .and_then(|s| {
+                    // RFC6068 forbids CR/LF in mailto URIs; a percent-encoded
+                    // %0d/%0a in the address part (e.g. inside a quoted display
+                    // name) would otherwise reach the To: header value (CWE-93).
+                    // Line breaks that are valid folding whitespace are allowed.
+                    if super::has_unfoldable_newline(&s) {
+                        return Err(nom::Err::Error((
                         input,
                         "mailto(): CR/LF characters are not allowed in the address part of \
                          mailto URIs (RFC6068)",
-                    )));
-                }
-                Address::list_try_from(s.as_bytes()).map_err(|_| {
-                    nom::Err::Error((input, "mailto(): doesn't start with an address."))
+                    ).into()));
+                    }
+                    Address::list_try_from(s.as_bytes()).map_err(|_| {
+                        nom::Err::Error(ParsingError::<&[u8]>::new(
+                            input,
+                            "mailto(): doesn't start with an address.".into(),
+                        ))
+                    })
                 })
-            })
         {
             address = addr;
             decoded = if decoded.as_bytes()[end_or_len..].is_empty() {
@@ -1288,7 +1310,7 @@ pub mod generic {
 
     ///`atom            =   [CFWS] 1*atext [CFWS]`
     pub fn atom(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        let (input, opt_space) = opt(cfws)(input)?;
+        let (input, opt_space) = opt(cfws).parse(input)?;
         let mut i = 0;
         while i < input.len() {
             //&& !input[i].is_ascii_whitespace() {
@@ -1311,7 +1333,7 @@ pub mod generic {
                 break;
             }
         }
-        let (rest, opt_space2) = opt(cfws)(&input[i..])?;
+        let (rest, opt_space2) = opt(cfws).parse(&input[i..])?;
         let ret = if opt_space.is_some() || opt_space2.is_some() {
             let mut ret = Vec::with_capacity(i + 2);
             if let Some(opt_space) = opt_space {
@@ -1331,7 +1353,7 @@ pub mod generic {
     ///`quoted-string   =   [CFWS] DQUOTE *([FWS] qcontent) [FWS] DQUOTE
     /// [CFWS]`
     pub fn quoted_string(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        let (input, opt_space) = opt(cfws)(input)?;
+        let (input, opt_space) = opt(cfws).parse(input)?;
         if !input.starts_with(b"\"") {
             return Err(nom::Err::Error(
                 (input, "quoted_string(): doesn't start with DQUOTE").into(),
@@ -1368,7 +1390,7 @@ pub mod generic {
                     ));
                 }
 
-                let (rest, opt_sp) = opt(cfws)(&input[i..])?;
+                let (rest, opt_sp) = opt(cfws).parse(&input[i..])?;
                 if let Some(opt_sp) = opt_sp {
                     ret.extend_from_slice(&opt_sp);
                 }
@@ -1387,7 +1409,7 @@ pub mod generic {
             ));
         }
 
-        let (rest, opt_sp) = opt(cfws)(&input[i..])?;
+        let (rest, opt_sp) = opt(cfws).parse(&input[i..])?;
         if let Some(opt_sp) = opt_sp {
             let mut ret = ret.to_vec();
             ret.extend_from_slice(&opt_sp);
@@ -1399,12 +1421,12 @@ pub mod generic {
 
     ///`word            =   atom / quoted-string`
     pub fn word(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        alt((quoted_string, atom))(input)
+        alt((quoted_string, atom)).parse(input)
     }
 
     ///`phrase          =   1*word / obs-phrase`
     pub fn phrase2(input: &[u8]) -> IResult<&[u8], Vec<u8>> {
-        let (rest, words) = many1(word)(input)?;
+        let (rest, words) = many1(word).parse(input)?;
         let len = words.iter().map(|v| v.len()).sum::<usize>();
         let mut ret = words
             .into_iter()
@@ -1473,14 +1495,14 @@ pub mod generic {
     }
 
     pub fn atext(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        alt((atext_ascii, utf8_non_ascii))(input)
+        alt((atext_ascii, utf8_non_ascii)).parse(input)
     }
 
     ///`dot-atom        =   [CFWS] dot-atom-text [CFWS]`
     pub fn dot_atom(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         let (input, ret) = dot_atom_text(input)?;
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         Ok((input, ret))
     }
 
@@ -1490,7 +1512,7 @@ pub mod generic {
     ///                    obs-dtext          ;  "[", "]", or "\"
     /// ```
     pub fn dtext(input: &[u8]) -> IResult<&[u8], u8> {
-        alt((byte_in_range(33, 90), byte_in_range(94, 125)))(input)
+        alt((byte_in_range(33, 90), byte_in_range(94, 125))).parse(input)
     }
 }
 
@@ -1508,7 +1530,7 @@ pub mod mailing_lists {
     /// Meta-Syntax for Core Mail List Commands and their Transport through
     /// Message Header Fields"
     pub fn rfc_2369_list_headers_action_list(input: &[u8]) -> IResult<&[u8], Vec<&[u8]>> {
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         let (input, ret) = alt((
             separated_list1(
                 delimited(
@@ -1529,8 +1551,9 @@ pub mod mailing_lists {
                 ),
                 |_| vec![&b"NO"[..]],
             ),
-        ))(input)?;
-        let (input, _) = opt(cfws)(input)?;
+        ))
+        .parse(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         Ok((input, ret))
     }
 }
@@ -1540,11 +1563,11 @@ pub mod headers {
     use super::*;
 
     pub fn headers(input: &[u8]) -> IResult<&[u8], Vec<(HeaderName, &[u8])>> {
-        many1(header)(input)
+        many1(header).parse(input)
     }
 
     pub fn header(input: &[u8]) -> IResult<&[u8], (HeaderName, &[u8])> {
-        alt((header_without_val, header_with_val))(input)
+        alt((header_without_val, header_with_val)).parse(input)
     }
 
     pub fn header_without_val(input: &[u8]) -> IResult<&[u8], (HeaderName, &[u8])> {
@@ -1818,11 +1841,12 @@ pub mod attachments {
         alt((
             separated_pair(
                 many0(headers::header),
-                alt((tag(b"\n"), tag(b"\r\n"))),
+                alt((tag(&b"\n"[..]), tag(&b"\r\n"[..]))),
                 take_while(|_| true),
             ),
             pair(headers::headers, generic::eof),
-        ))(input)
+        ))
+        .parse(input)
     }
 
     pub fn multipart_parts<'a>(
@@ -2008,11 +2032,12 @@ pub mod attachments {
         alt((
             parts_f(boundary),
             |input: &'a [u8]| -> IResult<&'a [u8], Vec<&'a [u8]>> {
-                let (input, _) = take_until(&b"--"[..])(input)?;
-                let (input, _) = take_until(boundary)(input)?;
+                let (input, _) = take_until(&b"--"[..]).parse(input)?;
+                let (input, _) = take_until(boundary).parse(input)?;
                 Ok((input, Vec::<&[u8]>::new()))
             },
-        ))(input)
+        ))
+        .parse(input)
         /*
             alt_complete!(call!(parts_f, boundary) | do_parse!(
                         take_until_and_consume!(&b"--"[..]) >>
@@ -2024,21 +2049,22 @@ pub mod attachments {
 
     /* Caution: values should be passed through phrase() */
     pub fn content_type_parameter(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8])> {
-        let (input, _) = tag(";")(input.ltrim())?;
-        let (input, name) = terminated(take_until("="), tag("="))(input.ltrim())?;
+        let (input, _) = tag(";").parse(input.ltrim())?;
+        let (input, name) = terminated(take_until("="), tag("=")).parse(input.ltrim())?;
         let (input, value) = alt((
             delimited(tag("\""), take_until("\""), tag("\"")),
             is_not(";"),
-        ))(input.ltrim())?;
+        ))
+        .parse(input.ltrim())?;
 
         Ok((input, (name, value)))
     }
 
     pub fn content_type(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8], Vec<(&[u8], &[u8])>)> {
-        let (input, _type) = take_until("/")(input.ltrim())?;
-        let (input, _) = tag("/")(input)?;
-        let (input, _subtype) = is_not(";")(input)?;
-        let (input, parameters) = many0(content_type_parameter)(input)?;
+        let (input, _type) = take_until("/").parse(input.ltrim())?;
+        let (input, _) = tag("/").parse(input)?;
+        let (input, _subtype) = is_not(";").parse(input)?;
+        let (input, parameters) = many0(content_type_parameter).parse(input)?;
         Ok((input, (_type, _subtype, parameters)))
         /*
            do_parse!(
@@ -2055,18 +2081,19 @@ pub mod attachments {
 
     /* Caution: values should be passed through phrase() */
     pub fn content_disposition_parameter(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8])> {
-        let (input, _) = tag(";")(input.ltrim())?;
-        let (input, name) = terminated(take_until("="), tag("="))(input.ltrim())?;
+        let (input, _) = tag(";").parse(input.ltrim())?;
+        let (input, name) = terminated(take_until("="), tag("=")).parse(input.ltrim())?;
         let (input, value) = alt((
             delimited(tag("\""), take_until("\""), tag("\"")),
             is_not(";"),
-        ))(input.ltrim())?;
+        ))
+        .parse(input.ltrim())?;
 
         Ok((input, (name, value)))
     }
 
     pub fn content_disposition(input: &[u8]) -> IResult<&[u8], ContentDisposition> {
-        let (input, kind) = alt((take_until(";"), take_while(|_| true)))(input.trim())?;
+        let (input, kind) = alt((take_until(";"), take_while(|_| true))).parse(input.trim())?;
         let mut ret = ContentDisposition {
             /* RFC2183 Content-Disposition: "Unrecognized disposition types should be treated as
              * `attachment'." */
@@ -2080,7 +2107,7 @@ pub mod attachments {
         if input.is_empty() {
             return Ok((input, ret));
         }
-        let (input, parameters) = many0(content_disposition_parameter)(input.ltrim())?;
+        let (input, parameters) = many0(content_disposition_parameter).parse(input.ltrim())?;
         for (k, v) in parameters {
             if k.eq_ignore_ascii_case(b"filename") {
                 ret.filename =
@@ -2122,7 +2149,7 @@ pub mod encodings {
                 )
                     .into(),
             ))
-        } else if input[0] == b'=' && is_hex_digit(input[1]) && is_hex_digit(input[2]) {
+        } else if input[0] == b'=' && input[1].is_hex_digit() && input[2].is_hex_digit() {
             let a = if input[1] < b':' {
                 input[1] - 48
             } else if input[1] < b'[' {
@@ -2288,7 +2315,7 @@ pub mod encodings {
     }
 
     pub fn qp_underscore_header(input: &[u8]) -> IResult<&[u8], u8> {
-        let (rest, _) = tag(b"_")(input)?;
+        let (rest, _) = tag(&b"_"[..]).parse(input)?;
         Ok((rest, 0x20))
     }
 
@@ -2296,7 +2323,7 @@ pub mod encodings {
     // represent spaces. In non-header context, an underscore is just a plain
     // underscore.
     pub fn quoted_printable_bytes_header(input: &[u8]) -> IResult<&[u8], Vec<u8>> {
-        many0(alt((quoted_printable_byte, qp_underscore_header, le_u8)))(input)
+        many0(alt((quoted_printable_byte, qp_underscore_header, le_u8))).parse(input)
     }
 
     // For atoms in Header values.
@@ -2309,18 +2336,19 @@ pub mod encodings {
             preceded(quoted_printable_soft_break, le_u8),
             quoted_printable_byte,
             le_u8,
-        )))(input)
+        )))
+        .parse(input)
     }
 
     pub fn space(input: &[u8]) -> IResult<&[u8], ()> {
         let (rest, _) =
-            take_while(|c: u8| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n')(input)?;
+            take_while(|c: u8| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n').parse(input)?;
         Ok((rest, ()))
         //eat_separator!());
     }
 
     pub fn encoded_word_list(input: &[u8]) -> IResult<&[u8], SmallVec<[u8; 64]>> {
-        let (input, list) = separated_list1(space, encoded_word)(input)?;
+        let (input, list) = separated_list1(space, encoded_word).parse(input)?;
         let list_len = list.iter().fold(0, |mut acc, x| {
             acc += x.len();
             acc
@@ -2337,9 +2365,13 @@ pub mod encodings {
 
     pub fn ascii_token(input: &[u8]) -> IResult<&[u8], SmallVec<[u8; 64]>> {
         let (input, word) = alt((
-            terminated(take_until(" =?"), peek(preceded(tag(b" "), encoded_word))),
+            terminated(
+                take_until(" =?"),
+                peek(preceded(tag(&b" "[..]), encoded_word)),
+            ),
             take_while(|_| true),
-        ))(input)?;
+        ))
+        .parse(input)?;
         Ok((input, SmallVec::from(word)))
     }
 
@@ -2544,17 +2576,17 @@ pub mod address {
 
     ///`angle-addr      =   [CFWS] "<" addr-spec ">" [CFWS] / obs-angle-addr`
     pub fn angle_addr(input: &[u8]) -> IResult<&[u8], Address> {
-        let (input, _) = opt(cfws)(input)?;
-        let (input, _) = tag("<")(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
+        let (input, _) = tag("<").parse(input)?;
         let (input, addr_spec) = addr_spec(input)?;
-        let (input, _) = tag(">")(input)?;
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = tag(">").parse(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         Ok((input, addr_spec))
     }
 
     ///`obs-domain      =   atom *("." atom)`
     pub fn obs_domain(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        let (mut input, atom_) = context("obs_domain", atom)(input)?;
+        let (mut input, atom_) = context("obs_domain", atom).parse(input)?;
         let mut ret: Vec<u8> = atom_.into();
         loop {
             if !input.starts_with(b".") {
@@ -2562,7 +2594,7 @@ pub mod address {
             }
             ret.push(b'.');
             input = &input[1..];
-            if let Ok((_input, atom_)) = context("obs_domain", atom)(input) {
+            if let Ok((_input, atom_)) = context("obs_domain", atom).parse(input) {
                 ret.extend_from_slice(&atom_);
                 input = _input;
             } else {
@@ -2576,23 +2608,24 @@ pub mod address {
 
     ///`local-part      =   dot-atom / quoted-string / obs-local-part`
     pub fn local_part(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        alt((dot_atom, quoted_string))(input)
+        alt((dot_atom, quoted_string)).parse(input)
     }
 
     ///`domain          =   dot-atom / domain-literal / obs-domain`
     pub fn domain(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        alt((dot_atom, domain_literal, obs_domain))(input)
+        alt((dot_atom, domain_literal, obs_domain)).parse(input)
     }
 
     ///`domain-literal  =   [CFWS] "[" *([FWS] dtext) [FWS] "]" [CFWS]`
     pub fn domain_literal(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
         use crate::email::parser::generic::fws;
-        let (input, first_opt_space) = context("domain_literal()", opt(cfws))(input)?;
-        let (input, _) = context("domain_literal()", tag("["))(input)?;
-        let (input, dtexts) = many0(pair(opt(fws), dtext))(input)?;
-        let (input, end_fws): (_, Option<_>) = context("domain_literal()", opt(fws))(input)?;
-        let (input, _) = context("domain_literal()", tag("]"))(input)?;
-        let (input, _) = context("domain_literal()", opt(cfws))(input)?;
+        let (input, first_opt_space) = context("domain_literal()", opt(cfws)).parse(input)?;
+        let (input, _) = context("domain_literal()", tag("[")).parse(input)?;
+        let (input, dtexts) = many0(pair(opt(fws), dtext)).parse(input)?;
+        let (input, end_fws): (_, Option<_>) =
+            context("domain_literal()", opt(fws)).parse(input)?;
+        let (input, _) = context("domain_literal()", tag("]")).parse(input)?;
+        let (input, _) = context("domain_literal()", opt(cfws)).parse(input)?;
         let mut ret_s = vec![b'['];
         if let Some(first_opt_space) = first_opt_space {
             ret_s.extend_from_slice(&first_opt_space);
@@ -2612,9 +2645,9 @@ pub mod address {
 
     ///`addr-spec       =   local-part "@" domain`
     pub fn addr_spec(input: &[u8]) -> IResult<&[u8], Address> {
-        let (input, local_part) = context("addr_spec()", local_part)(input)?;
-        let (input, _) = context("addr_spec()", tag("@"))(input)?;
-        let (input, domain) = context("addr_spec()", domain)(input)?;
+        let (input, local_part) = context("addr_spec()", local_part).parse(input)?;
+        let (input, _) = context("addr_spec()", tag("@")).parse(input)?;
+        let (input, domain) = context("addr_spec()", domain).parse(input)?;
 
         Ok((
             input,
@@ -2629,9 +2662,9 @@ pub mod address {
     ///
     ///`addr-spec       =   local-part "@" domain`
     pub fn addr_spec_raw(input: &[u8]) -> IResult<&[u8], (Cow<'_, [u8]>, Cow<'_, [u8]>)> {
-        let (input, local_part) = context("addr_spec()", local_part)(input)?;
-        let (input, _) = context("addr_spec()", tag("@"))(input)?;
-        let (input, domain) = context("addr_spec()", domain)(input)?;
+        let (input, local_part) = context("addr_spec()", local_part).parse(input)?;
+        let (input, _) = context("addr_spec()", tag("@")).parse(input)?;
+        let (input, domain) = context("addr_spec()", domain).parse(input)?;
 
         Ok((input, (local_part, domain)))
     }
@@ -2651,7 +2684,8 @@ pub mod address {
         let (input, (display_name, angle_addr)) = alt((
             pair(map(display_name, Some), angle_addr),
             map(angle_addr, |r| (None, r)),
-        ))(input.ltrim())?;
+        ))
+        .parse(input.ltrim())?;
         Ok((
             input,
             Address::new(
@@ -2663,7 +2697,7 @@ pub mod address {
 
     ///`mailbox         =   name-addr / addr-spec`
     pub fn mailbox(input: &[u8]) -> IResult<&[u8], Address> {
-        alt((addr_spec, name_addr))(input.ltrim())
+        alt((addr_spec, name_addr)).parse(input.ltrim())
     }
 
     ///`group-list      =   mailbox-list / CFWS / obs-group-list`
@@ -2694,12 +2728,12 @@ pub mod address {
 
     ///`group           =   display-name ":" [group-list] ";" [CFWS]`
     fn group(input: &[u8]) -> IResult<&[u8], Address> {
-        let (input, display_name) = context("group()", display_name)(input)?;
-        let (input, _) = context("group()", tag(":"))(input)?;
+        let (input, display_name) = context("group()", display_name).parse(input)?;
+        let (input, _) = context("group()", tag(":")).parse(input)?;
         let (input, group_list): (_, Option<Vec<Address>>) =
-            context("group()", opt(group_list))(input)?;
-        let (input, _) = context("group()", tag(";"))(input)?;
-        let (input, _) = context("group()", opt(cfws))(input)?;
+            context("group()", opt(group_list)).parse(input)?;
+        let (input, _) = context("group()", tag(";")).parse(input)?;
+        let (input, _) = context("group()", opt(cfws)).parse(input)?;
         Ok((
             input,
             Address::new_group(
@@ -2711,7 +2745,7 @@ pub mod address {
 
     /// `address         =   mailbox / group`
     pub fn address(input: &[u8]) -> IResult<&[u8], Address> {
-        let err = match alt((mailbox, group))(input.ltrim()) {
+        let err = match alt((mailbox, group)).parse(input.ltrim()) {
             ok @ Ok(_) => return ok,
             Err(err) => err,
         };
@@ -2726,23 +2760,25 @@ pub mod address {
             re.captures(input).map(|cap| cap.extract::<2>())
         {
             if b"()<>[]:;@\\,.\"".iter().any(|b| display_name.contains(b)) {
-                return Err(nom::Err::Error(ParsingError::<&[u8]>::new(
-                    full,
-                    Cow::Owned(format!(
+                return Err(nom::Err::<ParsingError<&[u8]>>::Error(
+                    ParsingError::<&[u8]>::new(
+                        full,
+                        Cow::Owned(format!(
                         "Address `{}` contains errors: Display names that contain ()<>[]:;@\\,.\" \
                          must be quoted. Try: `\"{}\" <{}>` instead",
                         String::from_utf8_lossy(input),
                         String::from_utf8_lossy(display_name),
                         String::from_utf8_lossy(addr_spec)
                     )),
-                )));
+                    ),
+                ));
             }
         }
         Err(err)
     }
 
     pub fn rfc2822address_list(input: &[u8]) -> IResult<&[u8], SmallVec<[Address; 1]>> {
-        separated_list_smallvec(is_a(", "), address)(input.ltrim())
+        separated_list_smallvec(is_a(", "), address).parse(input.ltrim())
         // ws!( separated_list!(is_a!(","), address))
     }
 
@@ -2750,7 +2786,8 @@ pub mod address {
         let (input, list) = alt((
             super::encodings::encoded_word_list,
             super::encodings::ascii_token,
-        ))(input)?;
+        ))
+        .parse(input)?;
         let list: Vec<&[u8]> = list.split(|c| *c == b',').collect();
         let string_len = list.iter().fold(0, |mut acc, x| {
             acc += x.trim().len();
@@ -2782,9 +2819,9 @@ pub mod address {
     ///`no-fold-literal =   "[" *dtext "]"`
     pub fn no_fold_literal(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
         let orig_input = input;
-        let (input, _) = tag("[")(input)?;
-        let (input, ret) = many0(dtext)(input)?;
-        let (input, _) = tag("]")(input)?;
+        let (input, _) = tag("[").parse(input)?;
+        let (input, ret) = many0(dtext).parse(input)?;
+        let (input, _) = tag("]").parse(input)?;
         Ok((input, Cow::Borrowed(&orig_input[0..ret.len() + 1])))
     }
 
@@ -2794,19 +2831,19 @@ pub mod address {
     }
     ///`id-right        =   dot-atom-text / no-fold-literal / obs-id-right`
     pub fn id_right(input: &[u8]) -> IResult<&[u8], Cow<'_, [u8]>> {
-        alt((dot_atom_text, no_fold_literal))(input)
+        alt((dot_atom_text, no_fold_literal)).parse(input)
     }
 
     ///`msg-id =   [CFWS] "<" id-left "@" id-right ">" [CFWS]`
     pub fn msg_id(input: &[u8]) -> IResult<&[u8], MessageID> {
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         let orig_input = input;
-        let (input, _) = tag("<")(input)?;
+        let (input, _) = tag("<").parse(input)?;
         let (input, id_left_) = id_left(input)?;
-        let (input, _) = tag("@")(input)?;
+        let (input, _) = tag("@").parse(input)?;
         let (input, id_right_) = id_right(input)?;
-        let (input, _) = tag(">")(input)?;
-        let (input, _) = opt(cfws)(input)?;
+        let (input, _) = tag(">").parse(input)?;
+        let (input, _) = opt(cfws).parse(input)?;
         Ok((
             input,
             MessageID::new(String::from_utf8_lossy(
@@ -2816,18 +2853,18 @@ pub mod address {
     }
 
     pub fn msg_id_list(input: &[u8]) -> IResult<&[u8], Vec<MessageID>> {
-        many0(msg_id)(input)
+        many0(msg_id).parse(input)
     }
 
     use smallvec::SmallVec;
     pub fn separated_list_smallvec<I, O, Sep, E, F, G>(
-        sep: G,
-        f: F,
+        mut sep: G,
+        mut f: F,
     ) -> impl FnMut(I) -> IResult<I, SmallVec<[O; 1]>, E>
     where
         I: Clone + PartialEq,
-        F: Fn(I) -> IResult<I, O, E>,
-        G: Fn(I) -> IResult<I, Sep, E>,
+        F: FnMut(I) -> IResult<I, O, E>,
+        G: FnMut(I) -> IResult<I, Sep, E>,
         E: nom::error::ParseError<I>,
     {
         move |i: I| {

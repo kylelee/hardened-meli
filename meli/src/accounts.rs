@@ -198,7 +198,8 @@ pub struct Account {
 
 impl Drop for Account {
     fn drop(&mut self) {
-        if let Ok(data_dir) = xdg::BaseDirectories::with_profile("meli", self.name.as_ref()) {
+        let data_dir = xdg::BaseDirectories::with_profile("meli", self.name.as_ref());
+        {
             if let Ok(data) = data_dir.place_data_file("contacts") {
                 /* place result in cache directory */
                 let f = match std::fs::File::create(data) {
@@ -286,7 +287,7 @@ impl Account {
             event_consumer,
         )?;
 
-        let data_dir = xdg::BaseDirectories::with_profile("meli", name.as_ref())?;
+        let data_dir = xdg::BaseDirectories::with_profile("meli", name.as_ref());
         let mut contacts = Contacts::with_account(settings.account());
 
         if let Ok(data) = data_dir.place_data_file("contacts") {
@@ -2204,30 +2205,18 @@ impl Account {
     }
 
     pub fn signature_file(&self) -> Option<PathBuf> {
-        xdg::BaseDirectories::with_profile("meli", self.name.as_ref())
-            .ok()
-            .and_then(|d| {
-                d.place_config_file("signature")
-                    .ok()
-                    .filter(|p| p.is_file())
-            })
-            .or_else(|| {
-                xdg::BaseDirectories::with_prefix("meli")
-                    .ok()
-                    .and_then(|d| {
-                        d.place_config_file("signature")
-                            .ok()
-                            .filter(|p| p.is_file())
-                    })
-            })
-            .or_else(|| {
-                xdg::BaseDirectories::new().ok().and_then(|d| {
-                    d.place_config_file("signature")
-                        .ok()
-                        .filter(|p| p.is_file())
-                })
-            })
-            .or_else(|| Some(Path::new("~/.signature").expand()).filter(|p| p.is_file()))
+        fn place_signature(dirs: &xdg::BaseDirectories) -> Option<PathBuf> {
+            dirs.place_config_file("signature")
+                .ok()
+                .filter(|p| p.is_file())
+        }
+        place_signature(&xdg::BaseDirectories::with_profile(
+            "meli",
+            self.name.as_ref(),
+        ))
+        .or_else(|| place_signature(&xdg::BaseDirectories::with_prefix("meli")))
+        .or_else(|| place_signature(&xdg::BaseDirectories::new()))
+        .or_else(|| Some(Path::new("~/.signature").expand()).filter(|p| p.is_file()))
     }
 }
 

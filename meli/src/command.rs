@@ -35,7 +35,7 @@ use melib::{
         error::Error as NomError,
         multi::separated_list1,
         sequence::{pair, preceded, separated_pair},
-        IResult,
+        IResult, Parser,
     },
     parser::BytesExt,
     SortField, SortOrder,
@@ -100,7 +100,7 @@ pub fn quoted_argument(input: &[u8]) -> IResult<&[u8], &str> {
             code: nom::error::ErrorKind::Tag,
         }))
     } else {
-        map_res(is_not(" "), std::str::from_utf8)(input)
+        map_res(is_not(" "), std::str::from_utf8).parse(input)
     }
 }
 

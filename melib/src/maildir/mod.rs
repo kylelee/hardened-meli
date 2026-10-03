@@ -50,7 +50,7 @@ use cache::{Cache, HashIndex};
 use utilities::{MaildirFilePathExt, MaildirMailbox, MaildirMailboxPathExt, MaildirOp};
 
 use crate::{
-    backends::{RefreshEventKind::*, prelude::*},
+    backends::{prelude::*, RefreshEventKind::*},
     error::{Error, ErrorKind, IntoError, Result, ResultIntoError},
     utils::shellexpand::ShellExpandTrait,
 };
@@ -75,16 +75,16 @@ impl Configuration {
             .get(RENAME_REGEX_FIELDNAME)
             .and_then(|v| v.as_str())
             .map(|v| {
-            Regex::new(v).map_err(|e| {
-                Error::new(format!(
-                    "Configuration error ({}): Invalid value for field \
+                Regex::new(v).map_err(|e| {
+                    Error::new(format!(
+                        "Configuration error ({}): Invalid value for field \
                      `{RENAME_REGEX_FIELDNAME}`: {v}",
-                    settings.name.as_str(),
-                ))
-                .set_source(Some(crate::src_err_arc_wrap!(e)))
-                .set_kind(ErrorKind::ValueError)
-            })
-        }) {
+                        settings.name.as_str(),
+                    ))
+                    .set_source(Some(crate::src_err_arc_wrap!(e)))
+                    .set_kind(ErrorKind::ValueError)
+                })
+            }) {
             Some(v?)
         } else {
             None

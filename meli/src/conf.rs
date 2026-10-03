@@ -368,13 +368,15 @@ pub fn get_config_file() -> Result<PathBuf> {
     if let Ok(path) = env::var("MELI_CONFIG") {
         return Ok(PathBuf::from(path).expand());
     }
-    let xdg_dirs = xdg::BaseDirectories::with_prefix("meli")?;
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("meli");
     xdg_dirs
         .place_config_file("config.toml")
         .chain_err_summary(|| {
             format!(
                 "Cannot create configuration directory in {}",
-                xdg_dirs.get_config_home().display()
+                xdg_dirs
+                    .get_config_home()
+                    .map_or_else(|| "<none>".to_string(), |p| p.display().to_string())
             )
         })
         .chain_err_kind(ErrorKind::Platform)
@@ -394,8 +396,8 @@ pub fn get_user_themes() -> (IndexMap<String, PathBuf>, Vec<String>) {
     let mut themes = IndexMap::new();
     let mut errors = Vec::new();
     let Some(dir) = (|| {
-        let xdg_dirs = xdg::BaseDirectories::with_prefix("meli").ok()?;
-        let dir = xdg_dirs.get_config_home().join("themes");
+        let xdg_dirs = xdg::BaseDirectories::with_prefix("meli");
+        let dir = xdg_dirs.get_config_home()?.join("themes");
         dir.is_dir().then_some(dir)
     })() else {
         return (themes, errors);
@@ -455,7 +457,7 @@ pub fn get_user_themes() -> (IndexMap<String, PathBuf>, Vec<String>) {
 pub fn theme_from_file(name: &str, path: &Path, base: &themes::Theme) -> Result<themes::Theme> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| Error::new(format!("could not read {}: {err}", path.display())))?;
-    let value: toml::Value = text.parse().map_err(|err: toml::de::Error| {
+    let value: toml::Table = text.parse().map_err(|err: toml::de::Error| {
         Error::new(format!("could not parse {}: {err}", path.display()))
     })?;
     let table = value
@@ -622,21 +624,27 @@ impl FileSettings {
     /// Validate configuration from `input` string.
     pub fn validate_string(s: String, clear_extras: bool) -> Result<Self> {
         let s = strip_legacy_listing_keys(s);
-        let _: toml::value::Table = melib::serde_path_to_error::deserialize(
-            toml::Deserializer::new(&s),
-        )
-        .map_err(|err| {
+        let de = toml::Deserializer::parse(&s).map_err(|err| {
+            Error::new("Config file is invalid TOML")
+                .set_source(Some(Arc::new(err)))
+                .set_kind(ErrorKind::ValueError)
+        })?;
+        let _: toml::value::Table = melib::serde_path_to_error::deserialize(de).map_err(|err| {
             Error::new("Config file is invalid TOML")
                 .set_source(Some(Arc::new(err)))
                 .set_kind(ErrorKind::ValueError)
         })?;
 
-        let mut s: Self = melib::serde_path_to_error::deserialize(toml::Deserializer::new(&s))
-            .map_err(|err| {
-                Error::new("Input contains errors")
-                    .set_source(Some(Arc::new(err)))
-                    .set_kind(ErrorKind::Configuration)
-            })?;
+        let de = toml::Deserializer::parse(&s).map_err(|err| {
+            Error::new("Config file is invalid TOML")
+                .set_source(Some(Arc::new(err)))
+                .set_kind(ErrorKind::ValueError)
+        })?;
+        let mut s: Self = melib::serde_path_to_error::deserialize(de).map_err(|err| {
+            Error::new("Input contains errors")
+                .set_source(Some(Arc::new(err)))
+                .set_kind(ErrorKind::Configuration)
+        })?;
         s.fixup_non_fatal();
         let backends = melib::backends::Backends::new();
         let Themes {

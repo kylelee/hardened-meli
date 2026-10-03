@@ -515,9 +515,7 @@ impl MailView {
                         );
                         context
                             .replies
-                            .push_back(UIEvent::StatusEvent(StatusEvent::NewJob(
-                                handle.job_id,
-                            )));
+                            .push_back(UIEvent::StatusEvent(StatusEvent::NewJob(handle.job_id)));
                     }
                     Err(err) => {
                         context.replies.push_back(UIEvent::Notification {

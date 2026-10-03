@@ -78,37 +78,40 @@ pub fn usize_c(input: &[u8]) -> IResult<&[u8], usize> {
     map_res(
         map_res(digit1, std::str::from_utf8),
         std::str::FromStr::from_str,
-    )(input.trim())
+    )
+    .parse(input.trim())
 }
 
 pub fn sortfield(input: &[u8]) -> IResult<&[u8], SortField> {
     map_res(
         map_res(take_until(" "), std::str::from_utf8),
         std::str::FromStr::from_str,
-    )(input.trim())
+    )
+    .parse(input.trim())
 }
 
 pub fn sortorder(input: &[u8]) -> IResult<&[u8], SortOrder> {
     map_res(
         map_res(not_line_ending, std::str::from_utf8),
         std::str::FromStr::from_str,
-    )(input)
+    )
+    .parse(input)
 }
 
 pub fn threaded(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    map(tag("threaded"), |_| Ok(Listing(SetThreaded)))(input.trim())
+    map(tag("threaded"), |_| Ok(Listing(SetThreaded))).parse(input.trim())
 }
 
 pub fn plain(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    map(tag("plain"), |_| Ok(Listing(SetPlain)))(input.trim())
+    map(tag("plain"), |_| Ok(Listing(SetPlain))).parse(input.trim())
 }
 
 pub fn compact(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    map(tag("compact"), |_| Ok(Listing(SetCompact)))(input.trim())
+    map(tag("compact"), |_| Ok(Listing(SetCompact))).parse(input.trim())
 }
 
 pub fn conversations(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    map(tag("conversations"), |_| Ok(Listing(SetConversations)))(input.trim())
+    map(tag("conversations"), |_| Ok(Listing(SetConversations))).parse(input.trim())
 }
 
 pub fn listing_action(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
@@ -124,7 +127,8 @@ pub fn listing_action(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErro
         export_mbox,
         _tag,
         flag,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 pub fn compose_action(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
@@ -134,11 +138,12 @@ pub fn compose_action(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErro
         remove_attachment,
         save_draft,
         discard_draft,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 pub fn account_action(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    alt((reindex, print_account_setting))(input)
+    alt((reindex, print_account_setting)).parse(input)
 }
 
 pub fn view(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
@@ -152,11 +157,12 @@ pub fn view(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
         export_thread,
         export_thread_mbox,
         add_addresses_to_contacts,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 pub fn new_tab(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    alt((manage_mailboxes, manage_jobs, compose_action, view_manpage))(input)
+    alt((manage_mailboxes, manage_jobs, compose_action, view_manpage)).parse(input)
 }
 
 pub fn parse_command(input: &[u8]) -> Result<Action, CommandError> {
@@ -196,7 +202,8 @@ pub fn parse_command(input: &[u8]) -> Result<Action, CommandError> {
         // Listing actions; `open` is kept after `listing_action`, whose
         // `open-in-tab` parser must win for that command.
         alt((open, refresh, reload_config, quit)),
-    ))(input)
+    ))
+    .parse(input)
     .map_err(|err| err.into())
     .and_then(|(_, v)| v)
 }
@@ -320,9 +327,9 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
         alt((
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
                 let mut check = arg_init! { min_arg:1, max_arg: 1, flag};
-                let (input, _) = tag("set")(input.trim())?;
+                let (input, _) = tag("set").parse(input.trim())?;
                 arg_chk!(start check, input);
-                let (input, _) = is_a(" ")(input)?;
+                let (input, _) = is_a(" ").parse(input)?;
                 arg_chk!(inc check, input);
                 let (input, flag) = quoted_argument(input.trim())?;
                 arg_chk!(finish check, input);
@@ -343,9 +350,9 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
             },
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
                 let mut check = arg_init! { min_arg:1, max_arg: 1, flag};
-                let (input, _) = tag("unset")(input.trim())?;
+                let (input, _) = tag("unset").parse(input.trim())?;
                 arg_chk!(start check, input);
-                let (input, _) = is_a(" ")(input)?;
+                let (input, _) = is_a(" ").parse(input)?;
                 arg_chk!(inc check, input);
                 let (input, flag) = quoted_argument(input.trim())?;
                 arg_chk!(finish check, input);
@@ -366,9 +373,9 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
             },
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
                 let mut check = arg_init! { min_arg:1, max_arg: 1, flag};
-                let (input, _) = tag("toggle")(input.trim())?;
+                let (input, _) = tag("toggle").parse(input.trim())?;
                 arg_chk!(start check, input);
-                let (input, _) = is_a(" ")(input)?;
+                let (input, _) = is_a(" ").parse(input)?;
                 arg_chk!(inc check, input);
                 let (input, flag) = quoted_argument(input.trim())?;
                 arg_chk!(finish check, input);
@@ -388,32 +395,33 @@ pub fn flag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
                 ))
             },
         )),
-    )(input.trim())
+    )
+    .parse(input.trim())
 }
 
 pub fn set(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     fn toggle(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
         let mut check = arg_init! { min_arg:1, max_arg: 1, set};
-        let (input, _) = tag("set")(input.trim())?;
+        let (input, _) = tag("set").parse(input.trim())?;
         arg_chk!(start check, input);
-        let (input, _) = is_a(" ")(input)?;
+        let (input, _) = is_a(" ").parse(input)?;
         arg_chk!(inc check, input);
-        let (input, ret) = alt((threaded, plain, compact, conversations))(input)?;
+        let (input, ret) = alt((threaded, plain, compact, conversations)).parse(input)?;
         arg_chk!(finish check, input);
         let (input, _) = eof(input)?;
         Ok((input, ret))
     }
     fn seen_flag(input: &'_ [u8]) -> IResult<&'_ [u8], Result<Action, CommandError>> {
         let mut check = arg_init! { min_arg:1, max_arg: 1, set_seen_flag};
-        let (input, _) = tag("set")(input.trim())?;
+        let (input, _) = tag("set").parse(input.trim())?;
         arg_chk!(start check, input);
-        let (input, _) = is_a(" ")(input)?;
+        let (input, _) = is_a(" ").parse(input)?;
         arg_chk!(inc check, input);
         let (input, ret) = command_err!(nom
                                    alt((
                                            map(tag("seen"), |_| Listing(SetSeen)),
                                            map(tag("unseen"), |_| Listing(SetUnseen)
-                                   )))(input),
+                                   ))).parse(input),
                                    input,
                                    String::from_utf8_lossy(input.trim()).to_string(),
                                    Some(&["seen", "unseen", "plain", "threaded", "compact", "conversations"]));
@@ -429,7 +437,7 @@ pub fn set(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 
 pub fn delete_message(input: &'_ [u8]) -> IResult<&'_ [u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, delete_message};
-    let (input, ret) = map(preceded(tag("delete"), eof), |_| Listing(Delete))(input)?;
+    let (input, ret) = map(preceded(tag("delete"), eof), |_| Listing(Delete)).parse(input)?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -440,10 +448,10 @@ pub fn copymove<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, Command
     alt((
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:1, max_arg: 1, copymove};
-            let (input, _) = tag("copyto")(input.trim())?;
+            let (input, _) = tag("copyto").parse(input.trim())?;
             arg_chk!(start check, input);
             arg_chk!(inc check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             let (input, path) = quoted_argument(input)?;
             arg_chk!(finish check, input);
             let (input, _) = eof(input)?;
@@ -451,12 +459,12 @@ pub fn copymove<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, Command
         },
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:2, max_arg: 2, copymove};
-            let (input, _) = tag("copyto")(input.trim())?;
+            let (input, _) = tag("copyto").parse(input.trim())?;
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, account) = quoted_argument(input)?;
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, path) = quoted_argument(input)?;
             arg_chk!(finish check, input);
@@ -471,10 +479,10 @@ pub fn copymove<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, Command
         },
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:1, max_arg: 1, moveto};
-            let (input, _) = tag("moveto")(input.trim())?;
+            let (input, _) = tag("moveto").parse(input.trim())?;
             println!("input len is {}", input.len());
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, path) = quoted_argument(input)?;
             arg_chk!(finish check, input);
@@ -483,13 +491,13 @@ pub fn copymove<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, Command
         },
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:2, max_arg: 2, moveto};
-            let (input, _) = tag("moveto")(input.trim())?;
+            let (input, _) = tag("moveto").parse(input.trim())?;
             println!("input len is {}", input.len());
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, account) = quoted_argument(input)?;
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, path) = quoted_argument(input)?;
             arg_chk!(finish check, input);
@@ -502,11 +510,12 @@ pub fn copymove<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, Command
                 ))),
             ))
         },
-    ))(input)
+    ))
+    .parse(input)
 }
 pub fn close(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, close};
-    let (input, _) = tag("close")(input.trim())?;
+    let (input, _) = tag("close").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -514,9 +523,9 @@ pub fn close(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 }
 pub fn goto(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, goto};
-    let (input, _) = tag("go")(input.trim())?;
+    let (input, _) = tag("go").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, nth) = command_err!(nom
                                usize_c(input),
@@ -529,37 +538,37 @@ pub fn goto(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 }
 pub fn subsort(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 2, subsort};
-    let (input, _) = tag("subsort")(input.trim())?;
+    let (input, _) = tag("subsort").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, p) = pair(sortfield, sortorder)(input)?;
+    let (input, p) = pair(sortfield, sortorder).parse(input)?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((input, Ok(SubSort(p.0, p.1))))
 }
 pub fn sort(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 2, sort};
-    let (input, _) = tag("sort")(input.trim())?;
+    let (input, _) = tag("sort").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, p) = separated_pair(sortfield, tag(" "), sortorder)(input)?;
+    let (input, p) = separated_pair(sortfield, tag(" "), sortorder).parse(input)?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((input, Ok(Sort(p.0, p.1))))
 }
 pub fn sort_column(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, sort_column};
-    let (input, _) = tag("sort")(input.trim())?;
+    let (input, _) = tag("sort").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, i) = usize_c(input)?;
     let (input, order) = if input.trim().is_empty() {
         (input, SortOrder::Desc)
     } else {
-        let (input, (_, order)) = pair(is_a(" "), sortorder)(input)?;
+        let (input, (_, order)) = pair(is_a(" "), sortorder).parse(input)?;
         (input, order)
     };
     arg_chk!(finish check, input);
@@ -573,11 +582,11 @@ pub fn search(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     } else {
         (input, false)
     };
-    let (input, _) = tag("search")(input)?;
+    let (input, _) = tag("search").parse(input)?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, string) = map_res(not_line_ending, std::str::from_utf8)(input)?;
+    let (input, string) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((
@@ -597,7 +606,7 @@ pub fn select(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
         #[inline]
         fn inner(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:0, max_arg: 0, clear_selection};
-            let (input, _) = tag("clear-selection")(input.ltrim())?;
+            let (input, _) = tag("clear-selection").parse(input.ltrim())?;
             arg_chk!(start check, input);
             arg_chk!(finish check, input);
             let (input, _) = eof(input)?;
@@ -615,11 +624,11 @@ pub fn select(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     } else {
         (input, false)
     };
-    let (input, _) = tag("select")(input.trim())?;
+    let (input, _) = tag("select").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, string) = map_res(not_line_ending, std::str::from_utf8)(input)?;
+    let (input, string) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((
@@ -632,9 +641,9 @@ pub fn select(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 }
 pub fn export_mbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, export_mbox};
-    let (input, _) = tag("export-mbox")(input.trim())?;
+    let (input, _) = tag("export-mbox").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, path) = quoted_argument(input.trim())?;
     arg_chk!(finish check, input);
@@ -650,9 +659,9 @@ pub fn export_mbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>>
 
 pub fn export_thread_mbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, export_thread_mbox};
-    let (input, _) = tag("export-thread-mbox")(input.trim())?;
+    let (input, _) = tag("export-thread-mbox").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, path) = quoted_argument(input.trim())?;
     arg_chk!(finish check, input);
@@ -675,38 +684,39 @@ pub fn mailinglist(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>>
             MailingListAction(ListUnsubscribe)
         }),
         map(tag("list-archive"), |_| MailingListAction(ListArchive)),
-    ))(input.trim())?;
+    ))
+    .parse(input.trim())?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((input, Ok(ret)))
 }
 pub fn setenv(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, setenv};
-    let (input, _) = tag("setenv")(input.trim())?;
+    let (input, _) = tag("setenv").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, key) = map_res(take_until("="), std::str::from_utf8)(input)?;
-    let (input, _) = tag("=")(input.trim())?;
-    let (input, val) = map_res(not_line_ending, std::str::from_utf8)(input)?;
+    let (input, key) = map_res(take_until("="), std::str::from_utf8).parse(input)?;
+    let (input, _) = tag("=").parse(input.trim())?;
+    let (input, val) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((input, Ok(SetEnv(key.to_string(), val.to_string()))))
 }
 pub fn printenv(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, printenv};
-    let (input, _) = tag("printenv")(input.ltrim())?;
+    let (input, _) = tag("printenv").parse(input.ltrim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, key) = map_res(not_line_ending, std::str::from_utf8)(input.trim())?;
+    let (input, key) = map_res(not_line_ending, std::str::from_utf8).parse(input.trim())?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((input, Ok(PrintEnv(key.to_string()))))
 }
 pub fn currentdir(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, pwd};
-    let (input, _) = alt((tag("cwd"), tag("pwd")))(input.ltrim())?;
+    let (input, _) = alt((tag("cwd"), tag("pwd"))).parse(input.ltrim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -714,11 +724,11 @@ pub fn currentdir(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> 
 }
 pub fn change_currentdir(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg: 1, max_arg: 1, cd};
-    let (input, _) = tag("cd")(input.ltrim())?;
+    let (input, _) = tag("cd").parse(input.ltrim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, d) = map_res(not_line_ending, std::str::from_utf8)(input.trim())?;
+    let (input, d) = map_res(not_line_ending, std::str::from_utf8).parse(input.trim())?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((input, Ok(ChangeCurrentDirectory(d.into()))))
@@ -726,11 +736,11 @@ pub fn change_currentdir(input: &[u8]) -> IResult<&[u8], Result<Action, CommandE
 pub fn mailto(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, mailto};
     use melib::email::parser::generic::mailto as parser;
-    let (input, _) = tag("mailto")(input.ltrim())?;
+    let (input, _) = tag("mailto").parse(input.ltrim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, val) = map_res(not_line_ending, std::str::from_utf8)(input.trim())?;
+    let (input, val) = map_res(not_line_ending, std::str::from_utf8).parse(input.trim())?;
     arg_chk!(finish check, input);
     let (_empty, _) = eof(input)?;
     let (input, val) = command_err!(
@@ -744,7 +754,7 @@ pub fn mailto(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 
 pub fn new_mail(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, new_mail};
-    let (input, _) = tag("new-mail")(input.trim())?;
+    let (input, _) = tag("new-mail").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
@@ -753,7 +763,7 @@ pub fn new_mail(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 
 pub fn reply(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, reply};
-    let (input, _) = tag("reply")(input.trim())?;
+    let (input, _) = tag("reply").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
@@ -762,10 +772,10 @@ pub fn reply(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 
 pub fn reply_author(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, reply_author};
-    let (input, _) = tag("reply")(input.trim())?;
+    let (input, _) = tag("reply").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
-    let (input, _) = tag("author")(input.trim())?;
+    let (input, _) = is_a(" ").parse(input)?;
+    let (input, _) = tag("author").parse(input.trim())?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
     Ok((input, Ok(Compose(ComposeAction::ReplyToAuthor))))
@@ -773,10 +783,10 @@ pub fn reply_author(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>
 
 pub fn reply_all(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, reply_all};
-    let (input, _) = tag("reply")(input.trim())?;
+    let (input, _) = tag("reply").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
-    let (input, _) = tag("all")(input.trim())?;
+    let (input, _) = is_a(" ").parse(input)?;
+    let (input, _) = tag("all").parse(input.trim())?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
     Ok((input, Ok(Compose(ComposeAction::ReplyToAll))))
@@ -784,7 +794,7 @@ pub fn reply_all(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 
 pub fn forward(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, forward};
-    let (input, _) = tag("forward")(input.trim())?;
+    let (input, _) = tag("forward").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
@@ -793,10 +803,10 @@ pub fn forward(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 
 pub fn forward_inline(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, forward_inline};
-    let (input, _) = tag("forward")(input.trim())?;
+    let (input, _) = tag("forward").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
-    let (input, _) = tag("inline")(input.trim())?;
+    let (input, _) = is_a(" ").parse(input)?;
+    let (input, _) = tag("inline").parse(input.trim())?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
     Ok((input, Ok(Compose(ComposeAction::ForwardInline))))
@@ -804,10 +814,10 @@ pub fn forward_inline(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErro
 
 pub fn forward_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, forward_attachment};
-    let (input, _) = tag("forward")(input.trim())?;
+    let (input, _) = tag("forward").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
-    let (input, _) = tag("attachment")(input.trim())?;
+    let (input, _) = is_a(" ").parse(input)?;
+    let (input, _) = tag("attachment").parse(input.trim())?;
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
     Ok((input, Ok(Compose(ComposeAction::ForwardAttachment))))
@@ -816,14 +826,14 @@ pub fn pipe<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
     alt((
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:1, max_arg: { u8::MAX }, pipe};
-            let (input, _) = tag("pipe")(input.trim())?;
+            let (input, _) = tag("pipe").parse(input.trim())?;
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, bin) = quoted_argument(input)?;
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
-            let (input, args) = separated_list1(is_a(" "), quoted_argument)(input)?;
+            let (input, args) = separated_list1(is_a(" "), quoted_argument).parse(input)?;
             arg_chk!(finish check, input);
             let (input, _) = eof(input)?;
             Ok((
@@ -836,28 +846,29 @@ pub fn pipe<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
         },
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:1, max_arg: 1, pipe};
-            let (input, _) = tag("pipe")(input.trim())?;
+            let (input, _) = tag("pipe").parse(input.trim())?;
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, bin) = quoted_argument(input.trim())?;
             arg_chk!(finish check, input);
             let (input, _) = eof(input)?;
             Ok((input, Ok(View(Pipe(bin.to_string(), Vec::new())))))
         },
-    ))(input)
+    ))
+    .parse(input)
 }
 pub fn filter(input: &'_ [u8]) -> IResult<&'_ [u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg:255, filter};
-    let (input, _) = tag("filter")(input.trim())?;
+    let (input, _) = tag("filter").parse(input.trim())?;
     arg_chk!(start check, input);
     if let Ok((input, _)) = eof(input) {
         arg_chk!(finish check, input);
         return Ok((input, Ok(View(Filter(None)))));
     }
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, cmd) = map_res(not_line_ending, std::str::from_utf8)(input)?;
+    let (input, cmd) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
     arg_chk!(finish check, input);
     Ok((input, Ok(View(Filter(Some(cmd.to_string()))))))
 }
@@ -865,12 +876,12 @@ pub fn add_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, C
     alt((
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:1, max_arg: 1, add_attachment};
-            let (input, _) = tag("add-attachment")(input.trim())?;
+            let (input, _) = tag("add-attachment").parse(input.trim())?;
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
-            let (input, _) = tag("<")(input.trim())?;
+            let (input, _) = is_a(" ").parse(input)?;
+            let (input, _) = tag("<").parse(input.trim())?;
             arg_chk!(inc check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             let (input, cmd) = quoted_argument(input)?;
             arg_chk!(finish check, input);
             let (input, _) = eof(input)?;
@@ -883,9 +894,9 @@ pub fn add_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, C
         },
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:1, max_arg: 1, add_attachment};
-            let (input, _) = tag("add-attachment")(input.trim())?;
+            let (input, _) = tag("add-attachment").parse(input.trim())?;
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, path) = quoted_argument(input)?;
             arg_chk!(finish check, input);
@@ -900,13 +911,13 @@ pub fn add_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, C
         alt((
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
                 let mut check = arg_init! { min_arg:1, max_arg: 1, add_attachment_file_picker};
-                let (input, _) = tag("add-attachment-file-picker")(input.trim())?;
+                let (input, _) = tag("add-attachment-file-picker").parse(input.trim())?;
                 arg_chk!(start check, input);
-                let (input, _) = is_a(" ")(input)?;
-                let (input, _) = tag("<")(input.trim())?;
-                let (input, _) = is_a(" ")(input)?;
+                let (input, _) = is_a(" ").parse(input)?;
+                let (input, _) = tag("<").parse(input.trim())?;
+                let (input, _) = is_a(" ").parse(input)?;
                 arg_chk!(inc check, input);
-                let (input, shell) = map_res(not_line_ending, std::str::from_utf8)(input)?;
+                let (input, shell) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
                 arg_chk!(finish check, input);
                 let (input, _) = eof(input)?;
                 Ok((
@@ -918,7 +929,7 @@ pub fn add_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, C
             },
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
                 let mut check = arg_init! { min_arg:0, max_arg: 0, add_attachment};
-                let (input, _) = tag("add-attachment-file-picker")(input.trim())?;
+                let (input, _) = tag("add-attachment-file-picker").parse(input.trim())?;
                 arg_chk!(start check, input);
                 arg_chk!(finish check, input);
                 let (input, _) = eof(input)?;
@@ -930,15 +941,16 @@ pub fn add_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, C
                 ))
             },
         )),
-    ))(input)
+    ))
+    .parse(input)
 }
 pub fn remove_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, remove_attachment};
-    let (input, _) = tag("remove-attachment")(input.trim())?;
+    let (input, _) = tag("remove-attachment").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, idx) = map_res(quoted_argument, usize::from_str)(input)?;
+    let (input, idx) = map_res(quoted_argument, usize::from_str).parse(input)?;
     // The consumer compares `idx + 1` against the attachment count; an index
     // that cannot be incremented (`usize::MAX`) would overflow there, so
     // reject it here instead of letting it reach the handler.
@@ -962,7 +974,7 @@ pub fn remove_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, CommandE
 }
 pub fn save_draft(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, save_draft };
-    let (input, _) = tag("save-draft")(input.trim())?;
+    let (input, _) = tag("save-draft").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -970,7 +982,7 @@ pub fn save_draft(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> 
 }
 pub fn discard_draft(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, discard_draft };
-    let (input, _) = tag("discard-draft")(input.trim())?;
+    let (input, _) = tag("discard-draft").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -981,12 +993,12 @@ pub fn discard_draft(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError
 }
 pub fn create_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg: 2, create_malbox};
-    let (input, _) = tag("create-mailbox")(input.trim())?;
+    let (input, _) = tag("create-mailbox").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, account) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, path) = quoted_argument(input)?;
     arg_chk!(finish check, input);
@@ -1001,12 +1013,12 @@ pub fn create_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErro
 }
 pub fn sub_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg: 2, sub_mailbox};
-    let (input, _) = tag("subscribe-mailbox")(input.trim())?;
+    let (input, _) = tag("subscribe-mailbox").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, account) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, path) = quoted_argument(input)?;
     arg_chk!(finish check, input);
@@ -1021,12 +1033,12 @@ pub fn sub_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>>
 }
 pub fn unsub_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg: 2, unsub_mailbox};
-    let (input, _) = tag("unsubscribe-mailbox")(input.trim())?;
+    let (input, _) = tag("unsubscribe-mailbox").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, account) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, path) = quoted_argument(input)?;
     arg_chk!(finish check, input);
@@ -1041,15 +1053,15 @@ pub fn unsub_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError
 }
 pub fn rename_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:3, max_arg: 3, rename_mailbox};
-    let (input, _) = tag("rename-mailbox")(input.trim())?;
+    let (input, _) = tag("rename-mailbox").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, account) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, src) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, dest) = quoted_argument(input)?;
     arg_chk!(finish check, input);
@@ -1064,12 +1076,12 @@ pub fn rename_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErro
 }
 pub fn delete_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg: 2, delete_mailbox};
-    let (input, _) = tag("delete-mailbox")(input.trim())?;
+    let (input, _) = tag("delete-mailbox").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, account) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, path) = quoted_argument(input)?;
     arg_chk!(finish check, input);
@@ -1084,9 +1096,9 @@ pub fn delete_mailbox(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErro
 }
 pub fn reindex(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, reindex};
-    let (input, _) = tag("reindex")(input.trim())?;
+    let (input, _) = tag("reindex").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, account) = quoted_argument(input)?;
     arg_chk!(finish check, input);
@@ -1095,7 +1107,7 @@ pub fn reindex(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 }
 pub fn open_in_new_tab(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, open_in_tab};
-    let (input, _) = tag("open-in-tab")(input.trim())?;
+    let (input, _) = tag("open-in-tab").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -1104,7 +1116,7 @@ pub fn open_in_new_tab(input: &[u8]) -> IResult<&[u8], Result<Action, CommandErr
 
 pub fn open(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, open};
-    let (input, _) = tag("open")(input.trim())?;
+    let (input, _) = tag("open").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
@@ -1113,7 +1125,7 @@ pub fn open(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 
 pub fn refresh(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, refresh};
-    let (input, _) = tag("refresh")(input.trim())?;
+    let (input, _) = tag("refresh").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
@@ -1124,12 +1136,12 @@ pub fn save_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, 
     alt((
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:2, max_arg: 2, save_attachment};
-            let (input, _) = tag("save-attachment")(input.trim())?;
+            let (input, _) = tag("save-attachment").parse(input.trim())?;
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
-            let (input, idx) = map_res(quoted_argument, usize::from_str)(input)?;
-            let (input, _) = is_a(" ")(input)?;
+            let (input, idx) = map_res(quoted_argument, usize::from_str).parse(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
             let (input, path) = quoted_argument(input.trim())?;
             arg_chk!(finish check, input);
@@ -1144,14 +1156,14 @@ pub fn save_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, 
         },
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:2, max_arg: 2, save_attachment_picker};
-            let (input, _) = tag("save-attachment-picker")(input.trim())?;
+            let (input, _) = tag("save-attachment-picker").parse(input.trim())?;
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
-            let (input, idx) = map_res(quoted_argument, usize::from_str)(input)?;
-            let (input, _) = is_a(" ")(input)?;
+            let (input, idx) = map_res(quoted_argument, usize::from_str).parse(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
-            let (input, shell) = map_res(not_line_ending, std::str::from_utf8)(input)?;
+            let (input, shell) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
             arg_chk!(finish check, input);
             let (input, _) = eof(input)?;
             Ok((
@@ -1164,11 +1176,11 @@ pub fn save_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, 
         },
         |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
             let mut check = arg_init! { min_arg:1, max_arg: 1, save_attachment_picker};
-            let (input, _) = tag("save-attachment-picker")(input.trim())?;
+            let (input, _) = tag("save-attachment-picker").parse(input.trim())?;
             arg_chk!(start check, input);
-            let (input, _) = is_a(" ")(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
             arg_chk!(inc check, input);
-            let (input, idx) = map_res(quoted_argument, usize::from_str)(input)?;
+            let (input, idx) = map_res(quoted_argument, usize::from_str).parse(input)?;
             arg_chk!(finish check, input);
             let (input, _) = eof(input)?;
             Ok((
@@ -1176,12 +1188,13 @@ pub fn save_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, 
                 Ok(View(SaveAttachment(idx, FileAction::FilePicker(None)))),
             ))
         },
-    ))(input)
+    ))
+    .parse(input)
 }
 
 pub fn save_all_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, save_all_attachment};
-    let (input, _) = tag("save-all-attachment")(input.trim())?;
+    let (input, _) = tag("save-all-attachment").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -1190,19 +1203,19 @@ pub fn save_all_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, Comman
 
 pub fn pipe_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg:{u8::MAX}, pipe_attachment};
-    let (input, _) = tag("pipe-attachment")(input.trim())?;
+    let (input, _) = tag("pipe-attachment").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, idx) = map_res(quoted_argument, usize::from_str)(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, idx) = map_res(quoted_argument, usize::from_str).parse(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, bin) = quoted_argument(input)?;
     arg_chk!(inc check, input);
     let (input, args) = alt((
         |input: &'a [u8]| -> IResult<&'a [u8], Vec<String>> {
-            let (input, _) = is_a(" ")(input)?;
-            let (input, args) = separated_list1(is_a(" "), quoted_argument)(input)?;
+            let (input, _) = is_a(" ").parse(input)?;
+            let (input, args) = separated_list1(is_a(" "), quoted_argument).parse(input)?;
             let (input, _) = eof(input)?;
             Ok((
                 input,
@@ -1213,15 +1226,16 @@ pub fn pipe_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, 
             let (input, _) = eof(input)?;
             Ok((input, Vec::with_capacity(0)))
         },
-    ))(input)?;
+    ))
+    .parse(input)?;
     arg_chk!(finish check, input);
     Ok((input, Ok(View(PipeAttachment(idx, bin.to_string(), args)))))
 }
 pub fn export_mail(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, export_mail};
-    let (input, _) = tag("export-mail")(input.trim())?;
+    let (input, _) = tag("export-mail").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, path) = quoted_argument(input.trim())?;
     arg_chk!(finish check, input);
@@ -1231,9 +1245,9 @@ pub fn export_mail(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>>
 
 pub fn export_thread(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, export_thread};
-    let (input, _) = tag("export-thread")(input.trim())?;
+    let (input, _) = tag("export-thread").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, path) = quoted_argument(input.trim())?;
     arg_chk!(finish check, input);
@@ -1243,7 +1257,7 @@ pub fn export_thread(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError
 
 pub fn add_addresses_to_contacts(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, add_addresses_to_contacts};
-    let (input, _) = tag("add-addresses-to-contacts")(input.trim())?;
+    let (input, _) = tag("add-addresses-to-contacts").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -1268,9 +1282,9 @@ pub fn _tag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
         alt((
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
                 let mut check = arg_init! { min_arg:1, max_arg: 1, tag};
-                let (input, _) = tag("add")(input.trim())?;
+                let (input, _) = tag("add").parse(input.trim())?;
                 arg_chk!(start check, input);
-                let (input, _) = is_a(" ")(input)?;
+                let (input, _) = is_a(" ").parse(input)?;
                 arg_chk!(inc check, input);
                 let (input, tag) = quoted_argument(input.trim())?;
                 arg_chk!(finish check, input);
@@ -1279,9 +1293,9 @@ pub fn _tag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
             },
             |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
                 let mut check = arg_init! { min_arg:1, max_arg: 1, tag};
-                let (input, _) = tag("remove")(input.trim())?;
+                let (input, _) = tag("remove").parse(input.trim())?;
                 arg_chk!(start check, input);
-                let (input, _) = is_a(" ")(input)?;
+                let (input, _) = is_a(" ").parse(input)?;
                 arg_chk!(inc check, input);
                 let (input, tag) = quoted_argument(input.trim())?;
                 arg_chk!(finish check, input);
@@ -1289,17 +1303,18 @@ pub fn _tag<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandErro
                 Ok((input, Ok(Listing(Tag(TagAction::Remove(tag.to_string()))))))
             },
         )),
-    )(input.trim())
+    )
+    .parse(input.trim())
 }
 
 pub fn print_account_setting(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg: 2, print};
-    let (input, _) = tag("print")(input.trim())?;
+    let (input, _) = tag("print").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, account) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, setting) = quoted_argument(input)?;
     arg_chk!(finish check, input);
@@ -1314,9 +1329,9 @@ pub fn print_account_setting(input: &[u8]) -> IResult<&[u8], Result<Action, Comm
 }
 pub fn print_setting(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, print};
-    let (input, _) = tag("print")(input.trim())?;
+    let (input, _) = tag("print").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, setting) = quoted_argument(input)?;
     arg_chk!(finish check, input);
@@ -1325,11 +1340,11 @@ pub fn print_setting(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError
 }
 pub fn toggle(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, toggle };
-    let (input, _) = tag("toggle")(input.trim())?;
+    let (input, _) = tag("toggle").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (mut input, _) = is_a(" ")(input)?;
+    let (mut input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let mut retval = if tag!()("thread_snooze")(input.ltrim()).is_ok() {
+    let mut retval = if tag!()("thread_snooze").parse(input.ltrim()).is_ok() {
         Some(Listing(ToggleThreadSnooze))
     } else {
         None
@@ -1346,7 +1361,7 @@ pub fn toggle(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
             Tab(ComposerAction(ComposerTabAction::ToggleEncrypt)),
         ),
     ] {
-        if let Ok((inner_input, _)) = tag!()(tok)(input.trim()) {
+        if let Ok((inner_input, _)) = tag!()(tok).parse(input.trim()) {
             input = inner_input;
             retval = Some(action);
             break;
@@ -1371,7 +1386,7 @@ pub fn toggle(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 }
 pub fn manage_mailboxes(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, manage_mailboxes};
-    let (input, _) = tag("manage-mailboxes")(input.trim())?;
+    let (input, _) = tag("manage-mailboxes").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -1379,7 +1394,7 @@ pub fn manage_mailboxes(input: &[u8]) -> IResult<&[u8], Result<Action, CommandEr
 }
 pub fn manage_jobs(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, manage_jobs};
-    let (input, _) = tag("manage-jobs")(input.trim())?;
+    let (input, _) = tag("manage-jobs").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
@@ -1388,12 +1403,12 @@ pub fn manage_jobs(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>>
 
 pub fn view_manpage(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, view_manpage };
-    let (input, _) = tag("man")(input.trim())?;
+    let (input, _) = tag("man").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     #[allow(unused_variables)]
-    let (input, manpage) = map_res(not_line_ending, std::str::from_utf8)(input.trim())?;
+    let (input, manpage) = map_res(not_line_ending, std::str::from_utf8).parse(input.trim())?;
     let (input, _) = eof(input)?;
     arg_chk!(finish check, input);
     #[cfg(feature = "cli-docs")]
@@ -1422,7 +1437,7 @@ pub fn view_manpage(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>
 
 pub fn quit(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, quit};
-    let (input, _) = tag("quit")(input.trim())?;
+    let (input, _) = tag("quit").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
@@ -1430,7 +1445,7 @@ pub fn quit(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 }
 pub fn reload_config(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, reload_config};
-    let (input, _) = tag("reload-config")(input.trim())?;
+    let (input, _) = tag("reload-config").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
@@ -1438,7 +1453,7 @@ pub fn reload_config(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError
 }
 pub fn toggle_theme(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg: 0, toggle_theme};
-    let (input, _) = tag("toggle_theme")(input.trim())?;
+    let (input, _) = tag("toggle_theme").parse(input.trim())?;
     arg_chk!(start check, input);
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
@@ -1446,12 +1461,12 @@ pub fn toggle_theme(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>
 }
 pub fn import(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg: 2, import};
-    let (input, _) = tag("import")(input.trim())?;
+    let (input, _) = tag("import").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, file) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, mailbox_path) = quoted_argument(input)?;
     let (input, _) = eof(input)?;
@@ -1467,25 +1482,27 @@ pub fn import(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 
 /// An unquoted single-word argument: alphanumerics, `_` and `-`.
 fn literal_argument(input: &[u8]) -> IResult<&[u8], &str> {
-    map_res(take_while(|c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'), |b| {
-        std::str::from_utf8(b)
-    })(input)
+    map_res(
+        take_while(|c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+        |b| std::str::from_utf8(b),
+    )
+    .parse(input)
 }
 
 pub fn public_inbox_import(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:3, max_arg: 3, public_inbox_import};
-    let (input, _) = tag("public-inbox")(input.trim())?;
+    let (input, _) = tag("public-inbox").parse(input.trim())?;
     arg_chk!(start check, input);
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, subcommand) = literal_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, account) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, mailbox_path) = quoted_argument(input)?;
-    let (input, _) = is_a(" ")(input)?;
+    let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
     let (input, message_id) = quoted_argument(input)?;
     let (input, _) = eof(input)?;

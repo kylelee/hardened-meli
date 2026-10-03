@@ -232,10 +232,7 @@ impl AccountCache {
                     params![old_hash.to_be_bytes().to_vec()],
                 ) {
                     drop(tx);
-                    tracing::error!(
-                        "Failed to update envelope {}: {err}",
-                        envelope.message_id()
-                    );
+                    tracing::error!("Failed to update envelope {}: {err}", envelope.message_id());
                     return Err(Error::new(format!(
                         "Failed to update envelope {} {err}",
                         envelope.message_id()

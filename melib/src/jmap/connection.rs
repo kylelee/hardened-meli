@@ -28,7 +28,7 @@ use std::{
 
 use futures::lock::{MappedMutexGuard as FutureMappedMutexGuard, Mutex as FutureMutex};
 use isahc::{
-    config::{Configurable, DnsCache, RedirectPolicy, SslOption},
+    config::{Configurable, RedirectPolicy},
     http, AsyncReadResponseExt, HttpClient,
 };
 use url::Url;
@@ -71,17 +71,17 @@ fn is_redirect_status(status: http::StatusCode) -> bool {
 impl JmapConnection {
     pub fn new(server_conf: &JmapServerConf, store: Arc<Store>) -> Result<Self> {
         let client = HttpClient::builder()
-            .dns_cache(DnsCache::Forever)
+            .dns_cache(isahc::net::dns::DnsCache::Forever)
             .connection_cache_size(8)
             .connection_cache_ttl(Duration::from_secs(30 * 60))
             .default_header(http::header::CONTENT_TYPE, "application/json")
-            .ssl_options(if server_conf.danger_accept_invalid_certs {
-                SslOption::DANGER_ACCEPT_INVALID_CERTS
-                    | SslOption::DANGER_ACCEPT_INVALID_HOSTS
-                    | SslOption::DANGER_ACCEPT_REVOKED_CERTS
-            } else {
-                SslOption::NONE
-            })
+            .tls_config(
+                isahc::tls::TlsConfig::builder()
+                    .danger_accept_invalid_certs(server_conf.danger_accept_invalid_certs)
+                    .danger_accept_invalid_hosts(server_conf.danger_accept_invalid_certs)
+                    .danger_accept_revoked_certs(server_conf.danger_accept_invalid_certs)
+                    .build(),
+            )
             .tcp_nodelay()
             .tcp_keepalive(Duration::new(60 * 9, 0))
             // Redirects are followed manually, see [`MAX_REDIRECTS`]. isahc

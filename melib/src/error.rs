@@ -686,14 +686,6 @@ impl From<base64::DecodeError> for Error {
     }
 }
 
-impl From<xdg::BaseDirectoriesError> for Error {
-    fn from(err: xdg::BaseDirectoriesError) -> Self {
-        Self::new("Could not detect XDG directories for user")
-            .set_source(Some(std::sync::Arc::new(Box::new(err))))
-            .set_kind(ErrorKind::NotSupported)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -497,7 +497,10 @@ mod tests {
         let (_, q) = query()
             .parse_complete("before:2023-06-04 from:user@example.org")
             .unwrap();
-        assert_eq!(serialize(&q), r#"BEFORE 04-Jun-2023 FROM "user@example.org""#);
+        assert_eq!(
+            serialize(&q),
+            r#"BEFORE 04-Jun-2023 FROM "user@example.org""#
+        );
         let (_, q) = query()
             .parse_complete(r#"subject:"wah ah ah" or (from:Manos and from:Sia)"#)
             .unwrap();

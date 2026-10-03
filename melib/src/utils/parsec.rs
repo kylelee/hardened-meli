@@ -592,7 +592,7 @@ pub fn take<'a>(count: usize) -> impl Parser<'a, &'a str> {
 /// assert_eq!(
 ///     take_literal(delimited(
 ///         match_literal("{"),
-///         map_res(is_a(b"0123456789"), |s| usize::from_str(s)),
+///         map_res(is_a(&b"0123456789"[..]), |s| usize::from_str(s)),
 ///         match_literal("}\r\n"),
 ///     ))
 ///     .parse(lit),
@@ -619,7 +619,7 @@ pub fn date<'a, T: Into<Cow<'static, str>>>(fmt: T) -> impl Parser<'a, UnixTimes
 
 pub fn integer<'a>() -> impl Parser<'a, usize> {
     use std::str::FromStr;
-    map_res(is_a(b"0123456789"), usize::from_str)
+    map_res(is_a(&b"0123456789"[..]), usize::from_str)
 }
 
 #[cfg(test)]

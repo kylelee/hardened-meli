@@ -32,8 +32,8 @@ use crate::{
     backends::prelude::*,
     error::{IntoError, ResultIntoError},
     maildir::{
-        Configuration, MaildirMailbox,
         utilities::{MaildirFilePathExt, MaildirMailboxPathExt},
+        Configuration, MaildirMailbox,
     },
 };
 

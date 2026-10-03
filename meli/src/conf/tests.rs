@@ -764,7 +764,7 @@ fn test_docs_sample_themes_load() {
             continue;
         }
         let text = fs::read_to_string(&path).unwrap();
-        let value: toml::Value = text.parse().unwrap_or_else(|err| {
+        let value: toml::Table = text.parse().unwrap_or_else(|err| {
             panic!("{}: invalid TOML: {err}", path.display());
         });
         let Some(themes_table) = value

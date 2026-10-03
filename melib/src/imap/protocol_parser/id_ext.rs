@@ -28,7 +28,7 @@
 //! The `ID` extension is defined in [RFC2971](https://datatracker.ietf.org/doc/rfc2971/).
 
 use indexmap::IndexMap;
-use nom::bytes::complete::tag;
+use nom::{bytes::complete::tag, Parser};
 
 use super::{quoted, quoted_or_nil};
 use crate::email::parser::{BytesExt, IResult};
@@ -77,14 +77,14 @@ pub fn id_ext_params_list(input: &[u8]) -> IResult<&[u8], Option<IDResponse>> {
     // id_params_list ::= "(" #(string SPACE nstring) ")" / nil ;; list of field
     // value pairs
 
-    let is_nil: IResult<&[u8], _> = tag("NIL")(input);
+    let is_nil: IResult<&[u8], _> = tag("NIL").parse(input);
     if let Ok((input, _)) = is_nil {
         return Ok((input, None));
     }
 
     let mut retval = IDResponse::default();
 
-    let (mut input, _) = tag("(")(input)?;
+    let (mut input, _) = tag("(").parse(input)?;
 
     let mut hits = 0;
     // Implementations MUST NOT send more than 30 field-value pairs.
@@ -109,7 +109,7 @@ pub fn id_ext_params_list(input: &[u8]) -> IResult<&[u8], Option<IDResponse>> {
                 (input, "id_ext_params_list(): invalid field value.").into(),
             ));
         };
-        let (_input, _) = tag(" ")(_input)?;
+        let (_input, _) = tag(" ").parse(_input)?;
         let (_input, value) = quoted_or_nil(_input)?;
         let value = if let Some(value) = value {
             // Value strings MUST NOT be longer than 1024 octets.
@@ -170,11 +170,11 @@ pub fn id_ext_params_list(input: &[u8]) -> IResult<&[u8], Option<IDResponse>> {
         if input.starts_with(b")") {
             break;
         }
-        let (_input, _) = tag(" ")(input)?;
+        let (_input, _) = tag(" ").parse(input)?;
         input = _input;
     }
 
-    let (input, _) = tag(")")(input)?;
+    let (input, _) = tag(")").parse(input)?;
 
     Ok((
         input,
@@ -188,7 +188,7 @@ pub fn id_ext_params_list(input: &[u8]) -> IResult<&[u8], Option<IDResponse>> {
 
 pub fn id_ext_response(input: &[u8]) -> IResult<&[u8], Option<IDResponse>> {
     // id_response ::= "ID" SPACE id_params_list
-    let (input, _) = tag("* ID ")(input.ltrim())?;
+    let (input, _) = tag("* ID ").parse(input.ltrim())?;
     id_ext_params_list(input)
 }
 
