@@ -81,7 +81,7 @@ signal-hook = { version = "^0.3", default-features = false, features = ["iterato
 signal-hook-registry = { version = "1.2.0", default-features = false }
 smallvec = { workspace = true }
 structopt = { version = "0.3.26", default-features = false }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
 # svg_crate = { version = "^0.13", optional = true, package = "svg" }
 toml = { workspace = true }
 toml_edit = { workspace = true }

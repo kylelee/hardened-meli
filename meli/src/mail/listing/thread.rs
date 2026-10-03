@@ -1889,12 +1889,13 @@ impl Component for ThreadListing {
                     // pane keeps rendering the filtered rows); it is a
                     // listing-level operation, not a grid-focus one.
                     //
-                    // Every backend runs the search as a job on the executor
-                    // thread pool: remote backends on the reactor thread,
-                    // local ones on the blocking pool. A local fallback scan
-                    // reads every mail file in the mailbox, so driving it on
-                    // this thread would freeze the UI on large mailboxes. The
-                    // completion (`JobFinished`) applies the filter.
+                    // Every backend runs the search as a job on the job
+                    // executor's `tokio` runtime: remote backends as async
+                    // tasks on its worker threads, local ones on its blocking
+                    // pool. A local fallback scan reads every mail file in
+                    // the mailbox, so driving it on this thread would freeze
+                    // the UI on large mailboxes. The completion
+                    // (`JobFinished`) applies the filter.
                     match context.accounts[&self.new_cursor_pos.0].search(
                         filter_term,
                         *raw_search,

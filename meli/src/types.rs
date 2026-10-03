@@ -89,7 +89,10 @@ pub enum ThreadEvent {
         events: Vec<RefreshEventKind>,
     },
     UIEvent(UIEvent),
-    /// A thread has updated some of its information
+    /// Heartbeat tick: the main loop re-checks account online status and
+    /// redraws (`State::pulse`). Emitted by the job executor's heartbeat
+    /// task while any account is offline (see `crate::jobs::Pulse`) and
+    /// periodically by the signal watchdog thread.
     Pulse,
     JobFinished(JobId),
 }
