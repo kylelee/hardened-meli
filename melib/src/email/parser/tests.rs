@@ -1033,10 +1033,14 @@ fn test_multipart_parts_clean_two_part_freeze() {
     assert_eq!(rendered, expected);
     assert_eq!(rest, b"--\n");
 
-    // CRLF variant: parts_f (via parts()) continues after a `\r\n`
-    // terminator and yields both parts byte-identically. NOTE (pre-existing
-    // twin asymmetry, deliberately frozen): multipart_parts' second loop
-    // breaks after the first part for CRLF bodies; not a C8a defect.
+    // CRLF variant: both twin loops continue after a `\r\n` terminator and
+    // yield both parts byte-identically. (Pre-CVE-1999-0940 hardening,
+    // multipart_parts' second loop broke after the first part for CRLF
+    // bodies — the twin asymmetry the old freeze note documented — which
+    // made `Envelope::has_attachments` miss attachments of every CRLF
+    // multipart mail outside its first part; the continuation guard now
+    // accepts `\r\n` exactly like parts_f, see
+    // `test_multipart_parts_crlf_continuation` below.)
     let crlf_body: &[u8] = b"preamble\r\n--BOUND\r\nContent-Type: text/plain\r\n\r\nfirst \
                              part\r\n--BOUND\r\nContent-Type: text/plain\r\n\r\nsecond \
                              part\r\n--BOUND--\r\n";
@@ -1057,13 +1061,95 @@ fn test_multipart_parts_clean_two_part_freeze() {
         .collect();
     assert_eq!(
         rendered,
-        vec![b"Content-Type: text/plain\r\n\r\nfirst part".as_slice()]
+        vec![
+            b"Content-Type: text/plain\r\n\r\nfirst part".as_slice(),
+            b"Content-Type: text/plain\r\n\r\nsecond part".as_slice(),
+        ]
     );
-    // Rest = everything after the second boundary line's `BOUND` token.
-    assert_eq!(
-        rest,
-        b"\r\nContent-Type: text/plain\r\n\r\nsecond part\r\n--BOUND--\r\n".as_slice()
+    assert_eq!(rest, b"--\r\n");
+}
+
+// CVE-1999-0940 (mutt early versions, malformed-MIME parsing overflow):
+// the CRLF-continuation hardening of the multipart twin loops. The RFC
+// 5322 canonical `\r\n` delimiter terminator used to break
+// `multipart_parts` after the first part (so `Attachment::part_boundaries`
+// under-reported and `Attachment::check_if_has_attachments_quick` — the
+// `Envelope::has_attachments` listing flag — missed every attachment
+// living outside the first part of a CRLF multipart mail), and consumed a
+// trailing `\r\n` after the last non-closing delimiter into the loop-top
+// EOF error, dropping all already-scanned parts of both twins (the
+// `parts()` alt fallback returns none of them). Regressions for the
+// issue #39 corpus; the twin loops must treat `\r\n` exactly like `\n`.
+#[test]
+fn test_multipart_parts_crlf_continuation() {
+    // Two-part CRLF body whose attachment part comes second: the quick
+    // attachment check must see it (pre-fix: first-part-only scan, false).
+    let crlf_attach: &[u8] = b"p\r\n--BOUND\r\nContent-Type: text/plain\r\n\r\njust \
+                               text\r\n--BOUND\r\nContent-Type: \
+                               application/octet-stream\r\nContent-Disposition: \
+                               attachment; filename=\"a.bin\"\r\n\r\nBINARY\r\n--BOUND--\r\n";
+    assert!(crate::email::Attachment::check_if_has_attachments_quick(
+        crlf_attach,
+        C8A_BOUNDARY
+    ));
+    // And the honest first-part-text/second-part-attachment mail parses to
+    // both parts at the envelope level.
+    let raw = format!(
+        "From: a@b.example\r\nSubject: s\r\nContent-Type: multipart/mixed; \
+         boundary=\"BOUND\"\r\n\r\n{}",
+        String::from_utf8_lossy(crlf_attach)
     );
+    let mail = crate::email::Mail::new(raw.into_bytes(), None).unwrap();
+    assert!(mail.envelope().has_attachments());
+    match mail.envelope().body_bytes(mail.bytes()).content_type {
+        crate::email::attachment_types::ContentType::Multipart { ref parts, .. } => {
+            assert_eq!(parts.len(), 2);
+        }
+        ref other => panic!("CRLF two-part mail must parse as multipart, got {other:?}"),
+    }
+    // A text-only CRLF multipart stays attachment-free.
+    let crlf_text: &[u8] = b"p\r\n--BOUND\r\nContent-Type: text/plain\r\n\r\njust \
+                             text\r\n--BOUND\r\nContent-Type: text/plain\r\n\r\nmore \
+                             text\r\n--BOUND--\r\n";
+    assert!(!crate::email::Attachment::check_if_has_attachments_quick(
+        crlf_text,
+        C8A_BOUNDARY
+    ));
+}
+
+#[test]
+fn test_multipart_parts_crlf_unclosed_tail_keeps_scanned_parts() {
+    // Body ends exactly at the line ending of its last non-closing
+    // delimiter (no close-delimiter, no epilogue): a missing
+    // close-delimiter body runs to end-of-input (RFC 2046), so the scanned
+    // part stands for both line-ending spellings. Pre-fix: the `\r\n`
+    // form consumed the terminator, hit the loop-top EOF error and the
+    // parts() fallback dropped the part (0 parts) while the `\n` form
+    // kept it (1).
+    for nl in ["\n", "\r\n"] {
+        let body = format!("p{nl}--BOUND{nl}Content-Type: text/plain{nl}{nl}one{nl}--BOUND{nl}");
+        let (rest, parts) = attachments::parts(body.as_bytes(), C8A_BOUNDARY).unwrap();
+        assert_eq!(
+            parts,
+            vec![format!("Content-Type: text/plain{nl}{nl}one").as_bytes()],
+            "{nl:?} unclosed tail must keep the scanned part"
+        );
+        // LF breaks at the `len < 2` guard leaving the lone `\n`
+        // unconsumed; CRLF consumes its two-byte terminator into the new
+        // EOF break — either way the terminator tail, nothing of the part.
+        assert!(rest.is_empty() || rest == nl.as_bytes());
+        let (rest, builders) = attachments::multipart_parts(body.as_bytes(), C8A_BOUNDARY).unwrap();
+        let rendered: Vec<&[u8]> = builders
+            .iter()
+            .map(|sb| &body.as_bytes()[sb.offset..sb.offset + sb.length])
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![format!("Content-Type: text/plain{nl}{nl}one").as_bytes()],
+            "{nl:?} unclosed tail must keep the scanned part (StrBuilder twin)"
+        );
+        assert!(rest.is_empty() || rest == nl.as_bytes());
+    }
 }
 
 // C9: malformed-address hardening. `display_addr` and `mailto` both used to

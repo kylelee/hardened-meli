@@ -827,3 +827,30 @@ mod cve_2001_0473;
 #[cfg(test)]
 #[path = "CVE-2014-9116.rs"]
 mod cve_2014_9116;
+
+/// CVE-1999-0940 (mutt, early versions, no CVSS assigned) MIME-parsing
+/// buffer-overflow regression (issue #39, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// malformed MIME mail overflowed a fixed buffer in mutt's MIME parser
+/// and executed attacker commands — one of the earliest e-mail-client
+/// overflow CVEs. meli's parser is checked Rust with no fixed-size
+/// buffers, so [`cve_1999_0940`] locks the issue-prescribed corpus
+/// family (boundary 缺失/重复, 部分头缺失, 坏 base64 边界, plus oversized
+/// MIME tokens as the anti-mutt layer) as deterministic degradation
+/// and bounded, byte-faithful parsing — and exposes two real gaps
+/// behind the canonical RFC 5322 `CRLF` line ending, fixed with this
+/// regression: the multipart twin scanners (`multipart_parts`/
+/// `parts_f`) treated `\r\n` and `\n` delimiter terminators
+/// asymmetrically, so `Envelope::has_attachments` (the 📎 listing
+/// indicator, fed by `check_if_has_attachments_quick`) missed every
+/// attachment living outside the first part of a CRLF mail and a
+/// CRLF mail ending at its last non-closing delimiter lost all
+/// already-scanned parts; and `headers_raw` returned the header
+/// block of a CRLF part ending in a bare `\r` no `header_value()`
+/// can terminate, silently dropping the part's last header — in
+/// practice the `Content-Disposition` of the attachment part. Both
+/// fixed in `melib/src/email/parser.rs`, regression-locked in
+/// `melib/src/email/parser/tests.rs` together with the corpus here.
+#[cfg(test)]
+#[path = "CVE-1999-0940.rs"]
+mod cve_1999_0940;
