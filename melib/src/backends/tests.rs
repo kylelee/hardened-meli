@@ -21,12 +21,9 @@
 //
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 
-use crate::{
-    backends::{
-        AccountHash, BackendEvent, EnvelopeHash, EnvelopeHashBatch, LazyCountSet, MailboxHash,
-        RefreshEvent, RefreshEventKind,
-    },
-    utils::logging::LogLevel,
+use crate::backends::{
+    AccountHash, BackendEvent, EnvelopeHash, EnvelopeHashBatch, LazyCountSet, MailboxHash,
+    RefreshEvent, RefreshEventKind,
 };
 
 #[test]
@@ -48,7 +45,7 @@ fn test_backend_event_flatten() {
     const NOTICE: BackendEvent = BackendEvent::Notice {
         description: String::new(),
         content: None,
-        level: LogLevel::ERROR,
+        level: tracing::Level::ERROR,
     };
     const ACS: BackendEvent = BackendEvent::AccountStateChange {
         message: std::borrow::Cow::<'static, str>::Borrowed(""),
@@ -258,14 +255,14 @@ fn test_backend_event_debug_small_refresh_batch_and_other_variants_are_complete(
     let notice = BackendEvent::Notice {
         description: "description".to_string(),
         content: Some("content".to_string()),
-        level: LogLevel::ERROR,
+        level: tracing::Level::ERROR,
     };
     let debug = format!("{notice:?}");
     for expected in [
         "BackendEvent::Notice",
         "description: \"description\"",
         "content: Some(\"content\")",
-        "level: ERROR",
+        "level: Level(Error)",
     ] {
         assert!(debug.contains(expected), "missing {expected:?} in {debug}");
     }

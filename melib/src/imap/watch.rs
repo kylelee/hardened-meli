@@ -57,7 +57,7 @@ pub fn poll_with_examine(
     kit: ImapWatchKit,
 ) -> impl futures::stream::Stream<Item = Result<BackendEvent>> {
     try_fn_stream(|emitter| async move {
-        log::trace!("poll with examine");
+        tracing::trace!("poll with examine");
         let ImapWatchKit {
             mut conn,
             main_conn: _,
@@ -112,7 +112,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
     // not ready yet).
     const IDLE_CONTINUATION_GRACE: Duration = Duration::from_secs(5);
     try_fn_stream(|emitter| async move {
-        log::trace!("IDLE");
+        tracing::trace!("IDLE");
         /* IDLE only watches the connection's selected mailbox. We will IDLE on INBOX
          * and every `watch_sweep_interval` (5 minutes by default, see
          * `ImapServerConf::watch_sweep_interval`) wake up and poll the others */
@@ -189,7 +189,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                 !matches!(s.current_mailbox.is(&mailbox_hash), MailboxSelection::None)
             }) {
                 if let Err(err) = pooled_conn.unselect().await {
-                    log::trace!(
+                    tracing::trace!(
                         "{}: could not unselect the watched mailbox on a pooled connection: \
                          {}",
                         uid_store.account_name,
@@ -232,7 +232,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
             // Compensate by re-syncing before entering IDLE.
             let current_exists = mailbox.counters.lock().unwrap().total.len();
             if select_response.exists > current_exists {
-                log::trace!(
+                tracing::trace!(
                     "IDLE compensating resync: mailbox {} reports {} EXISTS but {} are known \
                      locally",
                     mailbox.path(),
@@ -286,12 +286,12 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
             let line = match timeout(Some(heartbeat_interval), blockn.read_line()).await {
                 Ok(Some(line)) => line,
                 Ok(None) => {
-                    log::trace!("IDLE connection dropped: {:?}", blockn.err());
+                    tracing::trace!("IDLE connection dropped: {:?}", blockn.err());
                     return Ok(());
                 }
                 Err(_) => {
                     /* Timeout */
-                    log::trace!(
+                    tracing::trace!(
                         "IDLE heartbeat timed out after {heartbeat_interval:?}; unprocessed \
                          buffered bytes: {:?}",
                         String::from_utf8_lossy(
@@ -307,7 +307,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                     )
                     .await
                     {
-                        log::trace!("IDLE: no response to DONE within {done_timeout:?}: {err}");
+                        tracing::trace!("IDLE: no response to DONE within {done_timeout:?}: {err}");
                         return Err(err);
                     }
                     // The server may never deliver untagged updates during
@@ -326,7 +326,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                     continue;
                 }
             };
-            log::trace!(
+            tracing::trace!(
                 "IDLE received data: {:?}",
                 String::from_utf8_lossy(&line[..line.len().min(300)])
             );
@@ -355,11 +355,11 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                 if line.split_rn().any(is_continuation_request) {
                     continuation_seen = true;
                 }
-                log::trace!("IDLE data was only keepalive/continuation lines, continuing");
+                tracing::trace!("IDLE data was only keepalive/continuation lines, continuing");
                 continue;
             }
             {
-                log::trace!("IDLE push data received, sending DONE");
+                tracing::trace!("IDLE push data received, sending DONE");
                 let mut pending_lines: Vec<Vec<u8>> = vec![line];
                 if !continuation_seen {
                     // The push data raced the `+` continuation of this
@@ -370,7 +370,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                     // then handled by the DONE-response read). No inline
                     // sleeps: every wait below is bounded by
                     // `continuation_grace`.
-                    log::trace!(
+                    tracing::trace!(
                         "IDLE push data arrived before the `+` continuation; waiting up to \
                          {continuation_grace:?} for it before sending DONE"
                     );
@@ -383,7 +383,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                         match timeout(Some(remaining), blockn.read_line()).await {
                             Ok(Some(l)) => {
                                 if l.split_rn().any(is_continuation_request) {
-                                    log::trace!(
+                                    tracing::trace!(
                                         "IDLE continuation arrived within the grace period"
                                     );
                                     continuation_seen = true;
@@ -392,7 +392,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                                 }
                             }
                             Ok(None) => {
-                                log::trace!(
+                                tracing::trace!(
                                     "IDLE connection dropped while waiting for the \
                                      continuation: {:?}",
                                     blockn.err()
@@ -426,7 +426,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                         super::protocol_parser::ImapResponse::try_from(response.as_slice()),
                         Ok(super::protocol_parser::ImapResponse::Bad(_))
                     ) {
-                        log::trace!(
+                        tracing::trace!(
                             "IDLE: server answered DONE with a tagged BAD; restarting the \
                              IDLE flow: {err}"
                         );
@@ -439,7 +439,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                     .flat_map(|l| l.split_rn())
                     .chain(response.split_rn())
                 {
-                    log::trace!("process_untagged {:?}", String::from_utf8_lossy(l));
+                    tracing::trace!("process_untagged {:?}", String::from_utf8_lossy(l));
                     if is_idling_noise(l) {
                         continue;
                     }
@@ -466,7 +466,7 @@ pub async fn examine_updates(
         return Ok(None);
     }
     let mailbox_hash = mailbox.hash();
-    log::trace!("examining mailbox {} {}", mailbox_hash, mailbox.path());
+    tracing::trace!("examining mailbox {} {}", mailbox_hash, mailbox.path());
     if let Some(new_envelopes) = conn.resync(mailbox_hash).await? {
         Ok(new_envelopes
             .into_iter()
@@ -515,7 +515,7 @@ pub async fn examine_updates(
             if has_list_status {
                 // [ref:TODO]: (#222) imap-codec does not support "LIST Command Extensions" currently.
                 let Some(quoted_mailbox_path) = quote_imap_mailbox_path(mailbox.imap_path()) else {
-                    log::warn!(
+                    tracing::warn!(
                         "Could not safely quote IMAP mailbox path {:?}; skipping LIST-STATUS \
                          update.",
                         mailbox.imap_path()
@@ -536,7 +536,7 @@ pub async fn examine_updates(
                     RequiredResponses::LIST | RequiredResponses::STATUS,
                 )
                 .await?;
-                log::trace!(
+                tracing::trace!(
                     "list return status out: {}",
                     String::from_utf8_lossy(&response)
                 );
@@ -583,7 +583,7 @@ pub async fn examine_updates(
                 .await?;
             let v = protocol_parser::search_results(response.as_slice()).map(|(_, v)| v)?;
             if v.is_empty() {
-                log::trace!(
+                tracing::trace!(
                     "search response was empty: {}",
                     String::from_utf8_lossy(&response)
                 );
@@ -605,13 +605,13 @@ pub async fn examine_updates(
         } else {
             return Ok(None);
         }
-        log::trace!(
+        tracing::trace!(
             "fetch response is {} bytes and {} lines",
             response.len(),
             String::from_utf8_lossy(&response).lines().count()
         );
         let (_, mut v, _) = protocol_parser::fetch_responses(&response)?;
-        log::trace!("responses len is {}", v.len());
+        tracing::trace!("responses len is {}", v.len());
         if v.is_empty() {
             return Ok(None);
         }
@@ -691,7 +691,7 @@ pub async fn examine_updates(
                 continue;
             }
             let env = envelope.unwrap();
-            log::trace!(
+            tracing::trace!(
                 "Create event {} {} {}",
                 env.hash(),
                 env.subject(),

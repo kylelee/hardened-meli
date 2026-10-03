@@ -210,19 +210,19 @@ impl ImapConnection {
                             .map(|(_, v, _)| v.is_some())
                             .unwrap_or(false)
                     }) {
-                        log::trace!(
+                        tracing::trace!(
                             "resync_basic: NOOP reported pending updates for the selected \
                              mailbox {mailbox_path}; running full resync"
                         );
                     } else {
-                        log::trace!(
+                        tracing::trace!(
                             "resync_basic: STATUS counters of mailbox {mailbox_path} are \
                              unchanged; skipping FLAGS resync"
                         );
                         return Ok(Some(vec![]));
                     }
                 } else {
-                    log::trace!(
+                    tracing::trace!(
                         "resync_basic: STATUS counters of mailbox {mailbox_path} are unchanged; \
                          skipping FLAGS resync"
                     );
@@ -230,7 +230,7 @@ impl ImapConnection {
                 }
             }
             (None, _) => {
-                log::trace!(
+                tracing::trace!(
                     "resync_basic: could not parse STATUS response of mailbox {mailbox_path}: \
                      {}",
                     String::from_utf8_lossy(&response)
@@ -295,7 +295,7 @@ impl ImapConnection {
                 // after a rebuild was interrupted. The fetch stream's
                 // resume+retry keeps refill progress monotonic, so keeping
                 // the cached rows is always safe.
-                log::trace!(
+                tracing::trace!(
                     "resync_basic: cache holds {} envelopes but server reports {} for mailbox \
                      {mailbox_path}; falling back to full rebuild",
                     cached_env_count.unwrap_or(0),
@@ -303,7 +303,7 @@ impl ImapConnection {
                 );
                 return Ok(None);
             }
-            log::trace!(
+            tracing::trace!(
                 "resync_basic: cache holds {} envelopes but server reports {} for mailbox \
                  {mailbox_path}; already rebuilt this session, accepting the retrievable set",
                 cached_env_count.unwrap_or(0),
@@ -557,7 +557,7 @@ impl ImapConnection {
                 status.uidnext,
             )?;
         } else {
-            log::trace!(
+            tracing::trace!(
                 "resync_basic: could not parse STATUS response of mailbox {mailbox_path}: {}",
                 String::from_utf8_lossy(&response)
             );
@@ -677,7 +677,7 @@ impl ImapConnection {
                 // Live Coremail / 网易 163 proved the wipe destructive: an
                 // interrupted rebuild left mailboxes at 0 envelopes and
                 // INBOX at 61/825.
-                log::trace!(
+                tracing::trace!(
                     "resync_condstore: cache holds {} envelopes but server reports {} for \
                      mailbox {mailbox_path}; falling back to full rebuild",
                     cached_env_count.unwrap_or(0),
@@ -685,7 +685,7 @@ impl ImapConnection {
                 );
                 return Ok(None);
             }
-            log::trace!(
+            tracing::trace!(
                 "resync_condstore: cache holds {} envelopes but server reports {} for mailbox \
                  {mailbox_path}; already rebuilt this session, accepting the retrievable set",
                 cached_env_count.unwrap_or(0),
@@ -966,7 +966,7 @@ impl ImapConnection {
         &mut self,
         mailbox_hash: MailboxHash,
     ) -> Result<Option<Vec<Envelope>>> {
-        log::trace!(
+        tracing::trace!(
             "resync_condstoreqresync: mailbox_hash: {:?}, function unimplemented",
             mailbox_hash
         );

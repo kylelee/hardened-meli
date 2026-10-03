@@ -340,13 +340,13 @@ impl MailListingTrait for CompactListing {
                 continue 'items_for_loop;
             };
             if !envelopes.contains_key(&root_env_hash) {
-                //log::debug!("key = {}", root_env_hash);
-                //log::debug!(
+                //tracing::debug!("key = {}", root_env_hash);
+                //tracing::debug!(
                 //    "name = {} {}",
                 //    account[&self.cursor_pos.1].name(),
                 //    context.accounts[&self.cursor_pos.0].name()
                 //);
-                //log::debug!("{:#?}", context.accounts);
+                //tracing::debug!("{:#?}", context.accounts);
 
                 continue;
             }
@@ -1133,7 +1133,7 @@ impl CompactListing {
         let Some(envelope) = envelopes.get(&env_hash) else {
             /* The envelope has been renamed or removed, so wait for the appropriate
              * event to arrive */
-            log::error!(
+            tracing::error!(
                 "Could not update compact listing row: envelope {env_hash} is no longer in the \
                  mailbox"
             );
@@ -1489,7 +1489,7 @@ impl CompactListing {
                 self.new_cursor_pos.2 = 0;
                 let message =
                     format!("Encountered an error while searching for `{search_term}`: {err}.");
-                log::error!("{}", message);
+                tracing::error!("{}", message);
                 context.replies.push_back(UIEvent::Notification {
                     title: Some("Could not perform search".into()),
                     source: None,
@@ -2181,7 +2181,7 @@ impl Component for CompactListing {
                     Err(_) => { /* search was canceled */ }
                     Ok(None) => { /* something happened, perhaps a worker thread panicked */ }
                     Ok(Some(Ok(results))) => {
-                        log::debug!(
+                        tracing::debug!(
                             "search job finished: {} results for {:?}",
                             results.envelopes.len(),
                             filter_term
@@ -2194,7 +2194,7 @@ impl Component for CompactListing {
                             // was running: applying the old mailbox's
                             // hashes here would filter the new one with
                             // stale results. Drop them.
-                            log::debug!(
+                            tracing::debug!(
                                 "dropping stale search results for mailbox {mailbox_hash:?}; \
                                  the listing now shows mailbox {:?}",
                                 self.cursor_pos.1
@@ -2230,7 +2230,7 @@ impl Component for CompactListing {
                             // The user switched mailboxes while the scan
                             // was running: selecting stale envelopes
                             // would corrupt the new mailbox's selection.
-                            log::debug!(
+                            tracing::debug!(
                                 "dropping stale select results for mailbox {mailbox_hash:?}; \
                                  the listing now shows mailbox {:?}",
                                 self.cursor_pos.1

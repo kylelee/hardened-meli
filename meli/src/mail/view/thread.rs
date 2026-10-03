@@ -1449,7 +1449,10 @@ impl ThreadView {
                         } => {
                             path.push(format!("{}.eml", env.message_id()));
                             if let Err(err) = save_attachment(&path, bytes) {
-                                log::error!("Failed to create file at {}: {err}", path.display());
+                                tracing::error!(
+                                    "Failed to create file at {}: {err}",
+                                    path.display()
+                                );
                                 context.replies.push_back(UIEvent::Notification {
                                     title: Some(
                                         format!("Failed to create file at {}", path.display())
@@ -1649,7 +1652,7 @@ impl ThreadView {
                                 },
                             });
                         }))),
-                        log_level: LogLevel::INFO,
+                        log_level: tracing::Level::INFO,
                     },
                 );
                 true

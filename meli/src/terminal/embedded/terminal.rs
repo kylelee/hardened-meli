@@ -165,9 +165,9 @@ impl Terminal {
     /// the terminal state machine.
     pub fn forward_pty_translate_escape_codes(pty: Arc<Mutex<Self>>, pty_fd: std::fs::File) {
         let mut bytes_iter = std::io::BufReader::new(pty_fd).bytes();
-        //log::trace!("waiting for bytes");
+        //tracing::trace!("waiting for bytes");
         while let Some(Ok(byte)) = bytes_iter.next() {
-            //log::trace!("got a byte? {:?}", byte as char);
+            //tracing::trace!("got a byte? {:?}", byte as char);
             /* Drink deep, and descend. */
             pty.lock().unwrap().process_byte(byte);
         }
@@ -578,7 +578,7 @@ impl EmbeddedGrid {
                     b"106" => *bg_color = Color::Cyan,
                     b"107" => *bg_color = Color::White,
                     other => {
-                        log::trace!(
+                        tracing::trace!(
                             "unknown SGR attribute {:?} m",
                             String::from_utf8_lossy(other)
                         );
@@ -612,7 +612,7 @@ impl EmbeddedGrid {
             }
             (b'D', State::ExpectingControlChar) => {
                 // ESCD Linefeed
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 if cursor.1 == scroll_region.bottom {
                     screen
                         .grid_mut()
@@ -630,8 +630,8 @@ impl EmbeddedGrid {
             }
             (b'J', State::ExpectingControlChar) => {
                 // ESCJ Erase from the cursor to the end of the screen
-                //log::trace!("sending {}", EscCode::from((&(*state), byte)));
-                //log::trace!("erasing from {:?} to {:?}", cursor, terminal_size);
+                //tracing::trace!("sending {}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("erasing from {:?} to {:?}", cursor, terminal_size);
                 for y in cursor.1..terminal_size.1 {
                     for x in cursor.0..terminal_size.0 {
                         screen.grid_mut()[(x, y)] = Cell::default();
@@ -642,7 +642,7 @@ impl EmbeddedGrid {
             }
             (b'K', State::ExpectingControlChar) => {
                 // ESCK Erase from the cursor to the end of the line
-                //log::trace!("sending {}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("sending {}", EscCode::from((&(*state), byte)));
                 for x in cursor.0..terminal_size.0 {
                     screen.grid_mut()[(x, cursor.1)] = Cell::default();
                 }
@@ -650,7 +650,7 @@ impl EmbeddedGrid {
                 *state = State::Normal;
             }
             (_, State::ExpectingControlChar) => {
-                //log::trace!(
+                //tracing::trace!(
                 //    "unrecognised: byte is {} and state is {:?}",
                 //    byte as char, state
                 //);
@@ -674,14 +674,14 @@ impl EmbeddedGrid {
             }
             /* Normal */
             (b'\r', State::Normal) => {
-                //log::trace!("carriage return x-> 0, cursor was: {:?}", cursor);
+                //tracing::trace!("carriage return x-> 0, cursor was: {:?}", cursor);
                 cursor.0 = 0;
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
             }
             (b'\n', State::Normal) => {
-                //log::trace!("setting cell {:?} char '{}'", cursor, c as char);
-                //log::trace!("newline y-> y+1, cursor was: {:?}", cursor);
+                //tracing::trace!("setting cell {:?} char '{}'", cursor, c as char);
+                //tracing::trace!("newline y-> y+1, cursor was: {:?}", cursor);
 
                 if cursor.1 + 1 < terminal_size.1 || !is_alternate {
                     if cursor.1 == scroll_region.bottom && is_alternate {
@@ -692,18 +692,18 @@ impl EmbeddedGrid {
                     }
                 }
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
             }
             (b'', State::Normal) => {
-                //log::trace!("Visual bell ^G, ignoring {:?}", cursor);
+                //tracing::trace!("Visual bell ^G, ignoring {:?}", cursor);
             }
             (0x08, State::Normal) => {
                 /* Backspace */
-                //log::trace!("backspace x-> x-1, cursor was: {:?}", cursor);
+                //tracing::trace!("backspace x-> x-1, cursor was: {:?}", cursor);
                 if cursor.0 > 0 {
                     cursor.0 -= 1;
                 }
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
             }
             (c, State::Normal) => {
                 /* Character to be printed. */
@@ -725,11 +725,11 @@ impl EmbeddedGrid {
                             return;
                         }
                         CodepointBuf::TwoCodepoints(b) => {
-                            //log::trace!("two byte char = ");
+                            //tracing::trace!("two byte char = ");
                             decode_utf8_char(&[*b, c])
                         }
                         CodepointBuf::ThreeCodepoints(b, Some(b1)) => {
-                            //log::trace!("three byte char = ",);
+                            //tracing::trace!("three byte char = ",);
                             decode_utf8_char(&[*b, *b1, c])
                         }
                         CodepointBuf::ThreeCodepoints(_, ref mut b @ None) => {
@@ -737,7 +737,7 @@ impl EmbeddedGrid {
                             return;
                         }
                         CodepointBuf::FourCodepoints(b, Some(b1), Some(b2)) => {
-                            //log::trace!("four byte char = ",);
+                            //tracing::trace!("four byte char = ",);
                             decode_utf8_char(&[*b, *b1, *b2, c])
                         }
                         CodepointBuf::FourCodepoints(_, ref mut b1 @ None, None) => {
@@ -749,7 +749,7 @@ impl EmbeddedGrid {
                             return;
                         }
                         _ => {
-                            //log::trace!(
+                            //tracing::trace!(
                             //    "invalid utf8 sequence: codepoints = {:?} and c={}",
                             //    codepoints, c
                             //);
@@ -814,13 +814,13 @@ impl EmbeddedGrid {
             }
             (b'u', State::Csi) => {
                 /* restore cursor */
-                //log::trace!("restore cursor {}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("restore cursor {}", EscCode::from((&(*state), byte)));
                 *show_cursor = true;
                 *state = State::Normal;
             }
             (b'm', State::Csi) => {
                 /* Reset character Attributes (SGR).  Ps = 0  -> Normal (default), VT100 */
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *fg_color = Color::Default;
                 *bg_color = Color::Default;
                 *attrs = Attr::DEFAULT;
@@ -833,10 +833,10 @@ impl EmbeddedGrid {
             }
             (b'C', State::Csi) => {
                 // ESC[C    CSI Cursor Forward one Time
-                //log::trace!("cursor forward one time, cursor was: {:?}", cursor);
+                //tracing::trace!("cursor forward one time, cursor was: {:?}", cursor);
                 cursor.0 = std::cmp::min(cursor.0 + 1, terminal_size.0.saturating_sub(1));
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             /* CSI ? stuff */
@@ -878,11 +878,14 @@ impl EmbeddedGrid {
                         *screen_buffer = ScreenBuffer::Alternate;
                     }
                     _ => {
-                        log::trace!("unknown csi? {:?}", String::from_utf8_lossy(buf.as_slice()));
+                        tracing::trace!(
+                            "unknown csi? {:?}",
+                            String::from_utf8_lossy(buf.as_slice())
+                        );
                     }
                 }
 
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *state = State::Normal;
             }
             (b'l', State::CsiQ(ref mut buf)) => {
@@ -919,13 +922,13 @@ impl EmbeddedGrid {
                         *screen_buffer = ScreenBuffer::Normal;
                     }
                     _ => {
-                        log::trace!(
+                        tracing::trace!(
                             "unknown csi? `l` {:?}",
                             String::from_utf8_lossy(buf.as_slice())
                         );
                     }
                 }
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *state = State::Normal;
             }
             /* END OF CSI ? stuff */
@@ -947,13 +950,13 @@ impl EmbeddedGrid {
                     Default::default(),
                 );
                 *dirty = true;
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *state = State::Normal;
             }
             (b'K', State::Csi) => {
                 /* Erase in Line (ED), VT100. */
                 /* Erase to right (Default) */
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 for x in cursor.0..terminal_size.0 {
                     screen.grid_mut()[(x, cursor.1)] = Cell::default();
                 }
@@ -970,7 +973,7 @@ impl EmbeddedGrid {
 
                 screen.grid_mut().scroll_down(scroll_region, cursor.1, n);
 
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *dirty = true;
                 *state = State::Normal;
             }
@@ -984,26 +987,26 @@ impl EmbeddedGrid {
 
                 screen.grid_mut().scroll_up(scroll_region, cursor.1, n);
 
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *dirty = true;
                 *state = State::Normal;
             }
             (b'A', State::Csi) => {
                 // Move cursor up 1 line
-                //log::trace!("cursor up 1 times, cursor was: {:?}", cursor);
+                //tracing::trace!("cursor up 1 times, cursor was: {:?}", cursor);
                 if cursor.1 > 0 {
                     cursor.1 -= 1;
                 } else {
-                    //log::trace!("cursor.1 == 0");
+                    //tracing::trace!("cursor.1 == 0");
                 }
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (b'K', State::Csi1(buf)) if buf.as_ref() == b"0" => {
                 /* Erase in Line (ED), VT100. */
                 /* Erase to right (Default) */
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 for x in cursor.0..terminal_size.0 {
                     screen.grid_mut()[(x, cursor.1)] = Cell::default();
                 }
@@ -1016,7 +1019,7 @@ impl EmbeddedGrid {
                 for x in 0..=cursor.0 {
                     screen.grid_mut()[(x, cursor.1)] = Cell::default();
                 }
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *dirty = true;
                 *state = State::Normal;
             }
@@ -1028,7 +1031,7 @@ impl EmbeddedGrid {
                         screen.grid_mut()[(x, y)] = Cell::default();
                     }
                 }
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
 
                 let area = area!();
                 screen.grid_mut().clear_area(
@@ -1050,7 +1053,7 @@ impl EmbeddedGrid {
                     )),
                     Default::default(),
                 );
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *dirty = true;
                 *state = State::Normal;
             }
@@ -1063,7 +1066,7 @@ impl EmbeddedGrid {
                     area.take_rows(cursor.1.saturating_sub(1) + scroll_region.top),
                     Default::default(),
                 );
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *dirty = true;
                 *state = State::Normal;
             }
@@ -1073,7 +1076,7 @@ impl EmbeddedGrid {
 
                 let area = area!();
                 screen.grid_mut().clear_area(area, Default::default());
-                //log::trace!("{}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)));
                 *dirty = true;
                 *state = State::Normal;
             }
@@ -1095,7 +1098,7 @@ impl EmbeddedGrid {
                     cur_x += 1;
                     ctr += 1;
                 }
-                //log::trace!("Erased {} Character(s)", ps);
+                //tracing::trace!("Erased {} Character(s)", ps);
                 *dirty = true;
                 *state = State::Normal;
             }
@@ -1104,17 +1107,17 @@ impl EmbeddedGrid {
                 if buf.as_ref() == b"18" || buf.as_ref() == b"19" {
                     // Ps = 18 → Report the size of the text area in characters as CSI 8 ; height ;
                     // width t debug!("report size of the text area");
-                    //log::trace!("got {}", EscCode::from((&(*state), byte)));
+                    //tracing::trace!("got {}", EscCode::from((&(*state), byte)));
                     let response = format!("\x1b[8;{};{}t", terminal_size.1, terminal_size.0);
                     if let Err(err) = stdin
                         .write_all(response.as_bytes())
                         .and_then(|()| stdin.flush())
                     {
                         // The child may have exited and closed the pty.
-                        log::error!("Could not report embedded terminal size: {err}");
+                        tracing::error!("Could not report embedded terminal size: {err}");
                     }
                 } else {
-                    //log::trace!("ignoring unknown code {}",
+                    //tracing::trace!("ignoring unknown code {}",
                     // EscCode::from((&(*state), byte)));
                 }
                 *state = State::Normal;
@@ -1122,8 +1125,8 @@ impl EmbeddedGrid {
             (b'n', State::Csi1(_)) => {
                 // Ps = 6  ⇒  Report Cursor Position (CPR) [row;column].
                 // Result is CSI r ; c R
-                //log::trace!("report cursor position");
-                //log::trace!("got {}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("report cursor position");
+                //tracing::trace!("got {}", EscCode::from((&(*state), byte)));
                 let response = format!(
                     "\x1b[{};{}R",
                     cursor.1.saturating_add(1),
@@ -1133,26 +1136,26 @@ impl EmbeddedGrid {
                     .write_all(response.as_bytes())
                     .and_then(|()| stdin.flush())
                 {
-                    log::error!("Could not report embedded terminal cursor position: {err}");
+                    tracing::error!("Could not report embedded terminal cursor position: {err}");
                 }
                 *state = State::Normal;
             }
             (b'A', State::Csi1(buf)) => {
                 // Move cursor up n lines
                 let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
-                //log::trace!("cursor up {} times, cursor was: {:?}", offset, cursor);
+                //tracing::trace!("cursor up {} times, cursor was: {:?}", offset, cursor);
                 if cursor.1 >= offset {
                     cursor.1 -= offset;
                 } else {
-                    //log::trace!("offset > cursor.1");
+                    //tracing::trace!("offset > cursor.1");
                 }
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (b'B', State::Csi1(buf)) => {
                 // ESC[{buf}B   CSI Cursor Down {buf} Times
                 let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
-                //log::trace!("cursor down {} times, cursor was: {:?}", offset, cursor);
+                //tracing::trace!("cursor down {} times, cursor was: {:?}", offset, cursor);
                 if cursor.1 == scroll_region.bottom {
                     /* scroll down */
                     for y in scroll_region.top..scroll_region.bottom {
@@ -1170,7 +1173,7 @@ impl EmbeddedGrid {
                     cursor.1 = terminal_size.1.saturating_sub(1);
                 }
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (b'D', State::Csi1(buf)) => {
@@ -1179,7 +1182,7 @@ impl EmbeddedGrid {
                 if cursor.0 >= offset {
                     cursor.0 -= offset;
                 }
-                //log::trace!(
+                //tracing::trace!(
                 //   "ESC[ {} D cursor backwards cursor became: {:?}",
                 //    offset, cursor
                 // );
@@ -1188,7 +1191,7 @@ impl EmbeddedGrid {
             (b'E', State::Csi1(buf)) => {
                 // ESC[{buf}E   CSI Cursor Next Line {buf} Times
                 let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
-                //log::trace!(
+                //tracing::trace!(
                 //    "cursor next line {} times, cursor was: {:?}",
                 //    offset, cursor
                 //);
@@ -1200,20 +1203,20 @@ impl EmbeddedGrid {
                 }
                 cursor.0 = 0;
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (b'F', State::Csi1(buf)) => {
                 // ESC[{buf}F   CSI Cursor Previous Line {buf} Times
                 let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
-                //log::trace!(
+                //tracing::trace!(
                 //    "cursor previous line {} times, cursor was: {:?}",
                 //    offset, cursor
                 //);
                 cursor.1 = cursor.1.saturating_sub(offset);
                 cursor.0 = 0;
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (b'G', State::Csi1(_)) | (b'G', State::Csi) => {
@@ -1223,28 +1226,28 @@ impl EmbeddedGrid {
                 } else {
                     1
                 };
-                //log::trace!("cursor absolute {}, cursor was: {:?}", new_col, cursor);
+                //tracing::trace!("cursor absolute {}, cursor was: {:?}", new_col, cursor);
                 if new_col < terminal_size.0 {
                     cursor.0 = new_col.saturating_sub(1);
                 } else {
-                    //log::trace!(
+                    //tracing::trace!(
                     //    "error: new_cal = {} > terminal.size.0 =
                     // {}\nterminal_size = {:?}",
                     //    new_col, terminal_size.0, terminal_size
                     //);
                 }
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (b'C', State::Csi1(buf)) => {
                 // ESC[{buf}C   CSI Cursor Forward {buf} Times
                 let offset = parse_esc_param(buf.as_slice()).unwrap_or(1);
-                //log::trace!("cursor forward {} times, cursor was: {:?}", offset, cursor);
+                //tracing::trace!("cursor forward {} times, cursor was: {:?}", offset, cursor);
                 if offset.saturating_add(cursor.0) < terminal_size.0 {
                     cursor.0 += offset;
                 }
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (b'P', State::Csi1(_)) | (b'P', State::Csi) => {
@@ -1266,7 +1269,7 @@ impl EmbeddedGrid {
                 for x in (terminal_size.0 - offset)..terminal_size.0 {
                     screen.grid_mut()[(x, cursor.1)].set_ch(' ');
                 }
-                //log::trace!(
+                //tracing::trace!(
                 //    "Delete {} Character(s) with cursor at {:?}  ",
                 //    offset, cursor
                 //);
@@ -1280,7 +1283,7 @@ impl EmbeddedGrid {
                 } else {
                     1
                 };
-                //log::trace!(
+                //tracing::trace!(
                 //    "Line position absolute row {} with cursor at {:?}",
                 //    row, cursor
                 //);
@@ -1289,7 +1292,7 @@ impl EmbeddedGrid {
                     cursor.1 = terminal_size.1.saturating_sub(1);
                 }
                 *wrap_next = false;
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (b';', State::Csi1(ref mut buf1_p)) => {
@@ -1358,7 +1361,7 @@ impl EmbeddedGrid {
                 *state = State::Csi3(buf1, buf2, buf3);
             }
             (b't', State::Csi2(_, _)) => {
-                //log::trace!("ignoring {}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("ignoring {}", EscCode::from((&(*state), byte)));
                 // Window manipulation, skip it
                 *state = State::Normal;
             }
@@ -1374,7 +1377,7 @@ impl EmbeddedGrid {
                 };
 
                 let (min_y, max_y) = if *origin_mode {
-                    //log::trace!(*origin_mode);
+                    //tracing::trace!(*origin_mode);
                     orig_y = orig_y.saturating_add(scroll_region.top);
                     (scroll_region.top, scroll_region.bottom)
                 } else {
@@ -1386,13 +1389,13 @@ impl EmbeddedGrid {
                 cursor.1 = std::cmp::max(min_y, std::cmp::min(max_y, orig_y.saturating_sub(1)));
                 *wrap_next = false;
 
-                //log::trace!("{}", EscCode::from((&(*state), byte)),);
-                //log::trace!(
+                //tracing::trace!("{}", EscCode::from((&(*state), byte)),);
+                //tracing::trace!(
                 //    "cursor set to ({},{}), cursor was: {:?}",
                 //    orig_x, orig_y, cursor
                 //);
 
-                //log::trace!("cursor became: {:?}", cursor);
+                //tracing::trace!("cursor became: {:?}", cursor);
                 *state = State::Normal;
             }
             (c, State::Csi2(_, ref mut buf)) if c.is_ascii_digit() => {
@@ -1420,11 +1423,11 @@ impl EmbeddedGrid {
                     *cursor = (0, 0);
                     *wrap_next = false;
                 }
-                //log::trace!("set scrolling region to {:?}", scroll_region);
+                //tracing::trace!("set scrolling region to {:?}", scroll_region);
                 *state = State::Normal;
             }
             (b't', State::Csi3(_, _, _)) => {
-                //log::trace!("ignoring {}", EscCode::from((&(*state), byte)));
+                //tracing::trace!("ignoring {}", EscCode::from((&(*state), byte)));
                 // Window manipulation, skip it
                 *state = State::Normal;
             }
@@ -1437,7 +1440,7 @@ impl EmbeddedGrid {
             {
                 /* Set character attributes | foreground color */
                 *fg_color = if let Some(byte) = parse_esc_param_u8(buf3.as_slice()) {
-                    //log::trace!("parsed buf as {}", byte);
+                    //tracing::trace!("parsed buf as {}", byte);
                     Color::Byte(byte)
                 } else {
                     Color::Default
@@ -1451,7 +1454,7 @@ impl EmbeddedGrid {
             {
                 /* Set character attributes | background color */
                 *bg_color = if let Some(byte) = parse_esc_param_u8(buf3.as_slice()) {
-                    //log::trace!("parsed buf as {}", byte);
+                    //tracing::trace!("parsed buf as {}", byte);
                     Color::Byte(byte)
                 } else {
                     Color::Default
@@ -1467,7 +1470,7 @@ impl EmbeddedGrid {
                 //*fg_color = if let Ok(byte) =
                 //    unsafe { std::str::from_utf8_unchecked(buf3) }.parse::<u8>()
                 //{
-                //    //log::trace!("parsed buf as {}", byte);
+                //    //tracing::trace!("parsed buf as {}", byte);
                 //    Color::Byte(byte)
                 //} else {
                 //    Color::Default
@@ -1792,7 +1795,7 @@ impl EmbeddedGrid {
                 }
             }
             (b'm', State::CsiLarge(_)) => {
-                log::trace!(
+                tracing::trace!(
                     "state: {state:?} {} ignoring grouped SGR update",
                     EscCode::from((&(*state), byte))
                 );
@@ -1829,7 +1832,7 @@ impl EmbeddedGrid {
                 }
                 | State::Csi58_5_ { ps: _ },
             ) => {
-                log::trace!(
+                tracing::trace!(
                     "state: {state:?} ignoring unknown code {} byte {byte}",
                     EscCode::from((&(*state), byte))
                 );
@@ -1837,7 +1840,7 @@ impl EmbeddedGrid {
             }
             /* other stuff */
             (_, State::G0) => {
-                log::trace!("ignoring {}", EscCode::from((&(*state), byte)));
+                tracing::trace!("ignoring {}", EscCode::from((&(*state), byte)));
                 *state = State::Normal;
             }
         }

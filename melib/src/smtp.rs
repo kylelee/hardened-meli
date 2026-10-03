@@ -979,7 +979,7 @@ impl TryFrom<&'_ str> for ReplyCode {
     type Error = Error;
     fn try_from(val: &'_ str) -> Result<Self> {
         if val.len() != 3 {
-            log::debug!("{}", val);
+            tracing::debug!("{}", val);
         }
         debug_assert!(val.len() == 3);
         use ReplyCode::*;

@@ -58,7 +58,6 @@ use futures::{
 use melib::{
     backends::prelude::*,
     maildir::{utilities::MaildirFilePathExt, *},
-    utils::logging::{LogLevel, Logger},
     Mail,
 };
 use tempfile::TempDir;
@@ -156,7 +155,7 @@ fn move_file(
 /// Test that `MaildirType::watch` `Stream` returns the expected `Refresh`
 /// events when altering the mail store in the filesystem.
 fn run_maildir_watch() {
-    let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+    melib_test::init_test_logging();
     let temp_dir = TempDir::new().unwrap();
     let backend_event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(16)));
 
@@ -311,7 +310,7 @@ hello world.
 /// Test that `MaildirType::watch` `Stream` returns the expected `Refresh`
 /// events when altering the mail store in the filesystem.
 fn run_maildir_refresh() {
-    let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+    melib_test::init_test_logging();
     let temp_dir = TempDir::new().unwrap();
     let backend_event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(16)));
 
@@ -453,7 +452,7 @@ hello world.
 /// silently parsing the raw query string as a melib `Query`. See
 /// upstream `75752b38`.
 fn run_maildir_raw_search_not_supported() {
-    let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+    melib_test::init_test_logging();
     let temp_dir = TempDir::new().unwrap();
     let backend_event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(16)));
 

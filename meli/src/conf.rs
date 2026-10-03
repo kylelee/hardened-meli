@@ -42,7 +42,7 @@ use melib::{
     conf::{ActionFlag, MailboxConf, Secret, ToggleFlag},
     error::*,
     search::Query,
-    Logger, ShellExpandTrait, SortField, SortOrder,
+    ShellExpandTrait, SortField, SortOrder,
 };
 
 pub mod default_values;
@@ -288,7 +288,7 @@ impl FileSettings {
             let msg =
                 "terminal.progress_spinner_sequence: a custom sequence must contain at least \
                        one frame; using the default spinner instead.";
-            melib::log::error!("{msg}");
+            tracing::error!("{msg}");
             self.config_warnings.push(msg.to_string());
             self.terminal.progress_spinner_sequence = None;
         }
@@ -495,9 +495,7 @@ fn remove_legacy_listing_keys(table: &mut toml::value::Table, location: &str) ->
     for key in LEGACY_LISTING_KEYS {
         if table.remove(key).is_some() {
             removed = true;
-            melib::log::warn!(
-                "`{key}` in `{location}` is no longer a valid setting and was ignored."
-            );
+            tracing::warn!("`{key}` in `{location}` is no longer a valid setting and was ignored.");
         }
     }
     removed
@@ -847,8 +845,6 @@ pub struct Settings {
     /// these as notifications (see `State::new`).
     #[serde(skip)]
     pub config_warnings: Vec<String>,
-    #[serde(skip)]
-    pub _logger: Logger,
 }
 
 impl Settings {
@@ -864,19 +860,17 @@ impl Settings {
         Self::from_file_settings(FileSettings::from_path(path)?)
     }
 
-    fn from_file_settings(fs: FileSettings) -> Result<Self> {
-        let mut _logger = Logger::new(melib::LogLevel::default());
-
-        if _logger.log_level() != fs.log.maximum_level {
-            _logger.change_log_level(fs.log.maximum_level)
+    fn from_file_settings(mut fs: FileSettings) -> Result<Self> {
+        // Logging is configured by the single startup call below. If the
+        // configuration file still carries the legacy `[logging]` overrides,
+        // surface a warning instead of silently ignoring them.
+        if fs.log.log_file.is_some() || fs.log.maximum_level.is_some() {
+            fs.config_warnings.push(
+                "`[logging] log_file`/`maximum_level` are no longer applied: logging is                  configured at startup (pretty `tracing` output, hourly files under `./log/`                  with 7-day retention; DEBUG level in debug builds, ERROR in release builds)."
+                    .to_string(),
+            );
         }
-
-        #[cfg(debug_assertions)]
-        apply_debug_default_logging(&_logger, &fs.log);
-
-        if let Some(ref log_path) = fs.log.log_file {
-            _logger.change_log_dest(log_path.into());
-        }
+        crate::logging::init_log();
 
         let mut s: IndexMap<String, AccountConf> = IndexMap::new();
 
@@ -899,25 +893,13 @@ impl Settings {
             terminal: fs.terminal,
             log: fs.log,
             config_warnings: fs.config_warnings,
-            _logger,
         })
     }
 
     pub fn without_accounts() -> Result<Self> {
-        let mut _logger = Logger::new(melib::LogLevel::default());
-
         let fs = FileSettings::new()?;
 
-        if _logger.log_level() != fs.log.maximum_level {
-            _logger.change_log_level(fs.log.maximum_level)
-        }
-
-        #[cfg(debug_assertions)]
-        apply_debug_default_logging(&_logger, &fs.log);
-
-        if let Some(ref log_path) = fs.log.log_file {
-            _logger.change_log_dest(log_path.into());
-        }
+        crate::logging::init_log();
 
         Ok(Self {
             accounts: IndexMap::new(),
@@ -931,7 +913,6 @@ impl Settings {
             terminal: fs.terminal,
             log: fs.log,
             config_warnings: fs.config_warnings,
-            _logger,
         })
     }
 }
@@ -1063,54 +1044,26 @@ pub struct LogSettings {
     #[serde(default)]
     pub log_file: Option<PathBuf>,
     #[serde(default)]
-    pub maximum_level: melib::LogLevel,
+    pub maximum_level: Option<LogLevel>,
+}
+
+/// Legacy `[logging] maximum_level` value.
+///
+/// The setting is no longer applied — logging is configured once at
+/// startup by [`crate::logging::init_log`] (DEBUG in debug builds, ERROR
+/// in release builds) — but the type keeps existing configuration files
+/// parsing.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum LogLevel {
+    OFF,
+    ERROR,
+    WARN,
+    INFO,
+    DEBUG,
+    TRACE,
 }
 
 pub use data_types::dotaddressable::*;
-
-/// Debug builds default the logger to one file per run under `./log/` in
-/// the current directory at `DEBUG` level, so a field bug report comes with
-/// a trace of what the app was doing (the release build keeps the XDG
-/// data-dir default).
-///
-/// An explicit `[logging] log_file` in the configuration wins, and setting
-/// `MELI_DEBUG_LOG=0` opts out. Failures never abort startup: if `./log/`
-/// cannot be created, the previous destination is kept.
-#[cfg(debug_assertions)]
-fn apply_debug_default_logging(logger: &Logger, log: &LogSettings) {
-    // `cfg!(test)` (not `#[cfg(test)]`): unit tests construct `Settings`
-    // too, and must not litter the crate's working directory with log
-    // files.
-    if cfg!(test) {
-        return;
-    }
-    if std::env::var_os("MELI_DEBUG_LOG").is_some_and(|v| v == "0") {
-        return;
-    }
-    // The caller applies an explicit `log_file` right after; do not fight it.
-    if log.log_file.is_some() {
-        return;
-    }
-    if logger.log_level() < melib::LogLevel::TRACE {
-        logger.change_log_level(melib::LogLevel::TRACE);
-    }
-    let dir = Path::new("log");
-    if let Err(err) = std::fs::create_dir_all(dir) {
-        eprintln!(
-            "debug logging disabled: could not create `{}`: {err}",
-            dir.display()
-        );
-        return;
-    }
-    let ts = melib::utils::datetime::timestamp_to_string(
-        melib::utils::datetime::now(),
-        Some("%Y%m%d-%H%M%S"),
-        false,
-    );
-    let path = dir.join(format!("meli-debug-{ts}.log"));
-    logger.change_log_dest(path.clone());
-    melib::log::info!("debug build: logging to {}", path.display());
-}
 
 /// Rewrite `theme = "<name>"` inside the `[terminal]` table of a
 /// configuration file's text, preserving every other line verbatim.

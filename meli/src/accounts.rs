@@ -39,8 +39,8 @@ use indexmap::IndexMap;
 use melib::{
     backends::{prelude::*, Backends},
     error::{Error, ErrorKind, NetworkErrorKind, Result},
-    log,
     thread::Threads,
+    tracing,
     utils::{fnmatch::Fnmatch, futures::sleep, random, shellexpand::ShellExpandTrait},
     Contacts, SortField, SortOrder,
 };
@@ -382,7 +382,7 @@ impl Account {
             };
             if let Some(db_path) = db_path {
                 if !db_path.exists() {
-                    log::info!(
+                    tracing::info!(
                         "An sqlite3 search database for account `{}` seems to be missing, a new \
                          one will be created.",
                         name
@@ -509,7 +509,7 @@ impl Account {
                 });
             mailbox_comma_sep_list_string
                 .drain(mailbox_comma_sep_list_string.len().saturating_sub(2)..);
-            log::warn!(
+            tracing::warn!(
                 "Account `{name}` mailboxes `{mailbox_conf_hash_set:?}` configured but not \
                  present in account's mailboxes. Are they misspelled? Account `{name}` has the \
                  following mailboxes: [{mailbox_comma_sep_list_string}]",
@@ -650,7 +650,7 @@ impl Account {
 
         for (hash, entry) in self.mailbox_entries.iter() {
             if !ref_hashes.contains(hash) {
-                log::warn!(
+                tracing::warn!(
                     "Account `{name}` mailbox `{mbox}` is no longer present in the refreshed \
                      mailbox list; keeping the local entry. Remove it manually if it was deleted \
                      on the server.",
@@ -727,7 +727,7 @@ impl Account {
                 ui_events.push(UIEvent::EnvelopeUpdate(env_hash));
             }
             RefreshEventKind::Rename(old_hash, new_hash) => {
-                log::trace!("rename {} to {}", old_hash, new_hash);
+                tracing::trace!("rename {} to {}", old_hash, new_hash);
                 #[cfg(feature = "sqlite3")]
                 self.rename_cached_env(old_hash, new_hash);
 
@@ -773,7 +773,7 @@ impl Account {
                             )
                             .into(),
                             handle,
-                            log_level: LogLevel::TRACE,
+                            log_level: tracing::Level::TRACE,
                             on_finish: None,
                         },
                     );
@@ -884,7 +884,7 @@ impl Account {
                 self.watch(None);
             }
             RefreshEventKind::Failure(err) => {
-                log::trace!("RefreshEvent Failure: {err}");
+                tracing::trace!("RefreshEvent Failure: {err}");
                 while let Some((job_id, _)) = self.active_jobs.iter().find(|(_, j)| j.is_watch()) {
                     let job_id = *job_id;
                     let j = self.active_jobs.remove(&job_id);
@@ -1129,7 +1129,7 @@ impl Account {
         ] {
             if let Some(mailbox_hash) = mailbox {
                 if let Err(err) = self.save(bytes, *mailbox_hash, Some(flags)) {
-                    log::error!("Could not save in '{}' mailbox: {}.", *mailbox_hash, err);
+                    tracing::error!("Could not save in '{}' mailbox: {}.", *mailbox_hash, err);
                 } else {
                     saved_at = Some(*mailbox_hash);
                     break;
@@ -1143,8 +1143,8 @@ impl Account {
             Ok(mailbox_hash)
         } else {
             let file = crate::types::File::create_temp_file(bytes, None, None, Some("eml"), false)?;
-            log::trace!("message saved in {}", file.path().display());
-            log::info!(
+            tracing::trace!("message saved in {}", file.path().display());
+            tracing::info!(
                 "Message was stored in {} so that you can restore it manually.",
                 file.path().display()
             );
@@ -1221,7 +1221,7 @@ impl Account {
                         }
                         let output = msmtp.wait().expect("Failed to wait on mailer");
                         if output.success() {
-                            log::trace!("Message sent.");
+                            tracing::trace!("Message sent.");
                         } else {
                             let error_message = if let Some(exit_code) = output.code() {
                                 format!(
@@ -1234,7 +1234,7 @@ impl Account {
                                      by signal"
                                 )
                             };
-                            log::error!("{}", error_message);
+                            tracing::error!("{}", error_message);
                             return Err(Error::new(error_message).set_summary("Message not sent."));
                         }
                         Ok(())
@@ -1348,7 +1348,7 @@ impl Account {
         mailbox_hash: MailboxHash,
     ) -> ResultFuture<SearchResult> {
         use melib::search::QueryTrait;
-        melib::log::debug!(
+        tracing::debug!(
             "search: account `{}` term {search_term:?} raw {raw_search} \
              backend {:?} (conf search_backend {:?})",
             self.name,
@@ -1441,14 +1441,14 @@ impl Account {
                         // network. Header hits only; the remote search is
                         // the proper path for bodies and this scan is its
                         // fallback, not its replacement.
-                        melib::log::debug!(
+                        tracing::debug!(
                             "search fallback for account `{log_name}` (remote): {} header \
                              hits; body scan skipped (remote backend)",
                             hits.len()
                         );
                     } else {
                         let body_hits = scan_bodies(backend, mailbox_keys, term.clone()).await;
-                        melib::log::debug!(
+                        tracing::debug!(
                             "search fallback for account `{log_name}`: {} header hits + {} \
                              body hits",
                             hits.len(),
@@ -1477,14 +1477,14 @@ impl Account {
                 Ok(Box::pin(async move {
                     match crate::sqlite3::AccountCache::search(name, query, _sort).await {
                         Ok(ret) => {
-                            melib::log::debug!("search: sqlite3 index returned {} hits", ret.len());
+                            tracing::debug!("search: sqlite3 index returned {} hits", ret.len());
                             Ok(SearchResult {
                                 envelopes: ret,
                                 degraded: false,
                             })
                         }
                         Err(err) => {
-                            melib::log::debug!(
+                            tracing::debug!(
                                 "sqlite3 search failed for account `{log_name}` ({err}); \
                                  falling back to the in-memory scan"
                             );
@@ -1550,7 +1550,7 @@ impl Account {
                                         // term, which is not trustworthy
                                         // (see `should_scan_local_on_empty_remote`).
                                         // Supplement it with the local scan.
-                                        melib::log::debug!(
+                                        tracing::debug!(
                                             "search: remote returned 0 hits for non-ascii term; \
                                              running local fallback scan"
                                         );
@@ -1570,7 +1570,7 @@ impl Account {
                                             })
                                         }
                                     } else {
-                                        melib::log::debug!(
+                                        tracing::debug!(
                                             "search: remote returned {} hits",
                                             ret.len()
                                         );
@@ -1581,7 +1581,7 @@ impl Account {
                                     }
                                 }
                                 Err(err) => {
-                                    melib::log::debug!(
+                                    tracing::debug!(
                                         "remote search failed for account `{log_name}` \
                                          ({err}); falling back to the in-memory scan"
                                     );
@@ -1592,7 +1592,7 @@ impl Account {
                                 }
                             },
                             Err(err) => {
-                                melib::log::debug!(
+                                tracing::debug!(
                                     "remote search failed for account `{log_name}` \
                                      ({err}); falling back to the in-memory scan"
                                 );
@@ -1723,7 +1723,7 @@ impl Account {
                     ..
                 } => {
                     is_canceled! { handle };
-                    log::trace!("got payload in status for {}", mailbox_hash);
+                    tracing::trace!("got payload in status for {}", mailbox_hash);
                     match handle.chan.try_recv() {
                         Err(_) => {
                             self.main_loop_handler
@@ -1736,7 +1736,7 @@ impl Account {
                             return true;
                         }
                         Ok(Some((None, _))) => {
-                            log::trace!("finished in status for {}", mailbox_hash);
+                            tracing::trace!("finished in status for {}", mailbox_hash);
                             self.mailbox_entries
                                 .entry(mailbox_hash)
                                 .and_modify(|entry| {
@@ -2004,7 +2004,7 @@ impl Account {
                         self.main_loop_handler
                             .job_executor
                             .set_job_success(job_id, false);
-                        log::error!("Could not save message: {err}");
+                        tracing::error!("Could not save message: {err}");
                         match crate::types::File::create_temp_file(
                             bytes,
                             None,
@@ -2013,8 +2013,8 @@ impl Account {
                             false,
                         ) {
                             Ok(file) => {
-                                log::debug!("message saved in {}", file.path().display());
-                                log::info!(
+                                tracing::debug!("message saved in {}", file.path().display());
+                                tracing::info!(
                                     "Message was stored in {} so that you can restore it manually.",
                                     file.path().display()
                                 );
@@ -2034,7 +2034,7 @@ impl Account {
                                     },
                                 ));
                             }
-                            Err(err) => log::error!("Could not save message: {err}"),
+                            Err(err) => tracing::error!("Could not save message: {err}"),
                         }
                     }
                 }
@@ -2072,12 +2072,12 @@ impl Account {
                     }
                 }
                 JobRequest::Watch { ref mut handle } => {
-                    log::trace!("JobRequest::Watch event");
+                    tracing::trace!("JobRequest::Watch event");
                     is_canceled! { handle };
                     match handle.chan.try_recv() {
                         Err(_) => { /* canceled */ }
                         Ok(Some((None, _))) => {
-                            log::trace!("JobRequest::Watch stream returned None");
+                            tracing::trace!("JobRequest::Watch stream returned None");
                             self.watch(None);
                             _ = self.is_online(true);
                         }
@@ -2095,7 +2095,7 @@ impl Account {
                                 .insert(handle.job_id, JobRequest::Watch { handle });
                             match ev {
                                 Err(err) => {
-                                    log::trace!("JobRequest::Watch error {}", err);
+                                    tracing::trace!("JobRequest::Watch error {}", err);
                                     if err.kind.is_timeout()
                                         || matches!(
                                             err.kind,
@@ -2154,7 +2154,7 @@ impl Account {
                             ));
                         }
                         Ok(Some(Ok(()))) if on_finish.is_none() => {
-                            if log_level <= LogLevel::INFO {
+                            if log_level <= tracing::Level::INFO {
                                 self.main_loop_handler.send(ThreadEvent::UIEvent(
                                     UIEvent::Notification {
                                         title: Some(

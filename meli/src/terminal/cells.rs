@@ -30,10 +30,10 @@ use std::{
 };
 
 use melib::{
-    log,
     text::{
         is_east_asian_ambiguous, is_emoji_presentation_base, search::KMP, wcwidth, TextPresentation,
     },
+    tracing,
 };
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -598,7 +598,7 @@ impl CellBuffer {
         debug_assert_eq!(self.generation(), dest.generation());
         debug_assert_eq!(grid_src.generation(), src.generation());
         if self.generation() != dest.generation() || grid_src.generation() != src.generation() {
-            log::debug!(
+            tracing::debug!(
                 "BUG: Invalid areas in copy_area:\n src: {:?}\n dest: {:?}",
                 src,
                 dest
@@ -654,7 +654,7 @@ impl CellBuffer {
 
         let (cols, rows) = grid_src.size();
         if src_x >= cols || src_y >= rows {
-            log::debug!("BUG: src area outside of grid_src in copy_area",);
+            tracing::debug!("BUG: src area outside of grid_src in copy_area",);
             return dest.upper_left();
         }
 
@@ -729,13 +729,13 @@ impl CellBuffer {
         debug_assert_eq!(area.generation(), self.generation());
         if area.generation() != self.generation() {
             let backtrace = std::backtrace::Backtrace::force_capture();
-            log::error!(
+            tracing::error!(
                 "BUG: write_string() received an area argument of generation {} but the \
                  CellBuffer has generation of {}.",
                 area.generation(),
                 self.generation()
             );
-            log::error!(
+            tracing::error!(
                 "BUG: Please report this.\nString was: {:?}.\nArea was: {:?}\nBacktrace:\n{}",
                 s,
                 og_area,
@@ -792,7 +792,7 @@ impl CellBuffer {
                     return (x - upper_left.0, y - upper_left.1);
                 }
             } else {
-                log::debug!(" Invalid area with string {} and area {:?}", s, area);
+                tracing::debug!(" Invalid area with string {} and area {:?}", s, area);
                 return (x - upper_left.0, y - upper_left.1);
             }
         }
@@ -813,7 +813,7 @@ impl CellBuffer {
                         if let Some(c) = self.get_mut($x, $y) {
                             ret = c;
                         } else {
-                            log::debug!(
+                            tracing::debug!(
                                 "Could not access cell (x, y) = ({}, {}) while writing char c = \
                                  {:?} of string {:?} in area {:?}.",
                                 $x,

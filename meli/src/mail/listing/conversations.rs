@@ -318,13 +318,13 @@ impl MailListingTrait for ConversationsListing {
                 continue 'items_for_loop;
             };
             if !envelopes.contains_key(&root_env_hash) {
-                //log::debug!("key = {}", root_env_hash);
-                //log::debug!(
+                //tracing::debug!("key = {}", root_env_hash);
+                //tracing::debug!(
                 //    "name = {} {}",
                 //    account[&self.cursor_pos.1].name(),
                 //    context.accounts[&self.cursor_pos.0].name()
                 //);
-                //log::debug!("{:#?}", context.accounts);
+                //tracing::debug!("{:#?}", context.accounts);
 
                 continue 'items_for_loop;
             }
@@ -615,7 +615,7 @@ impl ListingTrait for ConversationsListing {
             self.filtered_order
                 .insert(thread, self.filtered_selection.len().saturating_sub(1));
         }
-        log::debug!(
+        tracing::debug!(
             "conversations filter `{}`: {} results -> {} mapped (missing_env {missing_env}, \
              no_thread_node {no_thread_node}); mailbox {} has {} threads in rows",
             self.filter_term,
@@ -947,7 +947,7 @@ impl ConversationsListing {
         let Some(envelope) = envelopes.get(&env_hash) else {
             // Stale row: the envelope was removed, leave the previous entry
             // strings in place instead of fabricating a row.
-            log::error!(
+            tracing::error!(
                 "Could not update conversation row: envelope {env_hash} is no longer in the mailbox"
             );
             return;
@@ -1735,7 +1735,7 @@ impl Component for ConversationsListing {
                     Err(_) => { /* search was canceled */ }
                     Ok(None) => { /* something happened, perhaps a worker thread panicked */ }
                     Ok(Some(Ok(results))) => {
-                        log::debug!(
+                        tracing::debug!(
                             "search job finished: {} results for {:?}",
                             results.envelopes.len(),
                             filter_term
@@ -1748,7 +1748,7 @@ impl Component for ConversationsListing {
                             // was running: applying the old mailbox's
                             // hashes here would filter the new one with
                             // stale results. Drop them.
-                            log::debug!(
+                            tracing::debug!(
                                 "dropping stale search results for mailbox {mailbox_hash:?}; \
                                  the listing now shows mailbox {:?}",
                                 self.cursor_pos.1

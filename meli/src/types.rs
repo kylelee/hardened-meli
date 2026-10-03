@@ -40,7 +40,7 @@ use indexmap::IndexMap;
 use melib::{
     backends::{AccountHash, BackendEvent, MailboxHash},
     error::{Error, Result, ResultIntoError},
-    log, EnvelopeHash, RefreshEvent, RefreshEventKind, ThreadHash,
+    EnvelopeHash, RefreshEvent, RefreshEventKind, ThreadHash,
 };
 use nix::{errno::Errno, unistd::Pid};
 
@@ -179,7 +179,7 @@ impl ForkedProcess {
                 let w = child.kill();
                 match w {
                     Ok(()) => {
-                        log::debug!(
+                        tracing::debug!(
                             "child process {} {} ({}) was killed successfully",
                             id,
                             command
@@ -242,7 +242,7 @@ impl ForkedProcess {
                 ref mut child,
             } => match child.try_wait() {
                 Ok(Some(exit_status)) => {
-                    log::debug!(
+                    tracing::debug!(
                         "child process {} {} ({}) exit_status = {:?}",
                         id,
                         command
@@ -288,7 +288,7 @@ impl ForkedProcess {
                         )
                     }),
                     Ok(ws @ WaitStatus::Exited(_, _)) | Ok(ws @ WaitStatus::Signaled(_, _, _)) => {
-                        log::debug!(
+                        tracing::debug!(
                             "embedded child process {} {} ({}) wait status: {:?}",
                             id,
                             command

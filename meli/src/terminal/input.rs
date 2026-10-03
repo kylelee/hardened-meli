@@ -37,7 +37,6 @@ use crate::terminal::keys::Key;
 use crate::terminal::ratatui_bridge::{encode_key, BridgeEvent};
 use crossbeam::channel::{Receiver, RecvTimeoutError};
 use crossterm::event;
-use melib::log;
 use nix::{
     errno::Errno,
     poll::{poll, PollFd, PollFlags, PollTimeout},
@@ -161,7 +160,7 @@ pub(crate) fn restore_stdin_for_child_spawn() {
         .take()
     {
         if let Err(err) = nix::unistd::dup2_stdin(&saved.fd) {
-            log::trace!("get_events: could not restore stdin: {err}");
+            tracing::trace!("get_events: could not restore stdin: {err}");
         }
     }
 }
@@ -177,7 +176,7 @@ fn restore_stdin_if_current(generation: u64) {
     {
         if let Some(saved) = stash.take() {
             if let Err(err) = nix::unistd::dup2_stdin(&saved.fd) {
-                log::trace!("get_events: could not restore stdin: {err}");
+                tracing::trace!("get_events: could not restore stdin: {err}");
             }
         }
     }
@@ -251,7 +250,7 @@ fn drain_events(mut closure: impl FnMut((Key, Vec<u8>)), mut resize: impl FnMut(
                 Ok(ev) => match BridgeEvent::from(ev) {
                     BridgeEvent::Key(key) => {
                         let bytes = encode_key(&key);
-                        log::debug!("input delivered: {key:?} (bytes {bytes:?})");
+                        tracing::debug!("input delivered: {key:?} (bytes {bytes:?})");
                         closure((key, bytes));
                         // A delivered event can never answer
                         // `ShouldInject`; the decision is deliberately
@@ -262,7 +261,7 @@ fn drain_events(mut closure: impl FnMut((Key, Vec<u8>)), mut resize: impl FnMut(
                         return true;
                     }
                     BridgeEvent::Resize(cols, rows) => {
-                        log::debug!("input delivered: Resize {cols}x{rows}");
+                        tracing::debug!("input delivered: Resize {cols}x{rows}");
                         resize(cols, rows);
                         let _ = observe_watchdog(watchdog::Observation::EventDelivered {
                             now: Instant::now(),
@@ -272,13 +271,13 @@ fn drain_events(mut closure: impl FnMut((Key, Vec<u8>)), mut resize: impl FnMut(
                     BridgeEvent::Ignored => continue 'stdin_while,
                 },
                 Err(err) => {
-                    log::trace!("get_events: crossterm read error: {err}");
+                    tracing::trace!("get_events: crossterm read error: {err}");
                     return false;
                 }
             },
             Ok(false) => return false,
             Err(err) => {
-                log::trace!("get_events: crossterm poll error: {err}");
+                tracing::trace!("get_events: crossterm poll error: {err}");
                 return false;
             }
         }
@@ -344,7 +343,7 @@ fn degraded_get_events(
             }
             Err(Errno::EINTR) => {}
             Err(err) => {
-                log::trace!("get_events: poll(2) error: {err}");
+                tracing::trace!("get_events: poll(2) error: {err}");
                 break 'degraded_while;
             }
         }
@@ -361,7 +360,7 @@ fn degraded_get_events(
                 }
                 Ok(false) => {}
                 Err(err) => {
-                    log::trace!(
+                    tracing::trace!(
                         "get_events: crossterm poll error: {err}; \
                          stopping crossterm consultation in degraded loop"
                     );
@@ -457,7 +456,7 @@ impl FdSwap {
         let saved = match nix::unistd::dup(target_fd) {
             Ok(saved) => saved,
             Err(err) => {
-                log::trace!("get_events: dup for fd swap failed: {err}");
+                tracing::trace!("get_events: dup for fd swap failed: {err}");
                 return None;
             }
         };
@@ -476,7 +475,7 @@ impl FdSwap {
             FdSwapTarget::Owned(fd) => nix::unistd::dup2(replacement, fd),
         };
         if let Err(err) = swapped {
-            log::trace!("get_events: dup2 for fd swap failed: {err}");
+            tracing::trace!("get_events: dup2 for fd swap failed: {err}");
             // `saved` closes when it drops; the target number still
             // points at its original description.
             swap.saved = None;
@@ -519,7 +518,7 @@ impl FdSwap {
             FdSwapTarget::Owned(fd) => {
                 if let Some(saved) = self.saved.take() {
                     if let Err(err) = nix::unistd::dup2(&saved, fd) {
-                        log::trace!("get_events: fd swap restore failed: {err}");
+                        tracing::trace!("get_events: fd swap restore failed: {err}");
                     }
                 }
             }
@@ -544,7 +543,7 @@ fn open_nonblocking_tty() -> Option<OwnedFd> {
     {
         Ok(file) => Some(OwnedFd::from(file)),
         Err(err) => {
-            log::trace!("get_events: open /dev/tty for the stdin swap failed: {err}");
+            tracing::trace!("get_events: open /dev/tty for the stdin swap failed: {err}");
             None
         }
     }
@@ -675,7 +674,7 @@ pub fn get_events(
     let stdin_is_tty = match nix::unistd::isatty(stdin.as_fd()) {
         Ok(is_tty) => is_tty,
         Err(err) => {
-            log::trace!("get_events: isatty(stdin) error: {err}");
+            tracing::trace!("get_events: isatty(stdin) error: {err}");
             false
         }
     };
@@ -699,7 +698,7 @@ pub fn get_events(
                 // swap was meant to prevent, so the degraded loop below
                 // must not ask crossterm for events (`Never`).
                 halt_watchdog();
-                log::warn!(
+                tracing::warn!(
                     "input watchdog: stdin nonblocking tty swap failed; \
                      degrading to tick polling"
                 );
@@ -731,7 +730,7 @@ pub fn get_events(
                 // `degraded_get_events` keeps kill/resize/event
                 // delivery alive.
                 halt_watchdog();
-                log::warn!("input watchdog: {err}; degrading to tick polling");
+                tracing::warn!("input watchdog: {err}; degrading to tick polling");
                 return degraded_get_events(
                     closure,
                     resize,
@@ -766,7 +765,7 @@ pub fn get_events(
             Ok(_n_ready) => false,
             Err(Errno::EINTR) => true,
             Err(err) => {
-                log::trace!("get_events: poll(2) error: {err}");
+                tracing::trace!("get_events: poll(2) error: {err}");
                 break 'poll_while;
             }
         };
@@ -790,7 +789,7 @@ pub fn get_events(
                 // re-wake `poll(2)` immediately, so the tty leaves the
                 // poll set for the rest of the process.
                 halt_watchdog();
-                log::warn!("input watchdog: tty POLLHUP/POLLERR; degrading to tick polling");
+                tracing::warn!("input watchdog: tty POLLHUP/POLLERR; degrading to tick polling");
                 return degraded_get_events(
                     closure,
                     resize,
@@ -818,7 +817,7 @@ pub fn get_events(
                 {
                     // meli saw tty bytes; crossterm consumed them and
                     // answered with no event: swallow evidence.
-                    log::debug!(
+                    tracing::debug!(
                         "input watchdog: tty bytes seen but crossterm delivered no event \
                          (swallow evidence)"
                     );
@@ -828,7 +827,7 @@ pub fn get_events(
                 }
             }
             Err(err) => {
-                log::trace!("get_events: crossterm poll error: {err}");
+                tracing::trace!("get_events: crossterm poll error: {err}");
             }
         }
         // Periodic decision point, timeouts included.
@@ -838,7 +837,9 @@ pub fn get_events(
             }),
             watchdog::Decision::ShouldInject
         ) {
-            log::warn!("input watchdog: injecting DA1 query (ESC[c) after stalled input parser");
+            tracing::warn!(
+                "input watchdog: injecting DA1 query (ESC[c) after stalled input parser"
+            );
             // fd 0 is the swapped-in `O_NONBLOCK` description, so the
             // 3-byte query can in theory report `EAGAIN` even though a
             // tty should always take it; retry once before giving up so
@@ -847,16 +848,16 @@ pub fn get_events(
             match nix::unistd::write(tty_fd, b"\x1b[c") {
                 Err(Errno::EAGAIN) => {
                     if let Err(err) = nix::unistd::write(tty_fd, b"\x1b[c") {
-                        log::warn!("input watchdog: DA1 query write failed: {err}");
+                        tracing::warn!("input watchdog: DA1 query write failed: {err}");
                     }
                 }
                 Err(err) => {
-                    log::warn!("input watchdog: DA1 query write failed: {err}");
+                    tracing::warn!("input watchdog: DA1 query write failed: {err}");
                 }
                 Ok(_) => {}
             }
             if watchdog_disabled() {
-                log::error!(
+                tracing::error!(
                     "input watchdog: {} DA1 injections without recovery; disabling for this process",
                     watchdog::MAX_FAILED_INJECTIONS
                 );

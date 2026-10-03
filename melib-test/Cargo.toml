@@ -33,7 +33,6 @@ imap-codec = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", 
 imap-types = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
 indexmap = { workspace = true }
 isahc = { version = "^1.7.2", default-features = false, features = ["http2", "json", "text-decoding"], optional = true }
-log = { version = "0.4" }
 melib = { path = "../melib" }
 nix = { workspace = true }
 regex = { workspace = true }
@@ -46,4 +45,6 @@ socket2 = { version = "0.6", features = [] }
 tempfile = { workspace = true }
 tokio-test = { version = "0.4" }
 toml = { workspace = true }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std"] }
 url = { version = "2.5", optional = true }

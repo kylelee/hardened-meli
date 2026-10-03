@@ -108,7 +108,7 @@ impl Contacts {
                     }
                 }
                 Err(err) => {
-                    log::warn!(
+                    tracing::warn!(
                         "Could not load mutt alias file {:?}: {}",
                         mutt_alias_file,
                         err
@@ -125,9 +125,9 @@ impl Contacts {
                     }
                 }
                 Err(err) => {
-                    log::warn!("Could not load vcards from {:?}: {}", vcard_path, err);
+                    tracing::warn!("Could not load vcards from {:?}: {}", vcard_path, err);
                     if expanded_path.display().to_string() != vcard_path {
-                        log::warn!(
+                        tracing::warn!(
                             "Note: vcard_folder was expanded from {} to {}",
                             vcard_path,
                             expanded_path.display()
@@ -159,7 +159,7 @@ impl Contacts {
                                         }
                                     }
                                     Err(err) => {
-                                        log::warn!(
+                                        tracing::warn!(
                                             "Unable to parse notmuch contact result into cards: \
                                              {} {}",
                                             notmuch_address_out,
@@ -169,7 +169,7 @@ impl Contacts {
                                 }
                             }
                             Err(err) => {
-                                log::warn!(
+                                tracing::warn!(
                                     "Unable to read from notmuch address query: {} {}",
                                     notmuch_addressbook_query,
                                     err
@@ -177,7 +177,7 @@ impl Contacts {
                             }
                         }
                     } else {
-                        log::warn!(
+                        tracing::warn!(
                             "Error ({}) running notmuch address: {} {}",
                             notmuch_addresses.status,
                             String::from_utf8_lossy(&notmuch_addresses.stdout),
@@ -185,7 +185,7 @@ impl Contacts {
                         );
                     }
                 }
-                Err(e) => log::warn!("Unable to run notmuch address command: {}", e),
+                Err(e) => tracing::warn!("Unable to run notmuch address command: {}", e),
             }
         }
         ret

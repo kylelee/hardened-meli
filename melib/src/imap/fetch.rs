@@ -394,7 +394,7 @@ impl FetchState {
                                 continue;
                             }
                             Err(err) => {
-                                log::error!(
+                                tracing::error!(
                                     "{} IMAP cache error: could not fetch cache. Reason: {}",
                                     self.uid_store.account_name,
                                     err
@@ -412,7 +412,7 @@ impl FetchState {
                                     Ok(None) => {}
                                     _ => {
                                         if let Err(err) = self.uid_store.reset() {
-                                            log::error!(
+                                            tracing::error!(
                                                 "{} IMAP cache error: could not reset cache. \
                                                  Reason: {}",
                                                 self.uid_store.account_name,
@@ -494,7 +494,7 @@ impl FetchState {
                             continue;
                         }
                         Err(err) => {
-                            log::error!(
+                            tracing::error!(
                                 "{} IMAP cache error: could not fetch cache. Reason: {}",
                                 self.uid_store.account_name,
                                 err
@@ -505,7 +505,7 @@ impl FetchState {
                             // incremental resync short-circuit to an empty
                             // listing.
                             if let Err(err) = self.uid_store.reset() {
-                                log::error!(
+                                tracing::error!(
                                     "{} IMAP cache error: could not reset cache. Reason: {}",
                                     self.uid_store.account_name,
                                     err
@@ -755,7 +755,7 @@ impl FetchState {
                                         || err.kind.is_oserror()) =>
                             {
                                 fetch_attempt += 1;
-                                log::trace!(
+                                tracing::trace!(
                                     "FreshFetch: connection lost mid-batch ({}); reconnecting and \
                                      retrying the batch",
                                     err

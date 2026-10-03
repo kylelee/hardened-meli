@@ -150,7 +150,7 @@ impl JmapConnection {
                     );
                     jmap_session_resource_url = to_well_known(&self.server_conf.server_url);
                     if let Ok(s) = self.get_async(&jmap_session_resource_url).await {
-                        log::error!(
+                        tracing::error!(
                             "Account {} server URL should start with `https`. Please correct your \
                              configuration value. Its current value is `{}`.",
                             self.store.account_name,
@@ -376,7 +376,7 @@ impl JmapConnection {
                                     )
                                 });
                         let id: Id<Identity> = Id::new_random();
-                        log::trace!(
+                        tracing::trace!(
                             "identity id = {}, {:#?}",
                             id,
                             Identity {
@@ -511,7 +511,7 @@ impl JmapConnection {
                 .text()
                 .await?;
             if self.server_conf.trace {
-                log::trace!("email_since_state(): response {res_text:?}");
+                tracing::trace!("email_since_state(): response {res_text:?}");
             }
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -619,15 +619,15 @@ impl JmapConnection {
 
     pub async fn send_request(&self, request: String) -> Result<String> {
         if self.server_conf.trace {
-            log::trace!("send_request(): request {:?}", request);
+            tracing::trace!("send_request(): request {:?}", request);
         }
         let res_text = self.post_async(None, request).await?.text().await?;
         if self.server_conf.trace {
-            log::trace!("send_request(): response {:?}", res_text);
+            tracing::trace!("send_request(): response {:?}", res_text);
         }
         let _: MethodResponse = match deserialize_from_str(&res_text) {
             Err(err) => {
-                log::error!("Could not deserialize response {res_text:?}: {err}");
+                tracing::error!("Could not deserialize response {res_text:?}: {err}");
                 _ = self.store.online_status.set(None, Err(err.clone())).await;
                 return Err(err);
             }
@@ -698,7 +698,7 @@ impl JmapConnection {
         let mut resp = loop {
             let resp = if self.server_conf.trace {
                 let res = self.client.get_async(request_url.as_str()).await;
-                log::trace!("get_async(): url `{}` response {:?}", request_url, res);
+                tracing::trace!("get_async(): url `{}` response {:?}", request_url, res);
                 res?
             } else {
                 self.client.get_async(request_url.as_str()).await?
@@ -757,7 +757,7 @@ impl JmapConnection {
     ) -> Result<isahc::Response<isahc::AsyncBody>> {
         let request: Vec<u8> = request.into();
         if self.server_conf.trace {
-            log::trace!(
+            tracing::trace!(
                 "post_async(): request {:?}",
                 String::from_utf8_lossy(&request)
             );
@@ -780,7 +780,7 @@ impl JmapConnection {
                     .await?
             };
             if self.server_conf.trace {
-                log::trace!("post_async(): response {resp:?}",);
+                tracing::trace!("post_async(): response {resp:?}",);
             }
             let next_url = match self.redirect_target(&original_url, &request_url, &resp) {
                 Ok(None) => break resp,

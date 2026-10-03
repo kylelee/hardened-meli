@@ -339,7 +339,7 @@ impl Connection {
     pub fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
         if self.is_trace_enabled() {
             let id = self.id();
-            log::trace!(
+            tracing::trace!(
                 "{}{}{}{:?} set_nonblocking({:?})",
                 if id.is_some() { "[" } else { "" },
                 if let Some(id) = id.as_ref() { id } else { "" },
@@ -372,7 +372,7 @@ impl Connection {
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
         if self.is_trace_enabled() {
             let id = self.id();
-            log::trace!(
+            tracing::trace!(
                 "{}{}{}{:?} set_read_timeout({:?})",
                 if id.is_some() { "[" } else { "" },
                 if let Some(id) = id.as_ref() { id } else { "" },
@@ -393,7 +393,7 @@ impl Connection {
     pub fn set_write_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
         if self.is_trace_enabled() {
             let id = self.id();
-            log::trace!(
+            tracing::trace!(
                 "{}{}{}{:?} set_write_timeout({:?})",
                 if id.is_some() { "[" } else { "" },
                 if let Some(id) = id.as_ref() { id } else { "" },
@@ -413,7 +413,7 @@ impl Connection {
 
     pub fn keepalive(&self) -> std::io::Result<Option<Duration>> {
         if self.is_trace_enabled() {
-            log::trace!("{:?} keepalive()", self);
+            tracing::trace!("{:?} keepalive()", self);
         }
         if matches!(self, Fd { .. }) {
             return Ok(None);
@@ -431,7 +431,7 @@ impl Connection {
     pub fn set_keepalive(&self, keepalive: Option<Duration>) -> std::io::Result<()> {
         if self.is_trace_enabled() {
             let id = self.id();
-            log::trace!(
+            tracing::trace!(
                 "{}{}{}{:?} set_keepalive({:?})",
                 if id.is_some() { "[" } else { "" },
                 if let Some(id) = id.as_ref() { id } else { "" },
@@ -577,7 +577,7 @@ impl std::io::Read for Connection {
             match &res {
                 Ok(len) => {
                     let slice = &buf[..*len];
-                    log::trace!(
+                    tracing::trace!(
                         "{}{}{}{:?} read {:?} bytes:{}",
                         if id.is_some() { "[" } else { "" },
                         if let Some(id) = id.as_ref() { id } else { "" },
@@ -592,7 +592,7 @@ impl std::io::Read for Connection {
                 }
                 Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {}
                 Err(err) => {
-                    log::trace!(
+                    tracing::trace!(
                         "{}{}{}{:?} could not read {:?}",
                         if id.is_some() { "[" } else { "" },
                         if let Some(id) = id.as_ref() { id } else { "" },
@@ -753,7 +753,7 @@ impl std::io::Write for Connection {
         if self.is_trace_enabled() {
             let id = self.id();
             let redacted = redact_sasl_secrets(buf);
-            log::trace!(
+            tracing::trace!(
                 "{}{}{}{:?} writing {} bytes:{}",
                 if id.is_some() { "[" } else { "" },
                 if let Some(id) = id.as_ref() { id } else { "" },

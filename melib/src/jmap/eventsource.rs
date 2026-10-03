@@ -276,7 +276,7 @@ impl EventSourceConnection {
                             .unwrap()
                             .starts_with("text/event-stream")
                         {
-                            log::error!(
+                            tracing::error!(
                                 "got content-type: {}",
                                 String::from_utf8_lossy(content_type_hv.as_ref())
                             );
@@ -303,13 +303,13 @@ impl EventSourceConnection {
                                     .ok()
                                     .and_then(|s| parse_event_line(s, &mut event))
                             {
-                                log::trace!(
+                                tracing::trace!(
                                     "read line {}",
                                     String::from_utf8_lossy(&line[start..cursor])
                                 );
                                 match parse_result {
                                     ParseResult::Comment(comment) => {
-                                        log::trace!("comment: {comment:?}");
+                                        tracing::trace!("comment: {comment:?}");
                                         start += len;
                                     }
                                     ParseResult::Next => {

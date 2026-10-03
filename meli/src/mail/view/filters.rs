@@ -33,9 +33,9 @@ use melib::{
     attachment_types::{ContentType, MultipartType, Text},
     email::headers::HeaderName,
     error::*,
-    log,
     parser::BytesExt,
     text::Truncate,
+    tracing,
     utils::xdg::query_default_app,
     Attachment, AttachmentBuilder, Result,
 };
@@ -982,7 +982,7 @@ impl ViewFilter {
                         inner: String::new(),
                     },
                 ) {
-                    log::trace!("job_process_event: inside if let ");
+                    tracing::trace!("job_process_event: inside if let ");
                     let job_result = job_handle.chan.try_recv();
                     self.process_job_result(job_result, &view_settings, context);
                 }
@@ -1029,7 +1029,7 @@ impl ViewFilter {
                     notice,
                 } = output;
                 self.event_handler = None;
-                log::trace!("job_process_event: OK ");
+                tracing::trace!("job_process_event: OK ");
                 match Self::new_attachment(&attachment, view_settings, context) {
                     Ok(mut new_self) => {
                         if self.content_type.is_text_html() {

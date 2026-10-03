@@ -163,7 +163,7 @@ impl MailBackend for MaildirType {
                         local_r.push(env);
                     }
                     Err(err) => {
-                        log::debug!(
+                        tracing::debug!(
                             "path: {} couldn't be parsed, {err}",
                             file.as_path().display()
                         );
@@ -180,7 +180,7 @@ impl MailBackend for MaildirType {
         Ok(Box::pin(try_fn_stream(|emitter| async move {
             for chunk in files.chunks(chunk_size) {
                 if let Some(res) = fetch(chunk.to_vec(), &mut cache).await.map_err(|err| {
-                    log::debug!("fetch err {err:?}");
+                    tracing::debug!("fetch err {err:?}");
                     err
                 })? {
                     emitter.emit(res).await;
@@ -205,7 +205,7 @@ impl MailBackend for MaildirType {
 
         Ok(Box::pin(async move {
             let mut thunk = move |sender: &BackendEventConsumer| {
-                log::trace!("refreshing {mailbox_hash:?}");
+                tracing::trace!("refreshing {mailbox_hash:?}");
                 let files = Self::list_mail_in_maildir_fs(&config, path.clone(), false)?;
                 let mut current_hashes = {
                     let mut map = cache.hash_indexes.lock().unwrap();
@@ -228,7 +228,7 @@ impl MailBackend for MaildirType {
                             }),
                         );
                     } else {
-                        log::debug!(
+                        tracing::debug!(
                             "hash {env_hash}, path: {} couldn't be parsed",
                             file.as_path().display()
                         );
@@ -466,7 +466,7 @@ impl MailBackend for MaildirType {
                 };
                 let dest_path = path_src.place_in_dir(&dest_dir, &config)?;
                 if move_ {
-                    log::trace!("renaming {path_src:?} to {dest_path:?}");
+                    tracing::trace!("renaming {path_src:?} to {dest_path:?}");
                     std::fs::rename(&path_src, &dest_path)
                         .chain_err_summary(|| {
                             format!(
@@ -486,9 +486,9 @@ impl MailBackend for MaildirType {
                             }),
                         );
                     }
-                    log::trace!("success in rename");
+                    tracing::trace!("success in rename");
                 } else {
-                    log::trace!("copying {path_src:?} to {dest_path:?}");
+                    tracing::trace!("copying {path_src:?} to {dest_path:?}");
                     std::fs::copy(&path_src, &dest_path)
                         .chain_err_summary(|| {
                             format!(
@@ -498,7 +498,7 @@ impl MailBackend for MaildirType {
                             )
                         })
                         .chain_err_related_path(&path_src)?;
-                    log::trace!("success in copy");
+                    tracing::trace!("success in copy");
                 }
                 let (m, env) = cache.create(&dest_path)?;
                 debug_assert_eq!(m, destination_mailbox_hash);
@@ -558,7 +558,7 @@ impl MailBackend for MaildirType {
             {
                 while let Some(op) = undo_ops.pop_back() {
                     if let Err(err) = op() {
-                        log::error!("{err}");
+                        tracing::error!("{err}");
                     }
                 }
                 return Ok(Box::pin(async move { Err(err) }));
@@ -571,7 +571,7 @@ impl MailBackend for MaildirType {
             Err(err) => {
                 while let Some(op) = undo_ops.pop_back() {
                     if let Err(err) = op() {
-                        log::error!("{err}");
+                        tracing::error!("{err}");
                     }
                 }
                 return Ok(Box::pin(async move { Err(err) }));
@@ -686,7 +686,7 @@ impl MaildirType {
                         let (Some(path_str), Some(file_name_str)) =
                             (path.to_str(), path.file_name().and_then(|f| f.to_str()))
                         else {
-                            log::warn!(
+                            tracing::warn!(
                                 "Skipping maildir directory with non-UTF-8 name: {:?}",
                                 path
                             );
@@ -909,7 +909,7 @@ impl MaildirType {
             }
             path.push(filename);
         }
-        log::trace!("saving at {}", path.display());
+        tracing::trace!("saving at {}", path.display());
         let file = fs::File::create(&path)
             .chain_err_summary(|| format!("Could not create {}", path.display()))
             .chain_err_related_path(&path)?;

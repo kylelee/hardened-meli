@@ -813,7 +813,7 @@ impl NntpType {
             'batch: while let Some(m) = mailboxes.pop() {
                 // first check if the group name itself is too big for `LIST ACTIVE`.
                 if "LIST ACTIVE ".len() + m.len() + "\r\n".len() >= 512 {
-                    log::warn!(
+                    tracing::warn!(
                         "{}: Newsgroup named {m} has a name that exceeds RFC 3977 limits of \
                          maximum command lines (512 octets) with LIST ACTIVE. Skipping it.",
                         conn.uid_store.account_name

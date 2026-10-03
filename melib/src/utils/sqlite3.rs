@@ -30,7 +30,7 @@ use std::{
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput};
 pub use rusqlite::{self, config::DbConfig, params, Connection};
 
-use crate::{error::*, log, Envelope};
+use crate::{error::*, tracing, Envelope};
 
 /// A description for creating, opening and handling application databases.
 #[derive(Clone, Debug)]
@@ -137,7 +137,7 @@ impl DatabaseDescription {
         let db_path = self.db_path()?;
         let set_mode = !db_path.exists();
         if set_mode {
-            log::info!("Creating {} database in {}", self.name, db_path.display());
+            tracing::info!("Creating {} database in {}", self.name, db_path.display());
         }
         loop {
             let mut inner_fn = || {
@@ -165,7 +165,7 @@ impl DatabaseDescription {
                 let version: i32 =
                     conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
                 if version != 0_i32 && version as u32 != self.version {
-                    log::info!(
+                    tracing::info!(
                         "Database version mismatch, is {} but expected {}. Attempting to recreate \
                          database.",
                         version,
@@ -213,13 +213,13 @@ impl DatabaseDescription {
         if !db_path.exists() {
             return Ok(());
         }
-        log::info!("Resetting {} database in {}", self.name, db_path.display());
+        tracing::info!("Resetting {} database in {}", self.name, db_path.display());
         std::fs::remove_file(&db_path).map_err(|err| {
             Error::new(format!("{}: could not remove file", db_path.display()))
                 .set_kind(ErrorKind::from(err.kind()))
                 .set_source(Some(Arc::new(err)))
         })?;
-        log::info!(
+        tracing::info!(
             "{} {} database reset successful",
             self.name,
             db_path.display()

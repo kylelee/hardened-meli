@@ -192,7 +192,7 @@ impl HappyEyeballs {
             };
             self.attempts_in_progress = self.attempts_in_progress.saturating_sub(1);
             if let Err(err) = self.poller.delete(&sock) {
-                log::warn!("poll_once(): could not delete socket from poller: {err}");
+                tracing::warn!("poll_once(): could not delete socket from poller: {err}");
             }
             match nix::sys::socket::getsockopt(&sock, nix::sys::socket::sockopt::SocketError) {
                 Err(err) => self.set_error(err.into()),

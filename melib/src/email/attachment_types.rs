@@ -155,7 +155,7 @@ impl<'a> From<&'a [u8]> for Charset {
             b if b.eq_ignore_ascii_case(b"koi8-u") => Self::KOI8U,
             b if b.eq_ignore_ascii_case(b"ks_c_5601-1987") => Self::KSX1001,
             _ => {
-                log::debug!("unknown tag is {:?}", str::from_utf8(b));
+                tracing::debug!("unknown tag is {:?}", str::from_utf8(b));
                 Self::Ascii
             }
         }

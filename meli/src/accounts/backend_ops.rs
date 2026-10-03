@@ -77,7 +77,7 @@ impl Account {
                 JobRequest::Generic {
                     name: format!("Update envelope {msg_id} in sqlite3 cache").into(),
                     handle,
-                    log_level: LogLevel::TRACE,
+                    log_level: tracing::Level::TRACE,
                     on_finish: None,
                 },
             );
@@ -100,7 +100,7 @@ impl Account {
                 JobRequest::Generic {
                     name: "Update envelope in sqlite3 cache".into(),
                     handle,
-                    log_level: LogLevel::TRACE,
+                    log_level: tracing::Level::TRACE,
                     on_finish: None,
                 },
             );

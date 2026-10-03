@@ -777,7 +777,7 @@ fn test_imap_envelope_address() {
 }
 
 /// Module providing a global log-capture facility for asserting on
-/// `log::error!` output in tests.
+/// `tracing::error!` output in tests.
 ///
 /// The buffer is append-only: tests snapshot a mark before acting and read
 /// only the entries appended since, so parallel tests can never consume
@@ -786,31 +786,68 @@ fn test_imap_envelope_address() {
 mod sanitize_log {
     use std::sync::{Mutex, Once};
 
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Level, Metadata, Subscriber};
+
     static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static INIT: Once = Once::new();
 
-    struct CaptureLogger;
+    /// [`tracing::field::Visit`] implementation collecting the implicit
+    /// `message` field of an event into a `String` (structured fields are
+    /// dropped).
+    struct MessageVisitor<'a>(&'a mut String);
 
-    impl log::Log for CaptureLogger {
-        fn enabled(&self, metadata: &log::Metadata) -> bool {
-            metadata.level() <= log::Level::Error
+    impl Visit for MessageVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                use std::fmt::Write;
+
+                let _ = write!(self.0, "{value:?}");
+            }
+        }
+    }
+
+    struct CaptureSubscriber;
+
+    impl Subscriber for CaptureSubscriber {
+        fn register_callsite(
+            &self,
+            _metadata: &'static Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
         }
 
-        fn log(&self, record: &log::Record) {
-            if self.enabled(record.metadata()) {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() >= Level::ERROR
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            // Must be non-zero (tracing-core asserts `Id > 0`).
+            tracing::span::Id::from_u64(0xDEAD)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            if self.enabled(event.metadata()) {
+                let mut message = String::new();
+                event.record(&mut MessageVisitor(&mut message));
                 if let Ok(mut captured) = CAPTURED.lock() {
-                    captured.push(format!("{}", record.args()));
+                    captured.push(message);
                 }
             }
         }
 
-        fn flush(&self) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
     }
 
     pub(super) fn init() {
         INIT.call_once(|| {
-            let _ = log::set_boxed_logger(Box::new(CaptureLogger));
-            log::set_max_level(log::LevelFilter::Error);
+            let _ = tracing::subscriber::set_global_default(CaptureSubscriber);
         });
     }
 

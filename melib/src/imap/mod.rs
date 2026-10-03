@@ -497,7 +497,7 @@ impl MailBackend for ImapType {
             };
             loop {
                 let res = state.chunk().await.inspect_err(|err| {
-                    log::trace!(
+                    tracing::trace!(
                         "{} fetch chunk at stage {:?} err {:?}",
                         account_name,
                         state.stage,
@@ -539,7 +539,7 @@ impl MailBackend for ImapType {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    log::error!(
+                    tracing::error!(
                         "{}: could not load cached mailbox list, falling back to network \
                          LIST/LSUB: {err}",
                         uid_store.account_name
@@ -638,19 +638,19 @@ impl MailBackend for ImapType {
                         } else {
                             return Err(err);
                         }
-                        log::trace!("{} Watch failure: {err}", uid_store.account_name);
+                        tracing::trace!("{} Watch failure: {err}", uid_store.account_name);
                         match timeout(uid_store.timeout, main_conn_lck.connect())
                             .await
                             .and_then(|res| res)
                         {
                             Err(err2) => {
-                                log::trace!(
+                                tracing::trace!(
                                     "{} Watch reconnect attempt failed: {err2}",
                                     uid_store.account_name
                                 );
                             }
                             Ok(()) => {
-                                log::trace!(
+                                tracing::trace!(
                                     "{} Watch reconnect attempt successful",
                                     uid_store.account_name
                                 );
@@ -672,7 +672,7 @@ impl MailBackend for ImapType {
                     }
                 }
             }
-            log::trace!("{} watch future returning", uid_store.account_name);
+            tracing::trace!("{} watch future returning", uid_store.account_name);
             Ok(())
         })))
     }
@@ -852,7 +852,7 @@ impl MailBackend for ImapType {
                                     // Ignore
                                 }
                                 FlagOp::Set(_) => {
-                                    log::error!(
+                                    tracing::error!(
                                         "Application error: more than one flag bit set in \
                                          set_flags: {:?}",
                                         flags
@@ -926,7 +926,7 @@ impl MailBackend for ImapType {
                                     // Ignore
                                 }
                                 FlagOp::UnSet(_) => {
-                                    log::error!(
+                                    tracing::error!(
                                         "Application error: more than one flag bit set in \
                                          set_flags: {:?}",
                                         flags
@@ -1107,7 +1107,7 @@ impl MailBackend for ImapType {
                 }
                 for root_mailbox in mailboxes.values().filter(|f| f.parent.is_none()) {
                     if path.starts_with(&root_mailbox.name) {
-                        log::trace!(
+                        tracing::trace!(
                             "{} path starts with {root_mailbox:?}",
                             uid_store.account_name
                         );
@@ -1752,7 +1752,7 @@ impl ImapType {
         mailboxes: &mut HashMap<MailboxHash, ImapMailbox>,
     ) -> Result<()> {
         for m in mailboxes.values_mut() {
-            log::trace!(
+            tracing::trace!(
                 "mailbox: {} is_subscribed: {}",
                 m.path(),
                 (uid_store.is_subscribed)(m.path())
@@ -1805,7 +1805,7 @@ impl ImapType {
             mailboxes.clone()
         };
         if let Err(err) = uid_store.save_mailbox_list(&mailboxes) {
-            log::warn!(
+            tracing::warn!(
                 "{}: could not save mailbox list to offline cache: {err}",
                 uid_store.account_name
             );

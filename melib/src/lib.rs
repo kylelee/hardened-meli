@@ -101,13 +101,7 @@
 
 pub mod text;
 
-pub use utils::{
-    datetime::UnixTimestamp,
-    logging::{LogLevel, Logger},
-    SortField, SortOrder,
-};
-#[deprecated(since = "0.8.14", note = "StderrLogger was renamed to just Logger")]
-pub use Logger as StderrLogger;
+pub use utils::{datetime::UnixTimestamp, SortField, SortOrder};
 
 pub mod contacts;
 pub use contacts::*;
@@ -147,7 +141,7 @@ pub mod smtp;
 
 #[macro_use]
 extern crate serde_derive;
-pub extern crate log;
+pub extern crate tracing;
 /* parser */
 extern crate data_encoding;
 pub extern crate nom;

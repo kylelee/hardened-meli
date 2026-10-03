@@ -72,7 +72,7 @@ pub(crate) struct DrawSpan {
 #[cfg(debug_assertions)]
 impl DrawSpan {
     pub(crate) fn enter(name: &str) -> Self {
-        log::debug!("draw: {name} begin");
+        tracing::debug!("draw: {name} begin");
         Self {
             name: name.to_string(),
             start: std::time::Instant::now(),
@@ -83,7 +83,7 @@ impl DrawSpan {
 #[cfg(debug_assertions)]
 impl Drop for DrawSpan {
     fn drop(&mut self) {
-        log::debug!("draw: {} done in {:?}", self.name, self.start.elapsed());
+        tracing::debug!("draw: {} done in {:?}", self.name, self.start.elapsed());
     }
 }
 use crate::{
@@ -131,7 +131,7 @@ impl InputHandler {
                             tx.send(ThreadEvent::Input(i)).unwrap();
                         },
                         |cols, rows| {
-                            log::trace!("terminal resized to {cols}x{rows}");
+                            tracing::trace!("terminal resized to {cols}x{rows}");
                             resize_tx
                                 .send(ThreadEvent::UIEvent(UIEvent::Resize))
                                 .unwrap();
@@ -142,7 +142,7 @@ impl InputHandler {
                     )
                 });
                 if std::panic::catch_unwind(run).is_err() {
-                    log::error!("input thread panicked; restarting it");
+                    tracing::error!("input thread panicked; restarting it");
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     continue;
                 }
@@ -162,7 +162,7 @@ impl InputHandler {
         match self.control.upgrade() {
             Some(_) => {}
             None => {
-                log::trace!("restarting input_thread");
+                tracing::trace!("restarting input_thread");
                 self.restore();
             }
         }
@@ -179,7 +179,7 @@ impl MainLoopHandler {
     #[inline]
     pub fn send(&self, event: ThreadEvent) {
         if let Err(err) = self.sender.send(event) {
-            log::error!("Could not send event to main loop: {}", err);
+            tracing::error!("Could not send event to main loop: {}", err);
         }
     }
 }
@@ -238,9 +238,9 @@ impl Context {
         let was_online = accounts[account_pos].is_online.is_true();
         let ret = accounts[account_pos].is_online(false);
         if ret.is_ok() && !was_online {
-            log::trace!("inserting mailbox hashes:");
+            tracing::trace!("inserting mailbox hashes:");
             for mailbox_node in accounts[account_pos].list_mailboxes() {
-                log::trace!(
+                tracing::trace!(
                     "hash & mailbox: {:?} {}",
                     mailbox_node.hash,
                     accounts[account_pos][&mailbox_node.hash].name()
@@ -444,10 +444,10 @@ pub struct State {
 impl Drop for State {
     fn drop(&mut self) {
         if let Some(Err(err)) = self.kill_main_child() {
-            log::debug!("Failed to kill subprocess: {}", err);
+            tracing::debug!("Failed to kill subprocess: {}", err);
         }
         if let (Some(false), Some(child)) = (self.try_wait_on_main_child(), self.child.as_ref()) {
-            log::error!("Main subprocess {:?} is still running on exit!", child);
+            tracing::error!("Main subprocess {:?} is still running on exit!", child);
         }
         let mut other_children = std::mem::take(&mut self.context.children);
         for (id, child, err) in other_children
@@ -461,7 +461,7 @@ impl Drop for State {
                 }
             })
         {
-            log::error!("Failed to kill subprocess {} ({:?}): {}", id, child, err);
+            tracing::error!("Failed to kill subprocess {} ({:?}): {}", id, child, err);
         }
         for (id, child, err) in other_children
             .into_iter()
@@ -475,7 +475,7 @@ impl Drop for State {
                 }
             })
         {
-            log::error!(
+            tracing::error!(
                 "Failed to wait for subprocess {} ({:?}): {}",
                 id,
                 child,
@@ -948,7 +948,7 @@ impl State {
             return;
         }
 
-        log::debug!("redraw: begin");
+        tracing::debug!("redraw: begin");
         #[cfg(debug_assertions)]
         let __redraw_span = DrawSpan::enter("redraw total");
 
@@ -1251,7 +1251,7 @@ impl State {
                         name: "Message index rebuild".into(),
                         handle,
                         on_finish: None,
-                        log_level: LogLevel::INFO,
+                        log_level: tracing::Level::INFO,
                     },
                 );
                 self.context.replies.push_back(UIEvent::Notification {
@@ -1502,7 +1502,14 @@ impl State {
                     if content.is_some() { ": " } else { "" },
                     content.as_ref().map(|s| s.as_str()).unwrap_or("")
                 );
-                log::log!(level.into(), "{msg}");
+                // `tracing::event!` needs a constant level; dispatch per arm.
+                match level {
+                    tracing::Level::ERROR => tracing::error!("{msg}"),
+                    tracing::Level::WARN => tracing::warn!("{msg}"),
+                    tracing::Level::INFO => tracing::info!("{msg}"),
+                    tracing::Level::DEBUG => tracing::debug!("{msg}"),
+                    tracing::Level::TRACE => tracing::trace!("{msg}"),
+                }
                 self.show_display_message(msg);
                 return;
             }
@@ -1617,7 +1624,7 @@ impl State {
                     result_cb,
                     temporary_files,
                 } = *process_request;
-                log::trace!(
+                tracing::trace!(
                     "Executing: {:?} {:?}",
                     command.get_program(),
                     command.get_args().collect::<Vec<_>>()
@@ -1745,7 +1752,7 @@ impl State {
                     self.component_tree.insert(id, v);
                 }
                 Some(parent) if !self.context.realized.contains_key(&parent) => {
-                    log::debug!(
+                    tracing::debug!(
                         "BUG: component_realize new_id = {:?} parent = {:?} but component_tree \
                          does not include parent, skipping.",
                         id,
@@ -1790,7 +1797,7 @@ impl State {
             Ok(false) => Some(false),
             ws @ Ok(true) | ws @ Err(_) => {
                 if let Err(err) = ws {
-                    log::error!("{}", err);
+                    tracing::error!("{}", err);
                 }
                 if matches!(child, ForkedProcess::Embedded { .. }) {
                     // The check on whether the embedded process is alive is done on input, so
@@ -1817,14 +1824,14 @@ impl State {
                         }
                         ws @ Ok(true) | ws @ Err(_) => {
                             if let Err(err) = ws {
-                                log::error!(
+                                tracing::error!(
                                     "Child {}:{:?} could not be waited for: {}",
                                     id,
                                     children[i],
                                     err
                                 );
                             }
-                            log::trace!("Child {}:{:?} has exited.", id, children[i]);
+                            tracing::trace!("Child {}:{:?} has exited.", id, children[i]);
                             children.remove(i);
                         }
                     }

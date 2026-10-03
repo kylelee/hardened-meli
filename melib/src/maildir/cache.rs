@@ -224,11 +224,11 @@ impl Cache {
 
         let new_name: PathBuf = path.set_flags(new_flags, config)?;
         debug_assert_eq!(new_flags, new_name.flags());
-        log::trace!("renaming {path:?} to {new_name:?}");
+        tracing::trace!("renaming {path:?} to {new_name:?}");
         std::fs::rename(&path, &new_name).chain_err_summary(|| {
             format!("Could not rename {path:?} to {new_name:?} when setting maildir flags")
         })?;
-        log::trace!("success in rename");
+        tracing::trace!("success in rename");
 
         let mut hash_indexes_lck = self.hash_indexes.lock().unwrap();
         let mut mi = self.mailbox_index.lock().unwrap();

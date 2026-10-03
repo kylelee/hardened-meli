@@ -123,7 +123,7 @@ impl Hook {
                 thread::scope(|s| {
                     s.spawn(move || {
                         if let Err(err) = stdin.write_all(draft.body.as_bytes()) {
-                            melib::log::warn!(
+                            tracing::warn!(
                                 "compose hook `{hook_name}`: could not write the draft body to \
                                  its stdin: {err}"
                             );

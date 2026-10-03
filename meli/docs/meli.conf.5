@@ -2530,45 +2530,32 @@ progress_spinner_sequence = { interval_ms = 150, frames = [ "-", "=", "≡" ] }
 .\"
 .Sh LOG
 .Ss Logging configuration settings
-Default values are shown in parentheses.
+Logging is set up by a single
+.Ic init_log()
+call at program startup and cannot be changed from the configuration file:
+events are pretty-formatted and appended to hourly-rotated files named
+.Pa ./log/meli.YYYY-MM-DD-HH ,
+a background retention sweep keeps the last 7 days of log files, and the
+level is
+.Em DEBUG
+in debug builds and
+.Em ERROR
+in release builds.
+Setting the
+.Ev MELI_DEBUG_STDERR
+environment variable additionally duplicates every log line on stderr.
+.Pp
+The keys below are legacy: they still parse (so old configuration files
+keep working) but they are no longer applied; meli prints a warning when
+they are present.
 .Bl -tag -width 36n
 .It Ic log_file Ar String
 .Pq Em optional
-path of the log file
-.Pq Pa $XDG_DATA_HOME/meli/meli.log \" default value
+legacy log file path; no longer applied.
 .It Ic maximum_level Ar String
 .Pq Em optional
-maximum level of messages to log.
-All levels less or equal to the
-.Ic maximum_level
-will be appended to the log file.
-Available levels are, in partial order:
-.Bl -dash -compact
-.It
-.Em OFF
-.It
-.Em ERROR
-.It
-.Em WARN
-.It
-.Em INFO
-.It
-.Em DEBUG
-.It
-.Em TRACE
+legacy maximum level of messages to log; no longer applied.
 .El
-This means that to turn logging off, set
-.Ic maximum_level
-to
-.Em OFF Ns
-\&.
-.Pq Em INFO \" default value
-.El
-.\"
-.\"
-.\"
-.\"
-.\"
 .Sh SMTP Connections
 .Ss SMTP configuration settings
 Default values are shown in parentheses.

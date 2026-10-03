@@ -68,13 +68,7 @@ mod tests {
     };
 
     use futures::{executor::block_on, StreamExt};
-    use melib::{
-        backends::prelude::*,
-        maildir::MaildirType,
-        notmuch::*,
-        utils::logging::{LogLevel, Logger},
-        Mail,
-    };
+    use melib::{backends::prelude::*, maildir::MaildirType, notmuch::*, Mail};
     use tempfile::TempDir;
 
     macro_rules! skip_test_if_notmuch_not_installed {
@@ -86,7 +80,7 @@ mod tests {
                 .stdin(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null()).output(), Ok(out) if out.status.success())
                 {
-                    log::info!("'notmuch' binary not found in PATH, skipping test.");
+                    tracing::info!("'notmuch' binary not found in PATH, skipping test.");
                     return;
                 }
             let mut library_file_path: Option<PathBuf> = None;
@@ -100,7 +94,7 @@ mod tests {
                     .stdin(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null()).output(), Ok(out) if out.status.success())
                     {
-                        log::info!("Attempting to set DYLD_LIBRARY_PATH=\"$(brew --prefix)/lib\"");
+                        tracing::info!("Attempting to set DYLD_LIBRARY_PATH=\"$(brew --prefix)/lib\"");
                         if let Ok(out) = std::process::Command::new("brew").arg("--prefix")
                             .stdout(std::process::Stdio::piped())
                                 .stdin(std::process::Stdio::null())
@@ -109,7 +103,7 @@ mod tests {
                                         let mut prefix_path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
                                         prefix_path.push("lib");
                                         std::env::set_var("DYLD_LIBRARY_PATH", &prefix_path);
-                                        log::info!("set DYLD_LIBRARY_PATH={}", prefix_path.display());
+                                        tracing::info!("set DYLD_LIBRARY_PATH={}", prefix_path.display());
                                     }
                                 }
                     }
@@ -139,13 +133,13 @@ mod tests {
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
         if block {
-            log::info!(
+            tracing::info!(
                 "'notmuch new' synchronous output: {:?}",
                 cmd.output().unwrap()
             );
         } else {
             std::thread::spawn(move || {
-                log::info!(
+                tracing::info!(
                     "'notmuch new' asynchronous output: {:?}",
                     cmd.output().unwrap()
                 );
@@ -243,7 +237,7 @@ other_email=test2@example.com;test3@example.com
     /// Test that `NotmuchDb::watch` `Stream` returns the expected `Refresh`
     /// events when altering the mail store in the filesystem.
     pub(crate) fn run_notmuch_watch() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let library_file_path = skip_test_if_notmuch_not_installed!();
         let temp_dir = TempDir::new().unwrap();
         // Store all events in a vector, and compare them at the end with the expected
@@ -392,7 +386,7 @@ hello world.
     /// libnotmuch, with the mailbox's `query_str` prefixed when a
     /// mailbox hash is given. See upstream `2825d224`.
     pub(crate) fn run_notmuch_raw_search() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let library_file_path = skip_test_if_notmuch_not_installed!();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(16)));
@@ -548,7 +542,7 @@ hello world 2.
     /// Test that `NotmuchDb::refresh` returns the expected `Refresh` events
     /// when altering the mail store in the filesystem.
     pub(crate) fn run_notmuch_refresh() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let library_file_path = skip_test_if_notmuch_not_installed!();
         let temp_dir = TempDir::new().unwrap();
         // Store all events in a vector, and compare them at the end with the expected

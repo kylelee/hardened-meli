@@ -525,7 +525,7 @@ impl MailBackend for JmapType {
                 futures::pin_mut!(stream);
                 while let Some(item) = stream.next().await {
                     let event = item?;
-                    log::debug!("watch: got eventsource event {:?}", event);
+                    tracing::debug!("watch: got eventsource event {:?}", event);
                     if matches!(event.event_type.as_deref(), Some("state")) {
                         let mut event: Value = Value::from_str(&event.data)?;
                         if !matches!(
@@ -539,7 +539,7 @@ impl MailBackend for JmapType {
                         };
                         let mut changed: IndexMap<Id<objects::Account>, IndexMap<String, String>> =
                             serde_json::from_value(changes.take())?;
-                        log::debug!("watch: got changed {changed:?}");
+                        tracing::debug!("watch: got changed {changed:?}");
 
                         let accounts = {
                             let conn = connection.lock().await;
@@ -554,7 +554,7 @@ impl MailBackend for JmapType {
                                 .swap_remove(<mailbox::MailboxObject as objects::Object>::NAME)
                             {
                                 let cached_state = store.mailbox_state.lock().await.clone();
-                                log::debug!(
+                                tracing::debug!(
                                     "watch: cached mailbox state {cached_state:?} current_state: \
                                      {current_state:?} "
                                 );
@@ -574,7 +574,7 @@ impl MailBackend for JmapType {
                                 .swap_remove(<email::EmailObject as objects::Object>::NAME)
                             {
                                 let cached_state = store.email_state.lock().await.clone();
-                                log::debug!(
+                                tracing::debug!(
                                     "watch: cached email state {cached_state:?} current_state: \
                                      {current_state:?} "
                                 );

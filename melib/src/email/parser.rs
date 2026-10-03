@@ -1215,7 +1215,7 @@ pub mod generic {
                     }
                     Ok(hdr) if hdr.is_standard() => {
                         if Mailto::IGNORE_HEADERS.contains(&hdr) {
-                            log::warn!(
+                            tracing::warn!(
                                 "parsing mailto(): header {} is not allowed in mailto URIs for \
                                  safety and will be ignored. Value was {:?}",
                                 hdr,
@@ -1226,7 +1226,7 @@ pub mod generic {
                         }
                     }
                     Ok(hdr) => {
-                        log::warn!(
+                        tracing::warn!(
                             "parsing mailto(): header {} is not a known header and it will be \
                              ignored. Value was {:?}",
                             hdr,

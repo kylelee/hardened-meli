@@ -1311,7 +1311,7 @@ pub mod server {
                 start: &mut usize,
                 end: &mut usize,
             ) -> ReadOutcome<'a> {
-                // log::trace!(
+                // tracing::trace!(
                 //     "read_line: buf={:?} start = {start:?} end = {end:?}",
                 //     String::from_utf8_lossy(&buf[..*end])
                 // );
@@ -1327,16 +1327,16 @@ pub mod server {
                         return ReadOutcome::Eof;
                     }
                     *end += read_bytes;
-                    // log::trace!(
+                    // tracing::trace!(
                     //     "read_line: read_bytes = {read_bytes:?} buf = {:?}",
                     //     String::from_utf8_lossy(&buf[..*end])
                     // );
                     if !buf[*start..*end].contains_subsequence(b"\r\n") {
-                        // log::trace!("read_line: returning None");
+                        // tracing::trace!("read_line: returning None");
                         return ReadOutcome::Incomplete;
                     }
                     let Some(input) = first_rn_line(&buf[*start..*end]) else {
-                        // log::trace!("read_line: returning None");
+                        // tracing::trace!("read_line: returning None");
                         return ReadOutcome::Incomplete;
                     };
                     *start += input.len();
@@ -1344,7 +1344,7 @@ pub mod server {
                         *start = 0;
                         *end = 0;
                     }
-                    // log::trace!("read_line: returning {:?}", String::from_utf8_lossy(input));
+                    // tracing::trace!("read_line: returning {:?}", String::from_utf8_lossy(input));
                     ReadOutcome::Line(input)
                 } else {
                     let rest = &buf[*start..*end];
@@ -1354,7 +1354,7 @@ pub mod server {
                         *start = 0;
                         *end = 0;
                     }
-                    // log::trace!("read_line: returning {:?}", String::from_utf8_lossy(input));
+                    // tracing::trace!("read_line: returning {:?}", String::from_utf8_lossy(input));
                     ReadOutcome::Line(input)
                 }
             }
@@ -2866,12 +2866,7 @@ mod tests {
         future::{self, Either},
         pin_mut, StreamExt,
     };
-    use melib::{
-        backends::prelude::*,
-        imap::*,
-        utils::logging::{LogLevel, Logger},
-        Mail,
-    };
+    use melib::{backends::prelude::*, imap::*, Mail};
     use tempfile::TempDir;
 
     use super::server::*;
@@ -2879,7 +2874,7 @@ mod tests {
     /// Test that `ImapType::watch` `Stream` returns the expected `Refresh`
     /// events when altering the mail store in the IMAP server.
     pub(crate) fn run_imap_watch() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -3362,7 +3357,7 @@ hello world 3.
     /// Ground truth is the mock server's received-command log.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_resync_status_shortcircuit(consistent: bool) {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
 
         for var in [
@@ -3659,7 +3654,7 @@ hello world 3.
     /// persisted envelopes.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_poisoned_cache_backfills() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -3794,7 +3789,7 @@ hello world 2.
     /// and issue a full `UID SEARCH ALL` + explicit-UID `UID FETCH`.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_null_skeleton_cache_backfills() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -3948,7 +3943,7 @@ hello world 2.
     /// a protocol error, not panic.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_uid_fetch_reply_without_uid_item() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -4111,7 +4106,7 @@ hello new world.
     /// (resync Step 2ii) twin of this test.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_uid_fetch_reply_without_uid_item_envelope() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -4292,7 +4287,7 @@ hello new world.
     /// command on the network.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_cache_first(with_cache: bool) {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
 
         for var in [
@@ -4675,7 +4670,7 @@ hello world 4.
     /// surviving mails must appear exactly once.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_cache_then_resync_no_ghost() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -4908,7 +4903,7 @@ hello world 3.
     /// byte-identical to the pre-`fetch_body_structure` behavior.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_body_structure_flag(enabled: bool) {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
 
         for var in [
@@ -5206,7 +5201,7 @@ hello world 3.
     /// Ground truth is the mock server's received-command log.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_msn_index_persisted(stable_uidvalidity: bool) {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
 
         for var in [
@@ -5540,7 +5535,7 @@ hello world 4.
     /// `ResyncCache` stage sees the real network error.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_no_cache_offline_errors() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
 
         for var in [
@@ -5686,7 +5681,7 @@ hello world 4.
     /// STORE path itself still works; the two `PASSED` operations prove
     /// they complete a full `UID STORE` round-trip without an error.
     pub(crate) fn run_imap_set_flags_ignores_passed() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -5958,7 +5953,7 @@ hello world 4.
     /// startup.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_mailboxes_cache_first() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -6106,7 +6101,7 @@ hello world 4.
     /// written by `refresh_mailboxes` itself.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_refresh_mailboxes_live() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -6349,7 +6344,7 @@ hello world 4.
     /// another dead-port session still starts from the rebuilt cache.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_offline_startup_uses_cache() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -6801,7 +6796,7 @@ hello world 3.
     /// `MailBackend::refresh` must emit a `Create` `RefreshEvent` for the new
     /// mail through the backend event consumer.
     pub(crate) fn run_imap_refresh_after_initial_fetch() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -6935,7 +6930,7 @@ hello new world.
     /// manual `refresh` path (`examine_updates`) must emit Create events
     /// for every revealed mail so an already-open listing backfills.
     pub(crate) fn run_imap_revealed_history_refresh() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -7059,7 +7054,7 @@ hello revealed {i}.
     /// hash via `Collection::merge`).
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_revealed_history_warm_cache() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
@@ -7302,7 +7297,7 @@ hello revealed {i}.
     pub(crate) fn run_imap_resync_quickskip_poisoned_cache() {
         use melib::imap::sync::cache::ImapCache as _;
 
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
@@ -7649,7 +7644,7 @@ hello poisoned revealed {i}.
     /// (literal, not an 8-bit quoted string) and the returned hashes. See
     /// `test_imap_search_subject_cjk_literal`.
     pub(crate) fn run_imap_search_subject_cjk_literal() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -7740,7 +7735,7 @@ hello poisoned revealed {i}.
     /// advertise `LITERAL+`). The search must return `Err` within a bounded
     /// wait rather than hang forever.
     pub(crate) fn run_imap_search_qq_literal_no_continuation() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -7827,7 +7822,7 @@ hello poisoned revealed {i}.
     /// (`{N+}`, no continuation request) and still parses the `* SEARCH`
     /// result.
     pub(crate) fn run_imap_search_literal_plus() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -7932,7 +7927,7 @@ hello poisoned revealed {i}.
     /// the server does not advertise `X-GM-EXT-1`. See upstream
     /// `c121b79e`.
     pub(crate) fn run_imap_raw_search_gmail() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -8118,7 +8113,7 @@ hello poisoned revealed {i}.
     /// selected on this connection, and it must not collapse a batch of
     /// new mail to the last message sequence number alone.
     pub(crate) fn run_imap_refresh_status_stale_when_selected() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -8306,7 +8301,7 @@ hello new world b.
     /// delivered while meli is running, and the `ImapType::watch` stream
     /// must emit a `Create` `RefreshEvent` for it without a restart.
     pub(crate) fn run_imap_watch_after_initial_fetch() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -8491,7 +8486,7 @@ hello new world.
     /// must re-sync the watched mailbox and emit a `Create`
     /// `RefreshEvent` for the new mail.
     pub(crate) fn run_imap_watch_idle_no_push() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -8678,7 +8673,7 @@ hello new world.
     /// filter out the continuation line, and still process the `EXISTS`
     /// push into a `Create` `RefreshEvent` for the new mail.
     pub(crate) fn run_imap_watch_push_glued_to_idling_greeting() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -8892,7 +8887,7 @@ hello new world.
     /// exactly like the wire would deliver it. Bounded by
     /// `WATCH_TEST_DEADLINE`; no sleeps.
     pub(crate) fn run_imap_watch_replay_real_push_bytes() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -9067,7 +9062,7 @@ hello new world.
     /// `EXISTS` growth in its opening EXAMINE and emit a `Create`
     /// `RefreshEvent` for it.
     pub(crate) fn run_imap_watch_startup_compensation() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -9253,7 +9248,7 @@ hello new world.
     /// at the first mail not known locally and both Create events must
     /// arrive.
     pub(crate) fn run_imap_watch_push_exists_multi_mail() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -9464,7 +9459,7 @@ hello new world b.
     /// server revalidates the mailbox, the watch stream must emit a `Rescan`
     /// `RefreshEvent`.
     pub(crate) fn run_imap_watch_uidvalidity_change_rescan() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -9619,7 +9614,7 @@ hello world 2.
     /// the IDLE terminator `DONE`, the watch must fail the response read
     /// after the (capped) timeout and surface an error instead of hanging.
     pub(crate) fn run_imap_watch_done_no_response_errors() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -10645,7 +10640,7 @@ hello new world.
     /// connection drops INBOX, the watch connection EXAMINEs it and reaches
     /// `IDLE`, and no ERROR notice is emitted.
     pub(crate) fn run_imap_watch_startup_unselect_fallback_no() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
         let (seed_mail_1, seed_mail_2, _new_mail) = gated_push_test_mails();
@@ -10846,7 +10841,7 @@ hello new world.
                 matches!(
                     be,
                     BackendEvent::Notice {
-                        level: LogLevel::ERROR,
+                        level: tracing::Level::ERROR,
                         ..
                     }
                 )
@@ -11165,7 +11160,7 @@ hello new world.
     /// the untagged-response processing path so the new mail is delivered
     /// as a `Create` `RefreshEvent`.
     pub(crate) fn run_imap_watch_tag_not_last() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -11314,7 +11309,7 @@ hello new world.
     /// instead of surfacing a fatal error. The push must still be
     /// delivered and the session must keep working for subsequent pushes.
     pub(crate) fn run_imap_watch_push_before_continuation() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -11520,7 +11515,7 @@ hello new world.
     /// noise: it must not be misclassified as push data (no DONE may be
     /// sent for it) and the watch must keep working normally afterwards.
     pub(crate) fn run_imap_watch_bare_plus_keepalive() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -11728,7 +11723,7 @@ hello new world.
     /// requires a message number after `* ` and cannot produce
     /// `UntaggedResponse::Bye` — see the evidence file for the analysis.
     pub(crate) fn run_imap_watch_bye_mid_idle_unselected() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -11885,7 +11880,7 @@ hello new world.
     /// back to `UID SEARCH *` to derive `UIDNEXT = max_uid + 1` and
     /// complete the initial fetch + a heartbeat resync without error.
     pub(crate) fn run_imap_init_uidnext_via_uid_search_star() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -12348,7 +12343,7 @@ hello world 2.
     /// carry no comma), so counting it is a direct measure of rebuilds.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_underdelivered_exists() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -12517,7 +12512,7 @@ hello underdelivered {i}.
     /// batch; a plain abort would surface a partial listing or an error.
     #[cfg(feature = "sqlite3")]
     pub(crate) fn run_imap_fetch_resumes_after_conn_drop() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
 
@@ -12643,7 +12638,7 @@ hello resume {i}.
     pub(crate) fn run_imap_rebuild_nondestructive_on_conn_drop() {
         use melib::imap::sync::cache::ImapCache as _;
 
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
         set_test_xdg_env(&temp_dir);

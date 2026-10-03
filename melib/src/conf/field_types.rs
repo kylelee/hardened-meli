@@ -479,7 +479,7 @@ impl<'de> Deserialize<'de> for Secret {
                                         }
                                     };
                                     let raw_value = access.next_value::<String>()?;
-                                    log::warn!(
+                                    tracing::warn!(
                                         "SMTP password syntax has been deprecated! Replace with a \
                                          raw string."
                                     );
@@ -497,7 +497,7 @@ impl<'de> Deserialize<'de> for Secret {
                                         }
                                     };
                                     let command = access.next_value::<String>()?;
-                                    log::warn!(
+                                    tracing::warn!(
                                         "SMTP password syntax has been deprecated! Replace with \
                                          Secret syntax."
                                     );
@@ -525,14 +525,14 @@ impl<'de> Deserialize<'de> for Secret {
                             };
                             match access.next_value::<String>()?.as_str() {
                                 "Raw" | "raw" => {
-                                    log::warn!(
+                                    tracing::warn!(
                                         "SMTP password syntax has been deprecated! Replace with a \
                                          raw string."
                                     );
                                     return Ok(Secret::Value(raw_value));
                                 }
                                 "CommandEval" | "command_evaluation" | "command_eval" => {
-                                    log::warn!(
+                                    tracing::warn!(
                                         "SMTP password syntax has been deprecated! Replace with \
                                          Secret syntax."
                                     );

@@ -112,7 +112,7 @@ macro_rules! format_url {
                     continue;
                 }
             })*
-            log::error!(
+            tracing::error!(
                 "BUG: unknown parameter in {}: {}",
                 stringify!($self), &$self.text[prev_pos..]
             );

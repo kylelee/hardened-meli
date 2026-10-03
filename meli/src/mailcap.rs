@@ -35,7 +35,7 @@ use std::{
 
 use melib::{
     email::{attachment_types::ContentType, Attachment},
-    log,
+    tracing,
     utils::fnmatch::Fnmatch,
     uuid::Uuid,
     Error, ErrorKind, Result,
@@ -313,14 +313,14 @@ impl MailcapEntry<'static> {
             if let Err(err) = std::fs::File::open(mailcap_path.as_path())
                 .and_then(|mut fs| fs.read_to_string(&mut content))
             {
-                log::warn!("Could not read {}: {err}", mailcap_path.display());
+                tracing::warn!("Could not read {}: {err}", mailcap_path.display());
                 continue;
             }
             for entry in MailcapEntry::parser(&content) {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(err) => {
-                        log::warn!("Could not parse {}: {err}", mailcap_path.display());
+                        tracing::warn!("Could not parse {}: {err}", mailcap_path.display());
                         continue;
                     }
                 };
@@ -670,7 +670,7 @@ impl<'a> Iterator for MailcapParser<'a> {
                 } else if token.starts_with("nametemplate=") {
                     ret.nametemplate = Some(parse_flag!("nametemplate="));
                 } else {
-                    log::warn!("unknown flag/setting {token:?}",);
+                    tracing::warn!("unknown flag/setting {token:?}",);
                 }
             }
             return Some(Ok(ret));
@@ -684,12 +684,9 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use melib::{
-        email::{
-            attachment_types::{Charset, ContentTransferEncoding, ContentType, Text},
-            AttachmentBuilder,
-        },
-        utils::logging::{LogLevel, Logger},
+    use melib::email::{
+        attachment_types::{Charset, ContentTransferEncoding, ContentType, Text},
+        AttachmentBuilder,
     };
 
     #[test]
@@ -2165,7 +2162,6 @@ is 50 \% Greek to me" \; cat %s; copiousoutput"#;
     }
 
     fn run_mailcap_execution() {
-        let _logger = Logger::new_with(LogLevel::TRACE, true);
         let temp_dir = tempfile::tempdir().unwrap();
         for var in [
             "HOME",

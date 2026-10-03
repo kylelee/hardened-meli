@@ -395,7 +395,7 @@ impl ToImapSearch for Query {
                     s.push_str(")))");
                 }
                 Q(HasAttachment) => {
-                    log::warn!("HasAttachment in IMAP is unimplemented.");
+                    tracing::warn!("HasAttachment in IMAP is unimplemented.");
                 }
                 Q(Answered) => {
                     space_pad!(s);

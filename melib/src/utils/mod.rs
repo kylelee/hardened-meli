@@ -25,19 +25,17 @@ pub mod connections;
 pub mod datetime;
 pub mod fnmatch;
 pub mod futures;
-pub mod random;
-pub mod vobject;
-#[macro_use]
-pub mod logging;
 pub mod lock;
 pub mod parsec;
 pub mod patch_retrieve;
 pub mod percent_encoding;
+pub mod random;
 pub mod shellexpand;
 #[cfg(feature = "sqlite3")]
 pub mod sqlite3;
 #[cfg(test)]
 pub mod tests;
+pub mod vobject;
 pub mod xdg;
 
 /// Convert an integer to a base 36 string using only ASCII letters and numbers.

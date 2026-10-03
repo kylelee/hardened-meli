@@ -60,7 +60,7 @@ use crossbeam::channel::Sender;
 pub use futures::channel::oneshot;
 use futures::future::FutureExt;
 use indexmap::IndexMap;
-use melib::{log, utils::datetime, uuid::Uuid, UnixTimestamp};
+use melib::{utils::datetime, uuid::Uuid, UnixTimestamp};
 
 use crate::types::{StatusEvent, ThreadEvent, UIEvent};
 
@@ -357,7 +357,7 @@ impl JobExecutor {
                     // (dropping it only at the end of the task raced with
                     // consumers reading the channel on `JobFinished`).
                     drop(sender);
-                    log::error!(
+                    tracing::error!(
                         "job {job_id} `{desc}` panicked: {}",
                         panic_message(payload.as_ref())
                     );

@@ -91,7 +91,7 @@ impl ServerPasswordCommand {
             if let Some(_prev) = acc.remove("server_password_command") {
                 let new = toml_edit::Item::Value(toml_edit::Value::from(new_entry));
                 if verbose {
-                    log::info!(
+                    tracing::info!(
                         "Account {acc_name}: converting server_password_command to new \
                          `server_password = {{ command = \"...\" }}` syntax."
                     );
@@ -133,7 +133,7 @@ impl ServerPasswordCommand {
                 if let Some(_prev) = acc.remove("server_password") {
                     let new = toml_edit::Item::Value(toml_edit::Value::from(command));
                     if verbose {
-                        log::info!(
+                        tracing::info!(
                             "Account {acc_name}: reverting server_password inline table back to \
                              server_password_command."
                         );
@@ -219,8 +219,6 @@ impl Migration for ServerPasswordCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use melib::utils::logging::{LogLevel, Logger};
-
     #[test]
     fn test_version_migration_server_password_command() {
         tokio_test::block_on(async {
@@ -229,7 +227,6 @@ mod tests {
     }
 
     fn run_version_migration_server_password_command() {
-        let _logger = Logger::new_with(LogLevel::TRACE, true);
         let input = r#"
 accounts.imap2 = { format = "imap", server_password_command = "echo hunter2" }
 

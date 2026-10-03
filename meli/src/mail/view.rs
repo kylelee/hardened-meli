@@ -213,28 +213,28 @@ impl MailView {
     }
 
     fn init_futures(&mut self, context: &mut Context) {
-        log::trace!("MailView::init_futures");
+        tracing::trace!("MailView::init_futures");
         #[cfg(debug_assertions)]
         let __span = crate::state::DrawSpan::enter("MailView::init_futures");
         self.theme_default = crate::conf::value(context, "mail.view.body");
         let mut pending_action = None;
         let Some(coordinates) = self.coordinates else {
-            log::debug!("init_futures: no coordinates");
+            tracing::debug!("init_futures: no coordinates");
             return;
         };
         let account = &mut context.accounts[&coordinates.0];
         if account.contains_key(coordinates.2) {
             {
-                log::debug!("init_futures: requesting envelope bytes");
+                tracing::debug!("init_futures: requesting envelope bytes");
                 match account.envelope_bytes_by_hash(coordinates.2) {
                     Ok(fut) => {
-                        log::debug!("init_futures: spawning fetch-envelope");
+                        tracing::debug!("init_futures: spawning fetch-envelope");
                         let mut handle = account.main_loop_handler.job_executor.spawn(
                             "fetch-envelope".into(),
                             fut,
                             account.is_async(),
                         );
-                        log::debug!("init_futures: fetch-envelope spawned, waiting up to 3ms");
+                        tracing::debug!("init_futures: fetch-envelope spawned, waiting up to 3ms");
                         let job_id = handle.job_id;
                         pending_action = if let MailViewState::Init {
                             ref mut pending_action,
@@ -245,23 +245,25 @@ impl MailView {
                             None
                         };
                         if let Ok(Some(bytes_result)) = try_recv_timeout!(&mut handle.chan) {
-                            log::debug!("init_futures: fetch-envelope completed synchronously");
+                            tracing::debug!("init_futures: fetch-envelope completed synchronously");
                             match bytes_result {
                                 Ok(bytes) => {
-                                    log::debug!(
+                                    tracing::debug!(
                                         "init_futures: load_bytes begin ({} bytes)",
                                         bytes.len()
                                     );
                                     MailViewState::load_bytes(self, bytes, context);
-                                    log::debug!("init_futures: load_bytes done");
+                                    tracing::debug!("init_futures: load_bytes done");
                                 }
                                 Err(err) => {
-                                    log::debug!("init_futures: fetch-envelope errored: {err}");
+                                    tracing::debug!("init_futures: fetch-envelope errored: {err}");
                                     self.state = MailViewState::Error { err };
                                 }
                             }
                         } else {
-                            log::debug!("init_futures: fetch-envelope still running; LoadingBody");
+                            tracing::debug!(
+                                "init_futures: fetch-envelope still running; LoadingBody"
+                            );
                             self.state = MailViewState::LoadingBody {
                                 main_loop_handler: self.main_loop_handler.clone(),
                                 handle,
@@ -341,7 +343,7 @@ impl MailView {
                     "Could not open reply: envelope {} is no longer available: {err}",
                     coordinates.2
                 );
-                log::error!("{err_string}");
+                tracing::error!("{err_string}");
                 context.replies.push_back(UIEvent::Notification {
                     title: Some("Could not open reply".into()),
                     source: Some(err),
@@ -630,7 +632,7 @@ impl Component for MailView {
                 body: err.to_string().into(),
                 kind: Some(NotificationType::Error(err.kind)),
             });
-            log::error!("Failed to open envelope: {err}");
+            tracing::error!("Failed to open envelope: {err}");
             if err.is_recoverable() {
                 self.init_futures(context);
             }
@@ -782,7 +784,7 @@ impl Component for MailView {
                         self.init_futures(context);
                     }
                     MailViewState::Loaded { .. } => {
-                        log::debug!(
+                        tracing::debug!(
                             "MailView.active_jobs contains job id {:?} but MailViewState is \
                              already loaded; what job was this and why was it in active_jobs?",
                             job_id
@@ -898,7 +900,7 @@ impl Component for MailView {
                                                     .map(|env| env.message_id()),
                                                 err
                                             );
-                                            log::error!("{err_string}");
+                                            tracing::error!("{err_string}");
                                             context.replies.push_back(UIEvent::Notification {
                                                 title: Some("Failed to open e-mail".into()),
                                                 source: None,
@@ -910,7 +912,7 @@ impl Component for MailView {
                                 }
                             }
                         }))),
-                        log_level: LogLevel::DEBUG,
+                        log_level: tracing::Level::DEBUG,
                     },
                 );
                 return true;
@@ -953,7 +955,7 @@ impl Component for MailView {
                 let Some(envelope) = account.collection.get_env(coordinates.2) else {
                     /* The envelope has been renamed or removed, so wait for the
                      * appropriate event to arrive */
-                    log::error!(
+                    tracing::error!(
                         "Could not perform mailing list action: envelope {} no longer exists",
                         coordinates.2
                     );

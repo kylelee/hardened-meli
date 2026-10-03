@@ -87,8 +87,12 @@ cargo build
 cargo run
 ```
 
-There is a debug/tracing log feature that can be enabled by using the flag `--feature debug-tracing` after uncommenting the features in `Cargo.toml`.
-The logs are printed in stderr when the env var `MELI_DEBUG_STDERR` is defined, thus you can run `meli` with a redirection (i.e `2> log`).
+Logging is always compiled in (built on the `tracing` crate) and configured by
+a single `init_log()` call at startup: pretty-formatted events go to hourly
+rotated files under `./log/` (7-day retention). Debug builds log at `DEBUG`
+level, release builds at `ERROR` only. Set the env var `MELI_DEBUG_STDERR` to
+additionally duplicate every log line on stderr, so you can run `meli` with a
+redirection (i.e `2> log`).
 
 To trace network and protocol communications you can enable the `trace = true`
 option in the account's extra settings (IMAP, JMAP, NNTP) or in the

@@ -141,7 +141,7 @@ impl EmailFetcher {
                 )
             };
             if is_empty {
-                log::debug!("{:?}: inserting state {state}", EmailObject::NAME);
+                tracing::debug!("{:?}: inserting state {state}", EmailObject::NAME);
                 *conn.store.email_state.lock().await = Some(state);
             } else if !is_equal {
                 if let Some(ev) = conn.email_changed(Some(state)).await? {

@@ -49,7 +49,7 @@ impl ImapConnection {
                 $(if let Err(err) = $result {
                     self.uid_store.is_online.lock().unwrap().1 = Err(err.clone());
                     imap_log!(trace, self, "failure: {}", err.to_string());
-                    log::debug!("failure: {}", err.to_string());
+                    tracing::debug!("failure: {}", err.to_string());
                     Err(err)
                 } else { Ok(()) }?;)+
             };
@@ -57,7 +57,7 @@ impl ImapConnection {
         // A BYE means the server is closing the connection; log its
         // reason (log-only) regardless of the session's selection state.
         if let UntaggedResponse::Bye { reason } = untagged_response {
-            log::trace!("process_untagged: BYE, server is going away: {reason}");
+            tracing::trace!("process_untagged: BYE, server is going away: {reason}");
         }
         let mailbox_hash = match self.stream.as_ref()?.current_mailbox {
             MailboxSelection::Select {
@@ -96,7 +96,7 @@ impl ImapConnection {
                     .map(|i| i.len() < TryInto::<usize>::try_into(n).unwrap())
                     .unwrap_or(true)
                 {
-                    log::debug!(
+                    tracing::debug!(
                         "Received expunge {} but mailbox msn index is {:?}",
                         n,
                         self.uid_store.msn_index.lock().unwrap().get(&mailbox_hash)
@@ -169,7 +169,7 @@ impl ImapConnection {
                         .update(mailbox_hash, &uid_events)
                         .or_else(ignore_not_found)
                     {
-                        log::error!(
+                        tracing::error!(
                             "Could not update cache for mailbox_hash = {:?} uid, events = {:?}: \
                              err = {}",
                             mailbox_hash,
@@ -232,7 +232,7 @@ impl ImapConnection {
                     .update(mailbox_hash, &pair)
                     .or_else(ignore_not_found)
                 {
-                    log::error!(
+                    tracing::error!(
                         "Could not update cache for mailbox_hash = {:?} uid = {:?}, events = \
                          {:?}: err = {}",
                         mailbox_hash,
@@ -467,7 +467,7 @@ impl ImapConnection {
                                     )
                                 })
                             {
-                                log::info!("{err}");
+                                tracing::info!("{err}");
                             }
                         }
                         let mut events = vec![];
@@ -504,7 +504,7 @@ impl ImapConnection {
                                     .lock()
                                     .unwrap()
                                     .insert((mailbox_hash, uid), envelope.hash());
-                                log::debug!(
+                                tracing::debug!(
                                     "Create event {} {} {}",
                                     envelope.hash(),
                                     envelope.subject(),
@@ -520,7 +520,10 @@ impl ImapConnection {
                         Ok(events.try_into().ok())
                     }
                     Err(err) => {
-                        log::debug!("UID SEARCH RECENT err: {err}\nresp: {}", to_str!(&response));
+                        tracing::debug!(
+                            "UID SEARCH RECENT err: {err}\nresp: {}",
+                            to_str!(&response)
+                        );
                         Ok(None)
                     }
                 }
@@ -562,7 +565,7 @@ impl ImapConnection {
                                 return Ok(None);
                             }
                             Err(e) => {
-                                log::debug!(
+                                tracing::debug!(
                                     "SEARCH error failed: {e}. Response: {}",
                                     to_str!(&response)
                                 );
@@ -570,7 +573,7 @@ impl ImapConnection {
                             }
                         }
                     };
-                    log::debug!("fetch uid {} {:?}", uid, flags);
+                    tracing::debug!("fetch uid {} {:?}", uid, flags);
                     if let Some(env_hash) = {
                         let temp = self
                             .uid_store

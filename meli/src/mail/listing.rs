@@ -861,7 +861,7 @@ pub trait MailListingTrait: ListingTrait {
                             name: format!("toggle {flag:?}").into(),
                             handle,
                             on_finish: None,
-                            log_level: LogLevel::INFO,
+                            log_level: tracing::Level::INFO,
                         },
                     );
                 }
@@ -936,7 +936,7 @@ pub trait MailListingTrait: ListingTrait {
                                     name: "taking out the trash".into(),
                                     handle,
                                     on_finish: None,
-                                    log_level: LogLevel::INFO,
+                                    log_level: tracing::Level::INFO,
                                 },
                             );
                         }
@@ -1001,7 +1001,7 @@ pub trait MailListingTrait: ListingTrait {
                                     name: "message copying".into(),
                                     handle,
                                     on_finish: None,
-                                    log_level: LogLevel::INFO,
+                                    log_level: tracing::Level::INFO,
                                 },
                             );
                         }
@@ -1046,7 +1046,7 @@ pub trait MailListingTrait: ListingTrait {
                                     name: "message moving".into(),
                                     handle,
                                     on_finish: None,
-                                    log_level: LogLevel::INFO,
+                                    log_level: tracing::Level::INFO,
                                 },
                             );
                         }
@@ -1192,7 +1192,7 @@ pub trait MailListingTrait: ListingTrait {
                                     },
                                 });
                             }))),
-                            log_level: LogLevel::INFO,
+                            log_level: tracing::Level::INFO,
                         },
                     );
                 }
@@ -1264,7 +1264,7 @@ pub trait ListingTrait: Component {
     fn set_focus(&mut self, new_value: Focus, context: &mut Context);
 
     fn kick_parent(&self, parent: ComponentId, msg: ListingMessage, context: &mut Context) {
-        log::trace!(
+        tracing::trace!(
             "kick_parent self is {} parent is {parent} msg is {msg:?}",
             self.id()
         );
@@ -1725,7 +1725,7 @@ impl Component for Listing {
                 ))
             )
         {
-            log::debug!(
+            tracing::debug!(
                 "listing: forwarding {event:?} to the component (focus {:?})",
                 self.focus
             );
@@ -2113,18 +2113,17 @@ impl Component for Listing {
                 }
                 return true;
             }
-            #[cfg(feature = "debug-tracing")]
             UIEvent::IntraComm {
                 from,
                 to,
                 ref content,
             } if *from == self.component.id() || *to == self.id() => {
-                log::debug!(
+                tracing::debug!(
                     "BUG intracomm event: {:?} downcast content {:?}",
                     event,
                     content.downcast_ref::<ListingMessage>().copied()
                 );
-                log::debug!(
+                tracing::debug!(
                     "BUG component is {} and self id is {}",
                     self.component.id(),
                     self.id()
@@ -2604,7 +2603,7 @@ impl Component for Listing {
                                     .into(),
                                     handle,
                                     on_finish: Some(on_finish),
-                                    log_level: LogLevel::INFO,
+                                    log_level: tracing::Level::INFO,
                                 },
                             );
 

@@ -720,7 +720,7 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                     .set_kind(ErrorKind::ProtocolError)
                 })?);
             } else {
-                log::debug!(
+                tracing::debug!(
                     "Unexpected input while parsing UID FETCH response. Got: `{}`",
                     String::from_utf8_lossy(input)
                 );
@@ -735,7 +735,7 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                 ret.flags = Some(flags);
                 i += (input.len() - i - rest.len()) + 1;
             } else {
-                log::debug!(
+                tracing::debug!(
                     "Unexpected input while parsing UID FETCH response. Could not parse FLAGS: {}.",
                     String::from_utf8_lossy(&input[i..])
                 );
@@ -758,7 +758,7 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                     .and_then(std::num::NonZeroU64::new)
                     .map(ModSequence);
             } else {
-                log::debug!(
+                tracing::debug!(
                     "Unexpected input while parsing MODSEQ in UID FETCH response. Got: `{}`",
                     String::from_utf8_lossy(input)
                 );
@@ -782,7 +782,7 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                 ret.body = Some(body);
                 i += input.len() - i - rest.len();
             } else {
-                log::debug!(
+                tracing::debug!(
                     "Unexpected input while parsing UID FETCH response. Could not parse \
                      RFC822/BODY: {}",
                     String::from_utf8_lossy(&input[i..])
@@ -803,7 +803,7 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                     i += input.len() - i - rest.len();
                 }
                 Err(err) => {
-                    log::debug!(
+                    tracing::debug!(
                         "Unexpected input while parsing UID FETCH response. Could not parse \
                          ENVELOPE: {err}. Input was: {}",
                         String::from_utf8_lossy(&input[i..])
@@ -837,7 +837,7 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                 }
                 i += input.len() - i - rest.len();
             } else {
-                log::debug!(
+                tracing::debug!(
                     "Unexpected input while parsing UID FETCH response. Could not parse \
                      BODY[HEADER.FIELDS (REFERENCES)]: {}",
                     String::from_utf8_lossy(&input[i..])
@@ -863,7 +863,7 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
                 }
                 i += input.len() - i - rest.len();
             } else {
-                log::debug!(
+                tracing::debug!(
                     "Unexpected input while parsing UID FETCH response. Could not parse \
                      BODY[HEADER.FIELDS (\"REFERENCES\"): {}",
                     String::from_utf8_lossy(&input[i..])
@@ -880,7 +880,7 @@ pub fn fetch_response(input: &[u8]) -> ImapParseResult<'_, FetchResponse<'_>> {
             i += b")\r\n".len();
             break;
         } else {
-            log::debug!(
+            tracing::debug!(
                 "Got unexpected token while parsing UID FETCH response:\n`{}`\n",
                 String::from_utf8_lossy(input)
             );
@@ -1063,7 +1063,7 @@ pub fn untagged_responses(input: &[u8]) -> ImapParseResult<'_, Option<UntaggedRe
     let (input, _) = tag::<_, &[u8], (&[u8], nom::error::ErrorKind)>(b" ")(input)?;
     let (input, _tag) = take_until::<_, &[u8], (&[u8], nom::error::ErrorKind)>(CRLF)(input)?;
     let (input, _) = tag::<_, &[u8], (&[u8], nom::error::ErrorKind)>(CRLF)(input)?;
-    log::trace!(
+    tracing::trace!(
         "Parse untagged response from {:?}",
         String::from_utf8_lossy(orig_input)
     );
@@ -1080,7 +1080,7 @@ pub fn untagged_responses(input: &[u8]) -> ImapParseResult<'_, Option<UntaggedRe
                     return Ok((rest, Some(Fetch(Box::new(resp))), status_response));
                 }
                 _ => {
-                    log::error!(
+                    tracing::error!(
                         "unknown untagged_response: {}, message was {:?}",
                         String::from_utf8_lossy(_tag),
                         String::from_utf8_lossy(orig_input)
@@ -1255,13 +1255,13 @@ pub fn select_response(input: &[u8]) -> Result<SelectResponse> {
             } else if l.starts_with(b"* OK [NOMODSEQ") {
                 ret.highestmodseq = Some(Err(()));
             } else if !l.is_empty() {
-                log::trace!("select response: {}", String::from_utf8_lossy(l));
+                tracing::trace!("select response: {}", String::from_utf8_lossy(l));
             }
         }
         Ok(ret)
     } else {
         let ret = String::from_utf8_lossy(input).to_string();
-        log::error!("BAD/NO response in select: {ret}");
+        tracing::error!("BAD/NO response in select: {ret}");
         Err(Error::new(ret))
     }
 }
@@ -1386,7 +1386,7 @@ pub fn envelope(input: &[u8]) -> IResult<&[u8], Envelope> {
     // ENVELOPE once in raw-bytes-fallback mode. In fallback mode every
     // nstring field that is not a single valid nstring is captured as its
     // raw bytes up to the field boundary (reported once per field through
-    // a bounded `log::debug!` line), while a truncated literal hard-fails
+    // a bounded `tracing::debug!` line), while a truncated literal hard-fails
     // so its declared bytes cannot drift into the next field (see
     // `quoted_or_nil_concat`). Inputs that strict parsing accepts keep
     // their exact strict values; the fallback only runs where the strict
@@ -1735,7 +1735,7 @@ fn invalid_address_placeholder(original: &Address) -> Address {
 ///
 /// Valid addresses are returned unchanged; fixable ones are normalized by
 /// quoting the local part of their addr-spec; unfixable ones are replaced
-/// with a placeholder and reported via `log::error!` naming the field and
+/// with a placeholder and reported via `tracing::error!` naming the field and
 /// the envelope subject (no credentials can appear in these fields).
 fn sanitize_envelope_address_field(
     field: &'static str,
@@ -1756,7 +1756,7 @@ fn sanitize_envelope_address_field(
             .chars()
             .take(INVALID_ADDRESS_CONTEXT_LIMIT)
             .collect::<String>();
-        log::error!(
+        tracing::error!(
             "IMAP ENVELOPE: could not represent the address of the {} field in a \
              cache-safe form; substituted a placeholder. Original address: `{raw}`. \
              Envelope subject: `{subject}`",
@@ -1861,7 +1861,7 @@ pub fn quoted_or_nil(input: &[u8]) -> IResult<&[u8], Option<Vec<u8>>> {
 ///    or `)` (a leading `"` is part of the value). A structurally missing
 ///    field (nothing before `)` or end of input) is an error instead of
 ///    fabricating a value. The fallback is reported once per field through
-///    a bounded (48 bytes) `log::debug!` line.
+///    a bounded (48 bytes) `tracing::debug!` line.
 /// 4. Any immediately-adjacent (no whitespace between them) quoted strings
 ///    and unquoted atoms are concatenated onto the seed.
 ///
@@ -1922,7 +1922,7 @@ pub fn quoted_or_nil_concat(input: &[u8]) -> IResult<&[u8], Option<Vec<u8>>> {
         }
     };
     if fallback {
-        log::debug!(
+        tracing::debug!(
             "IMAP ENVELOPE nstring field fell back to raw bytes (non-RFC compliant server?): {:?}",
             String::from_utf8_lossy(&seed[..seed.len().min(48)])
         );

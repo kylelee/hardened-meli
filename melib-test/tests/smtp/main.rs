@@ -390,18 +390,13 @@ pub mod tests {
     use std::thread;
 
     use futures::{channel::mpsc::unbounded, executor::block_on};
-    use melib::{
-        conf::Secret,
-        email::Address,
-        smtp::*,
-        utils::logging::{LogLevel, Logger},
-    };
+    use melib::{conf::Secret, email::Address, smtp::*};
 
     use super::server::*;
 
     /// Run a simple SMTP transaction without credential authentication.
     pub fn run_smtp_transaction() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let (server_event_sender, server_event_receiver) = unbounded();
         let server = SmtpServer::new(server_event_receiver);
         let server_state = server.state.clone();
@@ -483,7 +478,7 @@ hello world.
     /// the offending command (with the rejected address) and the numeric
     /// reply code.
     pub fn run_smtp_transaction_rcpt_rejected() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let (server_event_sender, server_event_receiver) = unbounded();
         let server = SmtpServer::new(server_event_receiver);
         server.state.lock().unwrap().rcpt_rejections = vec![(

@@ -323,7 +323,7 @@ pub fn load_cards(p: &std::path::Path) -> Result<Vec<Card>> {
                         }
                     }
                     Err(err) => {
-                        log::warn!("Could not parse vcard from {}: {}", f.display(), err);
+                        tracing::warn!("Could not parse vcard from {}: {}", f.display(), err);
                     }
                 }
             }
@@ -331,7 +331,7 @@ pub fn load_cards(p: &std::path::Path) -> Result<Vec<Card>> {
     }
     for c in &ret {
         if c.is_err() {
-            log::debug!("Could not parse contact card: {c:?}");
+            tracing::debug!("Could not parse contact card: {c:?}");
         }
     }
     if is_any_valid {

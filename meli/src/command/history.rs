@@ -37,14 +37,14 @@ fn open_history_file() -> Option<std::fs::File> {
     let data_dir = match xdg::BaseDirectories::with_prefix("meli") {
         Ok(d) => d,
         Err(err) => {
-            melib::log::error!("Could not locate data directory for command history: {err}");
+            tracing::error!("Could not locate data directory for command history: {err}");
             return None;
         }
     };
     let path = match data_dir.place_data_file("cmd_history") {
         Ok(p) => p,
         Err(err) => {
-            melib::log::error!("Could not locate command history file: {err}");
+            tracing::error!("Could not locate command history file: {err}");
             return None;
         }
     };
@@ -56,7 +56,7 @@ fn open_history_file() -> Option<std::fs::File> {
     {
         Ok(file) => Some(file),
         Err(err) => {
-            melib::log::error!(
+            tracing::error!(
                 "Could not open command history file `{}`: {err}",
                 path.display()
             );
@@ -75,7 +75,7 @@ pub fn log_cmd(mut cmd: String) {
         };
         cmd.push('\n');
         if let Err(err) = file.write_all(cmd.as_bytes()) {
-            melib::log::error!("Could not write to command history: {err}");
+            tracing::error!("Could not write to command history: {err}");
         }
     });
 }
@@ -93,7 +93,7 @@ pub fn old_cmd_history() -> Vec<String> {
         if let Err(err) = file.read_to_string(&mut old_history) {
             // Non-UTF-8 or otherwise unreadable history must not abort when
             // the command bar is opened.
-            melib::log::error!("Could not read command history: {err}");
+            tracing::error!("Could not read command history: {err}");
             return;
         }
         ret.extend(old_history.lines().map(|s| s.to_string()));
