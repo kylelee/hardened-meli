@@ -6,7 +6,7 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 
 - Workspace members are `cve/`, `meli/`, `meli-test/`, `melib/`, `melib-test/` (root `Cargo.toml`).
 - `melib/` — mail library. Backend trait in `src/backends.rs`; protocol implementations are per-protocol modules: `src/imap/` (connection pool + sqlite3 sync cache in `src/imap/sync/`), `src/maildir/`, `src/mbox/`, `src/notmuch/`, `src/jmap/`, `src/nntp/`, `src/smtp/`. E-mail parsing in `src/email/`.
-- `meli/` — terminal UI (binary `src/main.rs`). UI components in `src/mail/`, `src/terminal/`; thread-pool job executor in `src/jobs.rs`; account/backend glue in `src/accounts/`. Its unit-test fixtures (golden corpus) stay in `meli/tests/golden`.
+- `meli/` — terminal UI (binary `src/main.rs`). UI components in `src/mail/`, `src/terminal/`; `tokio`-runtime job executor in `src/jobs.rs`; account/backend glue in `src/accounts/`. Its unit-test fixtures (golden corpus) stay in `meli/tests/golden`.
 - `meli-test/`, `melib-test/` — integration test suites of `meli`/`melib` as standalone crates driven by `cargo test`; tests run on a `tokio` runtime via `tokio-test` (replacing `rusty-fork`).
 - `cve/` — security CVE workspace: the CVE research reports (`SECURITY-CVE-RESEARCH*.md`) and the crate scaffolding for CVE-driven regression tests targeting `meli`/`melib`.
 

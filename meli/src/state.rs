@@ -87,7 +87,7 @@ impl Drop for DrawSpan {
     }
 }
 use crate::{
-    jobs::JobExecutor,
+    jobs::{JobExecutor, Pulse},
     notifications::DisplayMessageBox,
     terminal::{get_events, Screen, Tty},
 };
@@ -428,7 +428,9 @@ pub struct State {
     components: IndexMap<ComponentId, Box<dyn Component>>,
     component_tree: IndexMap<ComponentId, ComponentPath>,
     pub context: Box<Context>,
-    timer: thread::JoinHandle<()>,
+    /// Main-loop heartbeat emitted while any account is still offline; see
+    /// [`Pulse`].
+    pulse: Pulse,
     message_box: DisplayMessageBox,
 }
 
@@ -546,20 +548,17 @@ impl State {
         };
         let accounts = accounts.into_iter().map(|acc| (acc.hash(), acc)).collect();
 
-        let timer = {
-            let sender = sender.clone();
-            thread::Builder::new().spawn(move || {
-                let sender = sender;
-                loop {
-                    thread::park();
-
-                    sender.send(ThreadEvent::Pulse).unwrap();
-                    thread::sleep(std::time::Duration::from_millis(100));
-                }
-            })
-        }?;
-
-        timer.thread().unpark();
+        // Heartbeat for `check_accounts`: a task on the job executor's
+        // `tokio` runtime (no dedicated OS thread). While any account is
+        // offline it is re-armed after every pulse and emits
+        // `ThreadEvent::Pulse` every 100ms so the main loop retries
+        // `is_online`; once every account is online it idles at zero cost
+        // until the next arm.
+        let pulse = job_executor
+            .clone()
+            .create_pulse(std::time::Duration::from_millis(100));
+        // Kick off the first pulse: freshly created accounts are offline.
+        pulse.arm();
 
         let working = Arc::new(());
         let control = Arc::downgrade(&working);
@@ -582,7 +581,7 @@ impl State {
             components: IndexMap::default(),
             overlay: IndexMap::default(),
             component_tree: IndexMap::default(),
-            timer,
+            pulse,
             draw_rate_limit: RateLimit::new(1, 3, job_executor.clone()),
             message_box,
             context: Box::new(Context {
@@ -1868,7 +1867,9 @@ impl State {
             }
         }
         if ctr != self.context.accounts.len() {
-            self.timer.thread().unpark();
+            // Some account is still offline: keep the heartbeat armed so
+            // `is_online` is retried on the next pulse.
+            self.pulse.arm();
         }
         self.context.input_thread.check();
     }

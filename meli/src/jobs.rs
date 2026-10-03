@@ -32,6 +32,10 @@
 //! - Timers ([`JobExecutor::create_timer`]) are runtime tasks that sleep with
 //!   [`tokio::time::sleep`] and emit [`UIEvent::Timer`] through the main-loop
 //!   channel.
+//! - The main-loop heartbeat ([`JobExecutor::create_pulse`]) is an on-demand
+//!   runtime task: while armed ([`Pulse::arm`]) it emits
+//!   [`ThreadEvent::Pulse`] at a fixed cadence, and it idles - no thread, no
+//!   wakeups - until the next arm.
 //!
 //! A panic inside a spawned job is isolated per task: it is caught with
 //! [`futures::FutureExt::catch_unwind`], logged, the job's metadata is marked
@@ -213,6 +217,45 @@ impl Drop for Timer {
     }
 }
 
+/// Main-loop heartbeat driven by the `tokio` runtime.
+///
+/// Created with [`JobExecutor::create_pulse`]. While something re-arms it
+/// between ticks ([`Pulse::arm`], the runtime equivalent of the old
+/// `std::thread::Thread::unpark` token), it emits [`ThreadEvent::Pulse`] on
+/// the main-loop channel every `interval`; when a tick is not re-armed it
+/// goes idle until the next arm instead of waking up. Dropping it aborts
+/// the runtime task.
+///
+/// `State::check_accounts` arms it while any account is still offline, so
+/// `is_online` is retried at a fast cadence during startup/reconnection and
+/// the heartbeat costs nothing once every account is up.
+#[derive(Debug)]
+pub struct Pulse {
+    abort: tokio::task::AbortHandle,
+    notify: Arc<tokio::sync::Notify>,
+    /// Not read directly: it pins the runtime (and with it the heartbeat
+    /// task) for the pulse's lifetime, so the `Drop` abort is deterministic
+    /// even when this pulse outlives every other `Arc<JobExecutor>` holder.
+    #[allow(dead_code)] // liveness pin, see the doc comment
+    job_executor: Arc<JobExecutor>,
+}
+
+impl Pulse {
+    /// Arms the heartbeat: an idle pulse emits its next tick (almost)
+    /// immediately, and ticking continues at the creation interval while
+    /// re-armed between ticks. Extra arms while a tick is pending collapse
+    /// into one, like a `std::thread` unpark token.
+    pub fn arm(&self) {
+        self.notify.notify_one();
+    }
+}
+
+impl Drop for Pulse {
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
+}
+
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(msg) = payload.downcast_ref::<&'static str>() {
         (*msg).to_string()
@@ -307,6 +350,13 @@ impl JobExecutor {
                     let _ = sender.send(res);
                 }
                 Err(payload) => {
+                    // Drop the result sender before anything else: the job
+                    // panicked and will never produce a value, so holders of
+                    // `JoinHandle::chan` must observe the cancellation
+                    // deterministically, before `JobFinished` is sent
+                    // (dropping it only at the end of the task raced with
+                    // consumers reading the channel on `JobFinished`).
+                    drop(sender);
                     log::error!(
                         "job {job_id} `{desc}` panicked: {}",
                         panic_message(payload.as_ref())
@@ -358,6 +408,46 @@ impl JobExecutor {
         self.arm_timer(id, value);
         Timer {
             id,
+            job_executor: self,
+        }
+    }
+
+    /// Creates the main-loop heartbeat task (see [`Pulse`]).
+    ///
+    /// The task starts idle; arm it with [`Pulse::arm`] to start ticking. It
+    /// is spawned directly on the runtime instead of going through
+    /// [`JobExecutor::spawn`], so it is not registered in the job
+    /// bookkeeping and never shows up in the jobs manager UI.
+    pub fn create_pulse(self: Arc<Self>, interval: Duration) -> Pulse {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let task_notify = Arc::clone(&notify);
+        let sender = self.sender.clone();
+        let handle = self.runtime.handle().spawn(async move {
+            loop {
+                // Idle until armed: no parked OS thread, no periodic
+                // wakeup.
+                task_notify.notified().await;
+                loop {
+                    if sender.send(ThreadEvent::Pulse).is_err() {
+                        // The main loop is gone; stop heartbeating.
+                        return;
+                    }
+                    tokio::time::sleep(interval).await;
+                    // Keep ticking only when re-armed while we slept;
+                    // otherwise fall back to idle. This mirrors the old
+                    // park/unpark token (at most one stored permit).
+                    if !std::pin::pin!(task_notify.notified())
+                        .now_or_never()
+                        .is_some()
+                    {
+                        break;
+                    }
+                }
+            }
+        });
+        Pulse {
+            abort: handle.abort_handle(),
+            notify,
             job_executor: self,
         }
     }
@@ -621,6 +711,59 @@ mod tests {
         assert_eq!(
             ticks, 1,
             "re-arming must replace the pending tick, not duplicate it"
+        );
+    }
+
+    #[test]
+    fn test_pulse_ticks_only_while_armed() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = Arc::new(JobExecutor::new(sender));
+        let pulse = executor.create_pulse(Duration::from_millis(20));
+        pulse.arm();
+        assert!(
+            matches!(next_event(&receiver), Some(ThreadEvent::Pulse)),
+            "an armed pulse must emit its first tick immediately"
+        );
+        // Nobody re-armed between ticks: the heartbeat must go idle.
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a pulse that is not re-armed must stop ticking"
+        );
+        pulse.arm();
+        assert!(
+            matches!(next_event(&receiver), Some(ThreadEvent::Pulse)),
+            "re-arming an idle pulse must resume ticking"
+        );
+    }
+
+    #[test]
+    fn test_pulse_keeps_cadence_while_re_armed() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = Arc::new(JobExecutor::new(sender));
+        let pulse = executor.create_pulse(Duration::from_millis(20));
+        pulse.arm();
+        // Re-arm after each tick, like `check_accounts` does while an
+        // account is offline: ticks must keep arriving at the cadence.
+        for _ in 0..3 {
+            assert!(
+                matches!(next_event(&receiver), Some(ThreadEvent::Pulse)),
+                "a re-armed pulse must keep ticking"
+            );
+            pulse.arm();
+        }
+    }
+
+    #[test]
+    fn test_pulse_drop_aborts_task() {
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let executor = Arc::new(JobExecutor::new(sender));
+        let pulse = executor.create_pulse(Duration::from_millis(20));
+        pulse.arm();
+        assert!(matches!(next_event(&receiver), Some(ThreadEvent::Pulse)));
+        drop(pulse);
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(200)).is_err(),
+            "dropping the pulse must abort its runtime task"
         );
     }
 }
