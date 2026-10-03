@@ -2270,6 +2270,7 @@ impl Component for EnvelopeView {
                     (Some(Charset::BIG5), Charset::BIG5.to_string()),
                     (Some(Charset::ISO2022JP), Charset::ISO2022JP.to_string()),
                     (Some(Charset::EUCJP), Charset::EUCJP.to_string()),
+                    (Some(Charset::ShiftJIS), Charset::ShiftJIS.to_string()),
                     (Some(Charset::KOI8R), Charset::KOI8R.to_string()),
                     (Some(Charset::KOI8U), Charset::KOI8U.to_string()),
                 ];

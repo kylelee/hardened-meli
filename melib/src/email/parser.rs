@@ -2397,6 +2397,7 @@ pub mod encodings {
             Charset::UTF16 => Ok(UTF_16LE.decode(s).0.to_string()),
             Charset::ISO2022JP => Ok(ISO_2022_JP.decode(s).0.to_string()),
             Charset::EUCJP => Ok(EUC_JP.decode(s).0.to_string()),
+            Charset::ShiftJIS => Ok(SHIFT_JIS.decode(s).0.to_string()),
             Charset::KSX1001 => Ok(EUC_KR.decode(s).0.to_string()),
         }
     }
