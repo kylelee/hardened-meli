@@ -226,7 +226,7 @@ impl MaildirMailbox {
         let path = match fs_path.strip_prefix(&root_parent) {
             Ok(stripped) => stripped.to_path_buf(),
             Err(err) => {
-                log::debug!(
+                tracing::debug!(
                     "Could not strip root prefix {} from {}: {err}",
                     root_parent.display(),
                     fs_path.display()
@@ -373,7 +373,7 @@ impl MaildirFilePathExt for Path {
                 'S' => flag |= Flag::SEEN,
                 'T' => flag |= Flag::TRASHED,
                 _ => {
-                    log::debug!(
+                    tracing::debug!(
                         "in MaildirFilePathExt::flags(), encountered unknown flag marker {:?}, \
                          path is {}",
                         f,
@@ -395,7 +395,7 @@ impl MaildirFilePathExt for Path {
         let (idx, append_2): (usize, bool) = if let Some(idx) = filename.rfind(":2,") {
             (idx + 3, false)
         } else {
-            log::trace!(
+            tracing::trace!(
                 "Invalid maildir filename: {:?}\nBacktrace:\n{}",
                 self,
                 std::backtrace::Backtrace::capture()
@@ -450,7 +450,7 @@ impl MaildirFilePathExt for Path {
         #[cfg(debug_assertions)]
         {
             if !matches!(self.try_exists(), Ok(true)) {
-                log::debug!(
+                tracing::debug!(
                     "{}",
                     Error::new("Path does not exist")
                         .set_summary(format!(
@@ -461,7 +461,7 @@ impl MaildirFilePathExt for Path {
                 );
             }
             if !self.is_file() {
-                log::debug!(
+                tracing::debug!(
                     "{}",
                     Error::new("Path is not a file")
                         .set_summary(format!(
@@ -573,7 +573,7 @@ pub fn move_to_cur(config: &Configuration, p: &Path) -> Result<PathBuf> {
         cur
     };
     let dest_path = p.place_in_dir(&cur, config)?;
-    log::trace!("moved to cur: {}", dest_path.display());
+    tracing::trace!("moved to cur: {}", dest_path.display());
     #[cfg(not(test))]
     std::fs::rename(p, &dest_path)?;
     Ok(dest_path)

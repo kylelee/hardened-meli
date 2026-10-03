@@ -93,11 +93,11 @@ impl Drop for DbPointer {
     fn drop(&mut self) {
         unsafe {
             if let Err(err) = try_call!(self.1, (self.1.database_close())(self.0.as_mut())) {
-                log::error!("Could not call C notmuch_database_close: {err}");
+                tracing::error!("Could not call C notmuch_database_close: {err}");
                 return;
             }
             if let Err(err) = try_call!(self.1, (self.1.database_destroy())(self.0.as_mut())) {
-                log::error!("Could not call C notmuch_database_destroy: {err}");
+                tracing::error!("Could not call C notmuch_database_destroy: {err}");
             }
         }
     }
@@ -726,7 +726,7 @@ impl MailBackend for NotmuchDb {
         };
         Ok(Box::pin(try_fn_stream(|emitter| async move {
             while let Some(res) = state.fetch().await.inspect_err(|err| {
-                log::debug!("fetch err {:?}", err);
+                tracing::debug!("fetch err {:?}", err);
             })? {
                 emitter.emit(res).await;
             }
@@ -897,13 +897,13 @@ impl MailBackend for NotmuchDb {
             let mut snapshot = snapshot.write().unwrap();
             for env_hash in env_hashes.iter() {
                 let Some(message_id) = snapshot.message_id_index.get(&env_hash) else {
-                    log::debug!("set_flags: no message id cached for envelope {env_hash}");
+                    tracing::debug!("set_flags: no message id cached for envelope {env_hash}");
                     continue;
                 };
                 let message = match Message::find_message(&database, message_id) {
                     Ok(v) => v,
                     Err(err) => {
-                        log::debug!("not found {err}");
+                        tracing::debug!("not found {err}");
                         continue;
                     }
                 };
@@ -950,19 +950,19 @@ impl MailBackend for NotmuchDb {
                             // cannot be passed through the C API, so skip it
                             // with a warning rather than panicking.
                             let Ok(c_tag) = CString::new(tag.as_str()) else {
-                                log::warn!("Skipping tag with a NUL byte: {tag:?}");
+                                tracing::warn!("Skipping tag with a NUL byte: {tag:?}");
                                 continue;
                             };
                             add_tag!(&c_tag.as_ref());
                         }
                         FlagOp::UnSetTag(tag) => {
                             let Ok(c_tag) = CString::new(tag.as_str()) else {
-                                log::warn!("Skipping tag with a NUL byte: {tag:?}");
+                                tracing::warn!("Skipping tag with a NUL byte: {tag:?}");
                                 continue;
                             };
                             remove_tag!(&c_tag.as_ref());
                         }
-                        _ => log::debug!("flag_op is {:?}", op),
+                        _ => tracing::debug!("flag_op is {:?}", op),
                     }
                 }
 

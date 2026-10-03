@@ -1262,7 +1262,7 @@ fn test_imap_sync_sqlite3_quarantine_second_load_idempotent() {
     // Second load is idempotent: the same healthy + placeholder set is
     // served, no duplicate quarantine row appears and `first_seen` is
     // untouched. `first_seen` is written only by the quarantine move,
-    // which is the same code path that emits the per-row `log::error!`,
+    // which is the same code path that emits the per-row `tracing::error!`,
     // so an unchanged `first_seen` and row count also prove that the
     // error-level log did not fire again on this load. (Direct log
     // capture cannot be shared across test modules: melib's lib tests

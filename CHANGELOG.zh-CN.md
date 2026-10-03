@@ -64,6 +64,8 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 
 ### 变更（Changes）
 
+- 日志重构（issue #11）：`meli`/`melib` 日志依赖由 `log` 换为 `tracing`，并删除 `melib` 原 log 模块（`Logger`、自研 `log::Log`/`Subscriber`、XDG 默认目录）——全部代码直接用 `tracing` 打日志（`BackendEvent::Notice` 携带 `tracing::Level`）。启动时一次无参调用 `meli/src/logging.rs::init_log()` 完成全部配置：`tracing-subscriber` pretty 格式写入 `tracing-appender` 按小时滚动的 `./log/meli.<YYYY-MM-DD-HH>` 文件（unix 下保持 `0600` 权限）、后台保留策略只留最近 7 天日志（每小时检查一次）、debug 构建开 `DEBUG` 级别 / release 构建开 `ERROR` 级别——release 还经 `tracing` 的 `release_max_level_error` 把 `ERROR` 以下全部编译剔除（替代 `log` 的 `release_max_level_off`）。`debug-tracing` cargo 特性移除（日志永远编译开启）；`MELI_DEBUG_STDERR=yes` 仍可把每行复制到 stderr；旧配置键 `[logging] log_file`/`maximum_level` 不再生效并在启动时告警；`meli print-log-path` 改为打印 `./log/` 目录。isahc 的 `tracing` 事件现在真正进入订阅器（此前落入 tracing 的空默认分发器）。单元测试覆盖保留策略与 pretty/级别过滤管线；melib 测试套件的 trace 经 `init_test_logging()` 助手走 stderr。
+
 - notmuch 整修（上游 `2ca62c90` + `05a08b6c` + `57e60bec` + `09c6d05c`）：`Drop`（close+destroy）从 `DbConnection` 移到 `DbPointer`，连接可自由克隆；`refresh` 改为对比当前与快照的 tags/存在性并发出精确 `RefreshEvent`（检测 flag 变化、计数精确增减、重建快照索引）；搜索词组合用 `AND` 而非 notmuch 同前缀隐式 `OR`（修上游 #766）；抓取分块 250→1000。
 
 - maildir 用户主动操作（设 flag/删除/改名）完成后直接发出后端事件（上游 `34e40e0e`），不再依赖 notify watcher 观察文件系统；fork 的「缓存锁下不做文件系统 IO」纪律保留。

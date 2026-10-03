@@ -933,7 +933,7 @@ pub fn construct_theme(name: &str, theme: &mut Theme, mut s: ThemeOptions) -> Re
     // else that is left over is still an error.
     for key in REMOVED_THEME_KEYS {
         if s.keys.shift_remove(*key).is_some() {
-            melib::log::warn!(
+            tracing::warn!(
                 "`{key}` in theme `{name}` is no longer a valid theme key and was ignored."
             );
         }

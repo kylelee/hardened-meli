@@ -299,8 +299,8 @@ impl Opt {
                 Ok(())
             }
             SubCommand::PrintLogPath => {
-                let settings = ret_err!(crate::conf::Settings::new());
-                print_path(&settings._logger.log_dest());
+                ret_err!(crate::conf::Settings::new());
+                print_path(&crate::logging::log_dir());
                 Ok(())
             }
         })

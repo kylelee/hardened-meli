@@ -169,7 +169,7 @@ impl Account {
                     _err @ Ok(None) | _err @ Err(_) => {
                         /* canceled */
                         #[cfg(debug_assertions)]
-                        log::trace!(
+                        tracing::trace!(
                             "handle.chan.try_recv() for job {} returned {:?}",
                             job_id,
                             _err
@@ -250,7 +250,7 @@ impl Account {
                             // Not retried here; the next `IsOnline`
                             // `Uninit`/`Err` -> `True` transition
                             // re-reconciles.
-                            log::warn!(
+                            tracing::warn!(
                                 "Account `{}`: refreshing the mailbox list failed: {err}",
                                 self.name
                             );
@@ -286,7 +286,7 @@ impl Account {
                     // The mailbox map is supplied by the backend; a hash that
                     // is not present (or a self/missing parent) must not panic.
                     if !mailboxes.contains_key(&mailbox_hash) {
-                        log::error!(
+                        tracing::error!(
                             "Backend reported creation of unknown mailbox hash {mailbox_hash}; \
                              ignoring the event."
                         );
@@ -326,7 +326,7 @@ impl Account {
                     let status = MailboxStatus::default();
 
                     let Some(created) = mailboxes.remove(&mailbox_hash) else {
-                        log::error!(
+                        tracing::error!(
                             "Backend returned an inconsistent mailbox map for {mailbox_hash}; \
                              ignoring the event."
                         );
@@ -384,7 +384,7 @@ impl Account {
                     let Some(deleted_mailbox) =
                         self.mailbox_entries.shift_remove(&mailbox_hash)
                     else {
-                        log::error!(
+                        tracing::error!(
                             "Tried to delete unknown mailbox hash {mailbox_hash}; ignoring the \
                              event."
                         );

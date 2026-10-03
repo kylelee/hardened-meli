@@ -85,17 +85,16 @@ use crate::{
         },
         futures::timeout,
     },
-    LogLevel,
 };
 
 const IMAP_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(60 * 28);
 
 macro_rules! imap_log {
     ($fn:ident, $conn:expr, $fmt:literal, $($t:tt)*) => {
-        log::$fn!(std::concat!("{} ", $fmt), $conn.id, $($t)*);
+        tracing::$fn!(std::concat!("{} ", $fmt), $conn.id, $($t)*);
     };
     ($fn:ident, $conn:expr, $fmt:literal) => {
-        log::$fn!(std::concat!("{} ", $fmt), $conn.id);
+        tracing::$fn!(std::concat!("{} ", $fmt), $conn.id);
     };
 }
 
@@ -341,7 +340,7 @@ impl ConnectionMutex {
                 );
                 if let Err(err) = timeout(mutex.uid_store.timeout, new_pool_entry.connect()).await?
                 {
-                    log::trace!(
+                    tracing::trace!(
                         "{} Creation of new connection for connection pool failed: {}",
                         mutex.uid_store.account_name,
                         err
@@ -349,7 +348,7 @@ impl ConnectionMutex {
                     return Err(err);
                 }
                 *guard = Some(new_pool_entry);
-                log::trace!(
+                tracing::trace!(
                     "{} Created new pool connection #{}",
                     mutex.uid_store.account_name,
                     i,
@@ -397,7 +396,7 @@ impl ConnectionMutex {
             }
             // A pool conn was the first available
             futures::future::Either::Left((Ok((res, _)), _main)) => {
-                log::trace!("{} using pool connection", self.uid_store.account_name);
+                tracing::trace!("{} using pool connection", self.uid_store.account_name);
                 Ok(res)
             }
             // All pool connections were unavailable, so fallback to waiting for the main
@@ -474,7 +473,7 @@ impl ImapStream {
                         .chain_err_summary(err_fn)?,
                     ImapProtocol::ManageSieve => {
                         let len = socket.read(&mut buf).await.chain_err_summary(err_fn)?;
-                        log::trace!(
+                        tracing::trace!(
                             "{} read {} bytes pre-STARTTLS: {:?}",
                             id,
                             len,
@@ -496,7 +495,7 @@ impl ImapStream {
                         .await
                         .chain_err_summary(err_fn)?
                         .chain_err_summary(err_fn)?;
-                    log::trace!(
+                    tracing::trace!(
                         "{} read {} bytes during STARTTLS negotiation: {:?}",
                         id,
                         len,
@@ -588,7 +587,7 @@ impl ImapStream {
             .get_ref()
             .set_keepalive(Some(Duration::new(60 * 35, 0)))
         {
-            log::warn!("Could not set TCP keepalive in IMAP connection: {}", err);
+            tracing::warn!("Could not set TCP keepalive in IMAP connection: {}", err);
         }
         let mut res = Vec::with_capacity(8 * 1024);
         let mut ret = Self {
@@ -670,7 +669,7 @@ impl ImapStream {
 
             match capabilities {
                 Err(err) => {
-                    log::debug!("{}: {}", uid_store.account_name, err);
+                    tracing::debug!("{}: {}", uid_store.account_name, err);
                     return Err(err);
                 }
                 Ok(v) => v,
@@ -925,7 +924,7 @@ impl ImapStream {
             imap_log!(trace, ret, "ID response {}", String::from_utf8_lossy(&res));
             match id_ext_response(&res) {
                 Err(err) => {
-                    log::warn!(
+                    tracing::warn!(
                         "Could not parse ID command response from server. Consider turning ID use \
                          off. Error was: {}",
                         err
@@ -967,7 +966,7 @@ impl ImapStream {
             match timeout(self.timeout, self.stream.read(&mut buf)).await? {
                 Ok(0) => break,
                 Ok(b) => {
-                    log::trace!(
+                    tracing::trace!(
                         "{} read_lines got {} bytes: {:?}",
                         self.id,
                         b,
@@ -1031,7 +1030,7 @@ impl ImapStream {
                                 }
                             }
                             if let Some(line_start) = tag_found_at {
-                                log::trace!(
+                                tracing::trace!(
                                     "{} read_lines: termination tag {:?} found mid-buffer \
                                      with {} trailing bytes kept for processing",
                                     self.id,
@@ -1311,7 +1310,7 @@ impl ImapConnection {
                                         .set_kind(ErrorKind::ProtocolError));
                                     }
                                     deflate_retries += 1;
-                                    log::warn!(
+                                    tracing::warn!(
                                         "Could not use COMPRESS=DEFLATE in account `{}`: server \
                                      replied with BYE `{}`. Retrying without deflate compression.",
                                         self.uid_store.account_name,
@@ -1348,7 +1347,7 @@ impl ImapConnection {
                                 ImapResponse::No(code)
                                 | ImapResponse::Bad(code)
                                 | ImapResponse::Preauth(code) => {
-                                    log::warn!(
+                                    tracing::warn!(
                                         "Could not use COMPRESS=DEFLATE in account `{}`: server \
                                      replied with {}",
                                         self.uid_store.account_name,
@@ -1453,7 +1452,7 @@ impl ImapConnection {
                                 BackendEvent::Notice {
                                     description: response_code.to_string(),
                                     content: last_cmd,
-                                    level: LogLevel::ERROR,
+                                    level: tracing::Level::ERROR,
                                 },
                             );
                             ret.extend_from_slice(&response);
@@ -1467,7 +1466,7 @@ impl ImapConnection {
                         } else if let Ok(Some(untagged_response)) =
                             super::protocol_parser::untagged_responses(l).map(|(_, v, _)| v)
                         {
-                            log::trace!(
+                            tracing::trace!(
                                 "read_response handling untagged line: {:?} -> {untagged_response:?}",
                                 String::from_utf8_lossy(&l[..l.len().min(200)])
                             );
@@ -2021,7 +2020,7 @@ async fn read(
         let len = line.len();
         let retval = line.to_vec();
         result.drain(0..len);
-        log::trace!(
+        tracing::trace!(
             "ImapBlockingConnection::read_line got buffered line: {:?}",
             String::from_utf8_lossy(&retval[..retval.len().min(200)])
         );
@@ -2029,11 +2028,11 @@ async fn read(
     }
     match conn.stream.as_mut().unwrap().stream.read(buf).await {
         Ok(0) => {
-            log::trace!("ImapBlockingConnection::read got EOF");
+            tracing::trace!("ImapBlockingConnection::read got EOF");
             *break_flag = true;
         }
         Ok(b) => {
-            log::trace!(
+            tracing::trace!(
                 "ImapBlockingConnection::read got {} bytes from socket: {:?}",
                 b,
                 String::from_utf8_lossy(&buf[0..b.min(200)])

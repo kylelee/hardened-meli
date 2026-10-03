@@ -24,7 +24,7 @@ use indexmap::IndexMap;
 use melib::{
     backends::{Mailbox, MailboxHash},
     error::Error,
-    log,
+    tracing,
 };
 use smallvec::SmallVec;
 
@@ -76,7 +76,7 @@ impl MailboxEntry {
                 ret.path = melib::backends::utf7::decode_utf7_imap(&ret.path);
             }
             Some(other) => {
-                log::warn!(
+                tracing::warn!(
                     "mailbox `{}`: unrecognized mailbox name charset: {other}",
                     ret.name
                 );

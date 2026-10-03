@@ -1892,7 +1892,7 @@ impl Component for Tabbed {
                     self.update_help_curr_views(context);
                     return true;
                 } else {
-                    log::debug!(
+                    tracing::debug!(
                         "Child component with id {:?} not found.\nList: {:?}",
                         id,
                         self.children

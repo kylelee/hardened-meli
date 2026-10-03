@@ -137,7 +137,7 @@ mod system {
                 }
 
                 if let Err(err) = notification.show() {
-                    log::error!("Could not show system notification: {err}");
+                    tracing::error!("Could not show system notification: {err}");
                 }
             }
             false
@@ -311,7 +311,7 @@ impl Component for NotificationRouter {
                 if let Err(err) =
                     self.show_notification(context, title.as_deref(), body, kind.as_ref())
                 {
-                    log::error!("{err}");
+                    tracing::error!("{err}");
                 }
             }
         }

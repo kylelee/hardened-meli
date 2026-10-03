@@ -457,7 +457,7 @@ impl MboxFormat {
                             Ok((input, env))
                         }
                         Err(err) => {
-                            log::debug!("Could not parse mail {:?}", err);
+                            tracing::debug!("Could not parse mail {:?}", err);
                             Err((&input[start..], Box::new(err)))
                         }
                     }
@@ -474,7 +474,7 @@ impl MboxFormat {
                             Ok((&[], env))
                         }
                         Err(err) => {
-                            log::debug!("Could not parse mail at {:?}", err);
+                            tracing::debug!("Could not parse mail at {:?}", err);
                             Err((&input[start..], Box::new(err)))
                         }
                     }
@@ -500,7 +500,7 @@ impl MboxFormat {
                             Ok((input, env))
                         }
                         Err(err) => {
-                            log::debug!("Could not parse mail {:?}", err);
+                            tracing::debug!("Could not parse mail {:?}", err);
                             Err((&input[start..len], Box::new(err)))
                         }
                     }
@@ -517,7 +517,7 @@ impl MboxFormat {
                             Ok((&[], env))
                         }
                         Err(err) => {
-                            log::debug!("Could not parse mail {:?}", err);
+                            tracing::debug!("Could not parse mail {:?}", err);
                             Err((&input[start..], Box::new(err)))
                         }
                     }
@@ -876,7 +876,7 @@ impl MailBackend for MboxType {
         Ok(Box::pin(try_fn_stream(|emitter| async move {
             loop {
                 if let Some(res) = state.fetch().await.inspect_err(|err| {
-                    log::debug!("fetch err {:?}", err);
+                    tracing::debug!("fetch err {:?}", err);
                 })? {
                     emitter.emit(res).await;
                 } else {
@@ -909,7 +909,7 @@ impl MailBackend for MboxType {
                 let mailboxes_lck = self.mailboxes.lock().unwrap();
                 for f in mailboxes_lck.values() {
                     watcher.watch(&f.fs_path, RecursiveMode::Recursive)?;
-                    log::debug!("watching {:?}", f.fs_path.as_path());
+                    tracing::debug!("watching {:?}", f.fs_path.as_path());
                 }
             }
             Ok(watcher)
@@ -1062,7 +1062,10 @@ impl MailBackend for MboxType {
                             }
                         }
                         _ => {
-                            log::debug!("Received unexpected fs watcher notify event: {:?}", event);
+                            tracing::debug!(
+                                "Received unexpected fs watcher notify event: {:?}",
+                                event
+                            );
                             /* Trigger rescan of mailboxes */
                             let events = {
                                 let mailboxes_lck = mailboxes.lock().unwrap();
@@ -1083,9 +1086,9 @@ impl MailBackend for MboxType {
                             return Ok(());
                         }
                     },
-                    Ok(Err(err)) => log::debug!("watch error: {:?}", err),
+                    Ok(Err(err)) => tracing::debug!("watch error: {:?}", err),
                     Err(err) => {
-                        log::debug!("watch error: {:?}", err);
+                        tracing::debug!("watch error: {:?}", err);
                         return Err(Error::new(format!(
                             "Mbox watching thread exited with error: {err}"
                         )));

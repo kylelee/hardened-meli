@@ -1307,7 +1307,7 @@ impl Index<&ThreadNodeHash> for Threads {
 //    ) {
 //        {
 //            let envelopes = envelopes.read().unwrap();
-//            log::debug!("{}ThreadNode {}\n{}\tmessage: {}\n{}\tparent:
+//            tracing::debug!("{}ThreadNode {}\n{}\tmessage: {}\n{}\tparent:
 // {}\n{}\tthread_group: {}\n{}\tchildren (len: {}):\n",
 // "\t".repeat(level),                  node_hash,
 //                  "\t".repeat(level),
@@ -1361,7 +1361,7 @@ impl Index<&ThreadNodeHash> for Threads {
 //    ids: &HashMap<ThreadNodeHash, MessageID>,
 //    envelopes: &Envelopes,
 //) {
-//    //log::debug!("save_graph {node_arr:?} nodes {nodes:?} ids {ids:?}
+//    //tracing::debug!("save_graph {node_arr:?} nodes {nodes:?} ids {ids:?}
 // envelopes {envelopes:?}");    for &n in node_arr {
 //        print_threadnodes(n, nodes, envelopes);
 //    }
@@ -1474,7 +1474,7 @@ impl Index<&ThreadNodeHash> for Threads {
 //        let mut file = File::create(&filename).unwrap();
 //        file.write_all(s.as_bytes()).unwrap();
 //        file.flush().unwrap();
-//        log::debug!("wrote graph to {filename}");
+//        tracing::debug!("wrote graph to {filename}");
 //    }
 //}
 
@@ -1539,7 +1539,7 @@ impl Index<&ThreadNodeHash> for Threads {
 //    let filename =
 // format!("/tmp/meli/threads/threads_{iter}_{_inserting_msg_id}.svg");
 //    graph_to_svg(&graph, &settings, &filename).unwrap();
-//    log::debug!("wrote graph to {filename}");
+//    tracing::debug!("wrote graph to {filename}");
 //}
 
 #[cfg(test)]

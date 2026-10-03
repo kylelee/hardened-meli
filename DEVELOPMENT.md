@@ -67,19 +67,21 @@ make -f .gitea/Makefile.lint clippy
 
 ## Trace logs
 
-Enable trace logs to `stderr` with:
+Logging is always compiled in (there is no build feature for it anymore) and
+set up by a single `init_log()` call at startup: `tracing-subscriber`'s
+pretty formatter writing into `tracing-appender`'s hourly-rotated files
+`./log/meli.<YYYY-MM-DD-HH>`, with a background retention sweep keeping the
+last 7 days of logs. Debug builds log at `DEBUG` level, release builds at
+`ERROR` only (`tracing`'s `release_max_level_error` compiles everything below
+`ERROR` out of release builds).
+
+To additionally duplicate every log line on `stderr` with:
 
 ```sh
 export MELI_DEBUG_STDERR=yes
 ```
 
 This means you will have to to redirect `stderr` to a file like `meli 2> trace.log`.
-
-Tracing to `stderr` is opt-in by a build feature:
-
-```sh
-cargo build --features=debug-tracing
-```
 
 To additionally trace network and protocol communications, set `trace = true`
 in the account's extra settings (IMAP, JMAP, NNTP) or in the

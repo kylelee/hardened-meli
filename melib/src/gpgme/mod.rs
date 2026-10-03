@@ -279,7 +279,7 @@ impl Context {
                         val.set(LocateKey::LOCAL, true);
                     }
                     unknown => {
-                        log::debug!("unknown mechanism: {}", unknown);
+                        tracing::debug!("unknown mechanism: {}", unknown);
                     }
                 }
             }

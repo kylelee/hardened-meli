@@ -105,11 +105,12 @@ static GLOBAL: System = System;
 
 pub extern crate melib;
 pub use melib::{
-    error::*, log, AccountHash, ActionFlag, Envelope, EnvelopeHash, EnvelopeRef, Flag, LogLevel,
-    Mail, Mailbox, MailboxHash, ThreadHash, ToggleFlag,
+    error::*, AccountHash, ActionFlag, Envelope, EnvelopeHash, EnvelopeRef, Flag, Mail, Mailbox,
+    MailboxHash, ThreadHash, ToggleFlag,
 };
 
 pub mod args;
+pub mod logging;
 #[cfg(feature = "cli-docs")]
 pub mod manpages;
 pub mod signal_handlers;

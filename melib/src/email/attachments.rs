@@ -98,10 +98,10 @@ impl AttachmentBuilder {
             Ok((_, v)) => v,
             Err(err) => {
                 if !content.trim().is_empty() {
-                    log::debug!("error in parsing attachment: {}", err);
-                    log::debug!("\n-------------------------------");
-                    log::debug!("{}\n", String::from_utf8_lossy(content));
-                    log::debug!("-------------------------------\n");
+                    tracing::debug!("error in parsing attachment: {}", err);
+                    tracing::debug!("\n-------------------------------");
+                    tracing::debug!("{}\n", String::from_utf8_lossy(content));
+                    tracing::debug!("-------------------------------\n");
                 }
 
                 return Self {
@@ -225,7 +225,7 @@ impl AttachmentBuilder {
                         .chain(cst.iter())
                         .any(|b| !is_rfc2045_token_byte(*b))
                 {
-                    log::debug!(
+                    tracing::debug!(
                         "invalid content type token(s) in content_type: {:?}",
                         String::from_utf8_lossy(value)
                     );
@@ -242,7 +242,7 @@ impl AttachmentBuilder {
                     }
                     if let Some(boundary) = boundary {
                         if depth >= MAX_MULTIPART_NESTING_DEPTH {
-                            log::debug!(
+                            tracing::debug!(
                                 "multipart nesting depth {} exceeded; treating remaining \
                                  subtree as application/octet-stream",
                                 MAX_MULTIPART_NESTING_DEPTH
@@ -344,7 +344,7 @@ impl AttachmentBuilder {
                 }
             }
             Err(err) => {
-                log::debug!(
+                tracing::debug!(
                     "parsing error in content_type: {:?} {}",
                     String::from_utf8_lossy(value),
                     err
@@ -383,10 +383,10 @@ impl AttachmentBuilder {
                     let (headers, body) = match parser::attachments::attachment(a) {
                         Ok((_, v)) => v,
                         Err(err) => {
-                            log::debug!("error in parsing attachment: {}", err);
-                            log::debug!("\n-------------------------------");
-                            log::debug!("{}\n", String::from_utf8_lossy(a));
-                            log::debug!("-------------------------------\n");
+                            tracing::debug!("error in parsing attachment: {}", err);
+                            tracing::debug!("\n-------------------------------");
+                            tracing::debug!("{}\n", String::from_utf8_lossy(a));
+                            tracing::debug!("-------------------------------\n");
 
                             continue;
                         }
@@ -413,7 +413,7 @@ impl AttachmentBuilder {
                 vec
             }
             a => {
-                log::debug!(
+                tracing::debug!(
                     "error {:?}\n\traw: {:?}\n\tboundary: {:?}",
                     a,
                     String::from_utf8_lossy(raw),
@@ -570,11 +570,11 @@ impl Attachment {
                 match parser::attachments::multipart_parts(self.body(), boundary) {
                     Ok((_, v)) => v,
                     Err(e) => {
-                        log::debug!("error in parsing attachment");
-                        log::debug!("\n-------------------------------");
-                        log::debug!("{}\n", String::from_utf8_lossy(&self.raw));
-                        log::debug!("-------------------------------\n");
-                        log::debug!("{:?}\n", e);
+                        tracing::debug!("error in parsing attachment");
+                        tracing::debug!("\n-------------------------------");
+                        tracing::debug!("{}\n", String::from_utf8_lossy(&self.raw));
+                        tracing::debug!("-------------------------------\n");
+                        tracing::debug!("{:?}\n", e);
                         Vec::new()
                     }
                 }
@@ -654,11 +654,11 @@ impl Attachment {
                 }
             }
             Err(e) => {
-                log::debug!("error in parsing multipart_parts");
-                log::debug!("\n-------------------------------");
-                log::debug!("{}\n", String::from_utf8_lossy(bytes));
-                log::debug!("-------------------------------\n");
-                log::debug!("{:?}\n", e);
+                tracing::debug!("error in parsing multipart_parts");
+                tracing::debug!("\n-------------------------------");
+                tracing::debug!("{}\n", String::from_utf8_lossy(bytes));
+                tracing::debug!("-------------------------------\n");
+                tracing::debug!("{:?}\n", e);
             }
         }
         false
@@ -1263,10 +1263,10 @@ mod tests {
 
     /// Regression test: the parser-error branch of
     /// [`AttachmentBuilder::parts_with_depth`] logs the raw bytes; the format
-    /// arguments of `log::debug!` are evaluated only when the runtime maximum
-    /// level permits, so the level is raised to Debug around the call. No
-    /// logger needs to be installed: the global fallback logger discards
-    /// records.
+    /// arguments of `tracing::debug!` are only evaluated when the active
+    /// subscriber enables them. No subscriber needs to be installed: the
+    /// default no-op dispatcher discards events, and the error branch (the
+    /// thing under test) still runs to completion.
     #[test]
     fn test_parts_err_arm_debug_log_with_invalid_utf8_does_not_panic() {
         // No `b` and no `-` anywhere, so `parts_f` cannot find a starting
@@ -1278,10 +1278,7 @@ mod tests {
         std::str::from_utf8(raw).unwrap_err();
         assert!(!raw.iter().any(|&b| b == b'b' || b == b'-'));
 
-        let prev_level = log::max_level();
-        log::set_max_level(log::LevelFilter::Debug);
         let parts = AttachmentBuilder::parts(raw, b"b");
-        log::set_max_level(prev_level);
 
         assert!(parts.is_empty());
         // Two replacement characters for the two truncated multibyte

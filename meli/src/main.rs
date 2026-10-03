@@ -41,7 +41,7 @@ fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default_hook(info);
-        log::error!("panic: {info}");
+        tracing::error!("panic: {info}");
     }));
     let opt = Opt::from_args();
     ::std::process::exit(match run_app(opt) {
@@ -137,7 +137,7 @@ fn run_app(mut opt: Opt) -> Result<()> {
                         r,
                         Ok(ThreadEvent::Pulse) | Ok(ThreadEvent::UIEvent(UIEvent::Timer(_)))
                     ) {
-                        log::trace!("{r:?}");
+                        tracing::trace!("{r:?}");
                     }
                     match r.unwrap() {
                         ThreadEvent::Input((Key::Ctrl('z'), _)) if state.mode != UIMode::Embedded => {
@@ -221,7 +221,7 @@ fn run_app(mut opt: Opt) -> Result<()> {
                             state.redraw();
                         }
                         ThreadEvent::UIEvent(e) => {
-                            log::debug!(
+                            tracing::debug!(
                                 "main loop: UIEvent {}",
                                 format!("{e:?}").chars().take(120).collect::<String>()
                             );
@@ -232,7 +232,7 @@ fn run_app(mut opt: Opt) -> Result<()> {
                             state.pulse();
                         },
                         ThreadEvent::JobFinished(id) => {
-                            log::debug!("main loop: JobFinished {id}");
+                            tracing::debug!("main loop: JobFinished {id}");
                             state.context.main_loop_handler.job_executor.set_job_finished(id);
                             for account in state.context.accounts.values_mut() {
                                 if account.process_event(&id) {
@@ -266,7 +266,7 @@ fn run_app(mut opt: Opt) -> Result<()> {
 
                         }
                         other => {
-                            log::trace!("got other signal: {:?}", other);
+                            tracing::trace!("got other signal: {:?}", other);
                         }
                     }
                 },

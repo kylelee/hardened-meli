@@ -55,7 +55,7 @@ impl DotAddressable for crate::terminal::Key {}
 impl DotAddressable for crate::terminal::ShortcutKeys {}
 impl DotAddressable for usize {}
 impl DotAddressable for Query {}
-impl DotAddressable for melib::LogLevel {}
+impl DotAddressable for LogLevel {}
 impl DotAddressable for PathBuf {}
 impl DotAddressable for melib::conf::ToggleFlag {}
 impl DotAddressable for melib::conf::ActionFlag {}

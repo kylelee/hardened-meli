@@ -341,7 +341,7 @@ impl Envelope {
         let (headers, body) = match parser::mail(bytes) {
             Ok(v) => v,
             Err(e) => {
-                log::debug!("error in parsing mail\n{:?}\n", e);
+                tracing::debug!("error in parsing mail\n{:?}\n", e);
                 let error_msg = String::from("Mail cannot be shown because of errors.");
                 return Err(Error::new(error_msg));
             }
@@ -413,7 +413,7 @@ impl Envelope {
                             self.has_attachments =
                                 Attachment::check_if_has_attachments_quick(body, boundary);
                         } else {
-                            log::debug!(
+                            tracing::debug!(
                                 "{self:?} has no boundary field set in multipart/mixed \
                                  content-type field."
                             );

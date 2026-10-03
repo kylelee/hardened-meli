@@ -23,7 +23,7 @@
 
 use std::{borrow::Cow, collections::HashMap};
 
-use melib::{backends::prelude::*, error::Result, LogLevel};
+use melib::{backends::prelude::*, error::Result};
 
 use crate::{is_variant, jobs::JoinHandle, StatusEvent};
 
@@ -123,7 +123,7 @@ pub enum JobRequest {
     },
     Generic {
         name: Cow<'static, str>,
-        log_level: LogLevel,
+        log_level: tracing::Level,
         handle: JoinHandle<Result<()>>,
         on_finish: Option<crate::types::CallbackFn>,
     },

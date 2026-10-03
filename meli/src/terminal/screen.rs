@@ -25,7 +25,7 @@ use std::io::{BufWriter, Write};
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
-use melib::{log, uuid};
+use melib::uuid;
 
 use crossterm::{
     cursor::{Hide, MoveTo, MoveToColumn, Show},
@@ -398,7 +398,7 @@ impl Screen<Tty> {
         if termcols.unwrap_or(72) as usize != self.cols
             || termrows.unwrap_or(120) as usize != self.rows
         {
-            log::trace!(
+            tracing::trace!(
                 "Size updated, from ({}, {}) -> ({:?}, {:?})",
                 self.cols,
                 self.rows,
@@ -415,7 +415,7 @@ impl Screen<Tty> {
             self.grid.area = self.area();
             self.overlay_grid.area = self.area();
         } else {
-            log::warn!("Terminal size too big: ({} cols, {} rows)", cols, rows);
+            tracing::warn!("Terminal size too big: ({} cols, {} rows)", cols, rows);
         }
     }
 
@@ -429,7 +429,7 @@ impl Screen<Tty> {
         write_leave_alternate_screen(stdout, mouse);
         self.flush();
         if let Err(err) = terminal::disable_raw_mode() {
-            log::warn!("Error while disabling raw mode: {err}");
+            tracing::warn!("Error while disabling raw mode: {err}");
         }
         self.display.stdout = None;
     }
@@ -659,12 +659,12 @@ impl Screen<Tty> {
         let mut palette = (None, None);
         query_terminal_palette(std::io::stdin(), &mut palette, PALETTE_QUERY_TIMEOUT);
         if let (Some(fg), Some(bg)) = palette {
-            log::trace!(
+            tracing::trace!(
                 "compute_scheme_contrast(fg {fg:?}, bg {bg:?}) = {:?}",
                 Color::compute_scheme_contrast(fg, bg)
             );
         }
-        log::debug!(
+        tracing::debug!(
             "Startup terminal palette query resolved: foreground = {:?}, background = {:?}",
             palette.0,
             palette.1
@@ -846,13 +846,13 @@ fn parse_palette_replies(buf: &mut Vec<u8>, palette: &mut (Option<Color>, Option
                 let reply = String::from_utf8_lossy(&buf[..idx]).into_owned();
                 buf.drain(..idx + term_len);
                 if let Some(bg) = QueryBackground::parse(&reply) {
-                    log::trace!("EscapeSequence parsed bg {bg:?}");
+                    tracing::trace!("EscapeSequence parsed bg {bg:?}");
                     palette.1 = Some(bg);
                 } else if let Some(fg) = QueryForeground::parse(&reply) {
-                    log::trace!("EscapeSequence parsed fg {fg:?}");
+                    tracing::trace!("EscapeSequence parsed fg {fg:?}");
                     palette.0 = Some(fg);
                 } else {
-                    log::trace!("EscapeSequence unknown");
+                    tracing::trace!("EscapeSequence unknown");
                 }
             }
             b'[' => {

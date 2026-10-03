@@ -116,27 +116,27 @@ impl QueryTrait for crate::Envelope {
                 &Query::Header(HeaderName::REFERENCES, s.to_string()),
             ),
             AllText(_) => {
-                log::warn!("Filtering with AllText is unimplemented.");
+                tracing::warn!("Filtering with AllText is unimplemented.");
                 false
             }
             Body(_) => {
-                log::warn!("Filtering with Body is unimplemented.");
+                tracing::warn!("Filtering with Body is unimplemented.");
                 false
             }
             Answered => {
-                log::warn!("Filtering with Answered is unimplemented.");
+                tracing::warn!("Filtering with Answered is unimplemented.");
                 false
             }
             AnsweredBy { .. } => {
-                log::warn!("Filtering with AnsweredBy is unimplemented.");
+                tracing::warn!("Filtering with AnsweredBy is unimplemented.");
                 false
             }
             Larger { .. } => {
-                log::warn!("Filtering with Larger is unimplemented.");
+                tracing::warn!("Filtering with Larger is unimplemented.");
                 false
             }
             Smaller { .. } => {
-                log::warn!("Filtering with Smaller is unimplemented.");
+                tracing::warn!("Filtering with Smaller is unimplemented.");
                 false
             }
         }

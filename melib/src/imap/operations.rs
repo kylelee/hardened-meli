@@ -82,7 +82,7 @@ impl ImapOp {
                 )
                 .await?;
             }
-            log::trace!(
+            tracing::trace!(
                 "fetch response is {} bytes and {} lines",
                 response.len(),
                 String::from_utf8_lossy(&response).lines().count()

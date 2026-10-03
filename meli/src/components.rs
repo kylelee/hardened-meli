@@ -198,12 +198,12 @@ pub trait Component: std::fmt::Display + std::fmt::Debug + Send + Sync {
     }
 
     fn realize(&self, parent: Option<ComponentId>, context: &mut Context) {
-        // log::trace!("Realizing id {} w/ parent {:?}", self.id(), &parent);
+        // tracing::trace!("Realizing id {} w/ parent {:?}", self.id(), &parent);
         context.realized.insert(self.id(), parent);
     }
 
     fn unrealize(&self, context: &mut Context) {
-        // log::trace!("Unrealizing id {}", self.id());
+        // tracing::trace!("Unrealizing id {}", self.id());
         context.unrealized.insert(self.id());
         context
             .replies
@@ -352,9 +352,9 @@ impl ComponentPath {
     pub fn resolve<'c>(&self, root: &'c dyn Component) -> Option<&'c dyn Component> {
         let mut cursor = root;
         for id in self.tail.iter().rev().chain(std::iter::once(&self.id)) {
-            // log::trace!("resolve cursor = {} next id is {}", cursor.id(), &id);
+            // tracing::trace!("resolve cursor = {} next id is {}", cursor.id(), &id);
             if *id == cursor.id() {
-                // log::trace!("continue;");
+                // tracing::trace!("continue;");
                 continue;
             }
             cursor = cursor.children().shift_remove(id)?;

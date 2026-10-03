@@ -95,7 +95,7 @@ impl MailViewState {
     pub fn load_bytes(self_: &mut MailView, bytes: Vec<u8>, context: &mut Context) {
         #[cfg(debug_assertions)]
         let __span = crate::state::DrawSpan::enter("MailViewState::load_bytes");
-        melib::log::debug!(
+        tracing::debug!(
             "load_bytes: acquiring envelope write lock ({} bytes)",
             bytes.len()
         );
@@ -108,17 +108,17 @@ impl MailViewState {
         let Some(mut env_ref) = account.collection.get_env_mut(coordinates.2) else {
             // The envelope was removed while its body was being fetched: skip
             // loading rather than fabricating a blank message.
-            melib::log::error!(
+            tracing::error!(
                 "Could not load email body: envelope {} is no longer in the mailbox",
                 coordinates.2
             );
             return;
         };
-        melib::log::debug!("load_bytes: write lock acquired; populating headers");
+        tracing::debug!("load_bytes: write lock acquired; populating headers");
         _ = env_ref.populate_headers(&bytes);
         drop(env_ref);
         let Some(env_ref) = account.collection.get_env(coordinates.2) else {
-            melib::log::error!(
+            tracing::error!(
                 "Could not load email body: envelope {} is no longer in the mailbox",
                 coordinates.2
             );
@@ -126,7 +126,7 @@ impl MailViewState {
         };
         let env = Box::new(env_ref.clone());
         drop(env_ref);
-        melib::log::debug!("load_bytes: constructing EnvelopeView");
+        tracing::debug!("load_bytes: constructing EnvelopeView");
         let env_view = Box::new(EnvelopeView::new(
             Mail {
                 envelope: *env.clone(),

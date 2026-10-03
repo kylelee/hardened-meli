@@ -113,7 +113,7 @@ impl Migration for AddressbookRename {
                                 .chain_err_related_path(&addressbook)?;
                         }
                         if verbose {
-                            log::info!(
+                            tracing::info!(
                                 "Migration {}/{}: Renamed {} to {}.",
                                 self.version().as_str(),
                                 self.id(),
@@ -161,7 +161,7 @@ impl Migration for AddressbookRename {
                                 .chain_err_related_path(&contacts)?;
                         }
                         if verbose {
-                            log::info!(
+                            tracing::info!(
                                 "Reverted migration {}/{}: Renamed {} to {}.",
                                 self.version().as_str(),
                                 self.id(),

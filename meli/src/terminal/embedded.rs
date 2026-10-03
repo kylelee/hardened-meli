@@ -31,7 +31,7 @@ use std::{
     },
 };
 
-use melib::{error::*, log};
+use melib::error::*;
 #[cfg(not(target_os = "macos"))]
 use nix::{
     fcntl::{open, OFlag},
@@ -158,14 +158,14 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
             nix::unistd::setsid().expect("Forked terminal process could not become session leader");
             match unsafe { set_controlling_terminal(backend_fd.as_raw_fd()) } {
                 Ok(c) if c < 0 => {
-                    log::error!(
+                    tracing::error!(
                         "Could not execute `{command}`: ioctl(fd, TIOCSCTTY, NULL) returned {c}",
                     );
                     std::process::exit(c);
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    log::error!(
+                    tracing::error!(
                         "Could not execute `{command}`: ioctl(fd, TIOCSCTTY, NULL) returned {err}",
                     );
                     std::process::exit(-1);

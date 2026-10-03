@@ -973,12 +973,7 @@ mod tests {
     };
 
     use futures::{channel::mpsc::unbounded, executor::block_on, StreamExt};
-    use melib::{
-        backends::prelude::*,
-        jmap::*,
-        utils::logging::{LogLevel, Logger},
-        Mail,
-    };
+    use melib::{backends::prelude::*, jmap::*, Mail};
     use tempfile::TempDir;
 
     use super::server::*;
@@ -986,7 +981,7 @@ mod tests {
     /// Test that `JmapType::refresh` returns the expected `Refresh` events when
     /// altering the mail store in the jmap server.
     pub(crate) fn run_jmap_refresh() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
@@ -1229,7 +1224,7 @@ hello world.
     /// events when altering the mail store in the JMAP server, using
     /// eventSourceUrl-type instead of polling.
     pub(crate) fn run_jmap_watch() {
-        let mut _logger = Logger::new_with(LogLevel::TRACE, true);
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
             Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));

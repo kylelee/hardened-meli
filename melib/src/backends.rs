@@ -59,7 +59,7 @@ pub mod prelude {
         email::{Envelope, EnvelopeHash, Flag},
         error::{Error, ErrorKind, NetworkErrorKind, Result},
         search::Query,
-        Collection, HeaderName, LogLevel, SpecialUsageMailbox,
+        Collection, HeaderName, SpecialUsageMailbox,
     };
 }
 use prelude::*;
@@ -288,7 +288,7 @@ pub enum BackendEvent {
     Notice {
         description: String,
         content: Option<String>,
-        level: LogLevel,
+        level: tracing::Level,
     },
     Refresh(RefreshEvent),
     RefreshBatch(Vec<RefreshEvent>),
@@ -334,7 +334,7 @@ impl From<Error> for BackendEvent {
         Self::Notice {
             description: val.summary.to_string(),
             content: Some(val.to_string()),
-            level: LogLevel::ERROR,
+            level: tracing::Level::ERROR,
         }
     }
 }

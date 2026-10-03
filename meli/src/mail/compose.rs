@@ -1053,7 +1053,7 @@ To: {}
             match std::fs::read_to_string(path).chain_err_related_path(path) {
                 Ok(sig) => Some(sig),
                 Err(err) => {
-                    log::error!(
+                    tracing::error!(
                         "Could not open signature file {} for account `{}`: {err}.",
                         path.display(),
                         context.accounts[&self.account_hash].name(),
@@ -1073,7 +1073,7 @@ To: {}
                         secret.value_with_timeout(Duration::from_millis(300)),
                     ) {
                         Err(err) => {
-                            log::error!(
+                            tracing::error!(
                                 "Could not execute signature command for account `{}`: {err}.",
                                 context.accounts[&self.account_hash].name(),
                             );
@@ -2577,7 +2577,7 @@ impl Component for Composer {
                                 |output| {
                                     if let Ok(ref output) = output {
                                         if !output.stderr.is_empty() {
-                                            log::warn!(
+                                            tracing::warn!(
                                                 "Command stderr output: `{}`.",
                                                 String::from_utf8_lossy(&output.stderr)
                                             );
@@ -3211,7 +3211,7 @@ pub fn send_draft_async(
                 .unwrap();
         } else if !store_sent_mail && is_ok {
             let f = File::create_temp_file(message.as_bytes(), None, None, Some("eml"), false)?;
-            log::debug!(
+            tracing::debug!(
                 "store_sent_mail is false; stored sent mail to {}",
                 f.path().display()
             );

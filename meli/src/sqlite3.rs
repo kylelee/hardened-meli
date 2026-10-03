@@ -29,12 +29,11 @@ use std::{
 use melib::{
     backends::MailBackend,
     email::{attachment_types::Text, Envelope, EnvelopeHash},
-    log,
     search::{
         escape_double_quote,
         Query::{self, *},
     },
-    smol,
+    smol, tracing,
     utils::sqlite3::{
         rusqlite::{params, OptionalExtension},
         DatabaseDescription,
@@ -198,7 +197,7 @@ impl AccountCache {
         let body = match op.await.map(|bytes| envelope.body_bytes(&bytes)) {
             Ok(body) => body.text(Text::Plain),
             Err(err) => {
-                log::error!("Failed to open envelope {}: {err}", envelope.message_id());
+                tracing::error!("Failed to open envelope {}: {err}", envelope.message_id());
                 return Err(err);
             }
         };
@@ -211,7 +210,7 @@ impl AccountCache {
                 "INSERT OR IGNORE INTO accounts (name) VALUES (?1)",
                 params![acc_name],
             ) {
-                log::error!("Failed to insert envelope {}: {err}", envelope.message_id());
+                tracing::error!("Failed to insert envelope {}: {err}", envelope.message_id());
                 return Err(Error::new(format!(
                     "Failed to insert envelope {}: {err}",
                     envelope.message_id(),
@@ -233,7 +232,7 @@ impl AccountCache {
                     params![old_hash.to_be_bytes().to_vec()],
                 ) {
                     drop(tx);
-                    log::error!(
+                    tracing::error!(
                         "Failed to update envelope {}: {err}",
                         envelope.message_id()
                     );
@@ -273,7 +272,7 @@ impl AccountCache {
                 .map_err(|e| Error::new(e.to_string()))
             {
                 drop(tx);
-                log::error!("Failed to insert envelope {}: {err}", envelope.message_id());
+                tracing::error!("Failed to insert envelope {}: {err}", envelope.message_id());
             } else {
                 tx.commit()?;
             }
@@ -304,7 +303,7 @@ impl AccountCache {
                 params![env_hash.to_be_bytes().to_vec()],
             ) {
                 drop(tx);
-                log::error!("Failed to remove envelope {env_hash}: {err}");
+                tracing::error!("Failed to remove envelope {env_hash}: {err}");
                 return Err(Error::new(format!(
                     "Failed to remove envelope {env_hash}: {err}"
                 )));
@@ -360,7 +359,7 @@ impl AccountCache {
             };
             if let Err(err) = result {
                 drop(tx);
-                log::error!("Failed to rename envelope {old_hash} to {new_hash}: {err}");
+                tracing::error!("Failed to rename envelope {old_hash} to {new_hash}: {err}");
                 return Err(Error::new(format!(
                     "Failed to rename envelope {old_hash} to {new_hash}: {err}"
                 )));
@@ -420,7 +419,7 @@ impl AccountCache {
         };
         let mut ctr = 0;
         for chunk in env_hashes.chunks(200) {
-            log::trace!(
+            tracing::trace!(
                 "Rebuilding {} index. {}/{}",
                 acc_name,
                 ctr,

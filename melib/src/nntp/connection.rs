@@ -24,7 +24,7 @@ use crate::{
     backends::{BackendMailbox, MailboxHash},
     email::parser::BytesExt,
     error::*,
-    log,
+    tracing,
     utils::connections::{
         enforce_response_size_limit, std_net::connect as tcp_stream_connect, Connection,
     },
@@ -191,7 +191,7 @@ impl NntpStream {
             .get_ref()
             .set_keepalive(Some(std::time::Duration::new(60 * 30, 0)))
         {
-            log::warn!("Could not set TCP keepalive in NNTP connection: {err}");
+            tracing::warn!("Could not set TCP keepalive in NNTP connection: {err}");
         }
 
         ret.read_response(&mut res, false, &["200 ", "201 "])
@@ -376,7 +376,7 @@ impl NntpStream {
         })
         .await
         {
-            log::debug!("stream send_command err {err:?}");
+            tracing::debug!("stream send_command err {err:?}");
             Err(err)
         } else {
             Ok(())
@@ -409,7 +409,7 @@ impl NntpStream {
         })
         .await
         {
-            log::debug!("stream send_multiline_data_block err {err:?}");
+            tracing::debug!("stream send_multiline_data_block err {err:?}");
             Err(err)
         } else {
             Ok(())
@@ -486,7 +486,7 @@ impl NntpConnection {
         // Commands and Responses Command lines MUST NOT exceed 512 octets, which
         // includes the terminating CRLF pair.
         if command.len() + b"\r\n".len() >= 512 {
-            log::error!(
+            tracing::error!(
                 "{}: Sending a command to the NNTP server that is over 511 bytes: this is invalid \
                  and should be fixed. Please report this as a bug to the melib bugtracker. The \
                  command line is `{command:?}\\r\\n`",
@@ -495,7 +495,7 @@ impl NntpConnection {
         }
         if let Err(err) = (async { self.stream.as_mut()?.send_command(command).await }).await {
             self.stream = Err(err.clone());
-            log::debug!("NNTP send command error {:?} {err}", err.kind);
+            tracing::debug!("NNTP send command error {:?} {err}", err.kind);
             if err.kind.is_network() {
                 self.connect().await?;
             }

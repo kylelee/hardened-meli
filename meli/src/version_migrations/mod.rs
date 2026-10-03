@@ -276,7 +276,7 @@ use std::{
 };
 
 use indexmap::{self, IndexMap};
-use melib::{error::*, log};
+use melib::error::*;
 
 use crate::{conf::FileSettings, terminal::Ask};
 
@@ -530,7 +530,7 @@ pub fn version_setup(
     let version_file = match version_file() {
         Ok(v) => v,
         Err(err) => {
-            log::debug!(
+            tracing::debug!(
                 "Could not place file with version metadata, .version, in your \
                  ${{XDG_DATA_HOME}}: {}",
                 err
@@ -616,7 +616,7 @@ pub fn version_setup(
                 // any (for example if the unrecognized value was left by an
                 // external build with no data to migrate).
                 if !any_migration_is_applicable(&migrations, config) {
-                    log::info!(
+                    tracing::info!(
                         "Creating version info file {} with value {}",
                         version_file.display(),
                         LATEST
@@ -630,7 +630,7 @@ pub fn version_setup(
             // Check if any migrations are applicable; they might not be any (for example if
             // user runs meli for the first time).
             if !any_migration_is_applicable(&migrations, config) {
-                log::info!(
+                tracing::info!(
                     "Creating version info file {} with value {}",
                     version_file.display(),
                     LATEST

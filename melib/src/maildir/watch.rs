@@ -68,13 +68,13 @@ impl MaildirWatch {
                 match ev {
                     Ok(event) => match event.kind {
                         NotifyEvent::Any => {
-                            log::trace!("Any event: {:?}", event);
+                            tracing::trace!("Any event: {:?}", event);
                         }
                         NotifyEvent::Access(_) => {
                             // We don't care about access events.
                         }
                         NotifyEvent::Create(_) => {
-                            log::trace!("Create events: (paths = {:?})", event.paths);
+                            tracing::trace!("Create events: (paths = {:?})", event.paths);
                             let mut pathbufs = vec![];
                             'path_loop: for mut pathbuf in event.paths {
                                 if pathbuf.is_dir() {
@@ -90,7 +90,7 @@ impl MaildirWatch {
                                     pathbuf = match move_to_cur(&config, &pathbuf) {
                                         Ok(p) => p,
                                         Err(err) => {
-                                            log::error!(
+                                            tracing::error!(
                                                 "Could not move {} to /cur: {}",
                                                 pathbuf.display(),
                                                 err
@@ -103,7 +103,7 @@ impl MaildirWatch {
                             }
                             for pathbuf in pathbufs {
                                 if let Ok((mailbox_hash, env)) = cache.create(pathbuf.as_path()) {
-                                    log::trace!(
+                                    tracing::trace!(
                                         "Create event {} {} {}",
                                         env.hash(),
                                         env.subject(),
@@ -122,14 +122,14 @@ impl MaildirWatch {
                             | notify::event::ModifyKind::Data(_)
                             | notify::event::ModifyKind::Other,
                         ) => {
-                            log::trace!("Modify events: (path = {:?})", event.paths);
+                            tracing::trace!("Modify events: (path = {:?})", event.paths);
                             'path_loop: for pathbuf in event.paths {
                                 let Some((mailbox_hash, old_hash)) = cache.remove(&pathbuf) else {
                                     // Did we just miss a Create event? In any case, create
                                     // envelope.
                                     if let Ok((mailbox_hash, env)) = cache.create(pathbuf.as_path())
                                     {
-                                        log::trace!(
+                                        tracing::trace!(
                                             "Create event {} {} {}",
                                             env.hash(),
                                             env.subject(),
@@ -161,7 +161,7 @@ impl MaildirWatch {
                         NotifyEvent::Remove(_) => {
                             for pathbuf in event.paths {
                                 if let Some((mailbox_hash, env_hash)) = cache.remove(&pathbuf) {
-                                    log::trace!("NotifyEvent::Remove(path = {:?}", pathbuf);
+                                    tracing::trace!("NotifyEvent::Remove(path = {:?}", pathbuf);
                                     events.push(BackendEvent::Refresh(RefreshEvent {
                                         account_hash,
                                         mailbox_hash,
@@ -176,7 +176,11 @@ impl MaildirWatch {
                             let [ref src, ref dest] = event.paths[..] else {
                                 continue 'watch_loop;
                             };
-                            log::trace!("NotifyEvent::Rename(src = {:?}, dest = {:?})", src, dest);
+                            tracing::trace!(
+                                "NotifyEvent::Rename(src = {:?}, dest = {:?})",
+                                src,
+                                dest
+                            );
 
                             if let Some((mailbox_hash, env_hash)) = cache.remove(dest) {
                                 events.push(BackendEvent::Refresh(RefreshEvent {
@@ -194,7 +198,7 @@ impl MaildirWatch {
                             }
                         }
                         NotifyEvent::Modify(notify::event::ModifyKind::Name(kind)) => {
-                            log::trace!("NotifyEvent::Rename({kind:?})",);
+                            tracing::trace!("NotifyEvent::Rename({kind:?})",);
                             'path_loop: for pathbuf in event.paths {
                                 if cache.path_to_hash(pathbuf.as_path()).is_some() {
                                     if matches!(pathbuf.try_exists(), Ok(true)) {
@@ -220,14 +224,14 @@ impl MaildirWatch {
                             }
                         }
                         NotifyEvent::Modify(notify::event::ModifyKind::Metadata(_)) => {
-                            log::trace!("Ignored Modify event: {:?}", event);
+                            tracing::trace!("Ignored Modify event: {:?}", event);
                         }
                         NotifyEvent::Other => {
-                            log::trace!("Ignored Other event: {:?}", event);
+                            tracing::trace!("Ignored Other event: {:?}", event);
                         }
                     },
                     Err(err) => {
-                        log::debug!("watch error: {}", err);
+                        tracing::debug!("watch error: {}", err);
                         return Err(err.into());
                     }
                 }

@@ -720,10 +720,10 @@ impl ImapCache for Sqlite3Cache {
         // from `envelopes` to `invalid_envelopes`, preserving the original
         // blob, the stored hash and the conversion error.
         //
-        // Logging discipline: the full `log::error!` fires only here, i.e.
+        // Logging discipline: the full `tracing::error!` fires only here, i.e.
         // when a row is actually moved (its first occurrence). Loads that
         // merely serve already-quarantined rows emit only the single
-        // `log::debug!` summary below, so a permanently poisoned cache does
+        // `tracing::debug!` summary below, so a permanently poisoned cache does
         // not produce error-level noise on every startup while the first
         // occurrence stays visible.
         if !quarantined.is_empty() {
@@ -737,7 +737,7 @@ impl ImapCache for Sqlite3Cache {
             {
                 Ok(tx) => {
                     for (uid, hash, error, raw) in &quarantined {
-                        log::error!(
+                        tracing::error!(
                             "IMAP cache: quarantining malformed cached envelope of account {} in \
                              mailbox {} uid {}: it will be shown as a placeholder until the \
                              mailbox is resynced. Reason: {}",
@@ -753,7 +753,7 @@ impl ImapCache for Sqlite3Cache {
                             "DELETE FROM envelopes WHERE mailbox_hash = ?1 AND uid = ?2;",
                             sqlite3::params![mailbox_hash, *uid as Sqlite3UID],
                         ) {
-                            log::error!(
+                            tracing::error!(
                                 "IMAP cache: could not delete malformed cached envelope of \
                                  account {} in mailbox {} uid {}: {}",
                                 self.uid_store.account_name,
@@ -775,7 +775,7 @@ impl ImapCache for Sqlite3Cache {
                                 first_seen
                             ],
                         ) {
-                            log::error!(
+                            tracing::error!(
                                 "IMAP cache: could not quarantine malformed cached envelope of \
                                  account {} in mailbox {} uid {}: {}",
                                 self.uid_store.account_name,
@@ -786,7 +786,7 @@ impl ImapCache for Sqlite3Cache {
                         }
                     }
                     if let Err(err) = tx.commit() {
-                        log::error!(
+                        tracing::error!(
                             "IMAP cache: could not commit quarantine of {} malformed cached \
                              envelopes of account {} in mailbox {}: {}",
                             quarantined.len(),
@@ -796,7 +796,7 @@ impl ImapCache for Sqlite3Cache {
                         );
                     }
                 }
-                Err(err) => log::error!(
+                Err(err) => tracing::error!(
                     "IMAP cache: could not open transaction to quarantine {} malformed cached \
                      envelopes of account {} in mailbox {}: {}",
                     quarantined.len(),
@@ -843,7 +843,7 @@ impl ImapCache for Sqlite3Cache {
             }
         }
         if !placeholders.is_empty() {
-            log::debug!(
+            tracing::debug!(
                 "IMAP cache: {} quarantined cached envelopes of account {} in mailbox {} shown \
                  as placeholders",
                 placeholders.len(),

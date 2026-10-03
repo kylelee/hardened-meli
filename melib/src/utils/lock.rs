@@ -84,7 +84,7 @@ where
             l_pid: 0, /* "By contrast with traditional record locks, the l_pid field of that structure must be set to zero when using the commands described below." */
         };
         let ret_val = unsafe { libc::fcntl(fd, F_SETLK, &mut flock) };
-        log::debug!("dropped unix fd lock for mbox fd {}, got {}", fd, ret_val);
+        tracing::debug!("dropped unix fd lock for mbox fd {}, got {}", fd, ret_val);
     }
 }
 

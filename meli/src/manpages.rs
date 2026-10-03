@@ -29,7 +29,7 @@ use std::{
 };
 
 use flate2::bufread::GzDecoder;
-use melib::{log, ShellExpandTrait};
+use melib::ShellExpandTrait;
 
 use crate::{Error, Result};
 
@@ -160,7 +160,7 @@ impl ManPages {
                 Error::new(format!("Could not write to {}", path.display()))
                     .set_source(Some(Arc::new(err)))
             })?;
-            log::trace!("Installed {} to {}", p, path.display());
+            tracing::trace!("Installed {} to {}", p, path.display());
             path.pop();
             path.pop();
         }

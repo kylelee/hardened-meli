@@ -137,7 +137,7 @@ impl IoState {
                     IoMessage::Remove(tag_idx) => {
                         let idx = tag_idx.idx;
                         if fds.remove(&idx).is_none() {
-                            log::error!(
+                            tracing::error!(
                                 "gpgme_remove_io_cb called with tag_data {tag_idx:?}, but idx \
                                  {idx} is not included in io_state ops. This is a bug.",
                             );
@@ -316,7 +316,9 @@ unsafe extern "C" fn gpgme_event_io_cb(
     }
     if r#type == gpgme_event_io_t::GPGME_EVENT_DONE {
         let Some(status) = NonNull::new(type_data.cast::<gpgme_io_event_done_data>()) else {
-            log::error!("gpgme_event_io_cb DONE event with NULL type_data. This is a gpgme bug.",);
+            tracing::error!(
+                "gpgme_event_io_cb DONE event with NULL type_data. This is a gpgme bug.",
+            );
             return;
         };
         // SAFETY: since type is DONE and type_data is not NULL, status is a valid
@@ -335,7 +337,7 @@ unsafe extern "C" fn gpgme_event_io_cb(
 
     if r#type == gpgme_event_io_t::GPGME_EVENT_NEXT_KEY {
         let Some(ptr) = NonNull::new(type_data.cast::<_gpgme_key>()) else {
-            log::error!(
+            tracing::error!(
                 "gpgme_event_io_cb NEXT_KEY event with NULL type_data. This is a gpgme bug.",
             );
             return;
@@ -348,7 +350,7 @@ unsafe extern "C" fn gpgme_event_io_cb(
         return;
     }
 
-    log::error!(
+    tracing::error!(
         "gpgme_event_io_cb called with unexpected event type: {}",
         r#type as u32
     );

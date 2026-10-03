@@ -324,7 +324,7 @@ impl EnvelopeView {
                 let backend = match view_settings.pgp_backend.instantiate() {
                     Ok(b) => b,
                     Err(err) => {
-                        log::error!("Could not instantiate PGP backend: {err}");
+                        tracing::error!("Could not instantiate PGP backend: {err}");
                         acc.push(AttachmentDisplay::InlineText {
                             inner: Box::new(a.clone()),
                             comment: None,
@@ -448,7 +448,7 @@ impl EnvelopeView {
                                     inner: Box::new(a.clone()),
                                     display: vec![],
                                 });
-                                log::error!("Could not instantiate PGP backend: {err}");
+                                tracing::error!("Could not instantiate PGP backend: {err}");
                                 return;
                             }
                         };
@@ -738,7 +738,7 @@ impl EnvelopeView {
             }
             match save_attachment(&path, &u.decode(self.view_settings.charset.into())) {
                 Err(err) => {
-                    log::error!("Failed to create file at {}: {err}", path.display());
+                    tracing::error!("Failed to create file at {}: {err}", path.display());
                     context.replies.push_back(UIEvent::Notification {
                         title: Some(format!("Failed to create file at {}", path.display()).into()),
                         body: err.to_string().into(),
@@ -765,7 +765,7 @@ impl EnvelopeView {
             }
             match save_attachment(&path, &self.mail.bytes) {
                 Err(err) => {
-                    log::error!("Failed to create file at {}: {err}", path.display());
+                    tracing::error!("Failed to create file at {}: {err}", path.display());
                     context.replies.push_back(UIEvent::Notification {
                         title: Some(format!("Failed to create file at {}", path.display()).into()),
                         body: err.to_string().into(),
@@ -892,7 +892,7 @@ impl EnvelopeView {
             let path = dir.join(filename.as_ref());
             match save_attachment(&path, &att.decode(self.view_settings.charset.into())) {
                 Err(err) => {
-                    log::error!("Failed to save attachment at {}: {err}", path.display());
+                    tracing::error!("Failed to save attachment at {}: {err}", path.display());
                     failed += 1;
                 }
                 Ok(()) => {
@@ -1509,14 +1509,16 @@ impl Component for EnvelopeView {
                                     Err(_) => {
                                         /* Job was canceled */
                                         succeeded = false;
-                                        log::warn!("Could not verify signature: Job was canceled",);
+                                        tracing::warn!(
+                                            "Could not verify signature: Job was canceled",
+                                        );
                                     }
                                     Ok(None) => {
                                         /* something happened,
                                          * perhaps a worker thread
                                          * panicked */
                                         succeeded = false;
-                                        log::warn!(
+                                        tracing::warn!(
                                             "Could not verify signature: check logs for any errors",
                                         );
                                     }
@@ -1533,7 +1535,7 @@ impl Component for EnvelopeView {
                                     }
                                     Ok(Some(Err(error))) => {
                                         succeeded = false;
-                                        log::error!("Could not verify signature: {}", error);
+                                        tracing::error!("Could not verify signature: {}", error);
                                         *d = AttachmentDisplay::SignedFailed {
                                             inner: std::mem::replace(
                                                 inner,
@@ -1555,7 +1557,7 @@ impl Component for EnvelopeView {
                                         /* Job was canceled */
 
                                         succeeded = false;
-                                        log::warn!(
+                                        tracing::warn!(
                                             "Could not decrypt encrypted message: Job was canceled",
                                         );
                                     }
@@ -1564,7 +1566,7 @@ impl Component for EnvelopeView {
                                          * perhaps a worker thread
                                          * panicked */
                                         succeeded = false;
-                                        log::warn!(
+                                        tracing::warn!(
                                             "Could not decrypt encrypted message: check logs for \
                                              any errors",
                                         );
@@ -1594,7 +1596,7 @@ impl Component for EnvelopeView {
                                     }
                                     Ok(Some(Err(error))) => {
                                         succeeded = false;
-                                        log::error!(
+                                        tracing::error!(
                                             "Could not decrypt encrypted message: {}",
                                             error
                                         );
@@ -1856,7 +1858,7 @@ impl Component for EnvelopeView {
                 }
                 match save_attachment(&path, &self.mail.bytes) {
                     Err(err) => {
-                        log::error!("Failed to create file at {}: {err}", path.display());
+                        tracing::error!("Failed to create file at {}: {err}", path.display());
                         context.replies.push_back(UIEvent::Notification {
                             title: Some(
                                 format!("Failed to create file at {}", path.display()).into(),
@@ -1927,7 +1929,7 @@ impl Component for EnvelopeView {
                         spawn: Some(Default::default()),
                         result_cb: ProcessResultFn(Box::new(move |output| {
                             if let Ok(ref output) = output {
-                                log::trace!("picker output:\n{output:?}");
+                                tracing::trace!("picker output:\n{output:?}");
                             }
                             Some(Box::new(EnvelopeViewMessage::FilePickerExit(a_i, output)))
                         })),
@@ -2289,7 +2291,7 @@ impl Component for EnvelopeView {
                                 });
                             } else {
                                 let path = String::from_utf8_lossy(paths[0]);
-                                log::trace!("saving to {path:?}");
+                                tracing::trace!("saving to {path:?}");
                                 self.save_attachment(a_i, &path, context);
                             }
                         }
