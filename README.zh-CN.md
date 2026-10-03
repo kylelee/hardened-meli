@@ -72,7 +72,7 @@ HTML 邮件开箱即由内置渲染器渲染（ammonia 清洗 + html2text 按终
 上游 meli 同步记录见 [`SYNC.md`](./SYNC.md)。
 
 邮件客户端/浏览器 CVE 调研报告（追踪、恶意软件、网页嵌入类攻击）见
-[`SECURITY-CVE-RESEARCH.zh-CN.md`](./SECURITY-CVE-RESEARCH.zh-CN.md)。
+[`SECURITY-CVE-RESEARCH.zh-CN.md`](./cve/SECURITY-CVE-RESEARCH.zh-CN.md)。
 
 ### Cargo 编译期特性
 

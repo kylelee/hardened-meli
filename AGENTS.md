@@ -4,14 +4,15 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 
 ## Layout
 
-- Workspace members are only `meli/` and `melib/` (root `Cargo.toml`).
+- Workspace members are `cve/`, `meli/`, and `melib/` (root `Cargo.toml`).
 - `melib/` — mail library. Backend trait in `src/backends.rs`; protocol implementations are per-protocol modules: `src/imap/` (connection pool + sqlite3 sync cache in `src/imap/sync/`), `src/maildir/`, `src/mbox/`, `src/notmuch/`, `src/jmap/`, `src/nntp/`, `src/smtp/`. E-mail parsing in `src/email/`.
 - `meli/` — terminal UI (binary `src/main.rs`). UI components in `src/mail/`, `src/terminal/`; thread-pool job executor in `src/jobs.rs`; account/backend glue in `src/accounts/`.
+- `cve/` — security CVE workspace: the CVE research reports (`SECURITY-CVE-RESEARCH*.md`) and the crate scaffolding for CVE-driven regression tests targeting `meli`/`melib`.
 
 ## Commands
 
 - Dev build/run: `cargo build` / `cargo run`. `make` builds the **release** binary (fat LTO, `codegen-units=1` — slow to link; don't use it for iteration). Local install: `make PREFIX=~/.local install`.
-- Format: `make fmt` — runs `cargo +nightly fmt` (`rustfmt.toml` uses nightly-only options `imports_granularity`/`group_imports`; falls back to stable) **and** `cargo-sort -w` on `melib` and `meli` manifests.
+- Format: `make fmt` — runs `cargo +nightly fmt` (`rustfmt.toml` uses nightly-only options `imports_granularity`/`group_imports`; falls back to stable) **and** `cargo-sort -w` on the `melib`, `meli`, and `cve` manifests.
 - Lint: `make lint` (clippy, all targets). Check: `make check`. Both set `RUSTFLAGS="-D warnings -W unreachable-pub -W rust-2021-compatibility"` — warnings are errors for these targets and in CI.
 - `make check`/`make test`/`make lint` default to `--all-features`; override with `MELI_FEATURES="<features>"`.
 - Tests: `make test` (runs rustdoc tests first, then everything). Single suite: `cargo test -p melib --test imap` (integration suites live in `melib/tests/<name>/main.rs`: `imap`, `jmap`, `smtp`, `maildir`, `notmuch`, `integration`). Single test with output: `cargo test -p melib <name> -- --nocapture`.
