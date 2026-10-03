@@ -1338,6 +1338,41 @@ Content-Disposition: inline
         );
     }
 
+    /// Regression for the CVE-2014-9116 boundary fix (issue #41):
+    /// [`Attachment::check_if_has_attachments_quick`] splits each part's
+    /// raw bytes with `headers_raw`, whose CRLF branch used to cut the
+    /// raw header block one byte short of the last header line's
+    /// terminator — so `HeaderIterator` dropped that header and the
+    /// `Content-Disposition: attachment` marker went unseen: the
+    /// listing's attachment indicator disappeared on CRLF-spelled
+    /// mails only. Both line-ending spellings of the same mail must
+    /// agree.
+    #[test]
+    fn test_attachment_indicator_agrees_across_line_endings() {
+        let lf_mail: &[u8] = b"From: a@b.example\nSubject: s\nContent-Type: multipart/mixed; boundary=\"EQ7CRLF\"\n\npre\n--EQ7CRLF\nContent-Disposition: attachment; filename=\"x.bin\"\n\ncontent here\n--EQ7CRLF--\n";
+        let crlf_mail: &[u8] = b"From: a@b.example\r\nSubject: s\r\nContent-Type: multipart/mixed; boundary=\"EQ7CRLF\"\r\n\r\npre\r\n--EQ7CRLF\r\nContent-Disposition: attachment; filename=\"x.bin\"\r\n\r\ncontent here\r\n--EQ7CRLF--\r\n";
+        let lf = Mail::new(lf_mail.to_vec(), None).unwrap();
+        let crlf = Mail::new(crlf_mail.to_vec(), None).unwrap();
+        assert!(lf.envelope().has_attachments);
+        assert!(
+            crlf.envelope().has_attachments,
+            "CRLF mail lost its attachment indicator (headers_raw boundary)"
+        );
+        // The fully parsed trees agree too: the attachment part is
+        // present in both spellings (`attachments()` also counts the
+        // multipart container itself).
+        for mail in [&lf, &crlf] {
+            let body = mail.envelope().body_bytes(mail.bytes());
+            assert_eq!(body.attachments().len(), 2);
+            assert!(
+                body.attachments()
+                    .iter()
+                    .any(|a| a.filename().as_deref() == Some("x.bin")),
+                "attachment part with filename x.bin missing from the tree"
+            );
+        }
+    }
+
     /// Regression: `Display for ContentTransferEncoding` used to `panic!` on
     /// the attacker-controlled `Other` variant
     /// (`Content-Transfer-Encoding: x-whatever`), so merely formatting a

@@ -440,7 +440,12 @@ impl<P: for<'r> FnMut(&'r u8) -> bool> BytesIterExt for std::slice::Split<'_, u8
 pub fn mail(input: &[u8]) -> Result<(Vec<(HeaderName, &[u8])>, &[u8])> {
     let (rest, result) = alt((
         separated_pair(
-            headers::headers,
+            // An empty header section is valid per RFC 5322 (`fields =
+            // *field` allows zero fields), so a message may open directly
+            // with the header/body separator line — the mutt
+            // CVE-2014-9116 「empty header」 trigger class. Parse it as
+            // zero headers plus the body that follows the empty line.
+            map(opt(headers::headers), |h| h.unwrap_or_default()),
             alt((tag(&b"\n"[..]), tag(&b"\r\n"[..]))),
             take_while(|_| true),
         ),
@@ -1816,11 +1821,30 @@ pub mod headers {
                 (input, "headers_raw(): input is empty").into(),
             ));
         }
+        // A header section with no fields is terminated by the empty line
+        // it opens with (RFC 5322 `fields = *field`; the mutt
+        // CVE-2014-9116 「empty header」 class): the body starts right
+        // after that line.
+        if let Some(rest) = input.strip_prefix(b"\r\n") {
+            return Ok((rest, b""));
+        }
+        if let Some(rest) = input.strip_prefix(b"\n") {
+            return Ok((rest, b""));
+        }
         for i in 0..input.len() {
-            if input[i..].starts_with(b"\n\n") {
-                return Ok((&input[(i + 1)..], &input[0..=i]));
-            } else if input[i..].starts_with(b"\r\n\r\n") {
+            if input[i] != b'\n' {
+                continue;
+            }
+            // `input[i]` closes a header line; the empty line that ends
+            // the header section may be spelled LF or CRLF whatever the
+            // header line's own terminator was. The raw header block
+            // keeps the closed line's terminator; the body starts after
+            // the empty line.
+            if input.get(i + 1) == Some(&b'\n') {
                 return Ok((&input[(i + 2)..], &input[0..=i]));
+            }
+            if input[i + 1..].starts_with(b"\r\n") {
+                return Ok((&input[(i + 3)..], &input[0..=i]));
             }
         }
         Err(nom::Err::Error(

@@ -1189,3 +1189,163 @@ aGVsbG8=\r\n\
         assert!(r.is_ok(), "Mail::new panicked on truncation at byte {n}");
     }
 }
+
+/// CVE-2014-9116 (mutt 1.5.23) regression (issue #41): a message
+/// whose header section opens directly with the empty separator line
+/// is valid per RFC 5322 (`fields = *field` allows zero fields), but
+/// `parser::mail`'s `many1` header list rejected it outright — the
+/// mutt crash class's meli face was a whole-mail rejection that made
+/// such messages invisible in mailboxes. They must parse as zero
+/// headers plus the body that follows the empty line, byte-exact in
+/// every separator spelling.
+#[test]
+fn test_email_parser_mail_empty_header_section_parses() {
+    for (raw, body) in [
+        (&b"\nbody"[..], &b"body"[..]),
+        (&b"\r\nbody"[..], &b"body"[..]),
+        (&b"\n"[..], &b""[..]),
+        (&b"\r\n"[..], &b""[..]),
+        (&b"\r\n\r\n"[..], &b"\r\n"[..]),
+        (&b"\n\nbody"[..], &b"\nbody"[..]),
+        (&b"\n\r\nbody"[..], &b"\r\nbody"[..]),
+    ] {
+        let (headers, parsed_body) = crate::email::parser::mail(raw).unwrap_or_else(|e| {
+            panic!(
+                "{}: must parse as an empty header section: {e}",
+                String::from_utf8_lossy(raw).escape_debug()
+            )
+        });
+        assert!(
+            headers.is_empty(),
+            "{}: an empty header section must yield zero headers",
+            String::from_utf8_lossy(raw).escape_debug()
+        );
+        assert_eq!(parsed_body, body);
+        // Deterministic: the same bytes parse the same way twice.
+        let (again_headers, again_body) = crate::email::parser::mail(raw).unwrap();
+        assert!(again_headers.is_empty());
+        assert_eq!(again_body, body);
+    }
+
+    // Shapes that do not open with the separator keep rejecting: a
+    // bare body with no empty line, the empty buffer and the
+    // empty-name line.
+    for raw in [&b"body"[..], &b""[..], &b": x\n\n"[..]] {
+        assert!(
+            crate::email::parser::mail(raw).is_err(),
+            "{}: non-separator opener must keep rejecting",
+            String::from_utf8_lossy(raw).escape_debug()
+        );
+    }
+
+    // Neighbouring valid mails parse byte-identically as before.
+    let (headers, body) = crate::email::parser::mail(b"A: v\n\nbody").unwrap();
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers[0].0.as_str(), "a");
+    assert_eq!(headers[0].1, &b"v"[..]);
+    assert_eq!(body, &b"body"[..]);
+    let (headers, body) = crate::email::parser::mail(b"A: v\r\n\r\nbody").unwrap();
+    assert_eq!(headers.len(), 1);
+    assert_eq!(body, &b"body"[..]);
+
+    // Through the receive path the empty-header mail becomes a real
+    // (visible) envelope with empty fields and the body intact.
+    let env = crate::email::Envelope::from_bytes(b"\nbody", None)
+        .unwrap_or_else(|e| panic!("empty-header mail must reach the envelope: {e}"));
+    assert!(env.from().is_empty());
+    assert!(env.subject().is_empty());
+    assert!(env.message_id().display_brackets().to_string().len() > 2);
+    let body = env.body_bytes(b"\nbody");
+    assert_eq!(
+        body.text(crate::email::attachment_types::Text::Plain),
+        String::from_utf8_lossy(b"body").into_owned()
+    );
+}
+
+/// CVE-2014-9116 (mutt 1.5.23) regression (issue #41): the raw
+/// header-block/body split of `headers_raw` must cut at byte
+/// boundaries for every separator spelling. The CRLF branch used to
+/// stop the raw block one byte short of the last header line's
+/// terminator (`"CD: x\r"`), which made `HeaderIterator` drop that
+/// header entirely, and both branches leaked the empty line's bytes
+/// into the body slice; the mixed spellings (`\n\r\n`, `\r\n\n`)
+/// did not split at all.
+#[test]
+fn test_email_parser_headers_raw_boundary_slices() {
+    for (raw, expect_block, expect_body) in [
+        (&b"CD: x\n\nBODY"[..], &b"CD: x\n"[..], &b"BODY"[..]),
+        (&b"CD: x\r\n\r\nBODY"[..], &b"CD: x\r\n"[..], &b"BODY"[..]),
+        (&b"CD: x\n\r\nBODY"[..], &b"CD: x\n"[..], &b"BODY"[..]),
+        (&b"CD: x\r\n\nBODY"[..], &b"CD: x\r\n"[..], &b"BODY"[..]),
+        (
+            &b"A: 1\nB: 2\n\nbody\n"[..],
+            &b"A: 1\nB: 2\n"[..],
+            &b"body\n"[..],
+        ),
+        // The empty-header-section opener (the mutt trigger class).
+        (&b"\nBODY"[..], &b""[..], &b"BODY"[..]),
+        (&b"\r\nBODY"[..], &b""[..], &b"BODY"[..]),
+        (&b"\n\nBODY"[..], &b""[..], &b"\nBODY"[..]),
+        // The separator landing on the exact buffer end.
+        (&b"X: v\n\n"[..], &b"X: v\n"[..], &b""[..]),
+        (&b"X: v\r\n\r\n"[..], &b"X: v\r\n"[..], &b""[..]),
+    ] {
+        let (body, block) = headers::headers_raw(raw).unwrap_or_else(|e| {
+            panic!(
+                "{}: must split at the empty line: {e}",
+                String::from_utf8_lossy(raw).escape_debug()
+            )
+        });
+        assert_eq!(
+            block,
+            expect_block,
+            "{}: raw header block bytes",
+            String::from_utf8_lossy(raw).escape_debug()
+        );
+        assert_eq!(
+            body,
+            expect_body,
+            "{}: body bytes",
+            String::from_utf8_lossy(raw).escape_debug()
+        );
+        // Both slices stay inside the input buffer (an empty block is
+        // the shared static `b""`, with no pointer relation to the
+        // input).
+        if !block.is_empty() {
+            let offset = block.as_ptr() as usize - raw.as_ptr() as usize;
+            assert!(offset + block.len() <= raw.len());
+        }
+        if !body.is_empty() {
+            let offset = body.as_ptr() as usize - raw.as_ptr() as usize;
+            assert!(offset + body.len() <= raw.len());
+        }
+    }
+
+    // No empty line at all: reject instead of scanning past the end.
+    for raw in [&b"CD: x\n"[..], &b"CD: x\r\n"[..], &b"CD: x"[..], &b""[..]] {
+        assert!(
+            headers::headers_raw(raw).is_err(),
+            "{}: no separator must reject",
+            String::from_utf8_lossy(raw).escape_debug()
+        );
+    }
+
+    // The CRLF raw block (formerly truncated to `...\r`) keeps its
+    // last header iterable — the observable face of the old boundary
+    // bug was `HeaderIterator` dropping `Content-Disposition`.
+    let (body, block) =
+        headers::headers_raw(b"Content-Disposition: attachment; filename=\"x.bin\"\r\n\r\nBODY")
+            .unwrap();
+    assert_eq!(
+        block,
+        &b"Content-Disposition: attachment; filename=\"x.bin\"\r\n"[..]
+    );
+    assert_eq!(body, &b"BODY"[..]);
+    let iterated: Vec<_> = crate::email::parser::generic::HeaderIterator(block).collect();
+    assert_eq!(iterated.len(), 1);
+    assert_eq!(
+        iterated[0].0,
+        crate::email::headers::HeaderName::CONTENT_DISPOSITION
+    );
+    assert_eq!(iterated[0].1, &b"attachment; filename=\"x.bin\""[..]);
+}
