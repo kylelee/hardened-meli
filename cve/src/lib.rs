@@ -639,3 +639,32 @@ mod cve_2020_9819;
 #[cfg(test)]
 #[path = "CVE-2008-0039.rs"]
 mod cve_2008_0039;
+
+/// CVE-2026-84641 (Thunderbird < 155, ESR < 140.15, 153.x < 153.2,
+/// MFSA 2026-86/87/88, CVSS 7.5) IMAP `ID` response use-after-free →
+/// heap-leak regression (issue #36, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// malicious IMAP server answered the `ID` command (RFC 2971) with
+/// a crafted parameter list that triggered a use-after-free in
+/// Thunderbird's C++ parser and leaked heap memory — content that
+/// could then be persisted into prefs.js. [`cve_2026_84641`] locks
+/// meli's equivalent surface (`melib/src/imap/protocol_parser/
+/// id_ext.rs` plus the response-assembly, log and `server_id`
+/// persistence sites) with the issue-prescribed hostile corpus
+/// (overlong keys/values, illegal UTF-8, unclosed parens, binary
+/// garbage) and proves the memory-safety class immune — safe
+/// checked Rust, every shape a deterministic typed error, illegal
+/// UTF-8 rendered as a fixed placeholder, and the `prefs.js`-face
+/// persistence (`serde_json::to_value`) holding only
+/// `String::from_utf8`-validated ≤ 1024-octet text from a
+/// zero-initialized read buffer — while exposing one real gap,
+/// fixed with this regression: RFC 2971's `#(string SPACE nstring)`
+/// allows *zero* pairs, but the parser demanded one, answering the
+/// legal 「no information」 `* ID ()` form with a parse error and a
+/// spurious "Consider turning ID use off" warning on every connect;
+/// it now answers `Ok(None)`, regression-locked in
+/// `melib/src/imap/protocol_parser/id_ext.rs` together with the
+/// corpus here.
+#[cfg(test)]
+#[path = "CVE-2026-84641.rs"]
+mod cve_2026_84641;
