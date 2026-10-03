@@ -131,8 +131,32 @@ impl FromStr for Draft {
 impl Draft {
     pub fn edit(envelope: &Envelope, bytes: &[u8], kind: Text) -> Result<Self> {
         let mut ret = Self::default();
-        for (k, v) in envelope.headers(bytes).unwrap_or_else(|_| Vec::new()) {
-            ret.headers.insert(k, v.into());
+        // CVE-2023-4875 regression (issue #44, the mutt draft-composition
+        // crash): a draft whose header block cannot be parsed back into
+        // text — malformed grammar or a non-UTF-8 header value — used to
+        // lose *every* header here (`unwrap_or_else(|_| Vec::new())` on
+        // `Envelope::headers`), silently opening the composer with a
+        // wiped To/Subject/From when a hostile draft was resumed. Parse
+        // the header block with the exact grammar and verdicts of
+        // [`Self::from_str`] instead — `parser::mail` plus a per-value
+        // UTF-8 conversion — so the re-open entry reports the
+        // unparseable field as a deterministic `ValueError` (which the
+        // composer surfaces as its "Failed to open e-mail" notification),
+        // while RFC 5322-valid zero-header 「空头」 drafts keep loading
+        // with the default fields.
+        let (headers, _) = parser::mail(bytes)
+            .chain_err_summary(|| "Could not parse e-mail into a Draft")
+            .chain_err_kind(ErrorKind::ValueError)?;
+        for (k, v) in headers {
+            ret.headers.insert(
+                k,
+                String::from_utf8(v.to_vec())
+                    .chain_err_summary(|| "Invalid header value; must be ASCII or UTF-8")
+                    .chain_err_details(|| {
+                        format!("Header value was `{}`", String::from_utf8_lossy(v))
+                    })
+                    .chain_err_kind(ErrorKind::ValueError)?,
+            );
         }
 
         let body = envelope.body_bytes(bytes);
