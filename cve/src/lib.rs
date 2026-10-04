@@ -1861,3 +1861,63 @@ mod cve_2021_37746;
 #[cfg(test)]
 #[path = "CVE-2015-7609.rs"]
 mod cve_2015_7609;
+
+/// CVE-2008-2248（Outlook Web Access for Exchange Server 2003 SP2；CPE 还含
+/// Exchange 2007 / 2007 SP1；Microsoft 公告 MS08-039，2008-07-08，CVSS v2 4.3
+/// AV:N/AC:M/Au:N/C:N/I:P/A:N，CWE-79，BID 30078）OWA 网页邮箱邮件 HTML XSS
+/// regression（issue #71，表 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 /
+/// web/HTML embedding）：OWA 未充分清洗邮件 HTML 即把内容渲染进 webmail 浏览器
+/// 页面，远程攻击者在一封普通邮件里注入任意 web 脚本 / HTML（NVD 原文 "via
+/// unspecified HTML"），脚本在 OWA 源执行（会话 Cookie 窃取等）；同公告姊妹
+/// 漏洞 CVE-2008-2247（via unspecified e-mail fields，BID 30130）是不同注入面。
+///
+/// meli 等价面映射（issue #71 明确要求）：meli 是终端邮件客户端，**没有 webmail
+/// 功能面**——没有 HTTP 页面、会话 Cookie、浏览器 DOM 或 JavaScript 引擎。邮件
+/// HTML 唯一的消费通路是邮件视图的显示管线 [`sanitize`]（ammonia 白名单：
+/// html5ever 恰好一次解析 → 过滤树 → 带转义再序列化）→ [`render`]（html2text →
+/// 纯终端文本）：`script`/`style` 属 `clean_content_tags` 连内容整体删除，
+/// `iframe`/`object`/`embed`/`applet`/`frameset`/`bgsound`/`xml`/`isindex`/`form`/
+/// `input`/`button`/`select`/`textarea`/`keygen`/`meta`/`base`/`link`/`video`/
+/// `audio`/`source`/`track`/`details` 等非白名单元素连同 `src`/`data`/`action`/
+/// `formaction`/`style`/`xlink:href`/`on*` 属性一起消失；`tag_attributes` 是整体
+/// 替换（只留 `a[href]`/`a[title]`，通用属性 `{lang,title}`）；`url_schemes` 只有
+/// http/https/mailto，ammonia 对每个保留 href 用 WHATWG `Url::parse` 取 scheme，
+/// meli 的 `attribute_filter` 在 trim 首尾 Cf / 控制符 / 空白后**重新校验** href
+/// （CVE-2025-66376 硬化）；sanitize 输出再交给 html2text 降成终端文本，没有
+/// 第二次“浏览器解析”可供碎片重组，也没有任何脚本 / 表单 / CSS / URL scheme
+/// 执行器。`<base href>` 重定基另由 MFSA-2005-11 的
+/// `base_href_cannot_rebase_relative_urls` 锁定。
+///
+/// [`cve_2008_2248`] 以内嵌 `multipart/alternative` 语料（plain + html 双叶）逐层
+/// 锁定为**免疫证明，未发现缺口，无需改动生产代码**。语料类别 A-J 与
+/// CVE-2015-7609（issue #70，Zimbra；`cve/src/CVE-2015-7609.rs`）互补不重复：
+/// A IE 嵌入 / 脚本宿主元素（iframe/object/embed/applet/frameset/frame/bgsound/
+/// XML 数据岛/isindex/VML/条件注释）、B 导航 / meta 家族（refresh 到 javascript:、
+/// UTF-7 charset 嗅探、base/link）、C 表单家族（action/formaction/autofocus
+/// onfocus/onsubmit）、D CSS 脚本（白名单元素 style 属性 expression/-moz-binding/
+/// behavior、style 元素 @import、未闭合吞尾）、E SVG/MathML 动画与属性注入
+/// （animate/set/use/image/maction）、F HTML5 媒体 / autofocus 事件载体
+/// （video/audio/source/track/details）、G scheme 混淆补（真实 LF/CR、`&Tab;`/
+/// `&NewLine;`、无引号/单引号、等号前换行、斜杠分隔、`&#106;` 有/无分号）、
+/// H RCDATA/raw-text（title/textarea/xmp/plaintext/listing）、I CDATA/PI/doctype、
+/// J 惰性边界（scheme 内 NUL/全角、诚实 meta/base、相对/fragment）。分层：L1
+/// melib 解析出双叶且全部攻击字节逐字在场（LF→CRLF 容忍）；L2 sanitize 输出无
+/// 任何非白名单标签 / `on*` / 禁止属性 / 活的危险 scheme href 且为不动点；L3
+/// render 里脚本 / 嵌入 / 表单元素整体消失、事件与 CSS 属性值不出现、危险 scheme
+/// 不生成脚注，RCDATA / CDATA / 转义只解出惰性字面字符串，UTF-7 以字面 `+ADw-`
+/// 字节交付，惰性边界的 `url_scheme` 为 `None` 且确认门拒绝；L4 整封攻击邮件
+/// 端到端纯文本且诚实 `http`/`https`/`mailto` 链接保持可用（sanitize 保留、render
+/// 脚注可见、`is_default_launchable_scheme` 放行）。实测记录：`&#106avascript:`
+/// （无分号）与 `&#106;avascript:`（有分号）都被 html5ever 解码为 `javascript:`
+/// 并被整体丢弃；`<![CDATA[<script>…` 在 HTML 上下文是覆盖到首个 `>` 的 bogus
+/// comment，余下 `alert(1)]]>` 为惰性字面文本；`title`/`textarea`/`xmp`/`plaintext`
+/// 内标记为惰性字面文本而 `listing` 是普通元素、内部真实 `<script>` 被整体删除；
+/// scheme 内 NUL 被替换为 U+FFFD、全角 scheme 非 ASCII，两者最多作惰性脚注。
+/// 仓内孪生改动：无（免疫证明，未触碰生产代码）。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2008_2248`]: self::cve_2008_2248
+#[cfg(test)]
+#[path = "CVE-2008-2248.rs"]
+mod cve_2008_2248;
