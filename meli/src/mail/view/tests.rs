@@ -2247,6 +2247,73 @@ fn save_all_attachments_sanitized_collisions_are_deduped() {
     );
 }
 
+/// CVE-2002-2351 regression (issue #61, Eudora 5.1 trailing-dot
+/// executable-attachment warning bypass): the batch save must land the
+/// normalized component, with the trailing dot run stripped, so the
+/// name meli displays/checks and the name a Win32-semantics filesystem
+/// (`/mnt/c` drvfs, Samba, some FUSE) creates agree — the divergence
+/// that let `evil.exe.` bypass Eudora's warning while landing as
+/// `evil.exe`.
+#[test]
+fn save_all_attachments_trailing_dot_names_are_normalized() {
+    let body = "MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"=_cve-2002-2351\"\r\n\
+         \r\n\
+         --=_cve-2002-2351\r\n\
+         Content-Type: application/x-msdownload\r\n\
+         Content-Disposition: attachment; filename=\"evil.exe.\"\r\n\
+         \r\n\
+         EXE-fake\r\n\
+         --=_cve-2002-2351\r\n\
+         Content-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=\"report.pdf.\"\r\n\
+         \r\n\
+         PDF-fake\r\n\
+         --=_cve-2002-2351--\r\n";
+    let mut ctx = mock_context();
+    let view = attachments_envelope_view(&ctx, "cve-2002-2351", "trailing-dot@x.example", body);
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+
+    view.save_all_attachments_to(&mut ctx, Some(&downloads));
+
+    let out_dirs: Vec<_> = std::fs::read_dir(&downloads)
+        .expect("Downloads must exist after a successful save")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        out_dirs.len(),
+        1,
+        "exactly one meli-<subject> directory must appear, got {out_dirs:?}"
+    );
+    let dir = out_dirs[0].clone();
+    let mut names = assert_flat_names(&dir);
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["evil.exe".to_string(), "report.pdf".to_string()],
+        "every landed name must have its trailing dot run stripped"
+    );
+    for (name, marker) in [("evil.exe", "EXE-fake"), ("report.pdf", "PDF-fake")] {
+        assert!(!name.ends_with('.'), "{name:?} must not end with a dot");
+        let content =
+            std::fs::read(dir.join(name)).unwrap_or_else(|err| panic!("{name:?} must land: {err}"));
+        assert!(
+            String::from_utf8_lossy(&content).contains(marker),
+            "{name:?} must contain {marker:?}"
+        );
+    }
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Notification { body, .. }
+            if body.contains("Saved 2 attachment(s)"))),
+        "both attachments must be reported saved, got {replies:?}"
+    );
+}
+
 /// CVE-2024-43604 regression (whole-message save): the `.eml` filename
 /// derived from the mail-controlled `Message-ID` used to reach
 /// `PathBuf::push` unsanitized, so `save-attachment 0 <dir>` on a mail
