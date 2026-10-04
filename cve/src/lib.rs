@@ -2558,3 +2558,28 @@ mod cve_2010_0249;
 #[cfg(test)]
 #[path = "CVE-2007-1268.rs"]
 mod cve_2007_1268;
+
+/// CVE-2024-49393（mutt 1.14.0–2.2.12 / neomutt ≤ 2024-04-25；CVSS 6.5）**签名未
+/// 覆盖 To/Cc 收件人头** regression（issue #84，表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：外层 RFC 5322 的 `To`/`Cc` 不在
+/// `multipart/signed` 被签 part 内，中间人可把 `eve@mitm.example` 追加进 `Cc`
+/// 破坏机密性；NeoMutt 的修复方向是 Memory Hole / protected header fields，
+/// 而本仓库完全没有该支持，meli 的等价面是签名验证域（只认被签 part 的 raw）
+/// 与信封头显示语义的隔离。[`cve_2024_49393`] 用一次性 Ed25519 密钥
+/// `B2611F2F94BD8B4F282E48BCEDC8569B5D2FEE15` 构造**真实签名**机密邮件 + 两个
+/// 只改外层头的 MITM 变体，分层锁定：L1 送验字节逐字节等于被签 part raw、头
+/// 篡改不改变验证输入、外层头从不进入、走私收件人 part fail-closed；L2
+/// `Signed*` 包装只承载自己的被签子树、`Envelope` 的 `To`/`Cc` 始终来自外层头
+/// （`signatures_into_error` 的 fail-closed 已由 #83 锁定，不重复）；L3 真实
+/// gpgme 端到端（原件与两个头篡改变体验证结果完全一致为 good——签名对 To/Cc
+/// 毫无约束力；篡改正文/把 To 塞进被签 part → BAD；垃圾 armor → Err）；L4 显示
+/// 域隔离（仓内孪生单测在 `meli/src/mail/view/tests.rs`：
+/// `tampered_recipient_headers_keep_signature_notice_on_the_signed_container`、
+/// `tampered_recipient_headers_are_read_from_the_outer_envelope`、
+/// `signature_notice_and_header_band_have_no_intersection`）。结论：结构性免疫，
+/// 未发现显示语义缺口，未触碰生产代码。
+///
+/// [`cve_2024_49393`]: self::cve_2024_49393
+#[cfg(test)]
+#[path = "CVE-2024-49393.rs"]
+mod cve_2024_49393;
