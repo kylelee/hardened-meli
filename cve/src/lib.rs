@@ -2204,3 +2204,46 @@ mod cve_2026_73572;
 #[cfg(test)]
 #[path = "CVE-2021-30858.rs"]
 mod cve_2021_30858;
+
+/// CVE-2023-4863（libwebp；CVSS 8.8；2023-09 在野利用；Chrome / Firefox /
+/// Thunderbird 共用同一份 libwebp）**VP8L 无损位流 Huffman 编码表构建堆缓冲区
+/// 溢出** regression（issue #78，表 4 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// e-mail-reachable browser engines）：`ReadHuffmanCodes` /
+/// `BuildHuffmanTable` 对 attacker 控制的 code-length 符号表写出越界，含
+/// WebP 图片的邮件只要被打开就在进程内解码并触发。meli 是终端邮件客户端，
+/// **没有浏览器引擎、没有 DOM / JS、也没有任何内嵌图片解码器**，本 CVE 的
+/// 触发原语在结构上不存在。
+///
+/// [`cve_2023_4863`] 以内嵌「等价结构」恶意 WebP 语料（真 `RIFF` + 小端 size +
+/// `WEBP` 魔数的 VP8 / VP8L / VP8X+ALPH+ANIM+ANMF 容器，与截断畸形变体，共
+/// 20+ 向量；投递形态覆盖 `Content-Disposition: attachment` 叶、inline
+/// `image/webp`、伪装 `application/octet-stream` + `.webp` 文件名、
+/// `multipart/related` + HTML `<img src="cid:…">` 引用、嵌套
+/// `message/rfc822`）逐层锁定为**免疫证明，未发现缺口，未触碰生产代码**。
+/// L1 melib 解析出精确的 `multipart/mixed` 附件树，全部语料字节在 wire 上逐字
+/// 在场，`image/webp` 归类 `ContentType::Other { tag: b"image/webp" }`、
+/// `is_text() == false`，伪装 `application/octet-stream` + `.webp` 文件名按
+/// Content-Type 归类（`ContentType::Other { tag: b"application/octet-stream" }`，
+/// 不看扩展名；`ContentType::OctetStream` 是程序化构造形），且
+/// [`Attachment::decode`] 只做 base64 / quoted-printable 传输编码反转、其余字节
+/// 原样返回，无任何 WebP 结构解释；L2 WebP 叶进入 `AttachmentDisplay::Attachment`
+/// 元数据条目（文件名 / 大小 / MIME），`multipart/related` 里的 `cid:` / `data:`
+/// / 远程 WebP 引用在 [`sanitize`] 里整体死亡（`img`/`object`/`embed`/`iframe`/
+/// `source` 非白名单，scheme 只有 http/https/mailto），[`render`] 输出纯终端文本；
+/// L3 打开 WebP 只经 `open_mailcap` / `open_attachment` 两条汇，两者都以
+/// `context.cmd_buf().is_some()`（先输入附件编号）为前置，命中后字节只落入
+/// `<temp_dir>/meli/` 的 `0o600` 随机名临时文件并交给进程外程序，语料同时断言
+/// 整个 workspace 清单无任何内嵌图片解码依赖（`l3_workspace_has_no_in_process_
+/// image_decoder_dependency`）；L4 整封攻击邮件端到端解析 + 渲染纯文本，合法
+/// 内容交付、WebP 字节 / 引用不出现，诚实 `http`/`https`/`mailto` 链接保持可用。
+/// WebP 门禁的仓内孪生回归为 `meli/src/mail/view/tests.rs` 的
+/// `cve_2023_4863_webp_attachments_render_as_metadata_only` 与
+/// `cve_2023_4863_open_attachment_requires_explicit_attachment_number`。
+///
+/// [`Attachment::decode`]: meli::melib::Attachment::decode
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2023_4863`]: self::cve_2023_4863
+#[cfg(test)]
+#[path = "CVE-2023-4863.rs"]
+mod cve_2023_4863;
