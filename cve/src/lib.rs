@@ -1242,3 +1242,34 @@ mod cve_2015_8708;
 #[cfg(test)]
 #[path = "CVE-2015-8614.rs"]
 mod cve_2015_8614;
+
+/// CVE-2020-12641 (Roundcube Webmail `<= 1.4.3`, CVSS 9.8, CWE-78) OS
+/// command-injection regression (issue #57, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): the
+/// `im_convert_path` / `im_identify_path` configuration values were
+/// concatenated into a shell command line and run through the shell,
+/// so a value carrying `;`, `|`, a backtick or `$(...)` executed an
+/// arbitrary command with the server's privileges. The trusted field
+/// was not the problem; completing a command-string template with
+/// mail-controlled text and handing it to `sh -c` was. [`cve_2020_12641`]
+/// maps that exactly onto meli's mailcap handler
+/// (`meli/src/mailcap.rs`): the local, trusted mailcap command field
+/// may legitimately carry pipes and command substitutions, while the
+/// mail-controlled `%t` content-type tag, `%{param}` MIME parameter
+/// and `%s`/`%F` temporary path are spliced into it. The regression
+/// exposes and locks the real gap: the old `quote_shell_word` armor
+/// only protects the bare context, so a template that opened `"..."`,
+/// `'...'`, a backtick or a `$(...)` region re-activated the value's
+/// shell syntax (or mangled it into a syntax error). The fix
+/// classifies the quoting context at each substitution point
+/// (`shell_quote_context`) and encodes for that exact region, refusing
+/// undecidable templates (`ShellContext::Ambiguous`) instead of
+/// guessing. Locked by `cve/src/CVE-2020-12641.rs` end to end and by
+/// the in-crate twins in `meli/src/mailcap.rs`
+/// (`expand_args_double_quoted_context_escapes`,
+/// `expand_args_single_quoted_context_reopens_quote`,
+/// `expand_args_backtick_context_escapes`,
+/// `expand_args_ambiguous_context_fails_closed`).
+#[cfg(test)]
+#[path = "CVE-2020-12641.rs"]
+mod cve_2020_12641;
