@@ -2794,3 +2794,46 @@ mod cve_2009_3765;
 #[cfg(test)]
 #[path = "CVE-2009-3766.rs"]
 mod cve_2009_3766;
+
+/// CVE-2020-15917（Claws Mail < 3.17.6，CVSS 9.8，NVD；CWE-345/CWE-346）
+/// STARTTLS 明文后缀注入 regression（issue #90，表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：MITM 在 IMAP `STARTTLS` 的 tagged OK
+///（`M1 OK Begin TLS negotiation now\r\n`）之后向同一 TCP 连接注入明文响应
+/// 行；Claws Mail `session.c` 的会话缓冲跨 TLS 升级存活，残留明文被当作升级
+/// 后的「安全」响应解析，中间人据此在 TLS 会话内伪造 CAPABILITY/认证/SELECT
+/// 结果。注入变体：黏连同段、分段到达、夹在 greeting 与 tagged OK 之间、或
+/// 在客户端 ClientHello 之后继续注入明文。
+///
+/// meli 等价面：issue 指定 `melib/src/imap/connection.rs` 的 STARTTLS 升级
+///（等价面 SMTP / NNTP 同型）。`if server_conf.use_starttls` 块里的协商缓冲
+/// 是**块内局部变量**，看到 tagged `M1 OK` break 后整体丢弃；TLS 升级直接包裹
+/// 裸 socket，内核缓冲里的残留明文只会进 TLS 记录层 → 握手失败（fail-closed）；
+/// 升级后首个响应必来自 TLS 会话内（IMAP/NNTP 重发 CAPABILITY，SMTP 重发
+/// EHLO，post-TLS 读取用全新缓冲）。因此后缀注入类在 meli 上不可能成为升级后
+/// 的响应。
+///
+/// 本次攻击模拟暴露并修复了一个真实缺口（交付物 A）：IMAP / NNTP 的 TLS 握手
+/// 块在 `AsyncWrapper::into_inner()` 之后没有恢复阻塞模式（async-io 2.x 的
+/// `into_inner` 文档明确要求调用方 `set_nonblocking(false)`；SMTP 早有此调用），
+/// 于是 native-tls 返回 `HandshakeError::WouldBlock` 中间流后，无超时的
+/// `loop { handshake() }` 在非阻塞 fd 上**热自旋（100% CPU）**——敌意服务器
+/// 应答 tagged OK 后保持沉默即可让客户端永久烧 CPU。修复：恢复阻塞模式、施加
+/// 账号读写超时，并在 WouldBlock 循环里加握手截止时间（`ErrorKind::TimedOut`）。
+///
+/// [`cve_2020_15917`] 分层锁定：(a) 攻击复现——Claws Mail 式跨升级会话缓冲对
+/// S1 语料逐行吐出注入的 `* CAPABILITY …` / `M2 OK …` / `* 3 EXISTS`；(b) meli
+/// 语义核心断言——按 425-533 行真实算法复刻，每个变体要么协商 Err，要么升级且
+/// 携带过升级的缓冲恒为空，OK 前未打标脏行必须协商失败；(c) 行为级攻击——本地
+/// 敌意服务器打真实 `ImapStream::new_connection`（黏连 / 分段 / OK 前 /
+/// ManageSieve / 沉默 MITM 五场景），客户端须进入 TLS（服务器读到 `0x16 0x03`）、
+/// TLS 流内不得含明文 IMAP 命令、注入后被 drop 必须 Err、沉默服务器须在账号
+/// 超时内以 `TimedOut` 返回而非热自旋到对端 drop；(d) L3 源码 / 工程扫描锁定
+/// imap / nntp / smtp 三处升级块的阻塞恢复 + 超时 + deadline + 升级后重发命令，
+/// 且 `ImapStream` 不含 `read_buffer`/`Vec<u8>` 跨升级残留缓冲。
+/// 结论：**后缀注入类免疫；沉默服务器缺口发现并修复**。
+///
+/// [`cve_2020_15917`]: self::cve_2020_15917
+/// [`ImapStream::new_connection`]: meli::melib::imap::ImapStream::new_connection
+#[cfg(test)]
+#[path = "CVE-2020-15917.rs"]
+mod cve_2020_15917;
