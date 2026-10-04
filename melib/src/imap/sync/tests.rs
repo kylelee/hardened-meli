@@ -1094,6 +1094,7 @@ fn test_imap_sync_sqlite3_healthy_rows_unchanged() {
     _ = tempdir.close();
 }
 
+#[cfg(feature = "sqlite3")]
 use std::sync::Arc;
 
 /// Boilerplate shared by the sqlite3 cache tests: a `Sqlite3Cache` over a
