@@ -2470,3 +2470,64 @@ mod cve_2023_41064;
 #[cfg(test)]
 #[path = "CVE-2026-8091.rs"]
 mod cve_2026_8091;
+
+/// CVE-2010-0249（Internet Explorer 6 / mshtml.dll；CVSS 9.3 v2；NVD）**无效指针
+/// 引用（invalid pointer reference）→ 远程代码执行** regression（issue #82）：
+/// Operation Aurora（极光行动）——攻击者向 Google、Adobe 等公司员工发送鱼叉邮件，
+/// 正文链接指向托管 IE6 漏洞利用页的服务器（在野样本 URL 形如
+/// `http://<evil-host>/a.asp?ZhangChen`）。受害者点击后，mshtml.dll 解析特制
+/// HTML/JS：脚本创建 / 删除 DOM 元素留下悬空指针，再用
+/// `unescape('%u0c0c%u0c0c')` 堆喷射铺到 `0x0C0C0C0C` 并跳入 shellcode。微软以
+/// 2010 年 1 月紧急带外补丁 MS10-002 修复。
+///
+/// meli 等价面映射（issue #82）：meli 是终端邮件客户端，**没有浏览器引擎、JS
+/// 引擎、DOM、ActiveX/COM 宿主**，本 CVE 的触发原语在结构上不存在。等价面 =
+/// ①链接显示 / 打开路径：linkify（[`ViewOptions::convert`]）只产生显示用 `Link`
+/// 值、不发起网络；打开必须是显式用户动作（URL 模式输入链接编号 + `go_to_url`），
+/// 非 `http`/`https`/`mailto` 还要过确认对话框
+/// （[`is_default_launchable_scheme`]）；Aurora 链接本身是普通 http URL，放行正是
+/// 设计内的显式用户动作语义。②渲染路径无预取 / 无自动打开：`sanitize`/`render`
+/// 永不发起网络，`url_launcher` 只出现在 `go_to_url` / `List-Unsubscribe` /
+/// `List-Archive` 三个用户动作汇点。③利用页字节形态在 [`sanitize`] 里整体死亡：
+/// `<script>`（unescape 堆喷射、createElement/removeChild churn、fromCharCode+eval、
+/// cid/https src）、`<object classid="CLSID:…">`、`<embed>`、
+/// `<iframe src="javascript:…">`、`<meta refresh>`、CSS `expression(...)`、`on*`
+/// 事件属性、`javascript:`/`vbscript:`/`data:text/html` href 全部不在 ammonia
+/// 白名单。
+///
+/// [`cve_2010_0249`] 共 19 条 HTML 利用向量 + 14 条投递形态向量（inline
+/// `text/html`、attachment + `Aurora82.html`/`.htm`、伪装
+/// `application/octet-stream` + `.html`、base64 / quoted-printable、RFC 2231
+/// `filename*=UTF-8''Aurora82%2Ehtml` 与 `filename*0=`/`filename*1=` 分段、双扩展
+/// `policy82.html.txt`、`text/plain` 伪装、路径穿越 `../../evil82.html`、
+/// `multipart/related` + `<script src="cid:…">`、嵌套 `message/rfc822`），整封
+/// `multipart/mixed` 攻击邮件经 melib 解析出精确附件树，全部语料字节在 wire 上
+/// 逐字在场。
+///
+/// L1 melib 解析出精确 `multipart/mixed` 附件树（`[0]` multipart/alternative + 11
+/// 个投递部件），`text/plain`/`text/html` 归类正确、`is_text()` 正确，base64 /
+/// quoted-printable 只做传输编码反转（已知答案 `PHNjcmlwdD4=` → `<script>`、
+/// `=3Cscript=3E` → `<script>`）；L2 每条 HTML 向量 / 完整利用页在 [`sanitize`] 里
+/// 整体死亡且为不动点，[`render`] 输出纯终端文本，`%u0c0c` / CLSID / createElement
+/// 标记不出现；L3 源码扫描锁定 `Command::new(url_launcher)` 只出现在三个用户动作
+/// 汇点、`html_render` 无 `url_launcher`/`Command::new`/`reqwest` 引用，
+/// `l3_workspace_has_no_js_or_browser_engine_dependency` 断言全仓清单无任何 JS /
+/// 浏览器引擎依赖（v8 / deno_core / quickjs / boa / javascriptcore / webkit2gtk /
+/// wry / tauri / servo / headless_chrome / chromiumoxide / fantoccini / thirtyfour /
+/// webdriver 等全查；ammonia / html5ever 只是 HTML 解析 / 清理器，不执行脚本）；
+/// L4 整封攻击邮件端到端解析 + 渲染纯文本，合法内容（`LEGITIMATE-MARKER-82`）交付、
+/// 脚本 / 喷射字节不出现，诚实 http/https/mailto 链接保持可用（sanitize 保留 href、
+/// render 脚注可见、门禁放行）。仓内孪生回归：`meli/src/mail/view/tests.rs` 的
+/// `go_to_url_cancel_does_not_launch` 与
+/// `go_to_url_non_default_scheme_requires_confirmation`。仓内孪生改动：无（免疫证明，
+/// 未触碰生产代码）。
+///
+/// [`Attachment::decode`]: meli::melib::Attachment::decode
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`ViewOptions::convert`]: meli::mail::view::ViewOptions::convert
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+/// [`cve_2010_0249`]: self::cve_2010_0249
+#[cfg(test)]
+#[path = "CVE-2010-0249.rs"]
+mod cve_2010_0249;
