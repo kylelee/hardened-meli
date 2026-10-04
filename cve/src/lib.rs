@@ -1340,3 +1340,53 @@ mod cve_2020_12641;
 #[cfg(test)]
 #[path = "CVE-2002-1770.rs"]
 mod cve_2002_1770;
+
+/// CVE-2024-37385 (Roundcube Webmail < 1.5.7, 1.6.x < 1.6.7, Windows
+/// deployments only, CVSS 9.8, CWE-77) OS command-injection regression
+/// (issue #56, table 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// virus / code execution): the ImageMagick configuration paths
+/// `im_convert_path`/`im_identify_path` were completed into a shell
+/// command line, and **the fix for CVE-2020-12641 (issue #57) was
+/// itself incomplete** — it rejected only backslash-leading paths, so
+/// the forward-slash UNC spelling `//attacker.example/share/…` (plus
+/// whitespace/type-juggling) passed the check and still injected.
+/// meli's equivalent surface is the CVE-2020-12641 one: the mailcap
+/// `%` substitutions of `meli/src/mailcap.rs`, where mail-controlled
+/// bytes (`%t` type tag, `%{param}` MIME parameters, `%s`/`%F` temp
+/// paths) join the local, trusted RFC 1524 shell templates — so this
+/// CVE attacks *the context-aware encoding that first fix landed*.
+/// [`cve_2024_37385`] locks it layer by layer over the
+/// issue-prescribed metacharacter corpus (`;`、反引号、`$()`、引号逃逸
+/// from malicious attachment names, parameters and type tags): exact
+/// known answers against an independent POSIX single-quoting oracle,
+/// actually-spawned `sh -c` runs whose stdout must stay byte-verbatim
+/// and whose canary markers must stay absent, the CVE's own Windows
+/// spellings (`//server/share`, `\\server\share`, `cmd.exe /c`,
+/// `%SystemRoot%`, `^&`) as inert data on meli's POSIX surface (the
+/// platform-precondition immunity mapping), the scanner's equivalent
+/// quoting-region spellings (`$'`, `$"`), and the 「one argv element」
+/// wall. It exposes **two real gaps of the exact "incomplete-fix"
+/// class this CVE memorializes, both fixed with this regression**:
+/// (1) the context scanner did not track here-documents *inside*
+/// `$(...)`/backtick regions, so a `%{charset}` landing in such a body
+/// was classified bare and armored with `'...'` — literal characters
+/// in a here-document body, whose `$()`/backticks still expanded
+/// (verified against a real shell pre-fix); a `<<` inside a command
+/// substitution is lexically indistinguishable from an arithmetic
+/// left shift, so the fix fails closed. (2) an arithmetic `$((...))`
+/// region executes command substitutions and backticks in its
+/// expression text *even inside quotes* (empirically: a `'x$(touch
+/// …)x'` operand still substitutes before the arithmetic parses), so
+/// the bare armor a `$((` body used to get let the payload inject —
+/// and `$((` is lexically indistinguishable from a command
+/// substitution containing a subshell, so no armor satisfies both
+/// readings and the fix fails closed there too
+/// (`ShellContext::Ambiguous`, the third-`$()`-level contract), while
+/// closed `$((…))` regions and nested ordinary `$(...)` bodies keep
+/// their bare armor. Locked together with the production newline wall
+/// (mailcap continuations are stripped; a file can never deliver the
+/// multi-line here-document shape) in `meli/src/mailcap.rs` and the
+/// corpus here.
+#[cfg(test)]
+#[path = "CVE-2024-37385.rs"]
+mod cve_2024_37385;

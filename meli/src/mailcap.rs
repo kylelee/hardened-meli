@@ -92,7 +92,7 @@ pub struct MailcapEntry<'a> {
 ///
 /// A mailcap command string is local, user-controlled configuration: it may
 /// legitimately contain pipes, redirections and even command substitutions
-/// (for example `... | uniq` or `t=`echo %{charset}``), and that is part of
+/// (for example `... | uniq` or `t='echo %{charset}'`), and that is part of
 /// the mailcap contract. The *values* spliced into it, on the other hand,
 /// are mail-controlled bytes (`%t` content type, `%{param}` MIME parameter,
 /// `%s`/`%F` temporary-file names) and must never be able to activate shell
@@ -136,7 +136,7 @@ enum ShellContext {
     Double,
     /// Inside an old-style backtick command substitution. Unlike `"..."`,
     /// the outer shell strips a backslash before `$`, a backtick or `\` while
-    /// searching for the closing backtick, so a bare `\`` or `\$` is *not*
+    /// searching for the closing backtick, so a bare escaped backtick or `$` is *not*
     /// inert: it merely keeps the outer scanner going and then re-executes in
     /// the inner shell. The value therefore needs two layers — an inner
     /// single-quoted word plus outer escaping of the backticks and
@@ -185,13 +185,33 @@ struct Heredoc {
 /// that cannot be resolved deterministically (an unterminated `${`, a third
 /// level of `$(...)` nesting, an unparsable here-document delimiter)
 /// becomes [`ShellContext::Ambiguous`]; the caller must then fail closed
-/// instead of guessing an encoding.
+/// instead of guessing an encoding. A `<<` seen inside a `$(...)` or
+/// backtick region is also undecidable: there it cannot be told apart from
+/// an arithmetic left shift (`$((1 << 4))`), and once a newline follows, one
+/// reading starts a here-document body (whose rules differ — quoting is
+/// literal there while `$` and backticks expand) while the other begins an
+/// ordinary new command line, so the context of any later substitution
+/// point cannot be determined. The same holds inside an arithmetic
+/// `$((...))` region, whose expression text executes command
+/// substitutions and backticks even inside quotes — and which is
+/// lexically indistinguishable from a subshell inside a command
+/// substitution, so it cannot be encoded for either reading.
 fn shell_quote_context(prefix: &str) -> ShellContext {
     let chars: Vec<char> = prefix.chars().collect();
     let mut stack: Vec<QuoteState> = Vec::new();
     let mut cmdsub_depth = 0usize;
     let mut pending_heredocs: VecDeque<Heredoc> = VecDeque::new();
     let mut active_heredoc: Option<Heredoc> = None;
+    // Set once a `<<` is seen inside a `$(...)` or backtick region: from
+    // that point on, a newline means "here-document body or new command
+    // line — cannot tell", which is ambiguous.
+    let mut cmdsub_heredoc_or_shift = false;
+    // Mirrors the `$(...)` levels on `stack`: `true` when that level was
+    // opened by `$((` — an arithmetic expansion region. Inside such a
+    // region the shell executes command substitutions and backticks in
+    // the expression text *even inside quotes*, so no quoting armor can
+    // make a value inert there — see the classification at the end.
+    let mut cmdsub_arith: Vec<bool> = Vec::new();
     let mut i = 0;
 
     while i < chars.len() {
@@ -227,6 +247,16 @@ fn shell_quote_context(prefix: &str) -> ShellContext {
 
         let c = chars[i];
         if c == '\n' {
+            if cmdsub_heredoc_or_shift {
+                // A `<<` inside a `$(...)` or backtick region followed by a
+                // newline: either a here-document body starts on the next
+                // line (quoting is literal there while `$` and backticks
+                // still expand) or the `<<` was an arithmetic shift and
+                // this is an ordinary new command line. The two readings
+                // demand different encodings for a substitution point, so
+                // the context cannot be resolved deterministically.
+                return ShellContext::Ambiguous;
+            }
             i += 1;
             // A here-document body begins after the newline that ends the
             // command line on which `<<` appeared.
@@ -262,6 +292,7 @@ fn shell_quote_context(prefix: &str) -> ShellContext {
                         return ShellContext::Ambiguous;
                     }
                     cmdsub_depth += 1;
+                    cmdsub_arith.push(chars.get(i + 2) == Some(&'('));
                     stack.push(QuoteState::CommandSub);
                     i += 2;
                 }
@@ -306,6 +337,7 @@ fn shell_quote_context(prefix: &str) -> ShellContext {
                         return ShellContext::Ambiguous;
                     }
                     cmdsub_depth += 1;
+                    cmdsub_arith.push(chars.get(i + 2) == Some(&'('));
                     stack.push(QuoteState::CommandSub);
                     i += 2;
                 }
@@ -330,6 +362,7 @@ fn shell_quote_context(prefix: &str) -> ShellContext {
                 }
                 ')' if top == Some(QuoteState::CommandSub) => {
                     stack.pop();
+                    cmdsub_arith.pop();
                     cmdsub_depth -= 1;
                     i += 1;
                 }
@@ -350,6 +383,7 @@ fn shell_quote_context(prefix: &str) -> ShellContext {
                         return ShellContext::Ambiguous;
                     }
                     cmdsub_depth += 1;
+                    cmdsub_arith.push(chars.get(i + 2) == Some(&'('));
                     stack.push(QuoteState::CommandSub);
                     i += 2;
                 }
@@ -358,6 +392,15 @@ fn shell_quote_context(prefix: &str) -> ShellContext {
                         return ShellContext::Ambiguous;
                     };
                     i = end;
+                }
+                '<' if chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') => {
+                    // A here-document redirection inside a command
+                    // substitution — or an arithmetic left shift inside
+                    // `$(( ... ))`, which is lexically identical at this
+                    // point. Track it and fail closed at the next newline,
+                    // where the two readings diverge.
+                    cmdsub_heredoc_or_shift = true;
+                    i += 2;
                 }
                 _ => i += 1,
             },
@@ -368,6 +411,19 @@ fn shell_quote_context(prefix: &str) -> ShellContext {
     // still surrounds the substitution point.
     if active_heredoc.is_some() {
         return ShellContext::Heredoc;
+    }
+
+    // An arithmetic `$((...))` region executes command substitutions and
+    // backticks in its expression text even inside quotes (a `'val'` operand
+    // still has its `$(...)` and backticks substituted before the arithmetic
+    // is parsed — verified against real shells), so no quoting armor can
+    // keep a value inert there. `$((` is also lexically indistinguishable
+    // from a command substitution containing a subshell, so the region
+    // cannot be encoded for either reading: refuse. A substitution inside a
+    // nested *ordinary* `$(...)` or backtick command body is still fine —
+    // that body really is a command context.
+    if cmdsub_arith.last() == Some(&true) && !matches!(stack.last(), Some(QuoteState::Backtick)) {
+        return ShellContext::Ambiguous;
     }
 
     match stack.last() {
@@ -3184,7 +3240,7 @@ text/html; less; needsterminal;
     }
 
     /// The `%t` substitution inside a backtick command substitution (the
-    /// `test="`echo %{charset}`"` shape of the repository mailcap corpus): the
+    /// `test="echo %{charset}"` shape of the repository mailcap corpus): the
     /// outer scanner strips a backslash before a backtick, so a single
     /// `\`` would still execute. The value is emitted as a single-quoted word
     /// with every backtick and backslash doubled for the outer scanner, and
@@ -3296,5 +3352,165 @@ text/html; less; needsterminal;
             shell_quote_context("cat <<EOF\nbody\n"),
             ShellContext::Heredoc
         );
+    }
+
+    /// A `<<` inside a `$(...)` command substitution or a backtick region is
+    /// lexically either a here-document redirection or an arithmetic left
+    /// shift; the two readings diverge at the next newline (a here-document
+    /// body starts there, a shift means an ordinary new command line). Every
+    /// such prefix is ambiguous and must fail closed.
+    #[test]
+    fn shell_quote_context_heredoc_inside_command_substitution_is_ambiguous() {
+        assert_eq!(
+            shell_quote_context("t=$(cat <<EOF\n"),
+            ShellContext::Ambiguous
+        );
+        assert_eq!(
+            shell_quote_context("t=`cat <<EOF\n"),
+            ShellContext::Ambiguous
+        );
+        assert_eq!(
+            shell_quote_context("echo $((1 << 4))\n"),
+            ShellContext::Ambiguous
+        );
+        // Before any newline the substitution point is still on the command
+        // line, where both readings agree it is bare command text.
+        assert_eq!(shell_quote_context("$(cat <<EOF) "), ShellContext::Bare);
+        assert_eq!(shell_quote_context("echo $((1 << 4)) "), ShellContext::Bare);
+    }
+
+    /// An arithmetic `$((...))` region executes command substitutions and
+    /// backticks in its expression text even inside quotes (verified: a
+    /// `'x$(touch …)x'` operand still has its `$(...)` substituted before
+    /// the arithmetic is parsed — the shell then reports the leftover
+    /// operand and the marker exists), so the single-quote armor the
+    /// scanner used to pick there (the body of `$((` classified like the
+    /// body of `$(`) let a mail-controlled value inject. And `$((` is
+    /// lexically indistinguishable from a command substitution containing
+    /// a subshell, so neither quoting nor escaping can satisfy both
+    /// readings — every substitution point inside an open arithmetic
+    /// region is ambiguous and fails closed, while a nested ordinary
+    /// `$(...)` body and a *closed* arithmetic region keep their bare
+    /// armor.
+    #[test]
+    fn shell_quote_context_arithmetic_region_is_ambiguous() {
+        assert_eq!(shell_quote_context("echo $((1 + "), ShellContext::Ambiguous);
+        assert_eq!(shell_quote_context("echo $(( 'x"), ShellContext::Ambiguous);
+        assert_eq!(
+            shell_quote_context("echo \"$((1 + "),
+            ShellContext::Ambiguous
+        );
+        // A nested ordinary command substitution body is a real command
+        // context and keeps the bare armor.
+        assert_eq!(shell_quote_context("echo $(( $(echo "), ShellContext::Bare);
+        // A closed arithmetic region leaves plain bare text behind.
+        assert_eq!(
+            shell_quote_context("echo $((1 + 1)) && echo "),
+            ShellContext::Bare
+        );
+    }
+
+    /// End-to-end twin: a `%{charset}` whose `$(...)` would execute inside
+    /// an arithmetic region is refused instead of armored; the closed-
+    /// region shape keeps working with the bare armor.
+    #[test]
+    fn expand_args_arithmetic_context_fails_closed() {
+        let attachment = test_attachment(
+            "Content-Type: text/plain; charset=\"x$(touch /tmp/pwned)y\"\r\n\r\nhi",
+            ContentType::Text {
+                kind: Text::Plain,
+                charset: Charset::UTF8,
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let err = expand_args(
+            "echo $((%{charset}))",
+            None,
+            &mut temporary_files,
+            &attachment,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err}");
+        let (_, expanded) = expand_args(
+            "echo $((1 + 1)) && echo %{charset}",
+            None,
+            &mut temporary_files,
+            &attachment,
+        )
+        .unwrap();
+        assert!(
+            expanded.contains("'x$(touch /tmp/pwned)y'"),
+            "a closed arithmetic region keeps the bare armor: {expanded}"
+        );
+    }
+
+    /// End-to-end twin of the classification above: a command template whose
+    /// `$(...)` body contains a here-document must be refused, never
+    /// completed. Pre-fix, the scanner classified a `%{charset}` landing
+    /// inside that body as *bare* command text and armored it with `'...'` —
+    /// but inside a here-document body quotes are literal characters while
+    /// `$` and backticks still expand, so the value's own `$(...)` executed
+    /// when the expanded line ran (verified against a real shell; the
+    /// CVE-2024-37385 "incomplete fix of CVE-2020-12641" shape — this
+    /// repository's CVE-2020-12641 hardening had a blind region of its own
+    /// there). The mailcap parser never delivers newlines into a command
+    /// field (see `mailcap_parser_joins_continuations_without_newlines`), so
+    /// this lock guards the scanner contract for any future caller that
+    /// could.
+    #[test]
+    fn expand_args_heredoc_inside_command_substitution_fails_closed() {
+        let attachment = test_attachment(
+            "Content-Type: text/plain; charset=\"x$(touch /tmp/pwned)x\"\r\n\r\nhi",
+            ContentType::Text {
+                kind: Text::Plain,
+                charset: Charset::UTF8,
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        for command in [
+            "t=$(cat <<EOF\n%{charset}\nEOF\n); echo \"$t\"",
+            "t=`cat <<EOF\n%{charset}\nEOF\n`; echo \"$t\"",
+        ] {
+            let err = expand_args(command, None, &mut temporary_files, &attachment)
+                .expect_err("a here-document inside a command substitution is refused");
+            assert!(err.to_string().contains("ambiguous"), "{err}");
+        }
+    }
+
+    /// The mailcap parser joins `\<newline>` continuations by *removing* the
+    /// backslash-newline pair, so no command, test or nametemplate field a
+    /// mailcap file delivers can ever contain a newline. That is the
+    /// production wall keeping here-document bodies (and every other
+    /// multi-line shell construct) away from `expand_args`; the
+    /// CVE-2024-37385 corpus re-locks it end to end.
+    #[test]
+    fn mailcap_parser_joins_continuations_without_newlines() {
+        let entry = MailcapEntry::parser(
+            "application/x-demo; cmd one \\\n two \\\n three; test=test -n \\\n \"$DISPLAY\"",
+        )
+        .next()
+        .expect("the line is non-empty")
+        .expect("the line parses");
+        assert_eq!(entry.view_command, "cmd one  two  three");
+        assert_eq!(
+            entry.test.first().map(|test| test.as_ref()),
+            Some("test -n  \"$DISPLAY\"")
+        );
+        for field in [
+            entry.view_command.as_ref(),
+            entry.key.as_ref(),
+            entry.description.as_ref(),
+        ]
+        .into_iter()
+        .chain(entry.test.iter().map(|t| t.as_ref()))
+        .chain(entry.nametemplate.as_deref())
+        {
+            assert!(
+                !field.contains('\n'),
+                "no newline may survive a join: {field:?}"
+            );
+        }
     }
 }
