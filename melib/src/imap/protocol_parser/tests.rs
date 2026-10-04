@@ -1329,3 +1329,67 @@ fn test_imap_line_iterator_brace_dense_line_is_linear() {
     let oversize = &b"* 1 FETCH (BODY[] {18446744073709551615}\r\n"[..];
     assert_eq!(oversize.split_rn().count(), 0);
 }
+
+/// CVE-2020-16094 (Claws Mail ≤ 3.17.6, CWE-674): a malicious IMAP
+/// server exhausted the client's stack by making it rebuild a directory
+/// tree from unlimited subfolder recursion. The meli-side delivery is a
+/// delimiter-stacked LIST/LSUB path: every downstream mailbox-tree walk
+/// spends resources proportional to the hierarchy depth, so the parse
+/// must bound the depth where the server line enters the client. A path
+/// nested deeper than `MAX_MAILBOX_HIERARCHY_DEPTH` (20 levels — far
+/// above any legitimate folder tree) is rejected with a clean nom error
+/// (and skipped by the mailbox-map ingestion) while an at-cap path
+/// still parses normally. meli's `build_mailboxes_order` enforces the
+/// same bound on the rebuilt tree, so hierarchies that slip past the
+/// wire (foreign backends, the sync cache) are capped too.
+#[test]
+fn test_imap_list_mailbox_result_hierarchy_depth_limit() {
+    let line_for = |depth: usize| -> Vec<u8> {
+        let mut path = String::with_capacity(2 * depth);
+        path.push('a');
+        for _ in 1..depth {
+            path.push('.');
+            path.push('a');
+        }
+        format!("* LIST () \".\" {path}\r\n").into_bytes()
+    };
+
+    // Honest shallow carriers still parse, parent hash and all.
+    let (_, inbox_sent) = list_mailbox_result(b"* LIST () \".\" INBOX.Sent\r\n").unwrap();
+    assert_eq!(inbox_sent.imap_path, "INBOX.Sent");
+    assert_eq!(inbox_sent.parent, Some(MailboxHash::from_bytes(b"INBOX")));
+
+    // At the cap the path parses (the 64th level is still legal) and
+    // still links to its one-level-shallower parent.
+    let at_cap = line_for(MAX_MAILBOX_HIERARCHY_DEPTH);
+    let (_, m) = list_mailbox_result(&at_cap).unwrap();
+    let path_str = std::str::from_utf8(&at_cap[14..at_cap.len() - 2]).unwrap();
+    let expected_parent = &path_str[..path_str.len() - 2];
+    assert_eq!(
+        m.parent,
+        Some(MailboxHash::from_bytes(expected_parent.as_bytes()))
+    );
+
+    // One level past the cap fails closed, deterministically.
+    let past_cap = line_for(MAX_MAILBOX_HIERARCHY_DEPTH + 1);
+    assert!(
+        list_mailbox_result(&past_cap).is_err(),
+        "a {plus}-level hierarchy must fail closed",
+        plus = MAX_MAILBOX_HIERARCHY_DEPTH + 1
+    );
+    assert_eq!(
+        format!("{:?}", list_mailbox_result(&past_cap)),
+        format!(
+            "{:?}",
+            list_mailbox_result(&line_for(MAX_MAILBOX_HIERARCHY_DEPTH + 1))
+        ),
+        "the rejection must be deterministic"
+    );
+
+    // The issue's verbatim attack scale: a delimiter-stacked path 10^5
+    // levels deep is rejected without panicking or recursing.
+    let hostile = line_for(100_000);
+    let parsed = std::panic::catch_unwind(|| list_mailbox_result(&hostile))
+        .expect("parsing a 10^5-deep LIST path must not panic");
+    parsed.unwrap_err();
+}

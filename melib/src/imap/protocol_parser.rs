@@ -41,7 +41,7 @@ use nom::{
 
 use super::*;
 use crate::{
-    backends::utf7::decode_utf7_imap,
+    backends::{utf7::decode_utf7_imap, MAX_MAILBOX_HIERARCHY_DEPTH},
     email::{
         address::Address,
         parser::{
@@ -550,6 +550,27 @@ pub fn list_mailbox_result(input: &[u8]) -> IResult<&[u8], ImapMailbox> {
         delimited(tag(&b"\""[..]), take(1_u32), tag(&b"\""[..])).parse(input)?;
     let (input, _) = take(1_u32).parse(input)?;
     let (input, path) = mailbox_token(input)?;
+    // CVE-2020-16094 (Claws Mail ≤ 3.17.6, CWE-674): a malicious server
+    // rebuilds an unbounded directory tree by stacking the hierarchy
+    // delimiter in LIST/LSUB paths; a path nested deep enough walked the
+    // stack pointer of every tree consumer into its guard page, exactly
+    // like Claws Mail's directory-tree rebuild did. Reject over-deep
+    // hierarchies here, where the line enters the client, with a clean
+    // nom error: the hostile entry never reaches the mailbox map that
+    // feeds the tree construction. The cap is `backends::
+    // MAX_MAILBOX_HIERARCHY_DEPTH`; meli's tree rebuild enforces the same
+    // bound on its own, so cached or foreign-backend hierarchies are
+    // covered too.
+    if path.split(separator[0] as char).count() > MAX_MAILBOX_HIERARCHY_DEPTH {
+        return Err(nom::Err::Error(
+            (
+                input,
+                "list_mailbox_result(): mailbox hierarchy deeper than \
+                 MAX_MAILBOX_HIERARCHY_DEPTH",
+            )
+                .into(),
+        ));
+    }
     let (input, _) = tag(CRLF).parse(input)?;
     Ok((
         input,

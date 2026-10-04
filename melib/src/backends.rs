@@ -734,6 +734,30 @@ impl SpecialUsageMailbox {
     }
 }
 
+/// Maximum depth of a mailbox hierarchy, in levels.
+///
+/// The mailbox tree every backend reports — IMAP's rebuilt from LIST/LSUB
+/// responses, maildir's from the filesystem, the sync cache's restored
+/// entries — nests one level per path component, and the walks of the
+/// tree meli rebuilds from those links (`build_mailboxes_order`'s
+/// owned-tree construction, the sidebar snapshot through
+/// `Account::list_mailboxes`, the tree teardown) each touch one nested
+/// subtree per visited node. An unbounded hierarchy is therefore the
+/// CVE-2020-16094 (Claws Mail ≤ 3.17.6, CWE-674) delivery: a malicious
+/// IMAP server stacking the hierarchy delimiter in a LIST path made the
+/// client rebuild an arbitrarily deep directory tree, and a deep enough
+/// hierarchy walks meli's tree consumers into the same
+/// resource-exhaustion wall (one stack frame per level for the walks,
+/// and quadratic snapshot memory for the subtree clones). Real
+/// hierarchies, even aggressively nested folder trees, are only a
+/// handful of levels deep; twenty levels is far above any legitimate
+/// tree while keeping every downstream walk of the rebuilt tree linear
+/// in the number of mailboxes. [`crate::imap::protocol_parser::
+/// list_mailbox_result`] rejects a LIST/LSUB path with more components
+/// than this outright, and meli's `build_mailboxes_order` refuses to
+/// nest the owned tree deeper than this whatever the backend feeds it.
+pub const MAX_MAILBOX_HIERARCHY_DEPTH: usize = 20;
+
 pub trait BackendMailbox: std::fmt::Debug + std::any::Any {
     fn hash(&self) -> MailboxHash;
     /// Final component of `path`.
