@@ -3288,4 +3288,308 @@ Long body line 60: the quick brown fox jumps over the lazy dog again.\r\n\
             "Down at the body bottom must not switch to the next mail"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // CVE-2024-49394 (issue #85) twin regressions
+    //
+    // The crypto is exercised end-to-end in `cve/src/CVE-2024-49394.rs`; these
+    // two tests pin the *thread-view display* consequence of the melib fix:
+    // a replayed copy with the same `Message-ID` but a tampered outer
+    // `In-Reply-To` must not move the original message into another thread,
+    // merge thread groups, or leak any signature status into a heading.
+    // -----------------------------------------------------------------------
+
+    /// Thread X root (Bob).
+    const CVE85_X_ROOT: &[u8] = b"From: Bob Example <bob@corp.example>\r\n\
+To: all@corp.example\r\n\
+Subject: Thread X root\r\n\
+Message-ID: <cve85-x-root@corp.example>\r\n\
+Date: Mon, 6 Oct 2026 08:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+thread root body\r\n";
+
+    /// Thread Y root (Carol).
+    const CVE85_Y_ROOT: &[u8] = b"From: Carol Example <carol@corp.example>\r\n\
+To: all@corp.example\r\n\
+Subject: Thread Y root\r\n\
+Message-ID: <cve85-y-root@corp.example>\r\n\
+Date: Mon, 6 Oct 2026 08:05:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+thread root body\r\n";
+
+    /// Alice's genuine `multipart/signed` reply, threaded under X. The
+    /// signature part is a placeholder: this fixture only exercises thread
+    /// placement, the real Ed25519 corpus lives in the `cve` crate.
+    const CVE85_GENUINE_REPLY: &[u8] = b"From: Alice Example <alice@corp.example>\r\n\
+To: Bob Example <bob@corp.example>\r\n\
+Subject: Re: Thread X root\r\n\
+Message-ID: <cve85-reply@corp.example>\r\n\
+In-Reply-To: <cve85-x-root@corp.example>\r\n\
+References: <cve85-x-root@corp.example>\r\n\
+Date: Mon, 6 Oct 2026 09:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/signed; protocol=\"application/pgp-signature\"; micalg=pgp-sha512; boundary=\"=_cve85\"\r\n\
+\r\n\
+--=_cve85\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+signed reply body\r\n\
+--=_cve85\r\n\
+Content-Type: application/pgp-signature; name=\"signature.asc\"\r\n\
+\r\n\
+-----BEGIN PGP SIGNATURE-----\r\n\
+\r\n\
+ZHVtbXk=\r\n\
+-----END PGP SIGNATURE-----\r\n\
+--=_cve85--\r\n";
+
+    /// The same `Message-ID` and signed payload, but the outer (unsigned)
+    /// `In-Reply-To`/`References` now point at thread Y: the CVE-2024-49394
+    /// replay.
+    const CVE85_REPLAY_V1: &[u8] = b"From: Alice Example <alice@corp.example>\r\n\
+To: Bob Example <bob@corp.example>\r\n\
+Subject: Re: Thread X root\r\n\
+Message-ID: <cve85-reply@corp.example>\r\n\
+In-Reply-To: <cve85-y-root@corp.example>\r\n\
+References: <cve85-y-root@corp.example>\r\n\
+Date: Mon, 6 Oct 2026 09:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/signed; protocol=\"application/pgp-signature\"; micalg=pgp-sha512; boundary=\"=_cve85\"\r\n\
+\r\n\
+--=_cve85\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+signed reply body\r\n\
+--=_cve85\r\n\
+Content-Type: application/pgp-signature; name=\"signature.asc\"\r\n\
+\r\n\
+-----BEGIN PGP SIGNATURE-----\r\n\
+\r\n\
+ZHVtbXk=\r\n\
+-----END PGP SIGNATURE-----\r\n\
+--=_cve85--\r\n";
+
+    /// Insert the CVE-2024-49394 twin fixture into a fresh inbox and return
+    /// everything the two views need.
+    #[allow(clippy::type_complexity)]
+    fn cve85_thread_fixture(
+        ctx: &mut Context,
+    ) -> (
+        AccountHash,
+        MailboxHash,
+        EnvelopeHash,
+        EnvelopeHash,
+        ThreadHash,
+        ThreadHash,
+    ) {
+        let (account_hash, mailbox_hash) = register_inbox(ctx);
+        let x_root = Envelope::from_bytes(CVE85_X_ROOT, None).expect("x-root parses");
+        let y_root = Envelope::from_bytes(CVE85_Y_ROOT, None).expect("y-root parses");
+        let genuine =
+            Envelope::from_bytes(CVE85_GENUINE_REPLY, None).expect("genuine reply parses");
+        let replay = Envelope::from_bytes(CVE85_REPLAY_V1, None).expect("replay parses");
+        let x_hash = x_root.hash();
+        let y_hash = y_root.hash();
+        let genuine_hash = genuine.hash();
+        let replay_hash = replay.hash();
+        assert_ne!(
+            genuine_hash, replay_hash,
+            "the replayed copy must be byte-different from the genuine reply"
+        );
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(x_root, mailbox_hash);
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(y_root, mailbox_hash);
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(genuine, mailbox_hash);
+        ctx.accounts[&account_hash]
+            .collection
+            .insert(replay, mailbox_hash);
+
+        let (x_group, y_group) = {
+            let threads = ctx.accounts[&account_hash]
+                .collection
+                .get_threads(mailbox_hash)
+                .expect("test fixture inserted mail into the mailbox threads");
+            assert!(
+                !threads.envelope_to_thread.contains_key(&replay_hash),
+                "the same-Message-ID replay must not be registered as threaded"
+            );
+            (
+                threads.find_group(threads.envelope_to_thread[&x_hash]),
+                threads.find_group(threads.envelope_to_thread[&y_hash]),
+            )
+        };
+        assert_ne!(
+            x_group, y_group,
+            "the replay must not merge threads X and Y"
+        );
+        (account_hash, mailbox_hash, x_hash, y_hash, x_group, y_group)
+    }
+
+    /// A replayed `multipart/signed` reply carrying Alice's `Message-ID` but an
+    /// outer `In-Reply-To` forged to point at thread Y must not move Alice's
+    /// message into Y nor merge the two threads: the X `ThreadView` still holds
+    /// exactly Bob + Alice, and the Y `ThreadView` still holds only Carol.
+    #[test]
+    fn cve_2024_49394_replayed_signed_reply_stays_in_its_thread() {
+        let mut ctx = mock_context();
+        let (account_hash, mailbox_hash, x_hash, y_hash, x_group, y_group) =
+            cve85_thread_fixture(&mut ctx);
+
+        let x_view = ThreadView::new(
+            (account_hash, mailbox_hash, x_hash),
+            x_group,
+            None,
+            false,
+            Some(ThreadViewFocus::None),
+            &mut ctx,
+        );
+        assert_eq!(
+            x_view.entries.len(),
+            2,
+            "thread X is Bob's root plus Alice's genuine reply, nothing more"
+        );
+        assert!(
+            x_view
+                .entries
+                .iter()
+                .any(|e| e.heading.contains("Bob Example")),
+            "thread X must still show Bob's root: {:?}",
+            x_view
+                .entries
+                .iter()
+                .map(|e| e.heading.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            x_view
+                .entries
+                .iter()
+                .any(|e| e.heading.contains("Alice Example")),
+            "thread X must still contain Alice's reply heading: {:?}",
+            x_view
+                .entries
+                .iter()
+                .map(|e| e.heading.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let y_view = ThreadView::new(
+            (account_hash, mailbox_hash, y_hash),
+            y_group,
+            None,
+            false,
+            Some(ThreadViewFocus::None),
+            &mut ctx,
+        );
+        assert_eq!(
+            y_view.entries.len(),
+            1,
+            "thread Y is only Carol's root; the replay must not join it"
+        );
+        assert!(
+            y_view.entries.iter().all(|e| !e.heading.contains("Alice")),
+            "the replay must not carry Alice's identity into thread Y: {:?}",
+            y_view
+                .entries
+                .iter()
+                .map(|e| e.heading.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            y_view
+                .entries
+                .iter()
+                .any(|e| e.heading.contains("Carol Example")),
+            "thread Y still shows Carol's root"
+        );
+    }
+
+    /// `ThreadView` headings are built exclusively from the per-message
+    /// `Envelope` date/attachment flag/subject/from. No signature status text
+    /// (which would only be produced by loading and verifying the signed body)
+    /// ever reaches a heading, for a genuine signed reply or for its replay:
+    /// the thread layer has no inheritable "verified" marker.
+    #[test]
+    fn cve_2024_49394_thread_headings_carry_no_signature_status() {
+        let mut ctx = mock_context();
+        let (account_hash, mailbox_hash, x_hash, y_hash, x_group, y_group) =
+            cve85_thread_fixture(&mut ctx);
+
+        let x_view = ThreadView::new(
+            (account_hash, mailbox_hash, x_hash),
+            x_group,
+            None,
+            false,
+            Some(ThreadViewFocus::None),
+            &mut ctx,
+        );
+        let y_view = ThreadView::new(
+            (account_hash, mailbox_hash, y_hash),
+            y_group,
+            None,
+            false,
+            Some(ThreadViewFocus::None),
+            &mut ctx,
+        );
+
+        for (name, view) in [("X", &x_view), ("Y", &y_view)] {
+            for entry in &view.entries {
+                for needle in [
+                    "Unverified signature.",
+                    "good signature",
+                    "BAD signature",
+                    "Signature:",
+                ] {
+                    assert!(
+                        !entry.heading.contains(needle),
+                        "thread {name} heading must not carry signature status {needle:?}: {:?}",
+                        entry.heading
+                    );
+                }
+            }
+        }
+        // The headings do carry the per-message From/Subject identity, so the
+        // absence above is not vacuous. (Alice's reply duplicates the parent
+        // subject, so `show_subject` suppresses it there; her From still shows.)
+        assert!(
+            x_view
+                .entries
+                .iter()
+                .any(|e| e.heading.contains("Alice Example")),
+            "Alice's heading must carry her From identity: {:?}",
+            x_view
+                .entries
+                .iter()
+                .map(|e| e.heading.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            x_view
+                .entries
+                .iter()
+                .any(|e| e.heading.contains("Thread X root")),
+            "Bob's root heading must carry the Subject: {:?}",
+            x_view
+                .entries
+                .iter()
+                .map(|e| e.heading.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            y_view
+                .entries
+                .iter()
+                .any(|e| e.heading.contains("Carol Example")),
+            "Carol's heading must carry her From identity"
+        );
+    }
 }

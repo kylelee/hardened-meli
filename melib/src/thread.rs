@@ -878,14 +878,21 @@ impl Threads {
                 let thread_hash = self.message_ids[message_id];
                 let node = self.thread_nodes.entry(thread_hash).or_default();
                 drop(envelopes_lck);
-                self.envelope_to_thread_node.insert(env_hash, thread_hash);
-
-                /* If thread node currently has a message from a foreign mailbox and env_hash
-                 * is from current mailbox we want to update it, otherwise
-                 * return */
                 if node.other_mailbox || other_mailbox {
+                    self.envelope_to_thread_node.insert(env_hash, thread_hash);
                     return false;
                 }
+                /* CVE-2024-49394: a byte-different copy of an already placed message
+                 * (same `Message-ID`, e.g. a replay with tampered unsigned
+                 * threading headers) must not re-thread, merge thread groups,
+                 * double-count bookkeeping or displace the placed envelope: the
+                 * first placement wins. Registering nothing also keeps a later
+                 * removal of the replayed copy from blanking the node's message
+                 * slot. */
+                if node.message.is_some() {
+                    return true;
+                }
+                self.envelope_to_thread_node.insert(env_hash, thread_hash);
             }
         }
         let envelopes_lck = envelopes.read().unwrap();
@@ -1687,5 +1694,305 @@ Subject: child
                 threads.update_show_subject(node, *h, &envelopes);
             }
         }
+    }
+
+    /// CVE-2024-49394 regression: a byte-different replay carrying the same
+    /// `Message-ID` as an already placed reply but a tampered (unsigned)
+    /// `In-Reply-To` must not re-thread the placed message, merge the two
+    /// thread groups or double-count the group bookkeeping. The first
+    /// placement wins.
+    #[test]
+    fn replay_with_same_message_id_cannot_rethread_or_merge_threads() {
+        let raw_mails = vec![
+            mail(
+                "From: bob@corp.example\r\nMessage-ID: <cve85-x-root@corp.example>\r\nSubject: \
+                 thread X root\r\n",
+                "x body",
+            ),
+            mail(
+                "From: carol@corp.example\r\nMessage-ID: <cve85-y-root@corp.example>\r\nSubject: \
+                 thread Y root\r\n",
+                "y body",
+            ),
+            mail(
+                "From: alice@corp.example\r\nMessage-ID: <cve85-reply@corp.example>\r\nIn-Reply-To: \
+                 <cve85-x-root@corp.example>\r\nReferences: <cve85-x-root@corp.example>\r\nSubject: \
+                 re: thread X\r\n",
+                "signed body",
+            ),
+            // The replay: same `Message-ID`, byte-different, `In-Reply-To` now
+            // points at Y's root (the attacker-chosen thread).
+            mail(
+                "From: alice@corp.example\r\nMessage-ID: <cve85-reply@corp.example>\r\nIn-Reply-To: \
+                 <cve85-y-root@corp.example>\r\nReferences: <cve85-y-root@corp.example>\r\nSubject: \
+                 re: thread X\r\n",
+                "tampered body",
+            ),
+        ];
+        let (envelopes, hashes) = envelopes_from(&raw_mails);
+        let (x_root, y_root, reply, replay) = (hashes[0], hashes[1], hashes[2], hashes[3]);
+        assert_ne!(
+            reply, replay,
+            "the replayed copy must hash differently (byte-different body)"
+        );
+        let mut threads = Threads::new(raw_mails.len());
+        for h in &hashes {
+            threads.insert(&envelopes, *h);
+        }
+
+        let reply_node = threads.envelope_to_thread_node[&reply];
+        let x_node = threads.envelope_to_thread_node[&x_root];
+        let y_node = threads.envelope_to_thread_node[&y_root];
+
+        // The placed reply keeps Bob's X root as parent instead of being
+        // re-parented under Carol's Y root.
+        assert_eq!(
+            threads.thread_nodes[&reply_node].parent,
+            Some(x_node),
+            "the placed reply must not be re-threaded by the replay"
+        );
+        // The placed envelope still owns the node's message slot.
+        assert_eq!(
+            threads.thread_nodes[&reply_node].message,
+            Some(reply),
+            "the first placement must win the node's message slot"
+        );
+        assert_ne!(
+            x_node, y_node,
+            "sanity: the two roots are distinct thread nodes"
+        );
+        // The two independent threads stay separate.
+        assert_ne!(
+            threads.find_group(threads.envelope_to_thread[&x_root]),
+            threads.find_group(threads.envelope_to_thread[&y_root]),
+            "the replay must not merge the two thread groups"
+        );
+        // Bookkeeping is not double-counted: X = root + reply, Y = its root.
+        assert_eq!(
+            threads
+                .thread_ref(threads.envelope_to_thread[&x_root])
+                .len(),
+            2,
+            "thread X must count only its two genuine messages"
+        );
+        assert_eq!(
+            threads
+                .thread_ref(threads.envelope_to_thread[&y_root])
+                .len(),
+            1,
+            "thread Y must not absorb the replay"
+        );
+        // The replay is never registered as threaded.
+        assert!(
+            !threads.envelope_to_thread_node.contains_key(&replay),
+            "the replay must not be registered as threaded"
+        );
+    }
+
+    /// CVE-2024-49394 regression, `References`-only variant: the replayed copy
+    /// keeps its genuine `In-Reply-To` but rewrites the (equally unsigned)
+    /// `References` chain. The second re-threading path in the `references`
+    /// loop must be just as inert as the `In-Reply-To` path.
+    #[test]
+    fn replay_with_tampered_references_cannot_rethread_placed_message() {
+        let raw_mails = vec![
+            mail(
+                "From: bob@corp.example\r\nMessage-ID: <cve85-x-root@corp.example>\r\nSubject: \
+                 thread X root\r\n",
+                "x body",
+            ),
+            mail(
+                "From: carol@corp.example\r\nMessage-ID: <cve85-y-root@corp.example>\r\nSubject: \
+                 thread Y root\r\n",
+                "y body",
+            ),
+            mail(
+                "From: alice@corp.example\r\nMessage-ID: <cve85-reply@corp.example>\r\nIn-Reply-To: \
+                 <cve85-x-root@corp.example>\r\nReferences: <cve85-x-root@corp.example>\r\nSubject: \
+                 re: thread X\r\n",
+                "signed body",
+            ),
+            // Same `Message-ID` and same genuine `In-Reply-To`, but the
+            // `References` chain now starts at Y's root.
+            mail(
+                "From: alice@corp.example\r\nMessage-ID: <cve85-reply@corp.example>\r\nIn-Reply-To: \
+                 <cve85-x-root@corp.example>\r\nReferences: <cve85-y-root@corp.example> \
+                 <cve85-x-root@corp.example>\r\nSubject: re: thread X\r\n",
+                "tampered body",
+            ),
+        ];
+        let (envelopes, hashes) = envelopes_from(&raw_mails);
+        let (x_root, y_root, reply, replay) = (hashes[0], hashes[1], hashes[2], hashes[3]);
+        assert_ne!(reply, replay, "the replayed copy must hash differently");
+        let mut threads = Threads::new(raw_mails.len());
+        for h in &hashes {
+            threads.insert(&envelopes, *h);
+        }
+
+        let reply_node = threads.envelope_to_thread_node[&reply];
+        let x_node = threads.envelope_to_thread_node[&x_root];
+        assert_eq!(
+            threads.thread_nodes[&reply_node].parent,
+            Some(x_node),
+            "the placed reply must keep its genuine parent"
+        );
+        assert_eq!(
+            threads.thread_nodes[&reply_node].message,
+            Some(reply),
+            "the first placement must win the node's message slot"
+        );
+        assert_ne!(
+            threads.find_group(threads.envelope_to_thread[&x_root]),
+            threads.find_group(threads.envelope_to_thread[&y_root]),
+            "the tampered References chain must not merge the groups"
+        );
+        assert_eq!(
+            threads
+                .thread_ref(threads.envelope_to_thread[&x_root])
+                .len(),
+            2,
+            "thread X must not be double-counted"
+        );
+        assert_eq!(
+            threads
+                .thread_ref(threads.envelope_to_thread[&y_root])
+                .len(),
+            1,
+            "thread Y must not absorb the replay"
+        );
+        assert!(
+            !threads.envelope_to_thread_node.contains_key(&replay),
+            "the replay must not be registered as threaded"
+        );
+    }
+
+    /// The CVE-2024-49394 early return must not break the jwz placeholder
+    /// semantics: when B's `References` names an A that has not arrived yet, a
+    /// placeholder node is created. A's real arrival must still fill that
+    /// placeholder and keep B under it (the dedup branch is skipped while A is
+    /// in `missing_message_ids`).
+    #[test]
+    fn missing_placeholder_message_arrival_still_threads() {
+        let raw_mails = vec![
+            // B arrives first and references the still-missing A.
+            mail(
+                "From: bob@corp.example\r\nMessage-ID: <cve85-child@corp.example>\r\nReferences: \
+                 <cve85-late@corp.example>\r\nSubject: child\r\n",
+                "b body",
+            ),
+            // A (the referenced placeholder) arrives later.
+            mail(
+                "From: alice@corp.example\r\nMessage-ID: <cve85-late@corp.example>\r\nSubject: \
+                 late root\r\n",
+                "a body",
+            ),
+        ];
+        let (envelopes, hashes) = envelopes_from(&raw_mails);
+        let (b_hash, a_hash) = (hashes[0], hashes[1]);
+        let mut threads = Threads::new(raw_mails.len());
+        threads.insert(&envelopes, b_hash);
+        // Sanity: right after B, A is a known-but-missing placeholder.
+        assert!(
+            threads
+                .missing_message_ids
+                .iter()
+                .any(|id| id.as_str() == "cve85-late@corp.example"),
+            "B's References must create a missing placeholder for A"
+        );
+        assert!(
+            !threads.hash_set.contains(&a_hash),
+            "sanity: A has not arrived yet"
+        );
+
+        threads.insert(&envelopes, a_hash);
+
+        let a_node = threads.envelope_to_thread_node[&a_hash];
+        let b_node = threads.envelope_to_thread_node[&b_hash];
+        assert_eq!(
+            threads.thread_nodes[&a_node].message,
+            Some(a_hash),
+            "A must fill its placeholder node's message slot"
+        );
+        assert_eq!(
+            threads.thread_nodes[&b_node].parent,
+            Some(a_node),
+            "B must still hang under A after the placeholder arrives"
+        );
+        assert!(
+            threads.hash_set.contains(&a_hash),
+            "A must be registered once it really arrives"
+        );
+        assert_eq!(
+            threads
+                .thread_ref(threads.envelope_to_thread[&a_hash])
+                .len(),
+            2,
+            "A + B form one two-message thread"
+        );
+    }
+
+    /// CVE-2024-49394 regression: because the replayed copy is never registered
+    /// (no `envelope_to_thread_node` entry), removing it must be a no-op that
+    /// leaves the originally placed message in its node. Registering the replay
+    /// would let its removal blank the node's genuine message slot.
+    #[test]
+    fn duplicate_message_id_replay_removal_leaves_structure_intact() {
+        let raw_mails = vec![
+            mail(
+                "From: bob@corp.example\r\nMessage-ID: <cve85-x-root@corp.example>\r\nSubject: \
+                 thread X root\r\n",
+                "x body",
+            ),
+            mail(
+                "From: carol@corp.example\r\nMessage-ID: <cve85-y-root@corp.example>\r\nSubject: \
+                 thread Y root\r\n",
+                "y body",
+            ),
+            mail(
+                "From: alice@corp.example\r\nMessage-ID: <cve85-reply@corp.example>\r\nIn-Reply-To: \
+                 <cve85-x-root@corp.example>\r\nReferences: <cve85-x-root@corp.example>\r\nSubject: \
+                 re: thread X\r\n",
+                "signed body",
+            ),
+            mail(
+                "From: alice@corp.example\r\nMessage-ID: <cve85-reply@corp.example>\r\nIn-Reply-To: \
+                 <cve85-y-root@corp.example>\r\nReferences: <cve85-y-root@corp.example>\r\nSubject: \
+                 re: thread X\r\n",
+                "tampered body",
+            ),
+        ];
+        let (envelopes, hashes) = envelopes_from(&raw_mails);
+        let (x_root, reply, replay) = (hashes[0], hashes[2], hashes[3]);
+        let mut threads = Threads::new(raw_mails.len());
+        for h in &hashes {
+            threads.insert(&envelopes, *h);
+        }
+
+        let reply_node = threads.envelope_to_thread_node[&reply];
+        let x_node = threads.envelope_to_thread_node[&x_root];
+        assert!(
+            !threads.envelope_to_thread_node.contains_key(&replay),
+            "sanity: the replay was never registered"
+        );
+
+        threads.remove(replay);
+
+        assert_eq!(
+            threads.thread_nodes[&reply_node].message,
+            Some(reply),
+            "removing the unregistered replay must not blank the genuine slot"
+        );
+        assert_eq!(
+            threads.thread_nodes[&reply_node].parent,
+            Some(x_node),
+            "removing the unregistered replay must not re-thread the placed reply"
+        );
+        assert_eq!(
+            threads
+                .thread_ref(threads.envelope_to_thread[&x_root])
+                .len(),
+            2,
+            "thread X keeps its two genuine messages"
+        );
     }
 }
