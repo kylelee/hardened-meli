@@ -2168,6 +2168,85 @@ fn save_all_attachments_overlength_names_land_capped_and_deduped() {
     );
 }
 
+/// CVE-2024-43604 review lock (batch save): deduplication must run on
+/// the *sanitized* name. Two different hostile spellings of one
+/// component (`../../twin.bin` and `..\..\twin.bin`) flatten to the
+/// same name; the second must land with the `_1` suffix inserted
+/// before its extension — if dedup ran on the raw mail-controlled
+/// names first, these distinct spellings would collide only at the
+/// `create_new` write and one attachment would be silently dropped.
+#[test]
+fn save_all_attachments_sanitized_collisions_are_deduped() {
+    let body = "MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"=_cve-43604-dedup\"\r\n\
+         \r\n\
+         --=_cve-43604-dedup\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"../../twin.bin\"\r\n\
+         \r\n\
+         FIRST-twin\r\n\
+         --=_cve-43604-dedup\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"..\\..\\twin.bin\"\r\n\
+         \r\n\
+         SECOND-twin\r\n\
+         --=_cve-43604-dedup\r\n\
+         Content-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+         \r\n\
+         PDF-plain\r\n\
+         --=_cve-43604-dedup--\r\n";
+    let mut ctx = mock_context();
+    let view = attachments_envelope_view(&ctx, "cve-43604-dedup", "dedup@x.example", body);
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+
+    view.save_all_attachments_to(&mut ctx, Some(&downloads));
+
+    let out_dirs: Vec<_> = std::fs::read_dir(&downloads)
+        .expect("Downloads must exist after a successful save")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        out_dirs.len(),
+        1,
+        "exactly one meli-<subject> directory must appear, got {out_dirs:?}"
+    );
+    let dir = out_dirs[0].clone();
+    let mut names = assert_flat_names(&dir);
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            ".._.._twin.bin".to_string(),
+            ".._.._twin_1.bin".to_string(),
+            "report.pdf".to_string(),
+        ],
+        "sanitized twins must both land, the second deduped"
+    );
+    for (name, marker) in [
+        (".._.._twin.bin", "FIRST-twin"),
+        (".._.._twin_1.bin", "SECOND-twin"),
+        ("report.pdf", "PDF-plain"),
+    ] {
+        let content =
+            std::fs::read(dir.join(name)).unwrap_or_else(|err| panic!("{name:?} must land: {err}"));
+        assert!(
+            String::from_utf8_lossy(&content).contains(marker),
+            "{name:?} must contain {marker:?}"
+        );
+    }
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Notification { body, .. }
+            if body.contains("Saved 3 attachment(s)"))),
+        "all three attachments must be reported saved, got {replies:?}"
+    );
+}
+
 /// CVE-2024-43604 regression (whole-message save): the `.eml` filename
 /// derived from the mail-controlled `Message-ID` used to reach
 /// `PathBuf::push` unsanitized, so `save-attachment 0 <dir>` on a mail
@@ -2524,6 +2603,73 @@ fn export_thread_filename_is_flat_for_traversal_message_ids() {
         );
         assert!(filename.ends_with(".eml"), "{id:?} -> {filename:?}");
     }
+}
+
+/// CVE-2024-43604 review lock (`.eml` export): a `Message-ID` made
+/// only of control bytes sanitizes down to an empty stem and must take
+/// the generated fallback name — pre-review it exported as the bare
+/// `.eml` hidden dotfile that every such mail collides on under the
+/// `create_new` write. (A mail with *no* `Message-ID` header never
+/// reaches this path with an empty identifier: melib synthesizes
+/// `<hash>` in `Envelope::populate_headers`.)
+#[test]
+fn save_whole_mail_degenerate_message_id_gets_generated_name() {
+    let mut ctx = mock_context();
+    let bytes = b"From: a@b.example\r\nTo: c@d.example\r\nSubject: no usable message id\r\nMessage-ID: <\x1b\x07>\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\nContent-Type: text/plain\r\n\r\nbody\r\n";
+    let mail = Mail::new(bytes.to_vec(), None).expect("could not parse test mail");
+    assert_eq!(
+        mail.message_id().as_str(),
+        "\u{1b}\u{7}",
+        "the corpus mail must carry the control-only Message-ID verbatim"
+    );
+    let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("out");
+    std::fs::create_dir(&dir).unwrap();
+    let mut event = UIEvent::Action(Action::View(ViewAction::SaveAttachment(
+        0,
+        FileAction::Path(dir.display().to_string()),
+    )));
+    _ = view.process_event(&mut event, &mut ctx);
+
+    let names = assert_flat_names(&dir);
+    assert_eq!(names.len(), 1, "exactly one file must land: {names:?}");
+    assert!(
+        names[0].starts_with("meli_mail_") && names[0].ends_with(".eml"),
+        "the empty Message-ID must take the generated fallback: {names:?}"
+    );
+}
+
+/// CVE-2024-43604 review lock (thread export): the per-message export
+/// loop claims names *after* sanitization, like the batch attachment
+/// save — two thread messages whose hostile identifiers flatten to the
+/// same component must both export (the second with the `_1` suffix
+/// before its extension), and a degenerate identifier takes the
+/// generated fallback instead of a hidden `.eml`.
+#[test]
+fn export_thread_filenames_dedup_after_sanitization() {
+    use super::thread::thread_export_filename;
+
+    let mut used = std::collections::HashSet::new();
+    let first = crate::unique_filename_component(
+        &mut used,
+        &thread_export_filename(&crate::melib::MessageID::new("../../evil")),
+    );
+    let second = crate::unique_filename_component(
+        &mut used,
+        &thread_export_filename(&crate::melib::MessageID::new(r"..\..\evil")),
+    );
+    assert_eq!(first, ".._.._evil.eml");
+    assert_eq!(second, ".._.._evil_1.eml");
+    let degenerate = crate::unique_filename_component(
+        &mut used,
+        &thread_export_filename(&crate::melib::MessageID::new("")),
+    );
+    assert!(
+        degenerate.starts_with("meli_mail_") && degenerate.ends_with(".eml"),
+        "degenerate identifiers take the generated fallback: {degenerate:?}"
+    );
 }
 
 /// `save-attachment 0 <dir>` saves the whole mail as `<Message-ID>.eml`
