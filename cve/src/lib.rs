@@ -2389,3 +2389,84 @@ mod cve_2023_41061;
 #[cfg(test)]
 #[path = "CVE-2023-41064.rs"]
 mod cve_2023_41064;
+
+/// CVE-2026-8091（Firefox / Thunderbird 150；CVSS 9.8；MFSA 2026-45 批次；Gecko
+/// 引擎共享同一修复）**Audio/Video: Playback 组件边界条件错误（incorrect boundary
+/// conditions）→ 任意代码执行** regression（issue #81，表 4 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — e-mail-reachable browser engines）：Gecko
+/// 的音视频回放栈在解析 / 解复用媒体容器（MP4 / ISO-BMFF、WebM / Matroska、
+/// Ogg、WAV、MP3）时，对容器声明的边界——box / element / chunk / page / frame 的
+/// 长度与计数——缺乏一致校验：size=0 延伸到 EOF 的 box、size=1 + 64 位 largesize
+/// 的越界声明、采样表里远超实际数据的 entry_count、EBML VINT 越界长度、Ogg
+/// segment lacing 与数据失配、RIFF 块长度撒谎、MP3 帧头 bitrate / sampling 花招，
+/// 任一即可让解码侧缓冲区边界计算失配并越界读写。攻击面正是**邮件内嵌 HTML5
+/// 音视频**：`<video>` / `<audio>` / `<source>` / `<track>` / `<picture>` 及
+/// `on*` 事件属性一旦被引擎渲染，media element 就在进程内解复用 / 解码附件字节。
+///
+/// meli 等价面映射（issue #81 明确要求）：meli 是终端邮件客户端，**没有浏览器
+/// 引擎、没有 DOM / JS / media element、也没有任何内嵌音视频解码器 / 解复用器**。
+/// 本 CVE 的触发原语在结构上不存在。`video/mp4` / `video/webm` / `audio/ogg` /
+/// `audio/webm` / `audio/mpeg` / `audio/wav` / `audio/x-wav` 与伪装成
+/// `application/octet-stream` 的媒体部件在 melib 解析路径按 Content-Type 归为
+/// `ContentType::Other { tag }`、`is_text() == false`（不看扩展名），
+/// [`Attachment::decode`] 只做 base64 / quoted-printable / 8bit 传输编码反转，
+/// 不做任何 ISO-BMFF box / EBML element / Ogg page / RIFF chunk / MPEG frame
+/// 结构解释；inline `Other` 原样文本分支只把已到达字节当纯文本；`multipart/related`
+/// 的 `<video src="cid:…">` / `<video><source src>` / `<audio controls autoplay>` /
+/// `<track>` / `<picture><source srcset>` / `data:video|audio;…` / 远程
+/// `https://evil81.example/x.mp4` / `blob:` / `file:` / `onerror`/`onload`/
+/// `oncanplay`/`onloadeddata` 在 [`sanitize`]（ammonia 白名单，标签集只有文本 /
+/// 结构元素——`video`/`audio`/`source`/`track`/`picture` 一概非白名单；属性白名单
+/// 只有 `a` 的 href/title；`url_schemes` 仅 http/https/mailto）里整体死亡；打开
+/// 媒体只有 `open_mailcap`（`meli/src/mail/view/envelope.rs:1859`）与
+/// `open_attachment`（同文件 `:2030`）两条汇，两者都以 `context.cmd_buf().is_some()`
+/// （先输入附件编号）为前置，命中后字节经 `sanitize_filename` 压平路径穿越再落入
+/// `<temp_dir>/meli/` 的 `0o600` 随机名临时文件、交给进程外程序。
+///
+/// [`cve_2026_8091`] 以内嵌「等价结构」畸形媒体语料（真 `ftyp` + `moov`/`mdat`
+/// box 树 + `stsz`/`stsc`/`stco` 采样表；真 EBML `1A45DFA3` 头 + `18538067`
+/// Segment + Void/Info 元素；真 `OggS` 页头 + segment lacing 表；真
+/// `RIFF`/`WAVE`/`fmt `/`data` 块；真 MPEG 帧头 + `ID3` 头，逐族内嵌「声明长度 /
+/// 计数远超实际数据」的边界错误形态）逐层锁定为 **免疫证明，未发现缺口，未触碰
+/// 生产代码**。语料共 27 个容器向量：MP4 8（moov size=0 到 EOF、size=1 + 64 位
+/// largesize=u64::MAX、mdat size=0xFFFFFFFF、stsz sample_count=0xFFFFFFFF、stsc
+/// entry_count=0xFFFFFFFF、stco chunk offset 越界、moov 中途截断、ftyp 首盒 size
+/// 越界）、WebM 6（EBML 头长度越界、Segment 未知长度、Segment 长度越界、Void 长度
+/// 越界、Info 长度失配、长度 VINT 标记后截断）、Ogg 5（version 非 0、lacing 总和
+/// 超过数据、page_segments 越界、页头截断、lacing 继续位无后续页）、WAV 4
+///（RIFF size 越界、fmt 块长度失配、data 块长度越界、data 头后截断）、MP3 4
+///（帧头后截断、bitrate/sampling 失配、ID3v2 syncsafe size 越界、sampling 保留
+/// 索引）；投递形态 21（正确申报七种媒体 MIME、伪装 `application/octet-stream` +
+/// `.mp4`/`.ogg`/`.webm`/`.mp3`/`.wav` 文件名、base64 / quoted-printable 传输编码、
+/// RFC 2231 `filename*=UTF-8''clip81%2Emp4` 与 `filename*0=`/`filename*1=` 分段
+/// 拼写、inline vs attachment、双扩展 `clip81.mp4.txt`、`text/plain` 伪装、路径
+/// 穿越 `../../evil81.mp4`、`multipart/related` + `<video poster src="cid:…">`、
+/// 嵌套 `message/rfc822`）；另有 19 个 HTML5 媒体嵌入向量。所有语料字节均以 8bit
+/// 形式逐字上线（固定投递部件 + `corpus-*.mp4/.ogg/.webm/.mp3/.wav` 附件）。
+///
+/// L1 melib 解析出精确的 `multipart/mixed` 附件树（21 + 其余向量个根部件），全部
+/// 语料字节在 wire 上逐字在场，七种媒体 MIME 归类 `ContentType::Other`、
+/// `is_text() == false`，base64 / quoted-printable 部件只做传输编码反转（已知答案
+/// `T2dnUw==` → `OggS`、`GkXfow==` → EBML 魔数、`//s=` → MPEG 同步字）；L2 媒体
+/// 叶只以元数据条目显示，HTML 媒体引用 / `on*` 事件属性在 [`sanitize`] 里整体死亡
+/// 且为不动点，inline `Other` 原样分支惰性；L3 源码扫描锁定 `open_mailcap` /
+/// `open_attachment` 的 `cmd_buf().is_some()` 前置，路径穿越文件名经
+/// `sanitize_filename` / `sanitize_filename_component` 不产生目录分量，
+/// `l3_workspace_has_no_in_process_media_decoder_dependency` 断言全仓清单无任何
+/// 内嵌音视频解码 / 解复用依赖（ffmpeg / gstreamer / symphonia / rodio / lewton /
+/// ogg / vorbis / minimp4 / mp4 / cpal / audiopus 等全查）；L4 整封攻击邮件端到端
+/// 解析 + 渲染纯文本，合法内容（`LEGITIMATE-MARKER-81`）交付、媒体字节 / 引用不
+/// 出现，诚实 http/https/mailto 链接保持可用（sanitize 保留 href、render 脚注可见、
+/// 确认门放行）。媒体类附件显示 / 开门禁的仓内孪生回归沿用
+/// `meli/src/mail/view/tests.rs` 的
+/// `cve_2023_4863_webp_attachments_render_as_metadata_only` 与
+/// `cve_2023_4863_open_attachment_requires_explicit_attachment_number`。仓内孪生
+/// 改动：无（免疫证明，未触碰生产代码）。
+///
+/// [`Attachment::decode`]: meli::melib::Attachment::decode
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2026_8091`]: self::cve_2026_8091
+#[cfg(test)]
+#[path = "CVE-2026-8091.rs"]
+mod cve_2026_8091;
