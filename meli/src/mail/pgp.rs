@@ -283,6 +283,16 @@ pub fn sign_filter(
     )
 }
 
+/// Encrypt (and optionally sign) an outgoing message body.
+///
+/// `hidden_recipients` is forwarded to [`PGPBackend::encrypt`] and controls
+/// whether the backend must suppress the recipient key IDs in the ciphertext
+/// (mutt's `--hidden-recipient` / gpg's `--throw-keyids`). The composer sets it
+/// whenever the draft carries a `Bcc` header (see
+/// [`draft_has_bcc_recipients`]), because otherwise any `To`/`Cc` recipient
+/// could run `gpg --list-packets` on the ciphertext, read the `Bcc` recipient's
+/// key ID from the PKESK packets and infer that a hidden recipient exists —
+/// CVE-2024-49395.
 pub fn encrypt_filter(
     choice: PGPBackendChoice,
     encrypt_for_self: Option<melib::Address>,
@@ -290,6 +300,7 @@ pub fn encrypt_filter(
     mut sign_keys: Option<Vec<Key>>,
     default_encrypt_key: Option<String>,
     mut encrypt_keys: Vec<Key>,
+    hidden_recipients: bool,
 ) -> Result<impl FnOnce(AttachmentBuilder) -> crate::mail::AttachmentBoxFuture + Send> {
     Ok(
         move |a: AttachmentBuilder| -> crate::mail::AttachmentBoxFuture {
@@ -383,7 +394,9 @@ pub fn encrypt_filter(
                             parameters: vec![],
                         },
                         Default::default(),
-                        backend.encrypt(encrypt_keys, &data)?.await?,
+                        backend
+                            .encrypt(encrypt_keys, &data, hidden_recipients)?
+                            .await?,
                     );
                     a.content_disposition =
                         ContentDisposition::from(br#"attachment; filename="msg.asc""#);
@@ -412,6 +425,20 @@ pub fn encrypt_filter(
             })
         },
     )
+}
+
+/// Returns `true` when `draft` carries a non-empty `Bcc` header.
+///
+/// CVE-2024-49395: a `Bcc` recipient must be part of the encryption set — it
+/// has to be able to decrypt the message — but its key ID must not be
+/// recoverable from the ciphertext, otherwise any `To`/`Cc` recipient can infer
+/// the hidden recipient from the PKESK packets. The composer uses this
+/// predicate to enable hidden-recipient encryption for exactly those drafts.
+pub fn draft_has_bcc_recipients(draft: &melib::Draft) -> bool {
+    draft
+        .headers()
+        .get(melib::HeaderName::BCC)
+        .is_some_and(|bcc| !bcc.trim().is_empty())
 }
 
 impl PGPBackendChoice {
@@ -722,10 +749,15 @@ impl PGPBackend for PGPBackendInstance {
         }
     }
 
-    fn encrypt(&mut self, encrypt_keys: Vec<Key>, plain: &[u8]) -> ResultFuture<Vec<u8>> {
+    fn encrypt(
+        &mut self,
+        encrypt_keys: Vec<Key>,
+        plain: &[u8],
+        hidden_recipients: bool,
+    ) -> ResultFuture<Vec<u8>> {
         match self {
             #[cfg(feature = "gpgme")]
-            Self::GpgME { ctx } => PGPBackend::encrypt(ctx, encrypt_keys, plain),
+            Self::GpgME { ctx } => PGPBackend::encrypt(ctx, encrypt_keys, plain, hidden_recipients),
             Self::CLI {
                 auto_key_locate,
                 cli,
@@ -737,7 +769,16 @@ impl PGPBackend for PGPBackendInstance {
                 Ok(Box::pin(async move {
                     smol::unblock(move || {
                         let mut cmd = Command::new(&encrypt_command);
+                        // CLI backend contract, following the `AUTO_KEY_LOCATE`
+                        // precedent: `HIDDEN_RECIPIENTS=1` tells the script to
+                        // use `--hidden-recipient`/`--throw-keyids` for the
+                        // recipient set so that the ciphertext does not reveal
+                        // the Bcc recipients (CVE-2024-49395).
                         cmd.env("AUTO_KEY_LOCATE", auto_key_locate.clone())
+                            .env(
+                                "HIDDEN_RECIPIENTS",
+                                if hidden_recipients { "1" } else { "0" },
+                            )
                             .arg(plain.path());
                         for key in encrypt_keys {
                             cmd.arg(&key.fingerprint);
@@ -838,5 +879,48 @@ impl PGPBackend for PGPBackendInstance {
                 }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use melib::{Draft, HeaderName};
+
+    use super::draft_has_bcc_recipients;
+
+    /// CVE-2024-49395: a `Bcc` header with at least one address must enable
+    /// hidden-recipient encryption. Multiple addresses count as well.
+    #[test]
+    fn draft_with_bcc_address_is_detected() {
+        let mut draft = Draft::default();
+        draft.set_header(HeaderName::BCC, "bcc-49395@cve.example".to_string());
+        assert!(draft_has_bcc_recipients(&draft));
+
+        let mut draft = Draft::default();
+        draft.set_header(
+            HeaderName::BCC,
+            "First <bcc-1@cve.example>, second@cve.example".to_string(),
+        );
+        assert!(draft_has_bcc_recipients(&draft));
+    }
+
+    /// No `Bcc` header at all, and an explicitly empty value, must both leave
+    /// hidden-recipient encryption off.
+    #[test]
+    fn draft_without_bcc_header_is_not_detected() {
+        let draft = Draft::default();
+        assert!(!draft_has_bcc_recipients(&draft));
+
+        let mut draft = Draft::default();
+        draft.set_header(HeaderName::BCC, String::new());
+        assert!(!draft_has_bcc_recipients(&draft));
+    }
+
+    /// A whitespace-only `Bcc` value is treated as absent.
+    #[test]
+    fn draft_with_whitespace_only_bcc_is_not_detected() {
+        let mut draft = Draft::default();
+        draft.set_header(HeaderName::BCC, "   ".to_string());
+        assert!(!draft_has_bcc_recipients(&draft));
     }
 }

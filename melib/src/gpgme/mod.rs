@@ -621,10 +621,25 @@ impl Context {
         })
     }
 
+    /// Encrypt `plain` for `encrypt_keys`.
+    ///
+    /// # CVE-2024-49395 / hidden recipients
+    ///
+    /// `hidden_recipients` implements the mutt `--hidden-recipient` semantics
+    /// on top of gpgme. The gpgme encrypt API has **no per-recipient** hidden
+    /// option — [`gpgme_encrypt_flags_t::GPGME_ENCRYPT_THROW_KEYIDS`] (gpg's
+    /// `--throw-keyids`) zeroes the key ID of every PKESK packet, which is the
+    /// strongest equivalent surface available here: an observer can no longer
+    /// recover *which* keys a message was encrypted to, so a `Bcc` recipient
+    /// can neither be enumerated from the ciphertext nor singled out. The flag
+    /// is set when the draft carries at least one `Bcc` recipient (computed by
+    /// `meli`'s `draft_has_bcc_recipients`), because that is exactly when the
+    /// visible recipient set is a strict subset of the real one.
     pub fn encrypt(
         &mut self,
         encrypt_keys: Vec<Key>,
         mut plain: Data,
+        hidden_recipients: bool,
     ) -> Result<impl Future<Output = Result<Vec<u8>>> + Send> {
         if encrypt_keys.is_empty() {
             return Err(
@@ -633,6 +648,13 @@ impl Context {
         }
         unsafe {
             call!(&self.inner.lib, gpgme_signers_clear)(self.inner.ptr.as_ptr());
+        }
+
+        let mut flags = gpgme_encrypt_flags_t::GPGME_ENCRYPT_NO_ENCRYPT_TO
+            | gpgme_encrypt_flags_t::GPGME_ENCRYPT_NO_COMPRESS
+            | gpgme_encrypt_flags_t::GPGME_ENCRYPT_ALWAYS_TRUST;
+        if hidden_recipients {
+            flags |= gpgme_encrypt_flags_t::GPGME_ENCRYPT_THROW_KEYIDS;
         }
 
         let mut cipher: Data = Data::new(self.inner.lib.clone())?;
@@ -646,9 +668,7 @@ impl Context {
                 call!(&self.inner.lib, gpgme_op_encrypt_start)(
                     self.inner.ptr.as_ptr(),
                     raw_keys.as_mut_slice().as_mut_ptr(),
-                    gpgme_encrypt_flags_t::GPGME_ENCRYPT_NO_ENCRYPT_TO
-                        | gpgme_encrypt_flags_t::GPGME_ENCRYPT_NO_COMPRESS
-                        | gpgme_encrypt_flags_t::GPGME_ENCRYPT_ALWAYS_TRUST,
+                    flags,
                     plain.as_ptr(),
                     cipher.as_ptr(),
                 ),
@@ -957,6 +977,7 @@ impl crate::email::pgp::PGPBackend for Context {
         &mut self,
         encrypt_keys: Vec<crate::email::pgp::Key>,
         plain: &[u8],
+        hidden_recipients: bool,
     ) -> ResultFuture<Vec<u8>> {
         let plain = self.new_data_mem(plain)?;
         let mut ctx = self.clone();
@@ -965,7 +986,8 @@ impl crate::email::pgp::PGPBackend for Context {
             for encrypt_key in encrypt_keys {
                 gpg_encrypt_keys.push(ctx.get_key(true, &encrypt_key.fingerprint)?);
             }
-            ctx.encrypt(gpg_encrypt_keys, plain)?.await
+            ctx.encrypt(gpg_encrypt_keys, plain, hidden_recipients)?
+                .await
         }))
     }
 

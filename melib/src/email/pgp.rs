@@ -55,7 +55,24 @@ pub trait PGPBackend: Send + Sync {
         text: &[u8],
         is_binary: bool,
     ) -> ResultFuture<(NewSignature, Vec<u8>)>;
-    fn encrypt(&mut self, encrypt_keys: Vec<Key>, plain: &[u8]) -> ResultFuture<Vec<u8>>;
+    /// Encrypt `plain` for every key in `encrypt_keys`.
+    ///
+    /// When `hidden_recipients` is `true`, the backend must suppress the
+    /// recipient key IDs in the resulting `OpenPGP` message so that anyone who
+    /// can read the ciphertext (for example a `To`/`Cc` recipient) cannot
+    /// enumerate the actual recipient set and thereby infer a `Bcc` recipient.
+    /// This is the meli-side equivalent of mutt/neomutt `--hidden-recipient`
+    /// for CVE-2024-49395: the `Bcc` recipients must still receive the
+    /// message (they are part of the envelope RCPT set and must be able to
+    /// decrypt it), but their key IDs must not be discoverable from the
+    /// ciphertext. Backends that cannot hide individual recipients are
+    /// expected to hide *all* of them rather than leak a partial set.
+    fn encrypt(
+        &mut self,
+        encrypt_keys: Vec<Key>,
+        plain: &[u8],
+        hidden_recipients: bool,
+    ) -> ResultFuture<Vec<u8>>;
     fn decrypt(&mut self, cipher: &[u8]) -> ResultFuture<(DecryptionMetadata, Vec<u8>)>;
 }
 
