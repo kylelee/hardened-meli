@@ -1588,3 +1588,59 @@ mod cve_2003_0336;
 #[cfg(test)]
 #[path = "CVE-2001-0677.rs"]
 mod cve_2001_0677;
+
+/// CVE-1999-1016（Microsoft HTML 控件 / IE5 / Outlook Express 5 / Eudora
+/// 4.x–5.x；NVD 未分配 CVSS 分数）HTML 表单资源耗尽 / 拒绝服务 regression
+/// （issue #64，表 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 /
+/// web/HTML embedding）：一封 HTML 邮件把巨型表单字段（`<input type=text
+/// value="A…">` MB 级 value、`<textarea>`/`<select>`/`<button>` 巨型内容）
+/// 放进 `<table><tr><td>` 单元格；内嵌 MS HTML 控件在打开邮件时为这些字段
+/// 建立布局，海量内容让渲染线程跑到 100% CPU、客户端卡死（CWE-400 /
+/// CWE-770，开放邮件即触发的可用性攻击）。
+///
+/// meli 等价面与结论：唯一 HTML 显示管线是 [`sanitize`]（ammonia 白名单）→
+/// [`render`]（html2text → 纯终端文本）。**字面触发面免疫**：`input`/
+/// `textarea`/`select`/`button`/`form` 都不在元素白名单里，也不在
+/// `clean_content_tags`（只有 `script`/`style`），ammonia 按「元素删除」处理
+/// ——void 元素 `input` 连同 `value=` 属性整体消失，`textarea`/`select`/
+/// `button` 只留子文本，advisory 的巨型字段到不了渲染器。**真实缺口**：
+/// [`render`] 原先对输入大小没有任何上限，>10 MiB 的 HTML 邮件（base64 在
+/// wire 上膨胀 ~33%）会在打开邮件时、在阻塞 view job 线程上耗尽与输入成
+/// 正比的 CPU / 内存（release 实测：10 MiB 纯嵌套表格 ≈ 3.3 s 最坏形态、
+/// 100 万个级小表 3.7 MB ≈ 790 ms、16 MiB 单格 ≈ 276 ms；100 MiB HTML 邮件
+/// ≈ 33 s 100% CPU + ~1 GB 分配）——即本 CVE 的 CWE-400「打开邮件即 DoS」面。
+/// 另注（本机重测更正）：ammonia 的 clean walk 迭代（sanitize 可处理 ~699k
+/// 层开标签），但 html2text 的 DOM walk **递归**、几千层即栈溢出，故 10 MiB
+/// 纯开标签嵌套仍会撞 html2text 的递归栈；本语料把峰值嵌套深度压在 html2text
+/// 已测的 1000 层，锁的是字节上限对输入大小 / 时间 / 内存的收敛。修复：
+/// `meli/src/mail/view/html_render.rs` 新增
+/// [`MAX_HTML_RENDER_INPUT_BYTES`]（10 MiB）上限，`render()` 在 lossy 解码后、
+/// `sanitize()` **之前**把超限输入截到 ≤ 上限的最大 UTF-8 字符边界，只对
+/// 前缀 sanitize + render，再追加一行截断提示；截断在 sanitize 之前，故
+/// sanitize 看到最终文档（未闭合 `<script>` 头吞掉余下内容并被整体删除，无
+/// parse differential），≤ 上限输入逐字节不变、无提示。仓内孪生单测
+/// （`meli/src/mail/view/html_render.rs::tests`）：
+/// `render_at_input_cap_has_no_truncation_notice`、
+/// `render_over_input_cap_truncates_ascii_with_single_notice`、
+/// `render_over_input_cap_cuts_on_cjk_char_boundary`、
+/// `render_over_input_cap_with_invalid_utf8_does_not_panic`、
+/// `render_truncation_cannot_smuggle_markup_past_sanitize`、
+/// `render_over_cap_nested_tables_completes_within_watchdog`。
+/// [`cve_1999_1016`] 以内嵌语料逐层锁定：L1 字面触发面免疫（8 MiB 级巨型
+/// 字段死于 sanitize，sanitize / render 输出无表单标签 / `value=` 标记，且
+/// 上限不误伤经典形态）；L2 资源面有界（1000 / 2000 层完成 + 12 MiB 最坏
+/// 形态（峰值深度 1000）watchdog + 提示）；L3 上限契约（恰好上限不截断、超限 CJK 字符边界
+/// 截断、lossy + 上限组合、超限未闭合 script 无标记、提示纯文本、
+/// `MAX_HTML_RENDER_INPUT_BYTES` 被引用并在移动时响亮失败）；L4 端到端
+/// （base64 `text/html` 巨型嵌套表格邮件经 melib 解析、解码、render：有界、
+/// 有提示、无表单痕迹）。结论：一个字面触发面免疫 + 一个真实资源缺口，
+/// 已随本回归修复，生产代码改动仅限
+/// `meli/src/mail/view/html_render.rs`。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`MAX_HTML_RENDER_INPUT_BYTES`]: meli::mail::view::html_render::MAX_HTML_RENDER_INPUT_BYTES
+/// [`cve_1999_1016`]: self::cve_1999_1016
+#[cfg(test)]
+#[path = "CVE-1999-1016.rs"]
+mod cve_1999_1016;
