@@ -2753,3 +2753,176 @@ fn missing_structural_fields_mail_renders_degraded_in_envelope_view() {
         "at least 11 corpus mails must render through the view path, got {rendered}"
     );
 }
+
+/// Synthetic S/MIME mail: a `multipart/signed` body whose detached
+/// signature part is `application/pkcs7-signature` (S/MIME, not
+/// OpenPGP). The signature bytes are an inert base64 placeholder — the
+/// open-view path never parses them, so validity does not matter.
+///
+/// This is the corpus for `issue #16` / CVE-2008-3068 (S/MIME
+/// certificate revocation / AIA-URL retrieval): the regression target
+/// is that **opening** such a mail stays entirely local. melib
+/// classifies the second part as `ContentType::CMSSignature`, meli's
+/// `EnvelopeView` renders the cleartext body synchronously without
+/// touching any crypto engine, and the detached-verify job (when
+/// dispatched) dies at melib's `protocol` gate before the CMS bytes
+/// can reach a PGP engine.
+const SMIME_SIGNED_MAIL: &[u8] = b"From: sender@example.com\r\n\
+To: victim@example.com\r\n\
+Subject: Quarterly receipt\r\n\
+Message-ID: <smime-open-1@example.com>\r\n\
+Date: Thu, 1 Jan 2026 00:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; micalg=sha-256; boundary=\"=_smime-open\"\r\n\
+\r\n\
+--=_smime-open\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Quarterly receipt enclosed.\r\n\
+--=_smime-open\r\n\
+Content-Type: application/pkcs7-signature; name=\"smime.p7s\"\r\n\
+Content-Disposition: attachment; filename=\"smime.p7s\"\r\n\
+\r\n\
+TUlNRS1mYWtl\r\n\
+--=_smime-open--\r\n";
+
+/// Construct an `EnvelopeView` for [`SMIME_SIGNED_MAIL`] under `settings`,
+/// following the `attachments_envelope_view` construction pattern.
+fn smime_envelope_view(context: &Context, settings: ViewSettings) -> EnvelopeView {
+    let mail =
+        Mail::new(SMIME_SIGNED_MAIL.to_vec(), None).expect("could not parse the S/MIME test mail");
+    EnvelopeView::new(
+        mail,
+        None,
+        None,
+        Some(settings),
+        context.main_loop_handler.clone(),
+    )
+}
+
+/// Concatenate every locally rendered text payload in the display tree,
+/// recursing through the multipart/signed wrapper (and any other
+/// multipart variant) via [`AttachmentDisplay::as_multipart`]. This is
+/// the offline body reachable straight out of `EnvelopeView::new`, before
+/// any asynchronous filter or verify job can complete.
+fn collect_rendered_text(displays: &[AttachmentDisplay]) -> String {
+    let mut acc = String::new();
+    for display in displays {
+        if let AttachmentDisplay::InlineText { text, .. } = display {
+            acc.push_str(text);
+        }
+        if let Some(parts) = display.as_multipart() {
+            acc.push_str(&collect_rendered_text(parts));
+        }
+    }
+    acc
+}
+
+/// Issue #16 / CVE-2008-3068: opening an S/MIME `multipart/signed` mail
+/// must render its cleartext body locally, synchronously and offline.
+/// When a PGP backend can be instantiated the view dispatches the
+/// asynchronous detached-verify job and shows `SignedPending`; otherwise
+/// it shows `SignedUnverified`. In **both** cases the display is built
+/// from the locally rendered parts — never a `SignedVerified`
+/// (synchronous result), and no certificate/AIA/CRL network path is
+/// reachable from the open path.
+#[test]
+fn smime_open_renders_content_offline_without_engine() {
+    let ctx = mock_context();
+    let mut settings = ViewSettings::default();
+    settings.auto_verify_signatures = true.into();
+    let backend_available = settings.pgp_backend.instantiate().is_ok();
+
+    let view = smime_envelope_view(&ctx, settings);
+    let root = view
+        .display
+        .first()
+        .expect("the multipart/signed root must have a display entry");
+
+    if backend_available {
+        assert!(
+            matches!(root, AttachmentDisplay::SignedPending { .. }),
+            "with an instantiable backend, opening the mail must dispatch the async verify job \
+             and display `SignedPending`, got {root:?}"
+        );
+    } else {
+        assert!(
+            matches!(root, AttachmentDisplay::SignedUnverified { .. }),
+            "without an instantiable backend, opening the mail must display `SignedUnverified`, \
+             got {root:?}"
+        );
+    }
+    assert!(
+        !matches!(
+            root,
+            AttachmentDisplay::SignedVerified { .. } | AttachmentDisplay::SignedFailed { .. }
+        ),
+        "the open path must never synchronously verify or fail the signature, got {root:?}"
+    );
+
+    let rendered = collect_rendered_text(&view.display);
+    assert!(
+        rendered.contains("Quarterly receipt enclosed."),
+        "the S/MIME cleartext body must be rendered locally on open; rendered text: {rendered:?}"
+    );
+    assert!(
+        view.attachment_tree.contains("S/MIME signature"),
+        "the CMS part must surface in the attachment tree as `S/MIME signature`; tree: {:?}",
+        view.attachment_tree
+    );
+}
+
+/// Issue #16 / CVE-2008-3068: the async verify job dispatched by the
+/// open path can never feed the CMS bytes to a PGP engine. The very
+/// first step of the job is `extract_unverified_signature`, which
+/// rejects `multipart/signed` whose `protocol` is not
+/// `application/pgp-signature` with a `ValueError` mentioning the
+/// `protocol` parameter. Without an engine there is no certificate
+/// parsing and therefore no AIA/CRL fetch primitive.
+#[test]
+fn smime_open_verify_job_dies_at_protocol_gate() {
+    let attachment = AttachmentBuilder::new(SMIME_SIGNED_MAIL).build();
+    let Err(err) = melib::email::pgp::extract_unverified_signature(&attachment) else {
+        panic!("a non-PGP `protocol` must be rejected before any crypto engine sees the CMS bytes");
+    };
+    assert_eq!(
+        err.kind,
+        melib::ErrorKind::ValueError,
+        "the protocol gate must return a ValueError, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("protocol"),
+        "the protocol gate must name the offending `protocol` parameter, got {err}"
+    );
+}
+
+/// Issue #16 / CVE-2008-3068: with `auto_verify_signatures` disabled the
+/// open path must not dispatch any job at all (regardless of backend
+/// availability) and must still render the cleartext body locally under
+/// `SignedUnverified`.
+#[test]
+fn smime_open_auto_verify_off_shows_unverified() {
+    let ctx = mock_context();
+    let mut settings = ViewSettings::default();
+    settings.auto_verify_signatures = false.into();
+
+    let view = smime_envelope_view(&ctx, settings);
+    let root = view
+        .display
+        .first()
+        .expect("the multipart/signed root must have a display entry");
+    assert!(
+        matches!(root, AttachmentDisplay::SignedUnverified { .. }),
+        "with auto-verify off the open path must display `SignedUnverified`, got {root:?}"
+    );
+    let rendered = collect_rendered_text(&view.display);
+    assert!(
+        rendered.contains("Quarterly receipt enclosed."),
+        "the body must still render locally with auto-verify off; rendered text: {rendered:?}"
+    );
+    assert!(
+        view.attachment_tree.contains("S/MIME signature"),
+        "the CMS part must still surface in the attachment tree; tree: {:?}",
+        view.attachment_tree
+    );
+}
