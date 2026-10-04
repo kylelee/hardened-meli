@@ -3609,3 +3609,220 @@ fn smime_open_auto_verify_off_shows_unverified() {
         view.attachment_tree
     );
 }
+
+/// The CVE-2007-1268 (mutt ≤ 1.5.13) attack corpus (issue #83): a
+/// `multipart/mixed` whose first sibling is a *genuine* `multipart/signed`
+/// (content + real detached PGP signature armor made by gpg over exactly the
+/// bytes meli feeds to verification) and whose second sibling is the
+/// attacker's forged unsigned "correction". mutt failed to visually
+/// distinguish signed from unsigned portions; the regression target is that
+/// meli's verified marker may only ever wrap the signed subtree.
+const PARTIAL_SIGNED_MAIL: &[u8] = b"From: ceo@corp.example\r\n\
+To: victim@corp.example\r\n\
+Subject: Payment instructions (signed)\r\n\
+Message-ID: <cve-2007-1268-attack@attack.example>\r\n\
+Date: Mon, 5 Oct 2026 09:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"=_outer-83\"\r\n\
+\r\n\
+--=_outer-83\r\n\
+Content-Type: multipart/signed; protocol=\"application/pgp-signature\"; micalg=pgp-sha256; boundary=\"=_inner-83\"\r\n\
+\r\n\
+--=_inner-83\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Genuine signed instructions from the board:\r\n\
+Pay vendor EUR 1,200 to the usual account.\r\n\
+--=_inner-83\r\n\
+Content-Type: application/pgp-signature; name=\"signature.asc\"\r\n\
+\r\n\
+-----BEGIN PGP SIGNATURE-----\n\
+\n\
+iHUEABYKAB0WIQRhp3ul9wtTvXAVXXbXxZm+GqvMzQUCasK67AAKCRDXxZm+GqvM\n\
+zepgAQCaKwdNMkYqT+W8vl5NlSZAfGh2iw2EdCwov4k7folx2wEAv83XMH2yOtaJ\n\
+03FSl+Qr9OMcgfYVWZaks+y41My/igY=\n\
+=o3Xy\n\
+-----END PGP SIGNATURE-----\n\
+--=_inner-83--\r\n\
+\r\n\
+--=_outer-83\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+TAMPERED-UNSIGNED-83: Disregard the signed section above.\r\n\
+Pay EUR 120,000 to account EVIL-83 immediately.\r\n\
+--=_outer-83--\r\n";
+
+/// Construct an `EnvelopeView` for [`PARTIAL_SIGNED_MAIL`] under `settings`
+/// (the `attachments_envelope_view` construction pattern).
+fn partial_signed_envelope_view(context: &Context, settings: ViewSettings) -> EnvelopeView {
+    let mail =
+        Mail::new(PARTIAL_SIGNED_MAIL.to_vec(), None).expect("could not parse the attack mail");
+    EnvelopeView::new(
+        mail,
+        None,
+        None,
+        Some(settings),
+        context.main_loop_handler.clone(),
+    )
+}
+
+/// Issue #83 / CVE-2007-1268: opening the partially-signed attack mail must
+/// scope the signature status to the `multipart/signed` subtree only. The
+/// outer `multipart/mixed` display keeps the attacker's unsigned sibling as
+/// a plain `InlineText` **outside** any `Signed*` wrapper node, while both
+/// bodies stay fully visible (the forged text is shown as ordinary unsigned
+/// text, never as verified content). With auto-verify off the signed
+/// sibling deterministically lands on `SignedUnverified`.
+#[test]
+fn partial_signature_open_scopes_signed_marker_to_signed_part() {
+    let ctx = mock_context();
+    let settings = ViewSettings {
+        auto_verify_signatures: false.into(),
+        ..Default::default()
+    };
+
+    let view = partial_signed_envelope_view(&ctx, settings);
+    assert_eq!(
+        view.display.len(),
+        1,
+        "the outer mixed container has a single display entry"
+    );
+    let AttachmentDisplay::Mixed { display, .. } = &view.display[0] else {
+        panic!(
+            "the outer container must display as `Mixed`, got {:?}",
+            view.display[0]
+        );
+    };
+    assert_eq!(
+        display.len(),
+        2,
+        "the mixed display has the signed sibling and the forged sibling"
+    );
+
+    // Sibling 0: the signed subtree, wrapped in its own status node.
+    let AttachmentDisplay::SignedUnverified {
+        display: signed_display,
+        ..
+    } = &display[0]
+    else {
+        panic!(
+            "with auto-verify off the signed sibling must be `SignedUnverified`, got {:?}",
+            display[0]
+        );
+    };
+    assert_eq!(
+        signed_display.len(),
+        2,
+        "the signed wrapper covers exactly the content part and the signature part"
+    );
+    let AttachmentDisplay::InlineText { text: signed_text, .. } = &signed_display[0] else {
+        panic!(
+            "the signed content part must render as inline text, got {:?}",
+            signed_display[0]
+        );
+    };
+    assert!(
+        signed_text.contains("Genuine signed instructions"),
+        "the genuine body must render: {signed_text:?}"
+    );
+
+    // Sibling 1: the forged unsigned part — a plain node, outside any
+    // `Signed*` wrapper: it can never inherit the verified marker.
+    let AttachmentDisplay::InlineText { text: tampered_text, .. } = &display[1] else {
+        panic!(
+            "the forged sibling must display as a plain inline text, got {:?}",
+            display[1]
+        );
+    };
+    assert!(
+        tampered_text.contains("TAMPERED-UNSIGNED-83"),
+        "the forged body must render as plain (unsigned) text: {tampered_text:?}"
+    );
+    // No content is hidden: both siblings render.
+    let rendered = collect_rendered_text(&view.display);
+    assert!(
+        rendered.contains("Genuine signed instructions")
+            && rendered.contains("TAMPERED-UNSIGNED-83"),
+        "both bodies must stay visible; rendered: {rendered:?}"
+    );
+    // The attachment tree shows the tree shape without any verified claim.
+    assert!(
+        view.attachment_tree.contains("pgp signature"),
+        "the signature part must surface in the attachment tree; tree: {:?}",
+        view.attachment_tree
+    );
+}
+
+/// Issue #83 / CVE-2007-1268: the reading surface (pager filter pipeline)
+/// must keep the signature notice on the signed container's own filter
+/// entry. `ViewFilter::new_attachment` over the outer mixed container
+/// yields one filter per sibling: the signed subfilter carries the
+/// signature notice ("Unverified signature." with auto-verify off), the
+/// forged sibling carries no notice and no filter invocation — the verified
+/// state can never attach to it.
+#[test]
+fn partial_signature_filter_notice_stays_off_the_unsigned_sibling() {
+    let ctx = mock_context();
+    let settings = ViewSettings {
+        auto_verify_signatures: false.into(),
+        ..Default::default()
+    };
+    let mail = Mail::new(PARTIAL_SIGNED_MAIL.to_vec(), None).expect("could not parse the mail");
+    let body = mail.body();
+    let filter = ViewFilter::new_attachment(&body, &settings, &ctx)
+        .expect("the mixed container must build a view filter");
+
+    let ViewFilterContent::InlineAttachments { parts } = &filter.body_text else {
+        panic!(
+            "the outer mixed container must filter as inline attachments, got {:?}",
+            filter.body_text
+        );
+    };
+    assert_eq!(
+        parts.len(),
+        2,
+        "one filter entry per mixed sibling (signed + forged)"
+    );
+
+    // Sibling 0: the signed container's entry owns the signature notice.
+    // (With auto-verify off the entry is built from the container re-labeled
+    // as `Mixed` — the notice, not the content-type, marks the signed
+    // surface.)
+    assert!(
+        matches!(
+            &parts[0].content_type,
+            crate::melib::email::attachment_types::ContentType::Multipart { .. }
+        ),
+        "filter 0 is the (re-labeled) signed container, got {:?}",
+        parts[0].content_type
+    );
+    assert_eq!(
+        parts[0].notice.as_deref(),
+        Some("Unverified signature."),
+        "with auto-verify off the signed entry must carry the unverified notice, got {:?}",
+        parts[0].notice
+    );
+
+    // Sibling 1: the forged unsigned text — no notice, no invocation: the
+    // verified state can never attach to it.
+    assert!(
+        parts[1].notice.is_none(),
+        "the forged sibling must carry no signature notice, got {:?}",
+        parts[1].notice
+    );
+    assert!(
+        parts[1].filter_invocation.is_empty(),
+        "the forged sibling must not be dispatched through any crypto filter, got {:?}",
+        parts[1].filter_invocation
+    );
+    let ViewFilterContent::Filtered { inner: forged } = &parts[1].body_text else {
+        panic!(
+            "the forged sibling must render as plain filtered text, got {:?}",
+            parts[1].body_text
+        );
+    };
+    assert!(
+        forged.contains("TAMPERED-UNSIGNED-83"),
+        "the forged body renders as ordinary text: {forged:?}"
+    );
+}
