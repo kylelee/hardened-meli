@@ -111,6 +111,60 @@ const SMTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(16
 #[cfg(test)]
 const SMTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// Remove every `Bcc` header (and its folded continuation lines) from a
+/// message's header block.
+///
+/// CVE-2024-49395 / RFC 5322 §3.5: a `Bcc` recipient belongs in the envelope
+/// (`RCPT TO`) so that it receives the message, but the delivery copy handed to
+/// the SMTP server — and therefore visible to every recipient — must have the
+/// `Bcc` field removed. [`SmtpConnection::mail_transaction`] parses the
+/// envelope from the **original** message (so `Bcc` still enters the RCPT set)
+/// and only strips the header from the `DATA`/`BDAT` payload.
+///
+/// Only the header block is inspected: everything up to and including the
+/// first empty line, or the whole string when there is no empty line. The body
+/// after that separator is preserved byte-for-byte. Header names match
+/// case-insensitively and trailing whitespace before the colon is tolerated
+/// (e.g. `Bcc :`). If there is no `Bcc` header the input is returned unchanged.
+pub fn strip_bcc_headers(mail: &str) -> String {
+    let mut ret = String::with_capacity(mail.len());
+    let mut in_header_block = true;
+    // Whether the previous header line was a `Bcc` field: a following folded
+    // line (starting with SP/HTAB) is its continuation and must be removed too.
+    let mut deleting_bcc = false;
+    for line in mail.split_inclusive('\n') {
+        if !in_header_block {
+            ret.push_str(line);
+            continue;
+        }
+        let content = line.trim_end_matches(['\r', '\n']);
+        if content.is_empty() {
+            // The empty line terminates the header block and starts the body.
+            ret.push_str(line);
+            in_header_block = false;
+            deleting_bcc = false;
+            continue;
+        }
+        if content.starts_with(' ') || content.starts_with('\t') {
+            if !deleting_bcc {
+                ret.push_str(line);
+            }
+            continue;
+        }
+        deleting_bcc = false;
+        let name = match content.find(':') {
+            Some(idx) => content[..idx].trim_end(),
+            None => content,
+        };
+        if name.eq_ignore_ascii_case("bcc") {
+            deleting_bcc = true;
+            continue;
+        }
+        ret.push_str(line);
+    }
+    ret
+}
+
 /// Kind of server security (StartTLS/TLS/None) the client should attempt
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type")]
@@ -703,6 +757,13 @@ impl SmtpConnection {
         // MAIL command or TO in the RCPT command. The syntax is exactly as
         // given above.
 
+        // CVE-2024-49395: the envelope above was parsed from the original mail,
+        // so every Bcc address has already been added to the RCPT set and will
+        // receive the message. The DATA/BDAT copy that all recipients can read
+        // must not contain the Bcc header; strip it once and use the result for
+        // both the BDAT length and the DATA lines.
+        let mail = strip_bcc_headers(mail);
+
         if self.server_conf.extensions.binarymime {
             let mail_length = format!("{}", mail.len());
             self.send_command(&[b"BDAT", mail_length.as_bytes(), b"LAST"])
@@ -1191,6 +1252,108 @@ mod tests {
         error::NetworkErrorKind,
         utils::connections::{cap_test_utils, max_server_response_size},
     };
+
+    /// A folded `Bcc` field (one header line plus two SP-prefixed continuation
+    /// lines) must be removed as a whole; the removed line count is exactly
+    /// header + continuations.
+    #[test]
+    fn test_strip_bcc_headers_removes_folded_bcc_as_a_whole() {
+        let mail = concat!(
+            "From: a@example.com\r\n",
+            "To: b@example.com\r\n",
+            "Bcc: first@example.com,\r\n",
+            " second@example.com,\r\n",
+            " third@example.com\r\n",
+            "Subject: hi\r\n",
+            "\r\n",
+            "body\r\n",
+        );
+        let stripped = strip_bcc_headers(mail);
+        assert_eq!(
+            stripped,
+            concat!(
+                "From: a@example.com\r\n",
+                "To: b@example.com\r\n",
+                "Subject: hi\r\n",
+                "\r\n",
+                "body\r\n",
+            )
+        );
+        assert!(!stripped.contains("first@example.com"));
+        assert!(!stripped.contains("second@example.com"));
+        assert!(!stripped.contains("third@example.com"));
+        assert_eq!(
+            mail.lines().count() - stripped.lines().count(),
+            3,
+            "exactly the Bcc header plus its two continuation lines must be removed"
+        );
+    }
+
+    /// Multiple independent `Bcc` headers are all removed, wherever they sit in
+    /// the header block.
+    #[test]
+    fn test_strip_bcc_headers_removes_multiple_bcc_headers() {
+        let mail = concat!(
+            "To: b@example.com\r\n",
+            "Bcc: one@example.com\r\n",
+            "Cc: c@example.com\r\n",
+            "BCC: two@example.com\r\n",
+            "\r\n",
+            "body\r\n",
+        );
+        assert_eq!(
+            strip_bcc_headers(mail),
+            "To: b@example.com\r\nCc: c@example.com\r\n\r\nbody\r\n"
+        );
+    }
+
+    /// With no `Bcc` header the input is returned byte-for-byte unchanged.
+    #[test]
+    fn test_strip_bcc_headers_is_identity_without_bcc() {
+        let mail = "To: b@example.com\r\nSubject: hi\r\n\r\nno bcc here\r\n";
+        assert_eq!(strip_bcc_headers(mail), mail);
+    }
+
+    /// A present but empty `Bcc:` header is still a `Bcc` header and must be
+    /// removed; the empty line that ends the header block stays.
+    #[test]
+    fn test_strip_bcc_headers_removes_empty_bcc_header() {
+        let mail = "To: b@example.com\r\nBcc:\r\n\r\nbody\r\n";
+        assert_eq!(strip_bcc_headers(mail), "To: b@example.com\r\n\r\nbody\r\n");
+
+        // No trailing empty line: the whole string is the header block.
+        let mail = "To: b@example.com\r\nBcc: hidden@example.com";
+        assert_eq!(strip_bcc_headers(mail), "To: b@example.com\r\n");
+    }
+
+    /// `Bcc:` text in the body is data, not a header: the header block ended at
+    /// the first empty line, so bytes after it are preserved unchanged.
+    #[test]
+    fn test_strip_bcc_headers_leaves_body_bcc_text_alone() {
+        let mail =
+            "To: b@example.com\r\nBcc: hidden@example.com\r\n\r\nBcc: looks like a header\r\nmore\r\n";
+        assert_eq!(
+            strip_bcc_headers(mail),
+            "To: b@example.com\r\n\r\nBcc: looks like a header\r\nmore\r\n"
+        );
+    }
+
+    /// Header-name matching is case-insensitive and tolerates trailing
+    /// whitespace before the colon (`Bcc :`).
+    #[test]
+    fn test_strip_bcc_headers_matches_case_and_trailing_space() {
+        for name in ["bcc", "BCC", "Bcc", "BcC"] {
+            let mail = format!("To: b@example.com\r\n{name}: hidden@example.com\r\n\r\nbody\r\n");
+            let stripped = strip_bcc_headers(&mail);
+            assert_eq!(stripped, "To: b@example.com\r\n\r\nbody\r\n");
+            assert!(!stripped.contains("hidden@example.com"));
+        }
+        let mail = "To: b@example.com\r\nBcc : hidden@example.com\r\nSubject: x\r\n\r\nbody\r\n";
+        assert_eq!(
+            strip_bcc_headers(mail),
+            "To: b@example.com\r\nSubject: x\r\n\r\nbody\r\n"
+        );
+    }
 
     /// Regression test for the server response size cap in SMTP
     /// [`read_lines`]: a server that keeps sending `250-` continuation lines

@@ -3183,6 +3183,13 @@ pub fn send_draft_async(
         .unwrap_or(ActionFlag::False)
         .is_true()
     {
+        // CVE-2024-49395: when the draft has Bcc recipients, the ciphertext
+        // must not reveal their key IDs. The Bcc recipients are still in the
+        // envelope RCPT set and must decrypt the message, so the fix is to
+        // hide *all* recipient key IDs (mutt `--hidden-recipient` /
+        // gpg `--throw-keyids`), which is what `hidden_recipients` requests
+        // from the backend.
+        let hidden_recipients = crate::mail::pgp::draft_has_bcc_recipients(&draft);
         filters_stack.push(Box::new(crate::mail::pgp::encrypt_filter(
             account_settings!(context[account_hash].pgp.backend).clone(),
             pgp_state.encrypt_for_self.then_some(()).map_or_else(
@@ -3209,6 +3216,7 @@ pub fn send_draft_async(
                 .then(|| account_settings!(context[account_hash].pgp.encrypt_key).clone())
                 .flatten(),
             pgp_state.encrypt_keys,
+            hidden_recipients,
         )?));
     }
     let send_mail = account_settings!(context[account_hash].send_mail).clone();
