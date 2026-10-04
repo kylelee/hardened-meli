@@ -2154,3 +2154,53 @@ mod cve_2025_48700;
 #[cfg(test)]
 #[path = "CVE-2026-73572.rs"]
 mod cve_2026_73572;
+
+/// CVE-2021-30858（WebKit；NVD 未分配 CVSS 分数；Apple 2021-09-13 紧急修复
+/// iOS 14.8 / iPadOS 14.8 / Safari 14.1.2 等，WebKitGTK 同步收录 WSA-2021-0020；
+/// Apple 确认在野利用，匿名研究者报告）**use-after-free → 任意代码执行**
+/// regression（issue #77，表 4 of `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 /
+/// web/HTML embedding）：Apple 公告原文 *"A use after free issue was addressed
+/// with improved memory management"*，攻击面是 Apple Mail 的 HTML 渲染引擎，
+/// 邮件 HTML 即投递面。与同族 CVE-2025-48700（正文 mXSS）、CVE-2015-8864（SVG
+/// 脚本 / 事件）、CVE-2026-73572（附件预览存储型 XSS）、CVE-2025-66376
+/// `TAG_SPLITTING_CORPUS`（CSS `@import` 标签切分）逐字不重复，本语料聚焦 issue
+/// #77 指定的 UAF 触发型两类面：(1) DOM 操作差异——深度嵌套 / 错配嵌套、active
+/// formatting elements 重建与 adoption agency、table foster parenting、
+/// `form`/`template` 交互、`p`-in-body 自动闭合、raw text 吞尾；(2) 命名空间
+/// 混淆——SVG / MathML foreign content、`annotation-xml`/`mtext`/`mglyph` 积分点、
+/// `foreignObject`、CDATA / 注释切分、大小写与实体混淆。
+///
+/// meli 等价面映射（issue #77 明确要求）：meli 是终端邮件客户端，**没有 WebKit /
+/// 浏览器 DOM / JavaScript 引擎 / webmail 页面**。邮件 HTML 唯一的消费通路是
+/// 邮件视图的显示管线 [`sanitize`]（ammonia 白名单：html5ever **恰好一次**规范
+/// 解析 → 过滤树 → 带转义再序列化）→ [`render`]（html2text → 纯终端文本）。
+/// UAF→RCE 在结构上不可表达（安全 Rust、无内存不安全宿主对象、`script`/`style`
+/// 连内容删除、`svg`/`math`/`foreignObject` 非白名单、`on*` 随元素死亡、
+/// `url_schemes` 只有 http/https/mailto 且 `href` 经 trim 后重新校验）；唯一的
+/// 内存安全等价面是无界递归（CWE-674），因为 Rust 无法 catch 栈溢出。
+///
+/// [`cve_2021_30858`] 以内嵌 `multipart/alternative` 语料（plain + html 双叶）
+/// 逐层锁定为**免疫证明，未发现缺口，无需改动生产代码**。语料两大类各 ≥ 6、
+/// 总数 46 个向量（DOM 差异 24 + 命名空间混淆 22），每个向量都过独立惰性预言机
+/// （`scan_tags` 白名单扫描 + 无 `on*`/危险 scheme + `sanitize` 不动点）。分层：
+/// L1 melib 解析出双叶且全部攻击字节逐字在场（LF→CRLF 容忍），并自检两类规模、
+/// 命名唯一性与同族参考语料长片段的逐字不重复；L2 sanitize 输出无任何非白名单
+/// script/style/SVG/MathML/form/select/template 标签、无 `on*`、无活的危险 scheme
+/// href 且为不动点；L3 render 脚本体 / 事件属性值 / 危险 scheme 目标整体消失，
+/// 不生成危险链接脚注，惰性边界 `url_scheme` 为 `None` 且
+/// `is_default_launchable_scheme` 拒绝；L4 整封攻击邮件端到端纯文本且诚实
+/// `http`/`https`/`mailto` 链接保持可用（sanitize 保留、render 脚注可见、确认门
+/// 放行）。重点探针
+/// `probe_sanitize_and_render_survive_deep_nesting_on_strict_stack` 在
+/// `stack_size(2 MiB)` 线程（对齐 meli view 线程栈，同 issue #23 的 2 MiB 说明）
+/// 上对 50000 层未闭合 `<b>` 链、`<table><tr><td>` 链、混合错配链与 balanced
+/// `<div>` 移除链（后者只跑 `render`，其第一步即 `sanitize`），另加为限制 CI 时间
+/// 收窄到 10000 层的 adoption agency 错配链跑 sanitize + render，全部存活、
+/// 不 panic / 不栈溢出、输出纯文本。仓内孪生改动：无（免疫证明，未触碰生产代码）。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2021_30858`]: self::cve_2021_30858
+#[cfg(test)]
+#[path = "CVE-2021-30858.rs"]
+mod cve_2021_30858;
