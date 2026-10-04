@@ -1563,3 +1563,28 @@ mod cve_2002_2351;
 #[cfg(test)]
 #[path = "CVE-2003-0336.rs"]
 mod cve_2003_0336;
+
+/// CVE-2001-0677（Qualcomm Eudora 5.0.2，Windows；NVD 未分配 CVSS 分数）
+/// `Attachment Converted` 头转发泄露本地文件 regression（issue #63，表 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 / web/HTML embedding）：Eudora
+/// 转存 MIME 附件后会写一行携带目标本地路径的 `Attachment Converted` 元数据
+/// 头（如 `"C:\path\secret.txt"`）；用户转发这样一封邮件时，Eudora 读取该头
+/// 指向的本地文件并作为附件重新附上发出——用户转发即把本地文件回传给攻击者。
+/// meli 没有 Eudora 的 `Attachment Converted` 转存面，唯一 HTML 无关的转发
+/// 管线 `Composer::forward`（`meli/src/mail/compose.rs:604`）只搬运邮件自身
+/// 字节：`inline` 模式附 `env.body_bytes(bytes)`，`as_attachment` 模式把整封
+/// `bytes` 打成 `message/rfc822`、文件名取
+/// `eml_filename(env.message_id())`。全仓库唯一的「读本地文件成附件」生产函数
+/// `melib/src/email/compose.rs::attachment_from_file` 的调用点全部是用户显式
+/// 的附件选择 / 添加附件动作，没有任何从收到的邮件字节推导路径的调用。
+/// [`cve_2001_0677`] 以内嵌 `multipart/mixed` 语料逐层锁定为**免疫证明，未
+/// 发现缺口，无需改动生产代码**：L1 头拼写变体 / 正文位标记只是
+/// `other_headers` 惰性字符串，不派生附件 / 文件名、`<tmp>/meli` 不变；L2
+/// 用真实 canary 文件证明转发两种模式都不读取、不附带、不改动头字段指向的
+/// 文件，附件字节逐字节等于原邮件自身字节；L3 转发草稿头集合固定，伪造头不
+/// 再生（`as_attachment` 中只存在于嵌套 `message/rfc822` 的惰性原始字节里）。
+///
+/// [`cve_2001_0677`]: self::cve_2001_0677
+#[cfg(test)]
+#[path = "CVE-2001-0677.rs"]
+mod cve_2001_0677;
