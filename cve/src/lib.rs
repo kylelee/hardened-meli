@@ -2100,3 +2100,57 @@ mod cve_2024_37384;
 #[cfg(test)]
 #[path = "CVE-2025-48700.rs"]
 mod cve_2025_48700;
+
+/// CVE-2026-73572（Synacor Zimbra Collaboration Suite，Zimbra Classic UI；NVD 未分配
+/// CVSS 分数；来源 Zimbra 官方安全公告）**存储型 XSS** regression（issue #76，
+/// 表 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` 第 127 行 — 网页嵌入 / web/HTML
+/// embedding）：报告原文记录攻击者在受害者预览恶意邮件附件时让附件内容执行脚本。
+/// 与同族 CVE-2025-48700（正文 mXSS）、CVE-2025-66376（CSS `@import` 标签切分）互补，
+/// 本语料聚焦 issue #76 指定的**附件预览面**四类：(1) `text/html` 附件带 `<script>` /
+/// 事件属性 / `javascript:` / `data:` / `document.cookie` 窃取语义；(2)
+/// `image/svg+xml` 附件带 `<script>` / `onload` / `<foreignObject>` / `xlink:href` /
+/// SMIL `<animate>`；(3) inline `Other`/`OctetStream` 原样文本载体（含 ESC/CSI/OSC/
+/// BEL/C1 终端控制序列）；(4) `multipart/mixed`、`multipart/related` 嵌套与
+/// Content-Type 混写伪装（`image/svg+xml` 带 charset、附件名伪装 `.txt`/`.jpg`/`.png`）。
+///
+/// meli 等价面映射（issue #76 明确要求）：meli 是终端邮件客户端，**没有 webmail
+/// 功能面**——没有 HTTP 页面、会话 Cookie、浏览器 DOM、JavaScript / SMIL 引擎，也
+/// 没有把附件内容注入页面的预览器。附件消费路径逐环检查：`Content-Disposition:
+/// attachment` 只以元数据进列表（`meli/src/mail/view/envelope.rs:321`）；inline
+/// `text/html` 经 `ViewFilter::new_html`（`filters.rs:146`）→ [`sanitize`]（ammonia
+/// 白名单恰好一次解析 → 过滤树 → 带转义序列化）→ [`render`]（html2text → 纯文本）；
+/// inline `Other`/`OctetStream` 走原样纯文本（`filters.rs:405`），控制字符在网格层
+/// 被 `CellBuffer::write_string`（`terminal/cells.rs:715`）标成空格子、发射器
+/// `Screen::draw_horizontal_segment`（`screen.rs:582`）只在 `!c.empty()` 时写字符；
+/// `image/svg+xml` 属 `ContentType::Other`，要么只显示元数据，要么在用户显式输入
+/// 附件编号 + 按键后（`envelope.rs:2029` `open_attachment` / `envelope.rs:1858`
+/// `open_mailcap` 均要求 `context.cmd_buf().is_some()`）交给本地桌面默认程序
+/// （`envelope.rs:2072` `query_default_app` + `sh -c`），meli 自身从不解析 SVG。
+///
+/// 缺口检测结论：`query_default_app(attachment.mime_type())` 只把邮件可控 MIME
+/// 字符串当查询键做相等比较（`melib/src/utils/xdg/mod.rs:239`），不拼接 shell；
+/// `File::create_temp_file` 对邮件可控 filename 先 `sanitize_filename` 再截断
+/// （`meli/src/types/helpers.rs:85`）；inline 原样文本分支的控制序列在网格层被
+/// 消灭——本语料 `l2_inline_other_terminal_controls_never_reach_the_grid` 直接断言
+/// 网格里 `cell.empty() || !cell.ch().is_control()`。**免疫证明，未发现缺口，无需
+/// 改动生产代码**。
+///
+/// [`cve_2026_73572`] 以内嵌 `multipart/mixed` 附件语料逐层锁定：L1 melib 解析出
+/// 多层附件树（HTML attachment 叶 / SVG attachment 叶 / ≥ 8 个 inline
+/// Other/OctetStream 叶 / 嵌套 related 与 mixed），四类各 ≥ 6、总数 30 个向量逐字
+/// 在场（LF→CRLF 容忍），并自检规模、命名唯一性与同族参考语料独有片段的逐字不重复；
+/// L2 sanitize 输出无任何非白名单标签、无 `on*`、无活的危险 scheme href 且为不动点，
+/// render 纯终端文本，inline 控制序列不进入网格；L3 `url_scheme` /
+/// `is_default_launchable_scheme` 对 `javascript:`/`vbscript:`/`data:`/`file:`/`blob:`
+/// 拒绝免确认启动、对 `http`/`https`/`mailto` 放行（诚实对照）；L4 整封攻击邮件逐
+/// HTML 附件叶端到端纯文本且诚实链接保持可用，
+/// `l4_no_webmail_or_svg_engine_pathway_exists` 的注释记录全仓无 webmail / 浏览器 /
+/// SVG 渲染器 / JS / SMIL 引擎 / 第二次 HTML 解析通路的映射依据。仓内孪生改动：无
+/// （免疫证明，未触碰生产代码）。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2026_73572`]: self::cve_2026_73572
+#[cfg(test)]
+#[path = "CVE-2026-73572.rs"]
+mod cve_2026_73572;
