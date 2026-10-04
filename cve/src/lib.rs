@@ -1662,3 +1662,31 @@ mod cve_2001_0677;
 #[cfg(test)]
 #[path = "CVE-1999-1016.rs"]
 mod cve_1999_1016;
+
+/// CVE-2007-4040（Outlook / Outlook Express，Windows；CVSS 8.8）URI 参数注入
+/// regression（issue #65，表 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入）：
+/// 特定已注册 URI 携带 shell 元字符（`unknown:$(cmd)`、
+/// `mailto:x?subject=;cmd`、含空格/引号的 URI）传入处理进程命令行，因客户端把
+/// URI 拼进 shell 命令行而跨浏览器脚本 / 任意命令执行。meli 的「URI → 进程
+/// 命令行」四个汇（`go_to_url` → `launch_url`、`List-Unsubscribe` URL、
+/// `List-Archive`、相邻的 desktop-Exec `sh -c` 拼接）全部不经 shell 或带逐字符
+/// 反斜杠 armor。[`cve_2007_4040`] 以内嵌 `multipart/alternative` 语料逐层锁
+/// 定为**免疫证明，未发现缺口，无需改动生产代码**：scheme 确认门对元字符
+/// corpus 的分类（unknown/`search-ms:`/无 scheme 必须确认，http/https/mailto
+/// 任意大小写放行）、提取地图（无 `//` 的 `unknown:$(cmd)` 根本不提取、
+/// `://` 拼写提取但落后于门、mailto 散文只产出落后于门的裸 email、白名单
+/// scheme 的元字符 URL 直达 argv 契约层）、sanitize 只留白名单 href 且字节
+/// 原样、`unsubscribe_action` 跳过未知 scheme 元字符选项并把白名单元字符
+/// URL 逐字节带入 `OpenUrl`（有 mailto 时优先内部 `Send`）、畸形 mailto
+/// fail-closed / 合法 mailto 的元字符只是惰性写信字段、以及
+/// `desktop_exec_to_command` 的转义 armor。argv 单参数逐字节契约（`$(touch
+/// marker)` 副作用预言机）由仓内孪生单测锁定在
+/// `meli/src/mail/view/tests.rs`（`Context::new_mock` 为 `#[cfg(test)]`，
+/// cve crate 无法驱动交互流）：`go_to_url_metacharacter_url_is_one_literal_argv_element`、
+/// `go_to_url_unknown_scheme_metacharacters_need_confirmation_and_stay_literal`、
+/// `list_archive_metacharacter_url_is_one_literal_argv_element`。
+///
+/// [`cve_2007_4040`]: self::cve_2007_4040
+#[cfg(test)]
+#[path = "CVE-2007-4040.rs"]
+mod cve_2007_4040;
