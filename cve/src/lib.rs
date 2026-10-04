@@ -2652,3 +2652,44 @@ mod cve_2024_49394;
 #[cfg(test)]
 #[path = "CVE-2024-49395.rs"]
 mod cve_2024_49395;
+
+/// CVE-2009-1390（mutt 1.5.19，OpenSSL/GnuTLS；CWE-295）**TLS 服务端证书链
+/// 校验不完整** regression（issue #87，表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：NVD 原文指出，mutt 1.5.19 只要证书链中
+/// **一张**证书能独立被接受（本身即信任锚，或由信任锚直接签发）就放行整条
+/// 连接，未要求叶子到信任锚的整条链逐节有效，中间人可据此伪装可信服务器。
+///
+/// meli 的 TLS 校验全部委托 `native-tls`（Linux=OpenSSL 系统信任库 + 全链 +
+/// 主机名校验）：`melib/src/imap/connection.rs`、`melib/src/nntp/connection.rs`、
+/// `melib/src/smtp.rs` 三处 `TlsConnector::builder()` 都是默认校验器，只有账号
+/// 配置显式打开 `danger_accept_invalid_certs` 时才追加危险开关；
+/// `connector.connect(&path, socket)` 把服务器主机名交给 verifier；JMAP 的 isahc
+/// 客户端（`melib/src/jmap/connection.rs`、`melib/src/jmap/eventsource.rs`）三个
+/// `danger_*` 同门控；四个账号配置默认全是 `false`。workspace 无 rustls /
+/// webpki，也无 `verify_callback`/`SSL_CTX`/`add_root_certificate` 等自定义校验面。
+///
+/// **为何单元级 mock**：`native-tls`/`openssl` 不是 melib 公开 API，`cve` 依赖
+/// 只有 `meli`，issue 约束「不新增 test-only 依赖」，melib 亦无 TLS 服务器实现，
+/// 故按 issue 允许的「真实证书语料 + 单元级 mock」做免疫证明。语料是 openssl
+/// 离线生成的真实 ECDSA P-256 链：受信根 / 诚实中间 / 诚实叶、攻击者 Rogue CA /
+/// 攻击叶、以及与受信根同 Subject DN 不同密钥的 evil twin CA / 伪造 issuer 叶；
+/// 三种攻击链 A1=[攻击叶,受信根]、A2=[攻击叶,诚实中间,受信根]、
+/// A3=[伪造 issuer 叶,受信根] 由测试内组装。
+///
+/// [`cve_2009_1390`] 分层锁定：(a) 语料真实性——诚实链 DN 逐级相连、攻击叶 SAN
+/// 均为 `imap.victim.example`、A3 叶 issuer TLV 字节级等于受信根 subject TLV 而
+/// 三个自签 CA 的 SPKI 互异（DN 可伪造、密钥不可），`openssl verify` 转录逐字
+/// 内嵌（诚实链 `OK`；A1/A2 error 20；A3 error 7）；(b) 攻击复现——mutt 式
+/// 「任一证书可独立验证即接受」谓词对诚实链与 A1/A2/A3 全部接受，证明攻击原语
+/// 成立；(c) 核心断言——整链连通谓词（签名邻接表 + issuer DN TLV 相等）接受诚实
+/// 链、拒绝 A1/A2/A3，即「部分可信链被拒绝」；(d) L3 源码 / manifest 扫描锁定
+/// 三处 connector 的默认校验器 + 门控 danger + 主机名、账号配置默认 false、
+/// 无自定义证书校验面、TLS 栈为 native-tls，以及可直达的
+/// [`SmtpSecurity::default`] danger=false。
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**。
+///
+/// [`cve_2009_1390`]: self::cve_2009_1390
+/// [`SmtpSecurity::default`]: meli::melib::smtp::SmtpSecurity
+#[cfg(test)]
+#[path = "CVE-2009-1390.rs"]
+mod cve_2009_1390;

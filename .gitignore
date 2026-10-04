@@ -30,3 +30,6 @@ log
 /log/
 .plan
 .worktree
+
+# AI worktrees
+.worktree
