@@ -2315,3 +2315,77 @@ mod cve_2023_4863;
 #[cfg(test)]
 #[path = "CVE-2023-41061.rs"]
 mod cve_2023_41061;
+
+/// CVE-2023-41064（Apple ImageIO；Apple 公告原文 *"A buffer overflow issue was
+/// addressed with improved memory management"*；2023-09 在野利用；与
+/// CVE-2023-41061 组成 BLASTPASS 零点击链，经 iMessage 附件投递，Citizen Lab /
+/// Lookout 披露，修复于 iOS 16.6.1）**图片缓冲区溢出 → 任意代码执行** regression
+/// （issue #80，表 4 of `SECURITY-CVE-RESEARCH.zh-CN.md` — e-mail-reachable
+/// browser engines）：ImageIO 解析恶意图片时对**元数据头**缺乏边界检查——
+/// IFD0 偏移 / entry count / 声明的 ImageWidth / ImageLength / StripOffsets /
+/// StripByteCounts / EXIF IFD 指针都可被声明为远超实际数据容量的值，越界读 /
+/// 写破坏堆内存；BLASTPASS 链中触发点正是 `.pass` 归档内嵌的 TIFF 形态图片。
+///
+/// meli 等价面映射（issue #80 明确要求）：meli 是终端邮件客户端，**没有浏览器
+/// 引擎、没有 ImageIO、也没有任何内嵌图片解码器**。本 CVE 的触发原语在结构上
+/// 不存在。`Content-Disposition: attachment` 叶只以元数据进列表；`image/tiff` /
+/// `image/heic` / `image/heif` / `image/jpeg` 与伪装成
+/// `application/octet-stream` 的图片部件在 melib 解析路径按 Content-Type 归为
+/// `ContentType::Other { tag }`、`is_text() == false`（不看扩展名），
+/// [`Attachment::decode`] 只做 base64 / quoted-printable / 8bit 传输编码反转，
+/// 不做任何 TIFF IFD / ISO-BMFF box / JPEG 段结构解释；inline `Other` 原样文本
+/// 分支只把已到达字节当纯文本；`multipart/related` 的 `<img src="cid:…">` /
+/// `data:image/tiff|heic|jpeg;…` / 远程 `https://evil80.example/x.tiff` /
+/// `<object>` / `<embed>` / `<iframe>` / `<picture><source>` / `data:` 锚点引用在
+/// [`sanitize`]（ammonia 白名单，`img` / `object` / `embed` / `iframe` / `source`
+/// 非白名单，URL scheme 只有 http/https/mailto）里整体死亡；打开图片只有
+/// `open_mailcap`（`meli/src/mail/view/envelope.rs:1859`）与 `open_attachment`
+/// （同文件 `:2030`）两条汇，两者都以 `context.cmd_buf().is_some()`（先输入附件
+/// 编号）为前置，命中后字节经 `sanitize_filename` 压平路径穿越再落入
+/// `<temp_dir>/meli/` 的 `0o600` 随机名临时文件、交给进程外程序。
+///
+/// [`cve_2023_41064`] 以内嵌「等价结构」畸形图片语料（真 `II*\0` / `MM\0*` TIFF
+/// 魔数 + IFD 记录；真 ISO-BMFF `ftyp` + `meta` + `iloc`/`iinf`/`infe`/`iprp`/
+/// `ipco` 子盒；真 JPEG `FFD8` SOI + APP0/APP1/SOF0/SOF2/DQT/DHT/SOS 段，逐族
+/// 内嵌「声明尺寸 / 偏移 / 长度远超实际数据」的越界元数据头形态）逐层锁定为
+/// **免疫证明，未发现缺口，未触碰生产代码**。语料共 26 个向量：TIFF 8（双字节序、
+/// IFD0 偏移 0xFFFFFFFF、entry count 0xFFFF、ImageWidth/ImageLength=0xFFFFFFFF、
+/// StripOffsets/StripByteCounts 越界、EXIF IFD 指针越界（BLASTPASS 等价形态）、
+/// IFD 头后截断、IFD 链自环）、HEIF/HEIC 9（`iloc` v2 extent u64 越界、
+/// construction_method=1 指向 `idat`、`meta` size=0、size=1 + 64 位 largesize
+/// 越界、`iinf` entry_count 0xFFFF、`infe` 截断、`pitm` 指向不存在条目、
+/// `meta`+`mdat`、`ftyp` 后截断）、JPEG 9（APP0/JFIF 长度失配、APP1/Exif 内嵌
+/// 越界 TIFF 头、SOF0/SOF2 声明 0xFFFF×0xFFFF、DQT/DHT 符号计数失配、SOS 前
+/// 截断、缺 EOI、SOS 后无扫描数据）；投递形态 16（正确申报四种图片 MIME、伪装
+/// `application/octet-stream` + `.tiff`/`.heic`/`.jpg` 文件名、base64 / quoted-printable
+/// 传输编码、RFC 2231 `filename*=UTF-8''board80%2Etiff` 与 `filename*0=`/
+/// `filename*1=` 分段拼写、inline vs attachment、双扩展 `board80.tiff.txt`、
+/// `text/plain` 伪装、路径穿越 `../../evil80.tiff`、`multipart/related` +
+/// `<img src="cid:image80@evil80.example">`、嵌套 `message/rfc822`）；另有 10 个
+/// HTML 引用向量。所有语料字节均以 8bit 形式逐字上线（固定投递部件 +
+/// `corpus-*.tiff/.heic/.jpg` 附件）。
+///
+/// L1 melib 解析出精确的 `multipart/mixed` 附件树（`16 + 其余向量` 个根部件），
+/// 全部语料字节在 wire 上逐字在场，四种图片 MIME 归类 `ContentType::Other`、
+/// `is_text() == false`，base64 / quoted-printable 部件只做传输编码反转（已知答案
+/// `SUkqAA==` → `II*\0`）；L2 图片叶只以元数据条目显示，HTML 引用在 [`sanitize`]
+/// 里整体死亡且为不动点，inline `Other` 原样分支惰性；L3 源码扫描锁定
+/// `open_mailcap` / `open_attachment` 的 `cmd_buf().is_some()` 前置，路径穿越
+/// 文件名经 `sanitize_filename` / `sanitize_filename_component` 不产生目录分量，
+/// `l3_workspace_has_no_in_process_image_decoder_dependency` 断言全仓清单无任何
+/// 内嵌图片解码依赖（`image` / `tiff` / `libheif` / `jpeg` / `png` / `gif` /
+/// `webp` / exif 类 crate 全查）；L4 整封攻击邮件端到端解析 + 渲染纯文本，合法
+/// 内容（`LEGITIMATE-MARKER-80`）交付、图片字节 / 引用不出现，诚实
+/// `http`/`https`/`mailto` 链接保持可用（sanitize 保留 href、render 脚注可见、
+/// 确认门放行）。图片类附件显示 / 开门禁的仓内孪生回归为
+/// `meli/src/mail/view/tests.rs` 的
+/// `cve_2023_4863_webp_attachments_render_as_metadata_only` 与
+/// `cve_2023_4863_open_attachment_requires_explicit_attachment_number`。仓内孪生
+/// 改动：无（免疫证明，未触碰生产代码）。
+///
+/// [`Attachment::decode`]: meli::melib::Attachment::decode
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`cve_2023_41064`]: self::cve_2023_41064
+#[cfg(test)]
+#[path = "CVE-2023-41064.rs"]
+mod cve_2023_41064;
