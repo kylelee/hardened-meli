@@ -1603,43 +1603,61 @@ mod cve_2001_0677;
 /// `textarea`/`select`/`button`/`form` 都不在元素白名单里，也不在
 /// `clean_content_tags`（只有 `script`/`style`），ammonia 按「元素删除」处理
 /// ——void 元素 `input` 连同 `value=` 属性整体消失，`textarea`/`select`/
-/// `button` 只留子文本，advisory 的巨型字段到不了渲染器。**真实缺口**：
-/// [`render`] 原先对输入大小没有任何上限，>10 MiB 的 HTML 邮件（base64 在
-/// wire 上膨胀 ~33%）会在打开邮件时、在阻塞 view job 线程上耗尽与输入成
-/// 正比的 CPU / 内存（release 实测：10 MiB 纯嵌套表格 ≈ 3.3 s 最坏形态、
-/// 100 万个级小表 3.7 MB ≈ 790 ms、16 MiB 单格 ≈ 276 ms；100 MiB HTML 邮件
-/// ≈ 33 s 100% CPU + ~1 GB 分配）——即本 CVE 的 CWE-400「打开邮件即 DoS」面。
-/// 另注（本机重测更正）：ammonia 的 clean walk 迭代（sanitize 可处理 ~699k
-/// 层开标签），但 html2text 的 DOM walk **递归**、几千层即栈溢出，故 10 MiB
-/// 纯开标签嵌套仍会撞 html2text 的递归栈；本语料把峰值嵌套深度压在 html2text
-/// 已测的 1000 层，锁的是字节上限对输入大小 / 时间 / 内存的收敛。修复：
-/// `meli/src/mail/view/html_render.rs` 新增
-/// [`MAX_HTML_RENDER_INPUT_BYTES`]（10 MiB）上限，`render()` 在 lossy 解码后、
-/// `sanitize()` **之前**把超限输入截到 ≤ 上限的最大 UTF-8 字符边界，只对
-/// 前缀 sanitize + render，再追加一行截断提示；截断在 sanitize 之前，故
-/// sanitize 看到最终文档（未闭合 `<script>` 头吞掉余下内容并被整体删除，无
-/// parse differential），≤ 上限输入逐字节不变、无提示。仓内孪生单测
-/// （`meli/src/mail/view/html_render.rs::tests`）：
+/// `button` 只留子文本，advisory 的巨型字段到不了渲染器。**两个真实缺口，
+/// 均已随本回归修复**：
+///
+/// 1. **CWE-400 输入无上限**：[`render`] 原先对输入大小没有任何上限，>10 MiB
+///    的 HTML 邮件（base64 在 wire 上膨胀 ~33%）会在打开邮件时、在阻塞
+///    view job 线程上耗尽与输入成正比的 CPU / 内存（release 实测：10 MiB
+///    纯嵌套表格 ≈ 3.3 s 最坏形态、10 万个小表 3.7 MB ≈ 790 ms、16 MiB
+///    单格 ≈ 276 ms；100 MiB HTML 邮件 ≈ 33 s 100% CPU + ~1 GB 分配）。
+///    修复：新增 [`MAX_HTML_RENDER_INPUT_BYTES`]（10 MiB），`render()` 在
+///    lossy 解码后、`sanitize()` **之前**把超限输入截到 ≤ 上限的最大 UTF-8
+///    字符边界，只对前缀 sanitize + render，再追加一行截断提示；截断在
+///    sanitize 之前，故 sanitize 看到最终文档（未闭合 `<script>` 头吞掉余下
+///    内容并被整体删除，无 parse differential），≤ 上限输入逐字节不变。
+/// 2. **CWE-674 嵌套深度无界（比 100% CPU 更狠：进程 abort）**：html2text
+///    0.17.1 用递归 `Drop` 胶水拆渲染树（gdb 实证 `RenderTable →
+///    Vec<RenderTableRow> → RenderTableCell → Vec<RenderNode> → …` 链，
+///    每表格嵌套层 ~700 B 栈），Rust 无法捕获栈溢出——过阈值即整个 meli
+///    进程 abort。实测（默认 2 MiB tokio `spawn_blocking` view job 线程栈）：
+///    `<table><tr><td>` 只开标签重复 5 000 次（**~75 KiB 邮件**）即崩，
+///    2 000 层存活；字节上限约束输入大小而非嵌套深度，450 KiB 的深嵌套
+///    邮件照样穿过 10 MiB 上限杀死进程。修复：新增
+///    [`MAX_HTML_RENDER_NESTING_DEPTH`]（256 个字面开始标签深度），对
+///    sanitize 后的规范化标记做引号感知扫描，在首个把深度推过上限的开始
+///    标签处截断并追加第二条提示；256 比实测 abort 阈值（≥6 000 字面标签）
+///    低 ≥23×，比合法邮件嵌套（生成器邮件 ≲30 层表格）高一个数量级。
+///
+/// 仓内孪生单测（`meli/src/mail/view/html_render.rs::tests`）：
 /// `render_at_input_cap_has_no_truncation_notice`、
 /// `render_over_input_cap_truncates_ascii_with_single_notice`、
 /// `render_over_input_cap_cuts_on_cjk_char_boundary`、
 /// `render_over_input_cap_with_invalid_utf8_does_not_panic`、
 /// `render_truncation_cannot_smuggle_markup_past_sanitize`、
+/// `render_deep_open_only_tables_do_not_abort`、
+/// `render_nesting_depth_boundary_is_inclusive`、
+/// `render_nesting_cap_ignores_void_elements_and_quoted_closers`、
+/// `render_both_caps_compose_on_one_document`、
 /// `render_over_cap_nested_tables_completes_within_watchdog`。
 /// [`cve_1999_1016`] 以内嵌语料逐层锁定：L1 字面触发面免疫（8 MiB 级巨型
-/// 字段死于 sanitize，sanitize / render 输出无表单标签 / `value=` 标记，且
-/// 上限不误伤经典形态）；L2 资源面有界（1000 / 2000 层完成 + 12 MiB 最坏
-/// 形态（峰值深度 1000）watchdog + 提示）；L3 上限契约（恰好上限不截断、超限 CJK 字符边界
-/// 截断、lossy + 上限组合、超限未闭合 script 无标记、提示纯文本、
-/// `MAX_HTML_RENDER_INPUT_BYTES` 被引用并在移动时响亮失败）；L4 端到端
-/// （base64 `text/html` 巨型嵌套表格邮件经 melib 解析、解码、render：有界、
-/// 有提示、无表单痕迹）。结论：一个字面触发面免疫 + 一个真实资源缺口，
-/// 已随本回归修复，生产代码改动仅限
-/// `meli/src/mail/view/html_render.rs`。
+/// 字段死于 sanitize，sanitize / render 输出无表单标签 / `value=` 标记，
+/// 且上限不误伤经典形态）；L2 资源面有界 + 崩溃面回归（深度上限内嵌套
+/// 完成、**修复前 75 KiB 即 abort 进程**的只开标签深嵌套（5k / 30k /
+/// ~699k 层）现在 `Ok` 返回且恰好一条深度提示、深度边界包含、void 元素与
+/// 引号内假闭合不干扰计数、12 MiB 最坏形态 watchdog 内 `Ok` 且恰好一条
+/// 字节提示无深度提示、双上限同击两条提示各一次）；L3 上限契约（恰好上限
+/// 不截断、超限 CJK 字符边界截断、lossy + 上限组合、超限未闭合 script 无
+/// 标记、提示纯文本、两个上限常量被引用并在移动时响亮失败）；L4 端到端
+/// （base64 `text/html` 两封邮件——11 MiB 巨型最坏形态与 450 KiB 进程杀手
+/// ——经 melib 解析、解码、render：有界、各恰好一条对应提示、无表单痕迹）。
+/// 结论：一个字面触发面免疫 + 两个真实缺口（CWE-400 + CWE-674），均已随
+/// 本回归修复，生产代码改动仅限 `meli/src/mail/view/html_render.rs`。
 ///
 /// [`sanitize`]: meli::mail::view::html_render::sanitize
 /// [`render`]: meli::mail::view::html_render::render
 /// [`MAX_HTML_RENDER_INPUT_BYTES`]: meli::mail::view::html_render::MAX_HTML_RENDER_INPUT_BYTES
+/// [`MAX_HTML_RENDER_NESTING_DEPTH`]: meli::mail::view::html_render::MAX_HTML_RENDER_NESTING_DEPTH
 /// [`cve_1999_1016`]: self::cve_1999_1016
 #[cfg(test)]
 #[path = "CVE-1999-1016.rs"]
