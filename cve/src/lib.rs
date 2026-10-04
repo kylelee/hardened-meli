@@ -2531,3 +2531,30 @@ mod cve_2026_8091;
 #[cfg(test)]
 #[path = "CVE-2010-0249.rs"]
 mod cve_2010_0249;
+
+/// CVE-2007-1268（mutt ≤ 1.5.13；NVD 未分配 CVSS 分数）**GnuPG 签名状态
+/// 误判** regression（issue #83，表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：mutt 没有正确使用 `--status-fd`，
+/// 多部分 OpenPGP 邮件里未签名部分的篡改无法被辨别，伪造内容继承了真实
+/// 签名的已验证状态。[`cve_2007_1268`] 用一次性 Ed25519 密钥构造**真实
+/// 部分签名**攻击邮件（真 detached 签名 over meli 送验字节 + 攻击者伪造
+/// 的未签名兄弟部分），分层锁定 meli 的等价面：L1 信任边界
+/// （`extract_unverified_signature`：恰好 2 部分 / micalg / protocol /
+/// 送验字节逐字节等于被签 part 的 raw，走私与畸形容器一律 fail-closed，
+/// cleartext armor 尾部走私不路由）；L2 状态解读 fail-closed
+/// （`signatures_into_error`：空签名列表必须是 `Err` —— 本 issue 暴露并
+/// 修复的 fail-open 缺口，CLI 后端 JSON `{"signatures":[]}` 旧版会落成
+/// `SignedVerified { comment: None }`；任何一条坏状态整体 `BAD
+/// signature`）；L3 真实 gpgme 引擎端到端（导入语料公钥：真签名 over
+/// 被签字节 → good；篡改内容 / 拼接未签名兄弟字节 → BAD；垃圾 armor →
+/// Err）；L4 显示域隔离（`Signed*` 包装节点与 pager notice 只套签名
+/// 子树，仓内孪生单测在 `meli/src/mail/view/tests.rs`：
+/// `partial_signature_open_scopes_signed_marker_to_signed_part`、
+/// `partial_signature_filter_notice_stays_off_the_unsigned_sibling`）。
+/// 结论：结构性免疫 + 一个 fail-open 缺口已修复（空签名列表 → `Err`，
+/// 与 gpgme 后端一致）。
+///
+/// [`cve_2007_1268`]: self::cve_2007_1268
+#[cfg(test)]
+#[path = "CVE-2007-1268.rs"]
+mod cve_2007_1268;
