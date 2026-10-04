@@ -2610,3 +2610,45 @@ mod cve_2024_49393;
 #[cfg(test)]
 #[path = "CVE-2024-49394.rs"]
 mod cve_2024_49394;
+
+/// CVE-2024-49395（mutt / neomutt；CVSS 5.3，CWE-1230）**PGP 加密未隐藏收件人
+/// key ID，密文可反推 Bcc 收件人** regression（issue #86，表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：NVD 原文 *"In mutt and neomutt, PGP
+/// encryption does not use the --hidden-recipient mode which may leak the Bcc
+/// email header field by inferring from the recipients info."* OpenPGP 为每个
+/// 收件人生成 PKESK 包，包体带 8 字节加密子钥 key ID；Bcc 收件人必须在加密集合
+/// 里才能解密，但其 key ID 若可见，任一 To/Cc 收件人都能反查身份、推断 Bcc。
+///
+/// 本仓库勘查确认两个真实缺口并全部修复：
+///
+/// 1. **缺口 A（核心面）**：`melib/src/gpgme/mod.rs` 的 `Context::encrypt` 只设
+///    `NO_ENCRYPT_TO|NO_COMPRESS|ALWAYS_TRUST`，从不设
+///    `GPGME_ENCRYPT_THROW_KEYIDS`；修复为 `hidden_recipients==true` 时追加该
+///    flag（gpgme 无 per-recipient hidden 选项，全量 `--throw-keyids` 是 mutt
+///    `--hidden-recipient` 的最强等价面）。
+/// 2. **缺口 B（外层头直泄）**：`Draft::finalise` 保留 `Bcc:` 头，SMTP
+///    `mail_transaction` 把含该头的原文发给所有收件人；修复为在解析信封之后、
+///    写 DATA/BDAT 之前用 `melib::smtp::strip_bcc_headers` 删除 `Bcc` 头（及折叠
+///    续行），RCPT 集合仍含 Bcc（RFC 5322 §3.5）。
+///
+/// 触发链路：`send_draft_async`（加密分支）→ `draft_has_bcc_recipients` →
+/// `encrypt_filter(..., hidden_recipients)` → `PGPBackend::encrypt` →
+/// gpgme flags 追加 `GPGME_ENCRYPT_THROW_KEYIDS`。CLI 后端以
+/// `HIDDEN_RECIPIENTS=1` 环境变量约定同一语义。
+///
+/// [`cve_2024_49395`] 用两把一次性收件人密钥（To 子钥
+/// `0x09339244E8A5C674`、Bcc 子钥 `0xF64F5EA77C73C35D`）分层锁定：
+/// (a) `draft_has_bcc_recipients` 有/无/仅空白三态；
+/// (b) `strip_bcc_headers` 后攻击邮件不含任何 `Bcc` 头行、删除行数恰为 Bcc
+/// 头+续行、其余字节逐一致，且 `Envelope::from_bytes(原文).bcc()` 非空——信封
+/// RCPT 来源在 strip 之前不受影响；
+/// (c) 真实 gpgme 端到端——本地 PKESK 解析器证明 `hidden_recipients=false` 时
+/// 密文 key ID 集合恰为 To/Bcc 两把子钥（攻击复现），真实发送路径
+/// `encrypt_filter(..., true)` 后所有 key ID 全零、不含两把子钥 ID、密文不含
+/// `bcc-49395`，且隐藏密文仍能用私钥解出与输入逐字节一致的明文。
+/// 结论：**两个真实缺口均已修复**，纯逻辑与真 gpgme 端到端双重回归锁定。
+///
+/// [`cve_2024_49395`]: self::cve_2024_49395
+#[cfg(test)]
+#[path = "CVE-2024-49395.rs"]
+mod cve_2024_49395;
