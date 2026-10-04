@@ -318,20 +318,61 @@ pub fn sanitize_filename_component(value: &mut Cow<'_, str>) -> bool {
     !matches!(value.as_ref(), "" | "." | "..")
 }
 
+/// Claim `filename` against `used`, the names already taken in the
+/// same destination directory, returning the (possibly suffixed) name
+/// that is now reserved.
+///
+/// The batch save paths sanitize a mail-controlled name *first* and
+/// claim it here *second*: two different hostile spellings that
+/// flatten to the same sanitized component (CVE-2024-43604 review:
+/// `../../twin.bin` and `..\..\twin.bin`) must both land — the second
+/// with a `_<n>` inserted before its extension — instead of failing
+/// the `create_new` write and silently dropping one attachment. A name
+/// without an extension takes the suffix at its end.
+pub fn unique_filename_component(
+    used: &mut std::collections::HashSet<String>,
+    filename: &str,
+) -> String {
+    if used.insert(filename.to_string()) {
+        return filename.to_string();
+    }
+    let (stem, dot_ext) = match filename.rsplit_once('.') {
+        Some((stem, ext)) => (stem.to_string(), format!(".{ext}")),
+        None => (filename.to_string(), String::new()),
+    };
+    let mut dedup = 1;
+    loop {
+        let candidate = format!("{stem}_{dedup}{dot_ext}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        dedup += 1;
+    }
+}
+
 /// Default `.eml` name for saving a message to disk, derived from its
 /// `Message-ID`.
 ///
 /// The identifier is mail-controlled, so it is sanitized into one safe
 /// path component — a hostile identifier (`../../evil`,
 /// `/etc/cron.d/pwn`, control characters) must not traverse out of the
-/// destination directory. Falls back to a generated name when nothing
-/// usable remains.
+/// destination directory. The stem is sanitized *before* the `.eml`
+/// suffix is appended: an identifier that sanitizes down to nothing —
+/// empty (a mail with no `Message-ID`), control-only, or the `.`/`..`
+/// spellings — falls back to a generated name instead of leaving the
+/// bare `.eml` hidden dotfile every such mail would collide on under
+/// the `create_new` write (CVE-2024-43604 review fix).
+///
+/// The fallback embeds a random UUID v4 on purpose: unpredictable (an
+/// attacker cannot pre-place a file at the landing name) and unique
+/// (repeated exports never collide with each other), which a name
+/// derived from the hostile identifier itself could not guarantee.
 pub fn eml_filename(message_id: &str) -> String {
-    let mut filename = Cow::Owned(format!("{message_id}.eml"));
-    if !sanitize_filename_component(&mut filename) {
+    let mut stem = Cow::Borrowed(message_id);
+    if !sanitize_filename_component(&mut stem) {
         return format!("meli_mail_{}.eml", Uuid::new_v4().as_simple());
     }
-    filename.into_owned()
+    format!("{stem}.eml")
 }
 
 #[cfg(test)]
@@ -630,9 +671,7 @@ mod tests {
             "/etc/cron.d/pwn",
             "..\\..\\evil",
             "evil\u{1b}[2j",
-            "..",
-            ".",
-            "",
+            "!",
         ] {
             let name = eml_filename(hostile);
             assert!(name.ends_with(".eml"), "{hostile:?} -> {name:?}");
@@ -643,8 +682,60 @@ mod tests {
                 "{hostile:?} -> {name:?} keeps control characters"
             );
         }
+        // Identifiers with no usable stem after sanitization — including
+        // the empty one a mail with no `Message-ID` carries — take the
+        // generated fallback instead of a bare/hidden `.eml` name
+        // (CVE-2024-43604 review fix).
+        for degenerate in ["..", ".", "", "\u{1b}\u{7f}"] {
+            let name = eml_filename(degenerate);
+            assert!(
+                name.starts_with("meli_mail_") && name.ends_with(".eml"),
+                "{degenerate:?} -> {name:?} must take the generated fallback"
+            );
+            assert!(
+                !name.starts_with('.'),
+                "{degenerate:?} -> {name:?} must not be a hidden dotfile"
+            );
+            assert!(
+                name.chars().all(|c| !c.is_control()),
+                "{degenerate:?} -> {name:?} keeps control characters"
+            );
+        }
         // Normal identifiers keep their name byte-for-byte.
         assert_eq!(eml_filename("abc@def.example"), "abc@def.example.eml");
+    }
+
+    /// Batch-name claiming runs on the *sanitized* name: hostile
+    /// spellings that flatten to the same component dedup with a
+    /// `_<n>` suffix before the extension instead of colliding at the
+    /// filesystem (CVE-2024-43604 review interaction).
+    #[test]
+    fn test_unique_filename_component_dedups_after_sanitization() {
+        fn sanitize_and_claim(used: &mut std::collections::HashSet<String>, raw: &str) -> String {
+            let mut name = Cow::Borrowed(raw);
+            assert!(sanitize_filename_component(&mut name), "{raw:?} is usable");
+            unique_filename_component(used, name.as_ref())
+        }
+
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(
+            sanitize_and_claim(&mut used, "../../twin.bin"),
+            ".._.._twin.bin"
+        );
+        assert_eq!(
+            sanitize_and_claim(&mut used, "..\\..\\twin.bin"),
+            ".._.._twin_1.bin"
+        );
+        assert_eq!(
+            sanitize_and_claim(&mut used, "../../twin.bin"),
+            ".._.._twin_2.bin"
+        );
+        assert_eq!(sanitize_and_claim(&mut used, "report.pdf"), "report.pdf");
+
+        // Extension-less names take the suffix at the end.
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(unique_filename_component(&mut used, "README"), "README");
+        assert_eq!(unique_filename_component(&mut used, "README"), "README_1");
     }
 
     /// A mail-controlled name hint that sanitizes down to `""`/`.`/`..`

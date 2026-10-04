@@ -922,23 +922,11 @@ impl EnvelopeView {
             if !crate::sanitize_filename_component(&mut filename) {
                 filename = format!("meli_attachment_{idx}_{}", Uuid::new_v4().as_simple()).into();
             }
-            if !used_names.insert(filename.to_string()) {
-                let duplicate = filename.to_string();
-                let (stem, dot_ext) = duplicate
-                    .rsplit_once('.')
-                    .map(|(stem, ext)| (stem.to_string(), format!(".{ext}")))
-                    .unwrap_or((duplicate, String::new()));
-                let mut dedup = 1;
-                loop {
-                    let candidate = format!("{stem}_{dedup}{dot_ext}");
-                    if used_names.insert(candidate.clone()) {
-                        filename = candidate.into();
-                        break;
-                    }
-                    dedup += 1;
-                }
-            }
-            let path = dir.join(filename.as_ref());
+            // Claim the sanitized name in the destination: dedup runs
+            // *after* sanitization, so spellings that flatten to the
+            // same component both land (see `unique_filename_component`).
+            let filename = crate::unique_filename_component(&mut used_names, filename.as_ref());
+            let path = dir.join(&filename);
             match save_attachment(&path, &att.decode(self.view_settings.charset.into())) {
                 Err(err) => {
                     tracing::error!("Failed to save attachment at {}: {err}", path.display());

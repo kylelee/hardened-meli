@@ -44,20 +44,22 @@ use crate::{
 };
 
 /// Filename for one message of a thread export: the `Message-ID`
-/// sanitized into a flat, separator-free component plus the `.eml`
-/// suffix.
+/// flattened through [`crate::eml_filename`] into one safe component
+/// with the `.eml` suffix.
 ///
 /// The `Message-ID` is attacker-controlled header bytes, kept verbatim
 /// by melib when they do not parse as `<id-left@id-right>` — pushing
 /// them unsanitized into the export directory traversed out of it
 /// (`Message-ID: ../evil` wrote outside the chosen directory), the
-/// CWE-35 path-traversal face of CVE-2025-47176. Regression-locked in
-/// `meli/src/mail/view/tests.rs` (`export_thread_filename_is_flat_for_`
-/// `traversal_message_ids`).
+/// CWE-35 path-traversal face of CVE-2025-47176 and the equivalent
+/// surface of CVE-2024-43604. Routing through `eml_filename` also
+/// gives this sink the degenerate-identifier fallback (an empty or
+/// control-only identifier exports under a generated name, never the
+/// bare `.eml` hidden dotfile) and the component length cap.
+/// Regression-locked in `meli/src/mail/view/tests.rs`
+/// (`export_thread_filename_is_flat_for_traversal_message_ids`).
 pub(super) fn thread_export_filename(message_id: &melib::MessageID) -> String {
-    let mut filename = message_id.to_string().into();
-    crate::sanitize_filename(&mut filename);
-    format!("{filename}.eml")
+    crate::eml_filename(message_id.as_str())
 }
 
 #[derive(Debug)]
@@ -1437,6 +1439,11 @@ impl ThreadView {
                 }
 
                 let mut results = vec![];
+                // Names claimed in this export directory: claimed from the
+                // *sanitized* name so identifiers that flatten to one
+                // component both export (CVE-2024-43604 review fix; same
+                // interaction as the batch attachment save).
+                let mut used_names = std::collections::HashSet::new();
                 for entry in &self.entries {
                     match entry.mailview.state {
                         MailViewState::Init { .. } | MailViewState::LoadingBody { .. } => {
@@ -1464,7 +1471,11 @@ impl ThreadView {
                             env_view: _,
                             stack: _,
                         } => {
-                            path.push(thread_export_filename(env.message_id()));
+                            let filename = crate::unique_filename_component(
+                                &mut used_names,
+                                &thread_export_filename(env.message_id()),
+                            );
+                            path.push(&filename);
                             if let Err(err) = save_attachment(&path, bytes) {
                                 tracing::error!(
                                     "Failed to create file at {}: {err}",
