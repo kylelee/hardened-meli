@@ -1821,3 +1821,43 @@ mod cve_2008_1448;
 #[cfg(test)]
 #[path = "CVE-2021-37746.rs"]
 mod cve_2021_37746;
+
+/// CVE-2015-7609（Zimbra 网页邮箱；NVD 未分配 CVSS 分数；Fortinet 披露）邮件正文
+/// XSS regression（issue #70，表 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 /
+/// web/HTML embedding）：邮件内容未充分清洗即进入页面，攻击者在一封普通邮件里注入
+/// 任意脚本——`<script>`（含 SVG/MathML 命名空间、未闭合吞尾、实体 / 大小写 / 属性
+/// 混淆变体）、`<img src=x onerror=…>` 及 on* 全事件属性家族、`javascript:` URL
+/// （href 载体与正文散文载体）。
+///
+/// meli 等价面映射（issue #70 明确要求）：meli 是终端邮件客户端，**没有 webmail
+/// 功能面**——没有 HTTP 页面、会话 Cookie、浏览器 DOM 或 JavaScript 引擎。邮件
+/// HTML 唯一的消费通路是邮件视图的显示管线 [`sanitize`]（ammonia 白名单：html5ever
+/// 恰好一次解析 → 过滤树 → 带转义再序列化）→ [`render`]（html2text → 纯终端文本）：
+/// `script`/`style` 属 ammonia `clean_content_tags` 默认集，连内容整体删除，
+/// SVG/MathML 命名空间的 `script` 同样按本地名删除；`tag_attributes` 是整体替换，
+/// 只保留 `a[href]`/`a[title]`，通用属性保持 ammonia 默认 `{lang,title}`，on*
+/// 家族无处存活；`url_schemes` 只有 http/https/mailto，ammonia 对每个保留 href 用
+/// WHATWG `Url::parse` 取 scheme（大小写归一、剥离 ASCII tab/LF/CR 与首尾 C0 /
+/// 空格），meli 的 `attribute_filter` 在 trim 首尾 Cf / 控制符 / 空白后**重新校验**
+/// href（CVE-2025-66376 硬化），前缀 Cf 隐藏的 `javascript:` 被整体丢弃而非被 trim
+/// 激活；sanitize 输出再交给 html2text 降成终端文本，没有第二次“浏览器解析”可供
+/// 碎片重组，也没有任何脚本 / 表单 / URL scheme 执行器。
+///
+/// [`cve_2015_7609`] 以内嵌 `multipart/alternative` 语料（plain + html 双叶）逐层
+/// 锁定为**免疫证明，未发现缺口，无需改动生产代码**：L1 melib 解析出双叶且全部
+/// 攻击字节逐字在场；L2 sanitize 输出无任何非白名单标签 / `on*` 属性 / 活的危险
+/// scheme href 且为不动点；L3 render 里真实脚本体整体消失、事件属性值不出现、
+/// 危险 scheme href 不生成脚注，正文散文 / 实体转义 / 注释切分留下的 `javascript:`
+/// / `on*=` 只是惰性字面文本；L4 整封邮件端到端纯文本且诚实 `http`/`https`/`mailto`
+/// 链接保持可用（sanitize 保留、render 脚注可见、`is_default_launchable_scheme`
+/// 放行）。唯一记录性非对称点：`<noscript>` / 实体转义 / 双编码 / NUL 混淆标签名
+/// 里的危险标记本来就不是脚本元素，render 解出的字面字符串不是活语义；
+/// `java\u{200B}script:` 的内部 Cf 让 scheme 不成立（`url_scheme` 返回 `None`、
+/// 确认门拒绝），最多作为惰性脚注展示。仓内孪生改动：无（免疫证明，未触碰生产代码）。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2015_7609`]: self::cve_2015_7609
+#[cfg(test)]
+#[path = "CVE-2015-7609.rs"]
+mod cve_2015_7609;
