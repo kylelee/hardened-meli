@@ -469,7 +469,7 @@ impl MessageID {
     ///
     /// A syntactically valid RFC 5322 `msg-id` can never contain `CR` or
     /// `LF`, so the grammar-valid path is byte-identical. But
-    /// [`Envelope`](crate::email::Envelope)`::set_message_id` stores a
+    /// [`Envelope`](crate::email::Envelope) method `set_message_id` stores a
     /// value that failed the `msg_id` grammar verbatim, and a header
     /// value may legally carry a bare `CR` (`header_value()` only ends
     /// at `LF`/`CRLF`), so a hostile `Message-ID: <a@b<CR>c>` used to
@@ -485,7 +485,7 @@ impl MessageID {
     pub fn new<T: Into<String>>(val: T) -> Self {
         let val: String = val.into();
         let val = if val.bytes().any(|b| b == b'\r' || b == b'\n') {
-            val.replace(|c: char| c == '\r' || c == '\n', "")
+            val.replace(['\r', '\n'], "")
         } else {
             val
         };
