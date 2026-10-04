@@ -1638,6 +1638,74 @@ impl ImapType {
         }
     }
 
+    /// Ingests one untagged LIST (or LIST-STATUS) response line into the
+    /// mailbox map under construction, reproducing exactly what a
+    /// `LIST "" "*"` roundtrip builds: the parsed mailbox links to its
+    /// parent hash (a dummy parent entry stands in until the server
+    /// lists the parent itself, at which point the children swap over),
+    /// and `STATUS` responses from the LIST-STATUS extension merge
+    /// unseen/total counters into an already-seen entry.
+    ///
+    /// Returns `false` when the line is neither a parseable LIST entry
+    /// nor a STATUS response, so the caller can log it as a parse error.
+    ///
+    /// Line framing and hierarchy depth are the two untrusted inputs
+    /// here; the depth of delimiter-stacked paths is bounded by
+    /// [`crate::backends::MAX_MAILBOX_HIERARCHY_DEPTH`] inside
+    /// [`protocol_parser::list_mailbox_result`]: deeper paths — the
+    /// CVE-2020-16094 (Claws Mail ≤ 3.17.6) infinite-subdirectory
+    /// delivery — fail the parse cleanly and never enter the map that
+    /// later feeds the mailbox-tree construction.
+    pub fn ingest_mailbox_list_line(
+        l: &[u8],
+        mailboxes: &mut HashMap<MailboxHash, ImapMailbox>,
+    ) -> bool {
+        if !l.starts_with(b"*") {
+            return true;
+        }
+        if let Ok(mut mailbox) = protocol_parser::list_mailbox_result(l).map(|(_, v)| v) {
+            if let Some(parent) = mailbox.parent {
+                if let std::collections::hash_map::Entry::Vacant(e) = mailboxes.entry(parent) {
+                    /* Insert dummy parent entry, populating only the children field. Later
+                     * when we encounter the parent entry we will swap its children with
+                     * dummy's */
+                    e.insert(ImapMailbox {
+                        children: vec![mailbox.hash],
+                        ..ImapMailbox::default()
+                    });
+                } else {
+                    mailboxes
+                        .entry(parent)
+                        .and_modify(|e| e.children.push(mailbox.hash));
+                }
+            }
+            if let std::collections::hash_map::Entry::Vacant(e) = mailboxes.entry(mailbox.hash) {
+                e.insert(mailbox);
+            } else {
+                let entry = mailboxes.entry(mailbox.hash).or_default();
+                std::mem::swap(&mut entry.children, &mut mailbox.children);
+                *entry = mailbox;
+            }
+            true
+        } else if let Ok(status) = protocol_parser::status_response(l).map(|(_, v)| v) {
+            if let Some(mailbox_hash) = status.mailbox {
+                if mailboxes.contains_key(&mailbox_hash) {
+                    let entry = mailboxes.entry(mailbox_hash).or_default();
+                    let mut counters = entry.counters.lock().unwrap();
+                    if let Some(total) = status.messages {
+                        counters.total.set_not_yet_seen(total);
+                    }
+                    if let Some(total) = status.unseen {
+                        counters.unseen.set_not_yet_seen(total);
+                    }
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn imap_mailboxes(
         connection: &Arc<ConnectionMutex>,
     ) -> Result<HashMap<MailboxHash, ImapMailbox>> {
@@ -1667,47 +1735,7 @@ impl ImapType {
         }
         imap_log!(trace, conn, "LIST reply: {}", String::from_utf8_lossy(&res));
         for l in res.split_rn() {
-            if !l.starts_with(b"*") {
-                continue;
-            }
-            if let Ok(mut mailbox) = protocol_parser::list_mailbox_result(l).map(|(_, v)| v) {
-                if let Some(parent) = mailbox.parent {
-                    if let std::collections::hash_map::Entry::Vacant(e) = mailboxes.entry(parent) {
-                        /* Insert dummy parent entry, populating only the children field. Later
-                         * when we encounter the parent entry we will swap its children with
-                         * dummy's */
-                        e.insert(ImapMailbox {
-                            children: vec![mailbox.hash],
-                            ..ImapMailbox::default()
-                        });
-                    } else {
-                        mailboxes
-                            .entry(parent)
-                            .and_modify(|e| e.children.push(mailbox.hash));
-                    }
-                }
-                if let std::collections::hash_map::Entry::Vacant(e) = mailboxes.entry(mailbox.hash)
-                {
-                    e.insert(mailbox);
-                } else {
-                    let entry = mailboxes.entry(mailbox.hash).or_default();
-                    std::mem::swap(&mut entry.children, &mut mailbox.children);
-                    *entry = mailbox;
-                }
-            } else if let Ok(status) = protocol_parser::status_response(l).map(|(_, v)| v) {
-                if let Some(mailbox_hash) = status.mailbox {
-                    if mailboxes.contains_key(&mailbox_hash) {
-                        let entry = mailboxes.entry(mailbox_hash).or_default();
-                        let mut counters = entry.counters.lock().unwrap();
-                        if let Some(total) = status.messages {
-                            counters.total.set_not_yet_seen(total);
-                        }
-                        if let Some(total) = status.unseen {
-                            counters.unseen.set_not_yet_seen(total);
-                        }
-                    }
-                }
-            } else {
+            if !Self::ingest_mailbox_list_line(l, &mut mailboxes) {
                 imap_log!(trace, conn, "parse error for {:?}", l);
             }
         }
