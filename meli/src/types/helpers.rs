@@ -288,6 +288,38 @@ fn cap_filename_component_bytes(value: &mut Cow<'_, str>) {
             end -= 1;
         }
         value.to_mut().truncate(end);
+        // The cut can land right after a `.` that was mid-name in the
+        // full value but is a trailing dot in the capped component;
+        // strip it so the byte cap cannot resurrect the CVE-2002-2351
+        // trailing-dot spelling the pipeline already normalized away.
+        strip_trailing_dots(value);
+    }
+}
+
+/// Strip trailing `.` characters from a filename component.
+///
+/// CVE-2002-2351 (issue #61, Qualcomm Eudora 5.1 on Windows): an
+/// attachment name ending in `.` (`evil.exe.`) or piling up dots
+/// (`evil.exe....`) bypassed Eudora's executable-attachment warning,
+/// because the Win32 file-creation APIs strip trailing dots (and
+/// spaces) from the final path component: the file landed as
+/// `evil.exe` while the warning check saw the `.`-suffixed spelling and
+/// classified its extension as empty/non-executable — a check/use
+/// divergence. A mail-controlled name can land on a filesystem with
+/// Win32 semantics (`/mnt/c` drvfs under WSL, Samba shares, some FUSE
+/// mounts), so the normalizer must produce the component the
+/// filesystem will: strip the trailing dot run here, *after* all other
+/// rules, so the checked/displayed name and the created name agree.
+///
+/// Only the *trailing* run is removed. A mid-name dot pile
+/// (`a.....exe`) and a leading dot (`.hidden`) are ordinary filename
+/// text and stay verbatim; a name that is nothing but dots normalizes
+/// to `""` and is refused by [`sanitize_filename_component`]
+/// (generated-name fallback).
+fn strip_trailing_dots(value: &mut Cow<'_, str>) {
+    let trimmed_len = value.trim_end_matches('.').len();
+    if trimmed_len != value.len() {
+        value.to_mut().truncate(trimmed_len);
     }
 }
 
@@ -379,6 +411,11 @@ pub fn sanitize_filename(value: &mut Cow<'_, str>) {
     replace_all!(regex!(r#"^[!"'/\\]*"#), "");
     replace_all!(regex!(r"(?m)__+"), "_");
     replace_all!(regex!(r#"[!"'/\\]*$"#), "");
+    // CVE-2002-2351 (issue #61): the last rule of the pipeline removes a
+    // trailing dot run, the spelling Win32 file-creation APIs silently
+    // rewrite in the final path component. See [`strip_trailing_dots`]
+    // for the check/use divergence this closes.
+    strip_trailing_dots(value);
 }
 
 /// Sanitize a mail-controlled filename into a single safe path
@@ -816,6 +853,188 @@ mod tests {
         let mut used = std::collections::HashSet::new();
         assert_eq!(unique_filename_component(&mut used, "README"), "README");
         assert_eq!(unique_filename_component(&mut used, "README"), "README_1");
+    }
+
+    /// CVE-2002-2351 regression (issue #61, Eudora 5.1 on Windows): an
+    /// attachment name ending in `.` (`evil.exe.`) or piling up dots
+    /// (`evil.exe....`) bypassed Eudora's executable-attachment warning
+    /// because Win32 file creation strips the trailing dots from the
+    /// final component — the file landed as `evil.exe` while the
+    /// warning check saw the `.`-suffixed spelling (check/use
+    /// divergence). The normalizer must output the component the
+    /// filesystem will create, so the trailing dot run is stripped
+    /// after every other rule. Whitespace is folded to `_` first, a
+    /// mid-name dot pile (`a.....exe`, the CVE-2003-0376 trigger) and a
+    /// leading dot (`.hidden`) stay verbatim, and an all-dot name
+    /// normalizes to `""`.
+    #[test]
+    fn test_sanitize_filename_strips_trailing_dots() {
+        for (raw, sanitized) in [
+            ("evil.exe.", "evil.exe"),
+            ("evil.exe.....", "evil.exe"),
+            ("evil.exe. . .", "evil.exe._._"),
+            ("report.pdf.", "report.pdf"),
+            (".hidden.", ".hidden"),
+            ("a.....exe", "a.....exe"),
+            (".hidden", ".hidden"),
+            ("plain.exe", "plain.exe"),
+            ("....", ""),
+        ] {
+            let mut value = Cow::Borrowed(raw);
+            sanitize_filename(&mut value);
+            assert_eq!(value.as_ref(), sanitized, "sanitize_filename({raw:?})");
+        }
+    }
+
+    /// CVE-2002-2351 regression (issue #61): the component normalizer
+    /// strips the trailing dot run from every corpus spelling so the
+    /// saved name and the checked name agree, refuses the all-dot
+    /// spellings (`""`/`.`/`..`) for the generated-name fallback, and
+    /// leaves mid-name/leading dots alone.
+    #[test]
+    fn test_sanitize_filename_component_strips_trailing_dots() {
+        for (raw, normalized) in [
+            ("evil.exe.", "evil.exe"),
+            ("evil.exe.....", "evil.exe"),
+            ("evil.exe. . .", "evil.exe._._"),
+            ("report.pdf.", "report.pdf"),
+            (".hidden.", ".hidden"),
+            ("a.....exe", "a.....exe"),
+            (".hidden", ".hidden"),
+        ] {
+            let mut value = Cow::Borrowed(raw);
+            assert!(
+                sanitize_filename_component(&mut value),
+                "{raw:?} must remain a usable name"
+            );
+            assert_eq!(
+                value.as_ref(),
+                normalized,
+                "sanitize_filename_component({raw:?})"
+            );
+        }
+
+        // A name made only of dots normalizes to nothing and is refused
+        // so the caller falls back to a generated name.
+        for raw in [".", "..", "...", "........"] {
+            let mut value = Cow::Borrowed(raw);
+            assert!(
+                !sanitize_filename_component(&mut value),
+                "{raw:?} must be refused as a file name"
+            );
+        }
+    }
+
+    /// CVE-2002-2351 regression (issue #61): over-length names end at
+    /// the 192-byte cap, and the cut can land right after a `.` that
+    /// was mid-name in the full value — the cap must not resurrect the
+    /// trailing-dot spelling the normalizer already removed.
+    #[test]
+    fn test_sanitize_filename_component_cap_keeps_no_trailing_dot() {
+        for raw in [
+            // The 192nd byte is the `.` of `...b`.
+            format!("{}...b", "a".repeat(190)),
+            // The 192nd byte is the `.` before `b`.
+            format!("{}.b", "a".repeat(191)),
+            // The 192nd byte is the `.` before a long suffix.
+            format!("{}.{}", "a".repeat(191), "c".repeat(100)),
+        ] {
+            let mut value = Cow::Borrowed(raw.as_str());
+            assert!(
+                sanitize_filename_component(&mut value),
+                "{} bytes must remain a usable name",
+                raw.len()
+            );
+            let out = value.as_ref();
+            assert!(
+                !out.ends_with('.'),
+                "the cap must not leave a trailing dot: {out:?}"
+            );
+            assert!(
+                out.len() <= FILENAME_COMPONENT_MAX_BYTES,
+                "{out:?} must stay capped"
+            );
+            assert!(out.starts_with('a'), "{out:?} must keep its head");
+        }
+    }
+
+    /// CVE-2002-2351 regression (issue #61): the default temp-file
+    /// landing for the canonical `evil.exe.` hint strips the trailing
+    /// dot first, so `randomized_temp_component` sees a real extension:
+    /// the landing is `evil_<32 hex>.exe` — no trailing dot, the `.exe`
+    /// extension visible (the "detection after normalization" surface),
+    /// under `<temp_dir>/meli`, owner-private and never executable.
+    #[cfg(unix)]
+    #[test]
+    fn test_create_temp_file_strips_trailing_dot_hint() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let first = File::create_temp_file(b"one", Some("evil.exe."), None, None, false).unwrap();
+        let second = File::create_temp_file(b"two", Some("evil.exe."), None, None, false).unwrap();
+        assert_ne!(
+            first.path(),
+            second.path(),
+            "the random UUID infix must differ between landings"
+        );
+
+        let temp_root = std::env::temp_dir().join("meli");
+        for file in [&first, &second] {
+            let path = file.path();
+            assert!(
+                path.starts_with(&temp_root),
+                "must land under <temp_dir>/meli, got {}",
+                path.display()
+            );
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(
+                !name.ends_with('.'),
+                "the landing must not carry the trailing dot: {name:?}"
+            );
+            assert!(
+                name.ends_with(".exe"),
+                "the normalized extension must stay visible: {name:?}"
+            );
+            let stem = name.strip_suffix(".exe").unwrap();
+            assert!(stem.starts_with("evil_"), "{name:?}");
+            let infix = stem
+                .rsplit_once('_')
+                .expect("the UUID infix must be present")
+                .1;
+            assert_eq!(infix.len(), 32, "UUID infix width: {name:?}");
+            assert!(
+                infix
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "UUID infix must be lowercase hex: {name:?}"
+            );
+            let mode = std::fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{name:?} must be owner-private");
+            assert_eq!(mode & 0o111, 0, "{name:?} must not be executable");
+        }
+        assert_eq!(std::fs::read(first.path()).unwrap(), b"one");
+        assert_eq!(std::fs::read(second.path()).unwrap(), b"two");
+        let _ = std::fs::remove_file(first.path());
+        let _ = std::fs::remove_file(second.path());
+    }
+
+    /// CVE-2002-2351 regression (issue #61): the twin spellings
+    /// `evil.exe` and `evil.exe.` normalize to the same component and
+    /// must both land — the second takes the `_1` suffix inserted before
+    /// its extension — instead of colliding at the filesystem.
+    #[test]
+    fn test_unique_filename_component_dedups_trailing_dot_twin() {
+        fn sanitize_and_claim(used: &mut std::collections::HashSet<String>, raw: &str) -> String {
+            let mut name = Cow::Borrowed(raw);
+            assert!(sanitize_filename_component(&mut name), "{raw:?} is usable");
+            unique_filename_component(used, name.as_ref())
+        }
+
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(sanitize_and_claim(&mut used, "evil.exe"), "evil.exe");
+        assert_eq!(sanitize_and_claim(&mut used, "evil.exe."), "evil_1.exe");
+        assert_eq!(sanitize_and_claim(&mut used, "evil.exe...."), "evil_2.exe");
+        assert_eq!(sanitize_and_claim(&mut used, "report.pdf"), "report.pdf");
+        assert_eq!(sanitize_and_claim(&mut used, "report.pdf."), "report_1.pdf");
     }
 
     /// A mail-controlled name hint that sanitizes down to `""`/`.`/`..`
