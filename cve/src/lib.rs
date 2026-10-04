@@ -1720,3 +1720,37 @@ mod cve_2007_4040;
 #[cfg(test)]
 #[path = "CVE-2007-2225.rs"]
 mod cve_2007_2225;
+
+/// CVE-2007-2227（Outlook Express 5.5–6 / Windows Mail；MS07-034，NVD 未分配
+/// CVSS 分数）MHTML 协议跨域信息泄露 regression（issue #67，表 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入）：与 CVE-2007-2225（issue #66）
+/// 同属 MS07-034 家族（另见 CVE-2008-1448）。MHTML 协议处理器对 UNC 路径与
+/// `Content-Disposition` 处理不当，跨 IE 安全域读取本地 / 他域内容；本 CVE 的
+/// 攻击语料是 MHTML 文档内嵌的本地资源引用协议 `res:`（`res://…shdoclc.dll/
+/// …htm` 指向系统 DLL 内嵌资源页）与 `mk:`（`mk:@MSITStore:…chm::/…htm` 经
+/// HTML Help moniker 读取 `.chm`），以及时代同族 `its:` / `ms-its:`。meli 是
+/// 终端客户端，没有 MHTML 协议处理器、没有 IE 安全域、没有 COM/URL moniker
+/// （`res:`/`mk:` 依赖的 MSITStore），字面的「`mhtml:` → IE 跨域读取本地资源」
+/// 站点不存在；issue 指定的等价面是链接 scheme 白名单
+/// （`meli/src/mail/view/envelope.rs` 的 `is_default_launchable_scheme` /
+/// `url_scheme`，与 `meli/src/mail/view/html_render.rs` 的 `sanitize` ammonia
+/// `url_schemes` 白名单），预期断言为白名单拒绝 `res:`/`mk:` 等本地资源 scheme、
+/// 其余仅纯文本显示。[`cve_2007_2227`] 以内嵌 `multipart/alternative` 语料与
+/// 帮助文档镜像语料逐层锁定为**免疫证明，未发现缺口，无需改动生产代码**：L1
+/// 语料是真实载体（melib 解析、双路负载逐字在场、`List-*` 头部逐字抵达）；
+/// L2 启动门对 `res:`/`mk:`/`mhtml:`/`its:`/`ms-its:` 的规范形态、资源 ID 变体、
+/// 大小写、percent-编码、query、fragment、复合变体全拒、裸 UNC 解析为无 scheme、
+/// 良性 `https`/`http`/`mailto` 全放；L3 URL 模式提取只提取带 `://` 的
+/// `res://…`（落后于确认门）、`mhtml:res://…` 剥前缀后与裸 `res://` 同类，
+/// `mk:`/`its:`/`ms-its:`/裸 UNC 不提取而只落到 `mk:…http://` 的普通 http 余项，
+/// 即「仅以纯文本显示」；L4 HTML 镜像的本地资源 href 全部死于 sanitize、锚文本
+/// 留为惰性散文；L5 `unsubscribe_action` 跳过 `res:`/`mk:` 选项落到合法
+/// `https:`、`List-Archive` 拒绝 `res:`、`mailto:` 仍胜出为内部写信；L6 诚实
+/// 载体每一层保持可用；L7 内嵌帮助文档镜像与 base64 stub 以
+/// `Content-Disposition: attachment` 归类为惰性附件、不自动打开 / 执行，其
+/// html 叶子经同一 sanitize 管道无 `res:`/`mk:` 幸存，外联正文不含负载。
+///
+/// [`cve_2007_2227`]: self::cve_2007_2227
+#[cfg(test)]
+#[path = "CVE-2007-2227.rs"]
+mod cve_2007_2227;
