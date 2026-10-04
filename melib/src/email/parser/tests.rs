@@ -684,6 +684,45 @@ fn test_email_parser_msg_id() {
     assert_eq!(e, "<b@[dot-atom-literal]>");
 }
 
+/// CVE-2003-0336 (issue #62): a `Message-ID` value carrying a bare `CR`
+/// survives `header_value()` (it only ends at `LF`/`CRLF`), the
+/// `msg_id` grammar rejects it, and the `Envelope::set_message_id`
+/// error-recovery fallback used to store the raw control byte — which
+/// the reply composer's `In-Reply-To`/`References` producers then
+/// carried into outbound header values (CWE-93). `MessageID::new` now
+/// strips `CR`/`LF` at the storage boundary, so the fallback is clean;
+/// a syntactically valid `msg-id` stays byte-identical (no valid
+/// `msg-id` contains `CR`/`LF`, so the normal path is untouched).
+#[test]
+fn test_email_envelope_message_id_strips_cr() {
+    let raw = b"From: a@b.example\r\nMessage-ID: <a@b\rc>\r\n\r\nbody\r\n";
+    let env = crate::email::Envelope::from_bytes(raw, None)
+        .expect("the CR-injected Message-ID mail must still parse");
+    assert!(
+        !env.message_id().as_str().contains('\r'),
+        "the stored Message-ID must not contain a bare CR: {:?}",
+        env.message_id().as_str()
+    );
+    assert!(!env.message_id().as_str().contains('\n'));
+    assert_eq!(env.message_id().as_str(), "a@bc");
+    assert_eq!(env.message_id().display_brackets().to_string(), "<a@bc>");
+
+    // The grammar-valid path is byte-identical.
+    let raw = b"From: a@b.example\r\n\
+                Message-ID: <20170825132332.6734-1@example.com>\r\n\
+                \r\n\
+                body\r\n";
+    let env = crate::email::Envelope::from_bytes(raw, None).expect("valid mail must parse");
+    assert_eq!(
+        env.message_id().as_str(),
+        "20170825132332.6734-1@example.com"
+    );
+    assert_eq!(
+        env.message_id().display_brackets().to_string(),
+        "<20170825132332.6734-1@example.com>"
+    );
+}
+
 #[test]
 fn test_email_parser_dates_date_new() {
     let s = b"Thu, 31 Aug 2017 13:43:37 +0000 (UTC)";
