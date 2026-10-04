@@ -1390,3 +1390,61 @@ mod cve_2002_1770;
 #[cfg(test)]
 #[path = "CVE-2024-37385.rs"]
 mod cve_2024_37385;
+
+/// CVE-2002-1210 (Qualcomm Eudora 5.1.1 / 5.2, Windows; no CVSS score
+/// assigned) predictable-attachment-path + frame-based local-file-read
+/// regression (issue #59, table 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 / web/HTML embedding):
+/// Eudora stored an attachment at a sender-predictable path, and a
+/// malicious HTML mail used links/frames (`<a href="file://…">`,
+/// `<iframe src="file://…">`, `<frameset><frame src=…>`) to load that
+/// attachment through `file://` into the local browser context, where
+/// the attachment's script could read and exfiltrate arbitrary local
+/// files. meli links no browser engine, DOM, CSS/JS runtime or media
+/// decoder, so the issue's three-layer equivalent surface is mapped and
+/// locked by [`cve_2002_1210`]:
+///
+/// 1. **The rich-context half is immune by construction** — meli's only
+///    HTML display pipeline is [`sanitize`] (ammonia allowlist) →
+///    [`render`] (html2text → plain terminal text). The tag allowlist
+///    holds no `iframe`/`frame`/`frameset`/`object`/`embed`/`script`
+///    (removed with their content), the URL-scheme allowlist is only
+///    `http`/`https`/`mailto` (every `file:` spelling — casing, drive
+///    path, staging-dir path — is dropped), and the output is plain
+///    text with no scripting engine to run the attachment script. No
+///    embedding container or `file:` reference survives `sanitize`, the
+///    `sanitize` output is a fixed point, and no attachment script
+///    marker reaches rendered text.
+/// 2. **The launch gate is immune** — even a surviving `file:` link is
+///    held by the OS url-launcher gate
+///    ([`is_default_launchable_scheme`] / [`url_scheme`]): `file:`
+///    (any casing/spelling) is not in `DEFAULT_LAUNCHABLE_SCHEMES` and
+///    needs an explicit per-URL confirmation, while an honest
+///    `http://attacker.example/collect` stays launchable. Wall locked
+///    by the CVE-2008-0039 corpus (issue #33).
+/// 3. **The predictable-path half was a real gap** —
+///    [`File::create_temp_file`] used to land a hint-bearing name
+///    verbatim at `<temp_dir>/meli/<mail-controlled name>`, exactly the
+///    Eudora precondition; the parallel issue-59-fix branch randomizes
+///    the default landing component to
+///    `stem_<32 lowercase hex UUID infix>.<ext>` and tightens the
+///    `<temp_dir>/meli` staging directory to `0o700` (it used to follow
+///    the process umask, usually `0o755`, letting other local users
+///    list a victim's landed attachment names — this CVE's
+///    information-leak face). The `temp_landing_path_is_unpredictable_and_private`
+///    regression asserts that post-fix contract, so it is expected to
+///    fail in this corpus-only worktree until issue-59-fix merges; the
+///    remaining tests lock the two immune layers on the full
+///    `multipart/mixed` corpus (HTML body with every carrier plus the
+///    `eudora_leak.htm` attachment carrying the classic
+///    `XMLHttpRequest` → `file://` → exfil script).
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+/// [`url_scheme`]: meli::mail::view::envelope::url_scheme
+/// [`File::create_temp_file`]: meli::types::File::create_temp_file
+/// [`cve_2002_1210`]: self::cve_2002_1210
+#[cfg(test)]
+#[path = "CVE-2002-1210.rs"]
+mod cve_2002_1210;
