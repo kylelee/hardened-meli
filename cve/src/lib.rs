@@ -1796,3 +1796,28 @@ mod cve_2007_2227;
 #[cfg(test)]
 #[path = "CVE-2008-1448.rs"]
 mod cve_2008_1448;
+/// CVE-2021-37746（Claws Mail < 3.18.0、Sylpheed ≤ 3.7.0；CVSS 6.1，NVD）链接
+/// 校验不足 regression（issue #69，表 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// 网页嵌入）：点击链接前的 URI 检查不充分，伪装链接（钓鱼）可达成本地资源。
+/// issue 指定攻击样例三件套：伪装链接 `<a href="http://evil.example">
+/// http://bank.example</a>`、Unicode 同形字符（西里尔 а U+0430）、U+202E 右向
+/// 覆盖（RLO）。[`cve_2021_37746`] 以内嵌 `multipart/alternative` 语料逐层锁定
+/// 为**免疫证明，未发现缺口，无需改动生产代码**：CVE 根因是「展示的链接文字」
+/// 与「实际打开的 URI」分叉而点击前不校验；meli 链接面不存在这一分叉——可启动
+/// 链接值永远是展示文本的逐字节子串（URL 模式 linkify 扫描对象就是 pager 显示
+/// 的同一字符串，编号标记插在链接字节前），HTML 锚点的 href——唯一分叉点——被
+/// html2text plain() 配置以编号脚注逐字节展示（防钓鱼可见性设计）。sanitize
+/// 把伪装本地资源（file:）与 host 内 bidi 控制符（UTS #46/IDNA 拒绝）的 href
+/// 整体杀死（伪装目标渲染前不可达），前缀 Cf 被 attribute trim 剥净，存活
+/// href（同形字符 host、path 内 RLO——尾部 Cf 被 trim）逐字节可见可点；
+/// mailto 脚注只产出裸 email 类链接；启动门按可见 scheme 分类（前缀 Cf、
+/// file: 落逐 URL 确认门后）；诚实对照每层可用。展示字节恒等启动字节的 argv
+/// 契约由仓内孪生单测 `go_to_url_disguised_lookalike_urls_are_one_literal_argv_element`
+/// （`meli/src/mail/view/tests.rs`）锁定。meli 自身按逻辑序渲染、不做 bidi
+/// 重排；双感知终端的视觉重排发生在 meli 之外，但展示与启动恒等——终端显示
+/// 什么就启动什么。
+///
+/// [`cve_2021_37746`]: self::cve_2021_37746
+#[cfg(test)]
+#[path = "CVE-2021-37746.rs"]
+mod cve_2021_37746;
