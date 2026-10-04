@@ -1754,3 +1754,45 @@ mod cve_2007_2225;
 #[cfg(test)]
 #[path = "CVE-2007-2227.rs"]
 mod cve_2007_2227;
+
+/// CVE-2008-1448（Outlook Express 5.5 SP2 / 6 SP1 与 Windows Mail；Microsoft
+/// 公告 MS08-048，CVSS v2 7.1 HIGH AV:N/AC:M/Au:N/C:C/I:N/A:N，CWE-264，发布
+/// 2008-08-12；aka "URL Parsing Cross-Domain Information Disclosure
+/// Vulnerability"）MHTML 协议跨域信息泄露 regression（issue #68，表 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入）：与 CVE-2007-2225（issue #66）、
+/// CVE-2007-2227（issue #67）同属 MS07-034 / MS08-048 的 MHTML 跨域家族。MHTML
+/// 协议处理器未给 UNC 共享路径分配正确的 IE 安全域，且未正确处理 MHTML URL
+/// 重定向，远程攻击者借 `mhtml:` URI + 重定向绕过 IE 域限制读取任意文件；本
+/// CVE 的特有向量是 UNC 安全域错配（`mhtml:file://\\host\share\…`）、MHTML URL
+/// 重定向 + 构造 HTTP 头（`mhtml:http://…/redirect.mhtml!http://victim/…`）与
+/// multipart 部件引用（`mhtml:http://x.example/a.html!cid`，`!` 后是
+/// Content-Location / Content-ID 部件定位，配合 `Content-Disposition` 语义跨域
+/// 读取）。meli 是终端客户端，没有 MHTML 协议处理器、没有 IE 安全域、没有
+/// COM/URL moniker，字面的「`mhtml:` → IE 跨域读取」站点不存在；issue 指定的
+/// 等价面是链接 scheme 白名单（`meli/src/mail/view/envelope.rs` 的
+/// `is_default_launchable_scheme` / `url_scheme`，与
+/// `meli/src/mail/view/html_render.rs` 的 `sanitize` ammonia `url_schemes`
+/// 白名单 http/https/mailto），预期断言为白名单拒绝 `mhtml:` 的全部形态（含 `!`
+/// 部件引用后缀）、无跨域读取通路、其余仅纯文本显示。[`cve_2008_1448`] 以内嵌
+/// `multipart/alternative` 语料与「构造 multipart 部件引用」`.mht` 归档语料逐层
+/// 锁定为**免疫证明，未发现缺口，无需改动生产代码**：L1 语料是真实载体（melib
+/// 解析、双路负载逐字在场、`List-*` 头部逐字抵达）；L2 启动门对规范 `!cid` 部件
+/// 引用、cid 值 / 他域部件变体、`!!` 双跳、UNC 错配、重定向、本地文件部件、
+/// 大小写、percent-编码、query、fragment 全拒、裸 UNC 解析为无 scheme、良性
+/// `https`/`http`/`mailto` 全放；L3 URL 模式提取从不保留 `mhtml:` 前缀
+/// （`mhtml:http://…!cid` 剥前缀后是普通 `http://…!cid`、`!cid` 只是惰性路径
+/// 字节，`mhtml:file://…` 余项落后于确认门、反斜杠主体 / 裸 UNC 不提取而只落到
+/// `!` 后的普通 http(s) 尾巴）；L4 HTML 镜像的 `mhtml:` href 全部死于 sanitize，
+/// `<meta http-equiv="refresh">` 重定向元素因不在 ammonia 标签白名单里整体死亡，
+/// 锚文本留为惰性散文；L5 `unsubscribe_action` 跳过 `mhtml:` 选项落到合法
+/// `https:`、`List-Archive` 拒绝 `mhtml:`、`mailto:` 仍胜出为内部写信；L6 诚实
+/// 载体每一层保持可用；L7 内嵌 `.mht` 归档以 `Content-Disposition: attachment`
+/// 归类为惰性附件、不自动打开 / 执行，其 html 叶经同一 sanitize 管道无 `mhtml:`
+/// 幸存，Content-Location / Content-ID 头部字节永不流入链接面（对每个文本部件跑
+/// URL 模式提取，没有任何链接值等于只存在于头部的受害者域 URL，证明无跨域读取
+/// 通路），构造的 `Content-Disposition` 部件字节保持休眠附件。
+///
+/// [`cve_2008_1448`]: self::cve_2008_1448
+#[cfg(test)]
+#[path = "CVE-2008-1448.rs"]
+mod cve_2008_1448;
