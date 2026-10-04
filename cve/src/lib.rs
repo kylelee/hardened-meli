@@ -1520,3 +1520,46 @@ mod cve_2001_1326;
 #[cfg(test)]
 #[path = "CVE-2002-2351.rs"]
 mod cve_2002_2351;
+
+/// CVE-2003-0336（Qualcomm Eudora 5.2.1，Windows；NVD 未分配 CVSS 分数）
+/// 伪造 `Attachment Converted:` 标记裸 `CR` 注入 / 任意文件读取 regression
+/// （issue #62，表 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code
+/// execution family，任意文件读取面）：Eudora 在把 MIME 附件转存为本地
+/// 文件后会向邮箱写一行 `Attachment Converted<CR>: "C:\path"` 元数据；其
+/// 邮箱解析把裸 `CR`（回车 0x0D）当行终止符（mbox / 老式 Mac 行尾语义），
+/// 于是攻击者在邮件里注入同样字节串时，伪造标记会被当成独立的头 / mbox
+/// 元数据行，Eudora 随后把引号里的任意本地路径当「已转换附件」读取——任意
+/// 文件读取；也可用 `Attachment Converted<CR>:` 名内 CR 拼写绕过只按 `\n`
+/// 切分的检查（Paul Szabo 2003-05 bugtraq 系列，与同族 CVE-2003-0376 的
+/// [`cve_2003_0376`] 同一份报告）。
+///
+/// meli 等价面与结论：meli 全仓库没有 Eudora 的 `Attachment Converted`
+/// 转换步骤，也没有「邮箱元数据行 → 本地附件路径」这一层；`header_value()`
+/// 只在 `LF`/`CRLF` 结束头值，裸 `CR` 留在头值内部，绝不切分新头，名内
+/// CR 拼写被 `is_ctl_or_space!` 确定性拒绝；头值进 `Envelope` 时 `phrase`
+/// 把中间 CR 折叠为单空格、首尾剥离，地址显示名另有 `sanitize_display_name`
+/// 剥 C0，附件落盘名经 [`sanitize_filename_component`]。本次发现真实缺口：
+/// `Envelope::set_message_id` 的 `msg_id` 语法失败回退分支
+/// `MessageID::new(String::from_utf8_lossy(new_val))` 原样保留裸 `CR`，
+/// 攻击邮件 `Message-ID: <a@b<CR>c>` 让结构字段 `message_id` 存入裸 CR，
+/// `Draft::new_reply` 再把它原样写进回复的 `In-Reply-To` / `References`，
+/// `finalise()` 的 CWE-93 chokepoint 因此永远拒绝发送——邮件控制的裸 CR
+/// 是全部代码里唯一存活进外发头值生产者的点，与 Eudora 把裸 CR 当行终止
+/// 符的根因同族（fail-closed 可用性破坏）。修复：`MessageID::new`
+/// （`melib/src/email/address.rs`）在存储边界剥离 `CR`/`LF`，参照同文件
+/// `sanitize_display_name` 的清洗先例；语法合法 `msg-id` 不含 CR/LF，正常
+/// 路径逐字节不变。孪生单测
+/// `melib/src/email/parser/tests.rs::test_email_envelope_message_id_strips_cr`。
+/// [`cve_2003_0336`] 以内嵌攻击语料逐层锁定：L1 语法墙（名内 CR 确定性
+/// 失败、CR 切分注入绝不诞生新头、裸 CR 行块只塌缩成一个头）、L2 无路径
+/// 语义（正文位标记惰性、不派生附件 / 文件名、`<tmp>/meli` 不变、显示为
+/// 折叠纯文本）、L3 外发墙与缺口回归（修复后回复头无 CR 且 `finalise` 为
+/// `Ok`，手工含 CR 头值仍被拒绝）、L4 附件名面（wire 逐字保真，展示 /
+/// 落盘组件剥控制字符且为单一组件）。
+///
+/// [`cve_2003_0376`]: self::cve_2003_0376
+/// [`cve_2003_0336`]: self::cve_2003_0336
+/// [`sanitize_filename_component`]: meli::types::sanitize_filename_component
+#[cfg(test)]
+#[path = "CVE-2003-0336.rs"]
+mod cve_2003_0336;
