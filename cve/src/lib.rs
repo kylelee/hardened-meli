@@ -1921,3 +1921,58 @@ mod cve_2015_7609;
 #[cfg(test)]
 #[path = "CVE-2008-2248.rs"]
 mod cve_2008_2248;
+
+/// CVE-2015-8864（Roundcube &lt; 1.0.9 / 1.1.x &lt; 1.1.5；NVD 未分配 CVSS 分数；
+/// 同族 CVE-2016-4068）邮件内 SVG XSS regression（issue #72，表 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 / web/HTML embedding）：NVD 记录，
+/// 攻击者在一封普通邮件里放入构造的 SVG 文档（正文内联或作为 `image/svg+xml`
+/// 附件），Roundcube 未充分清洗即把邮件交给浏览器，SVG 命名空间里的脚本 / 事件
+/// 属性 / 危险 URL 在 webmail 页面里执行；SVG 因自身命名空间与解析差异，是绕过
+/// 「HTML 标签白名单」的经典载体。
+///
+/// meli 等价面映射（issue #72 明确要求）：meli 是终端邮件客户端，**没有 webmail
+/// 功能面**——没有 HTTP 页面、会话 Cookie、浏览器 DOM、SVG 渲染器或 JavaScript
+/// 引擎。邮件 HTML 唯一的消费通路是邮件视图的显示管线 [`sanitize`]（ammonia
+/// 白名单：html5ever 恰好一次解析 → 过滤树 → 带转义再序列化）→ [`render`]
+/// （html2text → 纯终端文本）：`script`/`style` 属 `clean_content_tags` 连内容
+/// 整体删除，SVG foreign content 里的 `script` 仍按本地名命中；`svg`/
+/// `foreignObject`/`animate`/`set`/`image`/`use`/`feImage` 等非白名单元素删除、
+/// 仅保留再次清洗并转义的子文本；`tag_attributes` 是整体替换（只留
+/// `a[href]`/`a[title]`，通用属性 `{lang,title}`），SVG 事件与动画属性无处存活；
+/// `url_schemes` 只有 http/https/mailto，`xlink:href` / SVG `image href` / `use
+/// href` / 动画 `values` 里的 `javascript:` 与 `data:image/svg+xml,…` 一并死亡，
+/// meli 的 `attribute_filter` 在 trim 首尾 Cf / 控制符 / 空白后**重新校验** href
+/// （CVE-2025-66376 硬化）；sanitize 输出再交给 html2text 降成终端文本，没有
+/// 第二次“浏览器 / SVG 解析”可供碎片重组，也没有任何脚本 / URL scheme 执行器。
+///
+/// [`cve_2015_8864`] 以内嵌 `multipart/alternative` 语料（plain + html 双叶）与
+/// 带 `image/svg+xml` 附件叶的 `multipart/mixed` 语料逐层锁定为**免疫证明，
+/// 未发现缺口，无需改动生产代码**。语料与 CVE-2015-7609（issue #70，Zimbra）、
+/// CVE-2008-2248（issue #71，OWA）互补不重复，SVG 专精深挖：a SVG 内 `script`
+/// （issue 指定原形、大小写 / 属性 / 实体混淆、嵌套 SVG、`foreignObject`、
+/// 未闭合吞尾）；b SVG 事件属性全家族（issue 指定 `<svg onload=…>` 原形与
+/// `onbegin`/`onend`/`onrepeat`/`onactivate`/`onfocusin`/`onfocusout`/`onerror`/
+/// `onanimation*`/`ontoggle` 等，挂 `<svg>` 根与 `<animate>`/`<set>`/`<image>`/
+/// `<use>`/`<foreignObject>`/`<a xlink:href>` 载体）；c SVG 载体危险 URL
+/// （`xlink:href="javascript:…"` 混淆、`<use xlink:href="data:image/svg+xml,…">`、
+/// `<image href="javascript:…">`、动画 `values` 注入、HTML 锚点上的 SVG data
+/// URL）；d SVG mXSS 近亲（`<svg><style>` 属性逃逸、SVG 内 CDATA、注释切分
+/// `<s<!--c-->vg onload=…>`、`foreignObject` + `style`、`attributeName=onload`/
+/// `xlink:href` 动画注入、`title` 突围）；e 实体转义 / 双编码文本与惰性 href
+/// 边界。分层：L1 melib 解析出双叶 / 三叶且全部攻击字节逐字在场，`image/svg+xml`
+/// 附件归类为 `ContentDisposition::Attachment` 惰性附件、其脚本字节绝不进入
+/// HTML 显示管线；L2 sanitize 输出无任何非白名单 SVG 标签 / `xlink:href` /
+/// `on*` / 禁止属性 / 活的危险 scheme href 且为不动点；L3 render 里真实 SVG
+/// 脚本体整体消失、事件属性值不出现、危险 scheme 不生成脚注，SVG CDATA / 实体
+/// 转义只解出惰性字面字符串（显式记录该非对称点），惰性边界的 `url_scheme` 为
+/// `None` 且确认门拒绝；L4 整封攻击邮件端到端纯文本且诚实 `http`/`https`/`mailto`
+/// 链接保持可用（sanitize 保留、render 脚注可见、`is_default_launchable_scheme`
+/// 放行），`l4_webmail_script_pathway` 的注释记录全仓无 webmail / 浏览器 / SVG
+/// 渲染器 / JS 引擎通路的映射依据。仓内孪生改动：无（免疫证明，未触碰生产代码）。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2015_8864`]: self::cve_2015_8864
+#[cfg(test)]
+#[path = "CVE-2015-8864.rs"]
+mod cve_2015_8864;
