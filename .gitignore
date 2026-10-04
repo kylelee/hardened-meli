@@ -33,3 +33,6 @@ log
 
 # AI worktrees
 .worktree
+
+# AI agent worktrees
+.worktree/
