@@ -719,6 +719,34 @@ fn write_leave_alternate_screen(out: &mut impl Write, mouse: bool) {
     }
 }
 
+/// Strip the characters that would let a configuration string break
+/// out of an OSC string body: Unicode control characters (C0 U+0000..U+001F,
+/// DEL U+007F, C1 U+0080..U+009F — `char::is_control`). BEL terminates an
+/// OSC string and `ESC \\` (ST) closes one, and every other control byte is
+/// a live terminal directive with no business in a window title.
+/// CVE-2024-37384 (issue #74): preference values must never smuggle
+/// terminal control sequences into the tty byte stream.
+pub fn sanitize_osc_payload(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().all(|c| !c.is_control()) {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        std::borrow::Cow::Owned(s.chars().filter(|c| !c.is_control()).collect())
+    }
+}
+
+/// Write the OSC 2 "set window title" sequence with the payload
+/// sanitized (see [`sanitize_osc_payload`]). A title that sanitizes to
+/// empty writes nothing. This is the only place the user-configured
+/// `terminal.window_title` becomes wire bytes; it used to be
+/// interpolated raw (CVE-2024-37384, issue #74).
+pub fn write_set_window_title(out: &mut impl Write, title: &str) {
+    let sanitized = sanitize_osc_payload(title);
+    if sanitized.is_empty() {
+        return;
+    }
+    write!(out, "\x1b]2;{sanitized}\x07").unwrap();
+}
+
 /// Write the escape sequences that claim the alternate screen
 /// ([`Screen::switch_to_alternate_screen`]), in wire order.
 ///
@@ -740,17 +768,10 @@ fn write_enter_alternate_screen(out: &mut impl Write, mouse: bool, window_title:
         EnableBracketedPaste
     )
     .unwrap();
-    write!(
-        out,
-        "{save_wraparound}{window_title}",
-        save_wraparound = SaveWraparoundMode,
-        window_title = if let Some(title) = window_title {
-            format!("\x1b]2;{title}\x07")
-        } else {
-            String::new()
-        },
-    )
-    .unwrap();
+    write!(out, "{}", SaveWraparoundMode).unwrap();
+    if let Some(title) = window_title {
+        write_set_window_title(out, title);
+    }
     queue!(out, DisableLineWrap).unwrap();
     // Drain stack entries a child may have left behind, then push ours so
     // the stack depth stays exactly one however often the screen is
@@ -1938,5 +1959,101 @@ mod tests {
             elapsed < Duration::from_millis(1000),
             "query blocked too long: {elapsed:?}"
         );
+    }
+
+    /// The exact terminal-injection analogue of CVE-2024-37384 (issue
+    /// #74): a `terminal.window_title` preference carrying terminal
+    /// control sequences must not be able to terminate the OSC 2 string
+    /// early and turn its tail into live terminal directives. Each corpus
+    /// title is run through the full `write_enter_alternate_screen` wire
+    /// path (both mouse modes), and the emitted byte stream is required
+    /// to contain exactly one OSC 2 opener, exactly one BEL terminator,
+    /// and a body whose every character is a non-control character
+    /// equal to the title with its control characters removed — the
+    /// inert printable residue. Any early OSC termination (BEL or ST)
+    /// would either add a second BEL or leave live bytes after the
+    /// opener.
+    #[test]
+    fn window_title_control_bytes_cannot_break_out_of_osc2() {
+        let strip = |s: &str| -> String { s.chars().filter(|c| !c.is_control()).collect() };
+        // BEL-terminate + CSI erase + OSC 0 retitle + OSC 52 clipboard
+        // write + RIS reset; ST-terminate; C1 CSI; newline/tab/NUL; and
+        // the bare OSC 0/8/52, RIS and DCS directives on their own.
+        let corpus: &[&str] = &[
+            "meli\x07\x1b[2J\x1b[H\x1b]0;pwned\x07\x1b]52;c;aGF4\x07\x1bc",
+            "x\x1b\\\x1b[?1049h",
+            "y\u{9b}31m",
+            "a\nb\tc",
+            "nul\0tail",
+            "\u{1b}]0;evil\u{7}",
+            "\u{1b}]8;;https://evil.example\u{7}x\u{1b}]8;;\u{7}",
+            "\u{1b}]52;c;aGF4\u{7}",
+            "\u{1b}c",
+            "\u{1b}P1;2q\u{1b}\\",
+        ];
+        const OPENER: &[u8] = b"\x1b]2;";
+        for title in corpus {
+            let expected = strip(title);
+            assert!(
+                !expected.is_empty(),
+                "corpus titles must leave visible residue"
+            );
+            for mouse in [false, true] {
+                let mut out = Vec::new();
+                write_enter_alternate_screen(&mut out, mouse, Some(title));
+                assert_eq!(
+                    out.windows(OPENER.len()).filter(|w| *w == OPENER).count(),
+                    1,
+                    "exactly one OSC 2 opener expected for {title:?}: {out:?}"
+                );
+                assert_eq!(
+                    out.iter().filter(|&&b| b == 0x07).count(),
+                    1,
+                    "exactly one BEL terminator expected for {title:?}: {out:?}"
+                );
+                let body_start = out
+                    .windows(OPENER.len())
+                    .position(|w| w == OPENER)
+                    .expect("the opener was counted above")
+                    + OPENER.len();
+                let bel = out[body_start..]
+                    .iter()
+                    .position(|&b| b == 0x07)
+                    .expect("the terminator was counted above")
+                    + body_start;
+                let body = std::str::from_utf8(&out[body_start..bel])
+                    .expect("the sanitized title body is valid UTF-8");
+                assert!(
+                    body.chars().all(|c| !c.is_control()),
+                    "no control character may survive in the OSC 2 body: {body:?}"
+                );
+                assert_eq!(
+                    body, expected,
+                    "the body must be the title with control characters removed"
+                );
+            }
+        }
+    }
+
+    /// The honest title path is byte-for-byte unchanged, and a title that
+    /// is only control characters writes no OSC 2 sequence at all.
+    #[test]
+    fn window_title_honest_value_is_unchanged() {
+        let mut out = Vec::new();
+        write_enter_alternate_screen(&mut out, false, Some("meli"));
+        assert!(
+            out.windows(b"\x1b]2;meli\x07".len())
+                .any(|w| w == b"\x1b]2;meli\x07"),
+            "the honest title must be emitted exactly: {out:?}"
+        );
+
+        for mouse in [false, true] {
+            let mut out = Vec::new();
+            write_enter_alternate_screen(&mut out, mouse, Some("\x07\x1b\u{1b}"));
+            assert!(
+                !out.windows(b"\x1b]2;".len()).any(|w| w == b"\x1b]2;"),
+                "a control-only title must emit no OSC 2 sequence: {out:?}"
+            );
+        }
     }
 }

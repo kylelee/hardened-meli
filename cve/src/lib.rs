@@ -2033,3 +2033,27 @@ mod cve_2015_8864;
 #[cfg(test)]
 #[path = "CVE-2016-4068.rs"]
 mod cve_2016_4068;
+
+/// CVE-2024-37384（Roundcube &lt; 1.5.7 / 1.6.x &lt; 1.6.7；CVSS 6.1，NVD）偏好
+/// 字段 XSS regression（issue #74，表 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// 网页嵌入）：Roundcube 把用户偏好里的列表列设置原样拼进 webmail HTML 页面
+/// 而不过滤，偏好字段因此成为脚本注入点。meli 无 webmail / 浏览器 / DOM / JS
+/// 引擎，偏好 = TOML 配置值，「列设置」等价面 = listing 渲染配置 + terminal
+/// 显示配置；TOML 值永不经过 HTML 引擎，终端攻击等价物 = 配置值携带终端转义
+/// 序列（CSI / OSC / BEL / C1 / ST）落进 tty 字节流被解释成活指令。
+/// [`cve_2024_37384`] 证明 listing / 鼠标标志面免疫：生产接缝
+/// `CellBuffer::write_string` 把控制字符标成空格子，`draw_horizontal_segment`
+/// 从不发射，剥离完整转义序列后的 tty 残渣无任何控制字节；并暴露、修复一个
+/// 真缺口——`terminal.window_title` 曾被原样拼进 OSC 2 序列，标题里的 BEL/ST
+/// 可提前终止 OSC 串，其后字节成为活的终端指令。修复 = 新增
+/// `meli::terminal::sanitize_osc_payload`（过滤全部 `char::is_control`）+
+/// `write_set_window_title`（净化后发射，空则不发射），由 `screen.rs` 仓内孪生
+/// `window_title_control_bytes_cannot_break_out_of_osc2` /
+/// `window_title_honest_value_is_unchanged` 锁定完整线序；诚实配置渲染不变。
+///
+/// [`sanitize_osc_payload`]: meli::terminal::sanitize_osc_payload
+/// [`write_set_window_title`]: meli::terminal::write_set_window_title
+/// [`cve_2024_37384`]: self::cve_2024_37384
+#[cfg(test)]
+#[path = "CVE-2024-37384.rs"]
+mod cve_2024_37384;
