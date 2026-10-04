@@ -40,7 +40,10 @@ pub mod text_editing;
 use std::borrow::Cow;
 
 pub use braille::BraillePixelIter;
-pub use screen::{Area, Screen, ScreenGeneration, StateStdout, Tty, Virtual};
+pub use screen::{
+    sanitize_osc_payload, write_set_window_title, Area, Screen, ScreenGeneration, StateStdout, Tty,
+    Virtual,
+};
 
 pub use self::{
     cells::*,
