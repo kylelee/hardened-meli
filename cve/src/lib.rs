@@ -2583,3 +2583,30 @@ mod cve_2007_1268;
 #[cfg(test)]
 #[path = "CVE-2024-49393.rs"]
 mod cve_2024_49393;
+
+/// CVE-2024-49394（mutt 1.14.0–2.2.12 / neomutt ≤ 2024-04-25；CVSS 5.3）**签名未
+/// 覆盖 In-Reply-To/References 线程头** regression（issue #85，表 5 协议信任
+/// 边界 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：NVD 原文指出外层 `In-Reply-To`
+/// 不受密码学签名保护，中间人可复用一封未加密但已签名的邮件冒充原发件人；
+/// 本仓库没有 Memory Hole / protected headers，meli 的等价面是**线程构建
+/// （`melib/src/thread.rs`）与线程视图显示语义**。[`cve_2024_49394`] 用一次性
+/// Ed25519 密钥 `E130F3621F763BCC0D402F929FB76B8416849528` 构造真实签名回复 +
+/// 三个只改外层线程头的重放变体，分层锁定：L1 送验字节逐字节等于被签 part
+/// raw、四种变体的 `(signed_part, signature)` 完全相同、把 `In-Reply-To` 塞进
+/// 被签 part 会改变送验字节；L2 线程归属语义——genuine 挂声明的 x-root，
+/// 同 Message-ID 的 V1/V3 重放不能改挂/合并线程组/重复计数/劫持
+/// `node.message`，新 Message-ID 的 V2 诚实地成为挂到 y-root 的独立节点，
+/// V1 先到则先见者落位（诚实局限已记录）；L3 真实 gpgme 端到端（genuine 与
+/// 三个线程头变体验证结果完全一致为 good——签名对线程头毫无约束力；篡改
+/// 正文/把 `In-Reply-To` 塞进被签 part → BAD；垃圾 armor → Err）；L4 显示域
+/// 隔离（外层线程头解析、被签子树逐字节不变、`Thread`/`ThreadNode` 无签名
+/// 字段；仓内孪生单测在 `meli/src/mail/view/thread.rs`：
+/// `cve_2024_49394_replayed_signed_reply_stays_in_its_thread`、
+/// `cve_2024_49394_thread_headings_carry_no_signature_status`）。结论：**一个
+/// 真实缺口已修复**——同 Message-ID 重放触发 `insert` 幂等早退，首见落位
+/// 不可变（`melib/src/thread.rs` 的 `insert_internal`）；其余为结构性免疫。
+///
+/// [`cve_2024_49394`]: self::cve_2024_49394
+#[cfg(test)]
+#[path = "CVE-2024-49394.rs"]
+mod cve_2024_49394;
