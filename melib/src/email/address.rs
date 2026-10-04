@@ -465,8 +465,30 @@ impl std::fmt::Display for UINameAddress<'_> {
 pub struct MessageID(pub Box<str>);
 
 impl MessageID {
+    /// Create a new [`MessageID`] from `val`, stripping `CR`/`LF` bytes.
+    ///
+    /// A syntactically valid RFC 5322 `msg-id` can never contain `CR` or
+    /// `LF`, so the grammar-valid path is byte-identical. But
+    /// [`Envelope`](crate::email::Envelope)`::set_message_id` stores a
+    /// value that failed the `msg_id` grammar verbatim, and a header
+    /// value may legally carry a bare `CR` (`header_value()` only ends
+    /// at `LF`/`CRLF`), so a hostile `Message-ID: <a@b<CR>c>` used to
+    /// reach the reply composer's `In-Reply-To`/`References` header
+    /// values with the raw control byte. The bare `CR` as a line
+    /// terminator is exactly the confusion behind CVE-2003-0336 (issue
+    /// #62), and letting it reach an outbound header value is CWE-93
+    /// header injection.
+    ///
+    /// Scrubbing `CR`/`LF` here — the same storage-boundary precedent as
+    /// `sanitize_display_name` — means every consumer of a
+    /// [`MessageID`] gets a value that cannot smuggle a new header.
     pub fn new<T: Into<String>>(val: T) -> Self {
         let val: String = val.into();
+        let val = if val.bytes().any(|b| b == b'\r' || b == b'\n') {
+            val.replace(|c: char| c == '\r' || c == '\n', "")
+        } else {
+            val
+        };
         if val.trim().starts_with('<') && val.trim().ends_with('>') {
             let val = val.trim().trim_matches(['<', '>']);
             Self(val.into())
