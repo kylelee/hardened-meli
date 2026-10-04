@@ -1273,3 +1273,34 @@ mod cve_2015_8614;
 #[cfg(test)]
 #[path = "CVE-2020-12641.rs"]
 mod cve_2020_12641;
+
+/// CVE-2002-1770 (Qualcomm Eudora 5.1 on Windows, no CVSS score
+/// assigned) HTML-mail `file://` media-embedding script-execution
+/// regression (issue #58, table 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — web/HTML embedding): an HTML
+/// mail used a `t:video` tag to reference a Windows Media Player file
+/// attached to the mail through a `file://` URL; Eudora handed the
+/// markup to Internet Explorer, which resolved it into the
+/// unsandboxed 「My Computer」 local zone and ran the WMV's embedded
+/// JavaScript there. meli links no Microsoft HTML/script/media stack,
+/// no Windows protocol or Local Machine zone handling, so the issue's
+/// equivalent surface is the single HTML display pipeline —
+/// [`sanitize`] (ammonia allowlist) followed by [`render`] (html2text
+/// → plain terminal text) — and [`cve_2002_1770`] locks it as an
+/// immunity proof on a full `multipart/mixed` corpus mail (text/html
+/// body + `application/octet-stream` `.wmv` attachment): the
+/// whitelist holds none of `object`/`embed`/`iframe`/`video`/
+/// `source`/`param`/`t:video`, `file:` is not on the URL-scheme
+/// allowlist (`http`/`https`/`mailto` only) for any spelling, casing
+/// or quoting, so every carrier and reference dies in `sanitize`, the
+/// rendered output is plain text with no file reference or executable
+/// marker alive, and the media attachment stays an opaque,
+/// never-materialized blob whose script never crosses into the
+/// rendered text. No gap was exposed on this corpus; no production
+/// code needed changing.
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2002-1770.rs"]
+mod cve_2002_1770;
