@@ -3826,3 +3826,291 @@ fn partial_signature_filter_notice_stays_off_the_unsigned_sibling() {
         "the forged body renders as ordinary text: {forged:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CVE-2024-49393 (issue #84) — signed mail: outer To/Cc are not signature-bound
+// ---------------------------------------------------------------------------
+
+/// CVE-2024-49393 (issue #84) corpus: a genuine `multipart/signed` confidential
+/// report whose detached OpenPGP signature covers only the signed part's own
+/// bytes. The outer RFC 5322 `To`/`Cc` headers live outside the signature and
+/// a MITM can rewrite them freely. This is the same one-time Ed25519 corpus as
+/// `cve/src/CVE-2024-49393.rs`; the real signature armor is embedded verbatim
+/// for byte fidelity (auto-verify stays off here, so only the data flow is
+/// exercised).
+const CVE_2024_49393_SIGNATURE: &str = "-----BEGIN PGP SIGNATURE-----\n\
+     \n\
+     iHUEABYKAB0WIQSyYR8vlL2LTyguSLztyFabXS/uFQUCasLAiwAKCRDtyFabXS/u\n\
+     FWm3AQDHKrW2LPhFwl8G5DUr/dN1p6smfhLvrKrOx2MuSEubSAD9E1DL+sCt/xQe\n\
+     pugYxm3YhojNK1pR1owkYjwTcRpDgQA=\n\
+     =KoQY\n\
+     -----END PGP SIGNATURE-----\n";
+
+/// Byte-exact signed part (what meli's `extract_unverified_signature` feeds to
+/// the engine), used to prove the outer headers never reach it.
+const CVE_2024_49393_SIGNED_INPUT: &[u8] = b"Content-Type: text/plain; charset=utf-8\r\n\
+     \r\n\
+     CONFIDENTIAL-84: Q4 figures for the named recipient only.\r\n\
+     Budget: EUR 4,200,000; headcount: 84.";
+
+const CVE_2024_49393_ORIGINAL_TO: &str = "bob@corp.example";
+const CVE_2024_49393_ORIGINAL_CC: &str = "legal@corp.example";
+const CVE_2024_49393_TAMPERED_TO: &str = "eve@mitm.example";
+const CVE_2024_49393_TAMPERED_CC: &str = "legal@corp.example, eve@mitm.example";
+
+/// Build the CVE-2024-49393 signed mail with parameterized **outer** recipient
+/// headers. Everything from `X-Mitm-Note` onwards stays byte-identical.
+fn cve_2024_49393_mail(to: &str, cc: &str) -> Vec<u8> {
+    format!(
+        "From: alice@corp.example\r\n\
+         To: {to}\r\n\
+         Cc: {cc}\r\n\
+         X-Mitm-Note: forged-by-mitm\r\n\
+         Subject: Confidential Q4 figures (signed)\r\n\
+         Message-ID: <cve-2024-49393@corp.example>\r\n\
+         Date: Mon, 6 Oct 2026 09:00:00 +0000\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/signed; protocol=\"application/pgp-signature\"; micalg=pgp-sha512; boundary=\"=_cve84\"\r\n\
+         \r\n\
+         --=_cve84\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         CONFIDENTIAL-84: Q4 figures for the named recipient only.\r\n\
+         Budget: EUR 4,200,000; headcount: 84.\r\n\
+         --=_cve84\r\n\
+         Content-Type: application/pgp-signature; name=\"signature.asc\"\r\n\
+         \r\n\
+         {CVE_2024_49393_SIGNATURE}\
+         --=_cve84--\r\n",
+    )
+    .into_bytes()
+}
+
+/// Flatten every text a `ViewFilter` node can render (notice, MIME headers,
+/// filtered body), recursing through inline attachments.
+fn cve_2024_49393_collect_filter_text(filter: &ViewFilter) -> String {
+    let mut acc = String::new();
+    if let Some(notice) = filter.notice.as_deref() {
+        acc.push_str(notice);
+        acc.push('\n');
+    }
+    for (hdr, val) in &filter.headers {
+        acc.push_str(hdr.as_str());
+        acc.push_str(": ");
+        acc.push_str(val);
+        acc.push('\n');
+    }
+    match &filter.body_text {
+        ViewFilterContent::Filtered { inner } => acc.push_str(inner),
+        ViewFilterContent::Error { inner } => acc.push_str(&inner.to_string()),
+        ViewFilterContent::Running { .. } => {}
+        ViewFilterContent::InlineAttachments { parts } => {
+            for part in parts {
+                acc.push_str(&cve_2024_49393_collect_filter_text(part));
+            }
+        }
+    }
+    acc
+}
+
+/// CVE-2024-49393 / issue #84: the signature notice must stay on the signed
+/// container entry even when the outer `Cc` was tampered with by a MITM. The
+/// signed content and signature children carry no signature notice, and no
+/// filter entry ever renders the tampered recipient header — the header is an
+/// envelope fact, not signed material.
+#[test]
+fn tampered_recipient_headers_keep_signature_notice_on_the_signed_container() {
+    let ctx = mock_context();
+    let settings = ViewSettings {
+        auto_verify_signatures: false.into(),
+        ..Default::default()
+    };
+    let mail = Mail::new(
+        cve_2024_49393_mail(CVE_2024_49393_ORIGINAL_TO, CVE_2024_49393_TAMPERED_CC),
+        None,
+    )
+    .expect("could not parse the CVE-2024-49393 signed mail");
+
+    let filter = ViewFilter::new_attachment(&mail.body(), &settings, &ctx)
+        .expect("the signed container must build a view filter");
+    assert_eq!(
+        filter.notice.as_deref(),
+        Some("Unverified signature."),
+        "with auto-verify off the signature notice belongs to the signed container entry"
+    );
+
+    let ViewFilterContent::InlineAttachments { parts } = &filter.body_text else {
+        panic!(
+            "the signed container must expose its two children as inline attachments, got {:?}",
+            filter.body_text
+        );
+    };
+    assert_eq!(
+        parts.len(),
+        2,
+        "the signed container has the content part and the signature part"
+    );
+    for (idx, part) in parts.iter().enumerate() {
+        assert!(
+            !part
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("signature")),
+            "child {idx} must not carry a signature notice, got {:?}",
+            part.notice
+        );
+    }
+
+    // The tampered recipient header never appears anywhere in the filter tree:
+    // signature notices and body text are derived from the signed part, not the
+    // outer envelope.
+    let filter_text = cve_2024_49393_collect_filter_text(&filter);
+    assert!(
+        !filter_text.contains(CVE_2024_49393_TAMPERED_TO)
+            && !filter_text.contains("forged-by-mitm"),
+        "outer recipient headers must not leak into the signature filter tree: {filter_text:?}"
+    );
+    assert!(
+        filter_text.contains("CONFIDENTIAL-84"),
+        "the signed body must render: {filter_text:?}"
+    );
+}
+
+/// CVE-2024-49393 / issue #84: meli's display semantics are that `To`/`Cc` come
+/// from the **outer envelope**. The tampered variants must be reflected there,
+/// while the signed MIME subtree stays byte-identical — headers and signature
+/// verification are separate data domains.
+#[test]
+fn tampered_recipient_headers_are_read_from_the_outer_envelope() {
+    let cases = [
+        (
+            "genuine",
+            cve_2024_49393_mail(CVE_2024_49393_ORIGINAL_TO, CVE_2024_49393_ORIGINAL_CC),
+            CVE_2024_49393_ORIGINAL_TO,
+            CVE_2024_49393_ORIGINAL_CC,
+        ),
+        (
+            "cc-tampered",
+            cve_2024_49393_mail(CVE_2024_49393_ORIGINAL_TO, CVE_2024_49393_TAMPERED_CC),
+            CVE_2024_49393_ORIGINAL_TO,
+            CVE_2024_49393_TAMPERED_CC,
+        ),
+        (
+            "to-tampered",
+            cve_2024_49393_mail(CVE_2024_49393_TAMPERED_TO, CVE_2024_49393_ORIGINAL_CC),
+            CVE_2024_49393_TAMPERED_TO,
+            CVE_2024_49393_ORIGINAL_CC,
+        ),
+    ];
+
+    let mut signed_inputs: Vec<Vec<u8>> = Vec::new();
+    for (name, raw, want_to, want_cc) in cases {
+        let mail = Mail::new(raw, None)
+            .unwrap_or_else(|err| panic!("{name}: the corpus mail must parse: {err}"));
+        assert!(
+            mail.envelope().field_to_to_string().contains(want_to),
+            "{name}: To must come from the outer envelope, got {:?}",
+            mail.envelope().field_to_to_string()
+        );
+        assert!(
+            mail.envelope().field_cc_to_string().contains(want_cc),
+            "{name}: Cc must come from the outer envelope, got {:?}",
+            mail.envelope().field_cc_to_string()
+        );
+
+        let Ok(melib::email::pgp::UnverifiedSignature::Detached { signed_part, .. }) =
+            melib::email::pgp::extract_unverified_signature(&mail.body())
+        else {
+            panic!("{name}: the body must extract as a detached signature");
+        };
+        assert_eq!(
+            signed_part, CVE_2024_49393_SIGNED_INPUT,
+            "{name}: the signed bytes must not depend on the outer headers"
+        );
+        signed_inputs.push(signed_part);
+    }
+
+    assert_eq!(
+        signed_inputs[0], signed_inputs[1],
+        "tampering Cc must not change the signed bytes"
+    );
+    assert_eq!(
+        signed_inputs[0], signed_inputs[2],
+        "tampering To must not change the signed bytes"
+    );
+}
+
+/// CVE-2024-49393 / issue #84: drawing the whole envelope view must keep the
+/// header band (the `print_header!` macro rendering `Envelope` fields, plus
+/// the `mail.view.headers` extension header) and the signature notice in
+/// disjoint regions. No rendered row mixes an outer header value with a
+/// signature notice, and the header-band rows never carry the notice — there
+/// is no path that presents the outer `To`/`Cc` inside verified semantics.
+#[test]
+fn signature_notice_and_header_band_have_no_intersection() {
+    let mut ctx = mock_context();
+    let theme_default = crate::conf::value(&ctx, "theme_default");
+    let settings = ViewSettings {
+        auto_verify_signatures: false.into(),
+        show_extra_headers: vec![crate::melib::HeaderName::from_bytes(b"X-Mitm-Note").unwrap()],
+        ..Default::default()
+    };
+    let mail = Mail::new(
+        cve_2024_49393_mail(CVE_2024_49393_ORIGINAL_TO, CVE_2024_49393_TAMPERED_CC),
+        None,
+    )
+    .expect("could not parse the CVE-2024-49393 signed mail");
+    let mut view = EnvelopeView::new(
+        mail,
+        None,
+        None,
+        Some(settings),
+        ctx.main_loop_handler.clone(),
+    );
+    _ = view.process_event(&mut UIEvent::Resize, &mut ctx);
+
+    let mut screen = Screen::<Virtual>::new(theme_default);
+    assert!(screen.resize(120, 24), "screen must resize");
+    let area = screen.area();
+    view.draw(screen.grid_mut(), area, &mut ctx);
+
+    let grid = screen.grid();
+    let rows: Vec<String> = (0..grid.rows())
+        .map(|y| (0..grid.cols()).map(|x| grid[(x, y)].ch()).collect())
+        .collect();
+    let rendered = rows.join("\n");
+    assert!(
+        rendered.contains(CVE_2024_49393_TAMPERED_TO),
+        "the tampered outer Cc must render in the header band; rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("forged-by-mitm"),
+        "the mail.view.headers extension header must render in the header band; rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Unverified signature."),
+        "the signature notice must render in the body region; rendered:\n{rendered}"
+    );
+
+    for (y, row) in rows.iter().enumerate() {
+        let has_header_band_value =
+            row.contains(CVE_2024_49393_TAMPERED_TO) || row.contains("forged-by-mitm");
+        let has_signature_notice = row.contains("Unverified signature.");
+        assert!(
+            !(has_header_band_value && has_signature_notice),
+            "row {y} must not mix header-band text with a signature notice: {row:?}"
+        );
+        if row.contains("To:") || row.contains("Cc:") || row.contains("X-Mitm-Note:") {
+            assert!(
+                !row.contains("Unverified signature."),
+                "header-band row {y} must never carry the signature notice: {row:?}"
+            );
+        }
+        if row.contains("Unverified signature.") {
+            assert!(
+                !row.contains(CVE_2024_49393_TAMPERED_TO) && !row.contains("forged-by-mitm"),
+                "the notice row {y} must never carry outer header values: {row:?}"
+            );
+        }
+    }
+}
