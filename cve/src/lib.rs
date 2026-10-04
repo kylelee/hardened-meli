@@ -1448,3 +1448,36 @@ mod cve_2024_37385;
 #[cfg(test)]
 #[path = "CVE-2002-1210.rs"]
 mod cve_2002_1210;
+
+/// CVE-2001-1326 (Qualcomm Eudora 5.1, Windows; no CVSS score assigned) HTML
+/// 表单执行邮件内嵌附件 regression (issue #60, table 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 / web/HTML embedding): NVD
+/// 记录，HTML 邮件里的「伪装成图片链接的表单」被激活（点击看似图片 / 链接
+/// 的 submit 控件）后触发表单提交，Eudora 的表单处理把 `action` 解析到邮件
+/// 附件的落盘路径，从而执行邮件内嵌附件。攻击链需要四环同时成立：(1) HTML
+/// 邮件由内嵌 IE 引擎渲染且 `<form>` 存活；(2) submit 控件伪装成无害图片 /
+/// 链接诱导激活；(3) 表单提交处理把 `action` 解析到本地附件路径并启动；
+/// (4) 附件落盘路径可预测 / 可达。meli 是终端邮件客户端，唯一 HTML 显示管线
+/// 是 [`sanitize`] (ammonia allowlist) → [`render`] (html2text → 纯终端文本)，
+/// 四环都没有对应功能面：`sanitize` 的元素白名单不含
+/// `form`/`input`/`button`/`select`/`textarea`/`isindex` 等任何交互元素
+/// （元素删除、子文本保留，void 元素连同属性整体消失）；唯一 URL 承载属性是
+/// `a[href]`，方案白名单只有 `http`/`https`/`mailto`，`action`/`formaction` 随
+/// 元素一起消失，`file:`/`javascript:` 无处存活；html2text 之后没有 DOM / 表单
+/// 引擎，全仓库（`meli/src`）不存在任何「HTML 表单提交」处理代码（UI 的
+/// `FormWidget` 是联系人 / 撰写表单，与邮件 HTML 无关）；附件保持不透明
+/// blob，阅读 / 渲染不落盘不执行，打开附件走 mailcap / launcher 的确认门
+/// （issue #21/#33/#57 已锁）。[`cve_2001_1326`] 以完整 `multipart/mixed`
+/// 语料（伪装成图片链接的 form 正文 + 携带 MZ 头与 payload 的可执行附件）
+/// 覆盖 advisory 原形、各类 submit 控件、`action` 各 scheme / 拼写 / 大小写、
+/// 嵌在白名单结构里与 math/svg mXSS 近亲，并断言 sanitize 后无任何交互容器 /
+/// 无 `file:` / 无附件名、预言机全过且为不动点，render 输出纯文本无
+/// `form`/`submit`/`action=` 痕迹，附件解码等于原字节且从不落盘。结论：
+/// 免疫证明，未发现缺口，无需改动生产代码。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2001_1326`]: self::cve_2001_1326
+#[cfg(test)]
+#[path = "CVE-2001-1326.rs"]
+mod cve_2001_1326;
