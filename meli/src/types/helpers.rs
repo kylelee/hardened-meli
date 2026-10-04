@@ -133,20 +133,50 @@ impl File {
                 p
             } else {
                 dir.push("meli");
-                std::fs::DirBuilder::new().recursive(true).create(&dir)?;
+                // This staging directory sits under the shared, world-writable
+                // temp root. Created with the process umask it is usually 0o755,
+                // so every other local user can list the attachment names a
+                // victim lands here — the information-leak half of
+                // CVE-2002-1210 (issue #59). Create it owner-only, and
+                // best-effort re-tighten a directory that already exists;
+                // ignoring a failure is deliberate, we may not own it.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+
+                    if dir.try_exists().unwrap_or_default() {
+                        let _ =
+                            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+                    } else {
+                        std::fs::DirBuilder::new()
+                            .recursive(true)
+                            .mode(0o700)
+                            .create(&dir)?;
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    std::fs::DirBuilder::new().recursive(true).create(&dir)?;
+                }
                 if let Some(filename) = filename {
-                    dir.push(filename);
+                    // CVE-2002-1210 (issue #59): the mailcap `%s` landing and
+                    // the open-with default application must not materialize a
+                    // sender-predictable path. The sanitized hint gets a random
+                    // UUID v4 infix before its extension, and the existing
+                    // collision retry loop runs on top of that name.
+                    let randomized = randomized_temp_component(filename);
+                    dir.push(randomized.as_str());
                     'exists: while dir.try_exists().unwrap_or_default() {
                         for i in 0..u8::MAX {
                             dir.pop();
-                            dir.push(format!("{filename}_{i}"));
+                            dir.push(format!("{randomized}_{i}"));
                             if dir.try_exists().unwrap_or_default() {
                                 break 'exists;
                             }
                         }
                         while dir.try_exists().unwrap_or_default() {
                             dir.pop();
-                            dir.push(format!("{filename}_{}", Uuid::new_v4().as_simple()));
+                            dir.push(format!("{randomized}_{}", Uuid::new_v4().as_simple()));
                         }
                     }
                 } else {
@@ -258,6 +288,56 @@ fn cap_filename_component_bytes(value: &mut Cow<'_, str>) {
             end -= 1;
         }
         value.to_mut().truncate(end);
+    }
+}
+
+/// Build the randomized landing name for a mail-controlled hint.
+///
+/// CVE-2002-1210 (issue #59, Eudora 5.1.1/5.2): the client stored an
+/// attachment at a predictable path, and a link inside the message
+/// pulled that file back through `file://` so a browser executed it in
+/// the local context. meli's equivalent surface is the default
+/// temp-file landing — the mailcap `%s` expansion and the open-with
+/// default application both materialize the mail-controlled hint under
+/// `<temp_dir>/meli/`. The old spelling landed exactly at
+/// `<temp_dir>/meli/<hint>`, with no random component, so the sender
+/// could predict the path (and pre-plant a file at it). Insert an
+/// unguessable UUID v4 infix before the extension so the landing path
+/// is not predictable from the message, while keeping the sanitized
+/// stem as a recognizable prefix.
+///
+/// `filename` is already sanitized and capped to
+/// [`FILENAME_COMPONENT_MAX_BYTES`]. The returned component is capped
+/// as well: the UUID infix and the preserved extension are budgeted out
+/// of the stem on a UTF-8 character boundary. The extension is kept only
+/// when it follows a non-empty stem (so a leading `.` is a hidden-file
+/// name, not an extension) and is at most `32` bytes long.
+fn randomized_temp_component(filename: &str) -> String {
+    /// `Uuid::as_simple` renders exactly 32 lowercase hex digits.
+    const UUID_INFIX_HEX_LEN: usize = 32;
+    // Split at the last `.`; a missing/empty stem, an empty extension
+    // and an over-long extension all mean "no extension to preserve",
+    // in which case the whole hint stays the stem.
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() <= 32 => {
+            (stem, Some(ext))
+        }
+        _ => (filename, None),
+    };
+    // `_` + the 32 hex digits + (`.` + ext) must fit next to the stem
+    // inside the component cap.
+    let reserved = 1 + UUID_INFIX_HEX_LEN + ext.map_or(0, |ext| 1 + ext.len());
+    let mut stem_end = FILENAME_COMPONENT_MAX_BYTES
+        .saturating_sub(reserved)
+        .min(stem.len());
+    while !stem.is_char_boundary(stem_end) {
+        stem_end -= 1;
+    }
+    let stem = &stem[..stem_end];
+    let infix = Uuid::new_v4();
+    match ext {
+        Some(ext) => format!("{stem}_{}.{ext}", infix.as_simple()),
+        None => format!("{stem}_{}", infix.as_simple()),
     }
 }
 
@@ -765,5 +845,131 @@ mod tests {
             assert_eq!(std::fs::read(path).unwrap(), b"x");
         }
         _ = tempdir.close();
+    }
+
+    /// CVE-2002-1210 regression (issue #59): the default temp-file
+    /// landing must not be predictable from the mail-controlled hint.
+    /// The old spelling landed exactly at `<temp_dir>/meli/<hint>`, the
+    /// path a `file://` link in the message could point a browser at
+    /// (Eudora 5.1.1/5.2). Every default-branch landing now carries a
+    /// random UUID v4 infix before its extension: two calls on the same
+    /// hint land on different paths, while the sanitized stem and the
+    /// extension stay recognizable and the component stays bounded.
+    #[test]
+    fn test_create_temp_file_default_landing_is_randomized() {
+        const HINT: &str = "eudora_leak.htm";
+        let temp_root = std::env::temp_dir().join("meli");
+
+        let first = File::create_temp_file(b"one", Some(HINT), None, None, false).unwrap();
+        let second = File::create_temp_file(b"two", Some(HINT), None, None, false).unwrap();
+        assert_ne!(
+            first.path(),
+            second.path(),
+            "the same hint must not land on the same path twice"
+        );
+
+        for file in [&first, &second] {
+            let path = file.path();
+            assert!(
+                path.starts_with(&temp_root),
+                "must land under <temp_dir>/meli, got {}",
+                path.display()
+            );
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert_ne!(name, HINT, "the raw hint must never be the landing name");
+            assert!(
+                name.starts_with("eudora_leak_"),
+                "the sanitized stem must stay a recognizable prefix: {name:?}"
+            );
+            assert!(
+                name.ends_with(".htm"),
+                "the extension must be kept: {name:?}"
+            );
+            assert!(
+                name.len() <= FILENAME_COMPONENT_MAX_BYTES,
+                "landing component must stay capped, got {} bytes: {name:?}",
+                name.len()
+            );
+            // The infix is the last `_`-separated field before the
+            // extension: exactly 32 lowercase hex digits.
+            let infix = name
+                .strip_suffix(".htm")
+                .unwrap()
+                .rsplit_once('_')
+                .expect("the UUID infix must be present")
+                .1;
+            assert_eq!(infix.len(), 32, "UUID infix width: {name:?}");
+            assert!(
+                infix
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "UUID infix must be lowercase hex: {name:?}"
+            );
+        }
+        assert_eq!(std::fs::read(first.path()).unwrap(), b"one");
+        assert_eq!(std::fs::read(second.path()).unwrap(), b"two");
+        let _ = std::fs::remove_file(first.path());
+        let _ = std::fs::remove_file(second.path());
+    }
+
+    /// CVE-2002-1210 regression (issue #59): a file pre-planted at the
+    /// old predictable landing path is neither used nor clobbered — the
+    /// randomized `create_new` landing goes elsewhere and the planted
+    /// bytes survive untouched.
+    #[test]
+    fn test_create_temp_file_ignores_planted_predictable_path() {
+        const HINT: &str = "cve_2002_1210_planted.htm";
+        let planted = std::env::temp_dir().join("meli").join(HINT);
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::write(&planted, b"attacker").unwrap();
+
+        let file = File::create_temp_file(b"victim", Some(HINT), None, None, false).unwrap();
+        assert_ne!(file.path(), planted.as_path());
+        assert_eq!(std::fs::read(&planted).unwrap(), b"attacker");
+        assert_eq!(std::fs::read(file.path()).unwrap(), b"victim");
+        let _ = std::fs::remove_file(&planted);
+        let _ = std::fs::remove_file(file.path());
+    }
+
+    /// CVE-2002-1210 regression (issue #59): `<temp_dir>/meli` must not
+    /// be world-listable. The default umask left it 0o755, exposing the
+    /// attachment names a victim lands; the staging directory is created
+    /// (and, when it already exists, best-effort re-tightened)
+    /// owner-only.
+    #[cfg(unix)]
+    #[test]
+    fn test_temp_staging_directory_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let file =
+            File::create_temp_file(b"corpus", Some("perms_probe.htm"), None, None, false).unwrap();
+        let mode = std::fs::metadata(std::env::temp_dir().join("meli"))
+            .expect("the meli staging directory must exist after a landing")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "the staging directory must be owner-only, got {mode:o}"
+        );
+        let _ = std::fs::remove_file(file.path());
+    }
+
+    /// Landed temp files stay owner-only (`0o600`): the randomized name
+    /// changes the path, not the `create_new` private-mode write.
+    #[cfg(unix)]
+    #[test]
+    fn test_create_temp_file_default_landing_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let file =
+            File::create_temp_file(b"corpus", Some("secret.htm"), None, None, false).unwrap();
+        let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "landed temp files must be readable by the owner only"
+        );
+        let _ = std::fs::remove_file(file.path());
     }
 }
