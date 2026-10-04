@@ -728,6 +728,258 @@ html foobar
     assert_eq!(&value.content_type.to_string(), "text/plain");
 }
 
+// ---------------------------------------------------------------------------
+// CVE-2023-4863 (issue #78) — WebP 附件显示 / 打开门禁回归
+//
+// 仓内孪生：`cve/src/CVE-2023-4863.rs` 从 melib 解析与纯 render 面锁定免疫；
+// 这里用真实 `EnvelopeView` / `ViewFilter` 锁定显示分类与显式打开门禁。语料是
+// libwebp `BuildHuffmanTable` 越界写出形状的等价结构（真 RIFF + `WEBP` + VP8L
+// over-long code-length code）；meli 从不解析它。
+// ---------------------------------------------------------------------------
+
+/// CVE-2023-4863 的等价结构恶意 WebP：真 `RIFF` + 小端 size + `WEBP` 魔数 +
+/// `VP8L` chunk（签名 + 1×1 头 + over-long code-length code）。
+fn cve_2023_4863_webp_payload() -> Vec<u8> {
+    const VP8L: &[u8] = &[
+        0x2f, 0x00, 0x00, 0x00, 0x00, // signature + 1×1 header
+        0xff, 0xff, 0xff, 0xff, 0x0f, // over-long code-length code
+    ];
+    let mut body = Vec::from(*b"WEBP");
+    body.extend_from_slice(b"VP8L");
+    body.extend_from_slice(&(VP8L.len() as u32).to_le_bytes());
+    body.extend_from_slice(VP8L);
+    let mut out = Vec::from(*b"RIFF");
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// 组装一封 `multipart/mixed` 语料邮件：plain + WebP attachment（`photo.webp`）+
+/// inline WebP + 引用它的 HTML（`cid:`）。
+fn cve_2023_4863_mail() -> Vec<u8> {
+    const BOUNDARY: &str = "=_cve20234863_meli";
+    let webp = cve_2023_4863_webp_payload();
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        b"From: a@b.example\r\nTo: c@d.example\r\nSubject: webp78\r\nMessage-ID: \
+          <cve-2023-4863-meli@x.example>\r\nDate: Thu, 1 Jan 2026 00:00:00 \
+          +0000\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; \
+          boundary=\"=_cve20234863_meli\"\r\n\r\n",
+    );
+    let push = |out: &mut Vec<u8>, headers: &str, body: &[u8]| {
+        out.extend_from_slice(b"--");
+        out.extend_from_slice(BOUNDARY.as_bytes());
+        out.extend_from_slice(b"\r\n");
+        out.extend_from_slice(headers.as_bytes());
+        out.extend_from_slice(b"\r\n\r\n");
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\r\n");
+    };
+    push(&mut out, "Content-Type: text/plain; charset=utf-8", b"body");
+    push(
+        &mut out,
+        "Content-Type: image/webp\r\nContent-Disposition: attachment; filename=\"photo.webp\"",
+        &webp,
+    );
+    push(
+        &mut out,
+        "Content-Type: image/webp\r\nContent-Disposition: inline\r\nContent-ID: \
+         <webp78-meli@evil78.example>",
+        &webp,
+    );
+    push(
+        &mut out,
+        "Content-Type: text/html; charset=utf-8",
+        b"<p>x</p><img src=\"cid:webp78-meli@evil78.example\">",
+    );
+    out.extend_from_slice(b"--");
+    out.extend_from_slice(BOUNDARY.as_bytes());
+    out.extend_from_slice(b"--\r\n");
+    out
+}
+
+/// 用 CVE-2023-4863 语料邮件构造 `EnvelopeView`。
+fn cve_2023_4863_envelope_view(context: &Context, bytes: &[u8]) -> EnvelopeView {
+    let mail = Mail::new(bytes.to_vec(), None).expect("webp78 corpus mail must parse");
+    EnvelopeView::new(mail, None, None, None, context.main_loop_handler.clone())
+}
+
+/// 递归收集显示树里所有 WebP 的 `AttachmentDisplay::Attachment` 元数据文本。
+fn cve_2023_4863_webp_display_entries(display: &[AttachmentDisplay], out: &mut Vec<String>) {
+    for entry in display {
+        match entry {
+            AttachmentDisplay::Attachment { inner } if inner.mime_type() == "image/webp" => {
+                out.push(inner.to_string());
+            }
+            AttachmentDisplay::Attachment { .. }
+            | AttachmentDisplay::InlineText { .. }
+            | AttachmentDisplay::InlineOther { .. } => {}
+            AttachmentDisplay::Alternative { display, .. }
+            | AttachmentDisplay::Mixed { display, .. }
+            | AttachmentDisplay::InlineRfc822 { display, .. }
+            | AttachmentDisplay::SignedPending { display, .. }
+            | AttachmentDisplay::SignedFailed { display, .. }
+            | AttachmentDisplay::SignedVerified { display, .. }
+            | AttachmentDisplay::SignedUnverified { display, .. } => {
+                cve_2023_4863_webp_display_entries(display, out);
+            }
+            AttachmentDisplay::EncryptedPending { .. }
+            | AttachmentDisplay::EncryptedFailed { .. } => {}
+            AttachmentDisplay::EncryptedSuccess {
+                plaintext_display, ..
+            } => cve_2023_4863_webp_display_entries(plaintext_display, out),
+        }
+    }
+}
+
+/// CVE-2023-4863（issue #78）：WebP 附件在显示树里只以元数据条目
+/// `AttachmentDisplay::Attachment` 出现（attachment 形与 inline 形各一），正文
+/// 一个像素都不显示；WebP 载荷字节（`RIFF` / `VP8L`）绝不进入显示文本。
+#[test]
+fn cve_2023_4863_webp_attachments_render_as_metadata_only() {
+    let ctx = mock_context();
+    let bytes = cve_2023_4863_mail();
+    let view = cve_2023_4863_envelope_view(&ctx, &bytes);
+
+    let mut entries = Vec::new();
+    cve_2023_4863_webp_display_entries(&view.display, &mut entries);
+    assert_eq!(
+        entries.len(),
+        2,
+        "attachment + inline 两个 WebP 叶都必须是 AttachmentDisplay::Attachment 元数据条目: \
+         {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| entry.contains("photo.webp")),
+        "attachment 形的 WebP 必须带文件名元数据: {entries:?}"
+    );
+    for entry in &entries {
+        assert!(
+            entry.contains("image/webp"),
+            "显示文本必须带 MIME 元数据: {entry:?}"
+        );
+        assert!(
+            !entry.contains("RIFF") && !entry.contains("VP8L"),
+            "显示文本不得含 WebP 载荷字节: {entry:?}"
+        );
+    }
+}
+
+/// CVE-2023-4863（issue #78）：WebP 的 body-text filter 不做任何 WebP 解释——
+/// attachment 形只给空正文 + 附件 notice，`unfiltered` 是传输反转后的原始字节；
+/// inline `Other`/`OctetStream` 原样文本分支逐字保留已到达的字节。
+#[test]
+fn cve_2023_4863_webp_view_filter_only_passes_bytes_through() {
+    let ctx = mock_context();
+    let settings = ViewSettings::default();
+    let webp = cve_2023_4863_webp_payload();
+
+    // attachment 形：空正文 + 附件 notice，unfiltered 逐字等于载荷。
+    let mut part = Vec::from(
+        &b"Content-Type: image/webp\r\nContent-Disposition: attachment; \
+          filename=\"photo.webp\"\r\n\r\n"[..],
+    );
+    part.extend_from_slice(&webp);
+    let att = AttachmentBuilder::new(&part).build();
+    let value = ViewFilter::new_attachment(&att, &settings, &ctx).unwrap();
+    assert_eq!(value.unfiltered, webp, "filter 不得解释 / 改写 WebP 字节");
+    match &value.body_text {
+        ViewFilterContent::Filtered { inner } => assert!(inner.is_empty()),
+        other => panic!("attached webp must filter to empty text, got {other:?}"),
+    }
+    assert!(
+        value
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("photo.webp")),
+        "attachment notice 必须只含元数据: {:?}",
+        value.notice
+    );
+
+    // inline `Other`/`OctetStream` 原样文本分支：UTF-8 的 WebP 形状字节逐字保留，
+    // 不解析 VP8L、不生成像素。
+    const ASCII_WEBP: &[u8] =
+        b"RIFF\x16\x00\x00\x00WEBPVP8L\x0a\x00\x00\x00\x2f\x00\x00\x00\x00\x0f\x0f";
+    let mut inline =
+        Vec::from(&b"Content-Type: image/webp\r\nContent-Disposition: inline\r\n\r\n"[..]);
+    inline.extend_from_slice(ASCII_WEBP);
+    let inline_att = AttachmentBuilder::new(&inline).build();
+    let inline_value = ViewFilter::new_attachment(&inline_att, &settings, &ctx).unwrap();
+    match &inline_value.body_text {
+        ViewFilterContent::Filtered { inner } => assert_eq!(
+            inner.as_bytes(),
+            ASCII_WEBP,
+            "inline WebP 原样文本必须逐字保留，不做任何结构解释"
+        ),
+        other => panic!("inline webp must filter to raw text, got {other:?}"),
+    }
+}
+
+/// CVE-2023-4863（issue #78）：打开 WebP 附件必须先是显式用户手势——不输入附件
+/// 编号时 `open_attachment`（默认 `a`）绝不打开任何东西、不落临时文件、不启动
+/// 进程；输入编号后门禁放行，且仍只有「进程外程序」或「原样字节 view filter」
+/// 两条惰性通路。
+#[test]
+fn cve_2023_4863_open_attachment_requires_explicit_attachment_number() {
+    let mut ctx = mock_context();
+    let bytes = cve_2023_4863_mail();
+    let mut view = cve_2023_4863_envelope_view(&ctx, &bytes);
+    let temp_before = ctx.temp_files.len();
+
+    // 无附件编号：按键绝不触达打开路径。
+    let mut event = UIEvent::Input(Key::Char('a'));
+    let handled = view.process_event(&mut event, &mut ctx);
+    assert!(!handled, "无附件编号时 open_attachment 分支不得消费事件");
+    assert_eq!(view.filters.len(), 0, "无编号时不得打开附件");
+    assert_eq!(
+        ctx.temp_files.len(),
+        temp_before,
+        "无编号时不得物化任何临时文件"
+    );
+    assert!(
+        ctx.children.is_empty(),
+        "无编号时不得启动任何进程: {:?}",
+        ctx.children.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !ctx.replies()
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::ProcessRequest(_))),
+        "无编号时不得启动任何进程"
+    );
+
+    // 显式输入附件编号 2（photo.webp 在附件树里的编号）再按键：门禁放行。把宿主
+    // mimeapps 数据库指向空目录，让 `query_default_app("image/webp")` 确定性地
+    // 失败，从而走 view filter 回退——测试不得真的拉起宿主的桌面图片查看器，
+    // 进程外程序分支的行为也不应依赖宿主环境。`env_lock` 在 drop 时恢复环境
+    // （仓库既有约定）。
+    let empty = tempfile::tempdir().unwrap();
+    let _env = crate::utilities::tests::env_lock();
+    std::env::set_var("XDG_DATA_DIRS", empty.path());
+    std::env::set_var("XDG_CONFIG_DIRS", empty.path());
+
+    ctx.cmd_buf_push('2', None);
+    let mut event = UIEvent::Input(Key::Char('a'));
+    let handled = view.process_event(&mut event, &mut ctx);
+    assert!(handled, "有附件编号时 open_attachment 分支必须消费事件");
+    assert_eq!(
+        view.filters.len(),
+        1,
+        "回退分支必须恰好打开一个 view filter"
+    );
+    assert_eq!(
+        view.filters[0].unfiltered,
+        cve_2023_4863_webp_payload(),
+        "回退 view filter 不得解释 WebP 字节"
+    );
+    assert_eq!(
+        ctx.temp_files.len(),
+        temp_before,
+        "回退分支不得物化临时文件"
+    );
+    assert!(ctx.children.is_empty(), "回退分支不得启动任何进程");
+}
+
 /// Create an executable url-launcher "spy" that appends every argument it
 /// receives as a line to `dir/spy.log`, and return `(script, log)`.
 ///
