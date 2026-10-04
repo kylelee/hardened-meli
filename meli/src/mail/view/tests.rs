@@ -1579,6 +1579,43 @@ fn go_to_url_metacharacter_url_is_one_literal_argv_element() {
     }
 }
 
+/// CVE-2021-37746, disguised-lookalike face: the corpus homoglyph and bidi
+/// (RLO) spellings are honest http/https schemes of *displayed bytes*, so
+/// they launch directly (no dialog) — and what reaches the launcher is the
+/// exact same byte string the pager displayed: one literal argv element, no
+/// reordering, no shell. meli never launches a href that was not displayed
+/// (the HTML mirror shows every surviving href as a numbered footnote); this
+/// locks the launcher side of that displayed == launched invariant.
+#[test]
+fn go_to_url_disguised_lookalike_urls_are_one_literal_argv_element() {
+    let mut ctx = mock_context();
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = argv_spy_launcher(dir.path());
+    for url in [
+        "http://evil.example/phish".to_string(),
+        "https://b\u{0430}nk.example/login".to_string(),
+        "http://\u{202E}elpmaxe.live\u{202C}/login".to_string(),
+        "http://evil.example/\u{202E}docs".to_string(),
+    ] {
+        std::fs::write(&log, b"").unwrap();
+        let mut view = url_envelope_view(&ctx, script.to_string_lossy().into_owned(), &url);
+
+        trigger_go_to_url(&mut view, &mut ctx);
+        assert!(
+            view.launch_url_dialog.is_none(),
+            "{url:?} must launch without a confirmation dialog"
+        );
+
+        let lines = wait_for_argv_spy(&log);
+        assert_eq!(
+            lines,
+            vec!["1".to_string(), url.clone()],
+            "{url:?} must reach the launcher as exactly one byte-identical \\
+             argv element (count first)"
+        );
+    }
+}
+
 /// CVE-2007-4040, unknown-scheme face: the advisory's `unknown:$(cmd)`
 /// family must never auto-launch (explicit per-URL confirmation first),
 /// and *after* the user confirms, the metacharacter URL still must not
