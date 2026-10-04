@@ -1499,6 +1499,183 @@ fn go_to_url_allowlisted_scheme_launches_directly() {
     }
 }
 
+/// Like [`spy_launcher`], but the script records the argument *count*
+/// and every argument, one per line (the first line is always `$#`).
+/// This is the ground truth for the CVE-2007-4040 contract below: a
+/// shell would split or expand the arguments, an exec(3) argv spawn
+/// reproduces them verbatim.
+fn argv_spy_launcher(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("argv-spy-launcher.sh");
+    let log = dir.join("argv-spy.log");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$@\" >> {}\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(&log, b"").unwrap();
+    (script, log)
+}
+
+/// Wait (bounded) for the argv spy to record an invocation and return
+/// its lines (argument count first, then each argument).
+fn wait_for_argv_spy(log: &Path) -> Vec<String> {
+    let mut invoked = String::new();
+    for _ in 0..150 {
+        invoked = std::fs::read_to_string(log).unwrap_or_default();
+        if !invoked.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    invoked.lines().map(str::to_string).collect()
+}
+
+/// CVE-2007-4040 (Outlook/OE URI parameter injection, issue #65): a
+/// URL with a *whitelisted* scheme carrying shell metacharacters — the
+/// CVE's kill-shot shape, since the scheme gate lets it through — must
+/// reach the url launcher as exactly one literal argv element: never
+/// through a shell, never split, never expanded. The `$(touch …)`
+/// payload doubles as the side-effect oracle: had any shell
+/// interpreted the URL, the marker file would exist.
+#[test]
+fn go_to_url_metacharacter_url_is_one_literal_argv_element() {
+    let mut ctx = mock_context();
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pwned-marker");
+    let (script, log) = argv_spy_launcher(dir.path());
+    for url in [
+        format!("https://ex.example/p?next=$(touch {})", marker.display()),
+        "https://ex.example/a`id`b".to_string(),
+        "https://ex.example/x$(cmd)".to_string(),
+        "https://ex.example/$HOME/*.txt".to_string(),
+        "https://ex.example/a b\"c'd".to_string(),
+        "mailto:a@b.example?subject=hi;rm%20-rf&body=;x".to_string(),
+    ] {
+        std::fs::write(&log, b"").unwrap();
+        let mut view = url_envelope_view(&ctx, script.to_string_lossy().into_owned(), &url);
+
+        trigger_go_to_url(&mut view, &mut ctx);
+        assert!(
+            view.launch_url_dialog.is_none(),
+            "{url:?} must launch without a confirmation dialog"
+        );
+
+        let lines = wait_for_argv_spy(&log);
+        assert_eq!(
+            lines,
+            vec!["1".to_string(), url.clone()],
+            "{url:?} must reach the launcher as exactly one byte-identical \
+             argv element (count first)"
+        );
+        assert!(
+            !marker.exists(),
+            "the `$(touch …)` payload must never execute: no shell touches the URL"
+        );
+    }
+}
+
+/// CVE-2007-4040, unknown-scheme face: the advisory's `unknown:$(cmd)`
+/// family must never auto-launch (explicit per-URL confirmation first),
+/// and *after* the user confirms, the metacharacter URL still must not
+/// be shell-interpreted: it launches as one literal argv element.
+#[test]
+fn go_to_url_unknown_scheme_metacharacters_need_confirmation_and_stay_literal() {
+    let mut ctx = mock_context();
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pwned-marker");
+    let (script, log) = argv_spy_launcher(dir.path());
+    for url in [
+        format!("unknown:$(touch {})", marker.display()),
+        format!("unknown://x$(touch {})y", marker.display()),
+        "search-ms:displayname=Policy,query=$(id)".to_string(),
+    ] {
+        std::fs::write(&log, b"").unwrap();
+        let mut view = url_envelope_view(&ctx, script.to_string_lossy().into_owned(), &url);
+
+        trigger_go_to_url(&mut view, &mut ctx);
+        assert!(
+            view.launch_url_dialog.is_some(),
+            "{url:?} must be held behind a confirmation dialog"
+        );
+        assert_eq!(view.pending_launch_url.as_deref(), Some(url.as_str()));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let invoked = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            invoked.is_empty(),
+            "{url:?} must not reach the launcher before confirmation; got: {invoked:?}"
+        );
+
+        // Confirm the dialog, feeding the component's replies back like
+        // the main loop does.
+        let mut event = UIEvent::Input(Key::Char('\n'));
+        _ = view.process_event(&mut event, &mut ctx);
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies.iter().any(
+                |ev| matches!(ev, UIEvent::FinishedUIDialog(_, result) if result
+                    .downcast_ref::<bool>()
+                    == Some(&true))
+            ),
+            "confirming must emit a confirmed FinishedUIDialog"
+        );
+        for mut ev in replies {
+            _ = view.process_event(&mut ev, &mut ctx);
+        }
+
+        let lines = wait_for_argv_spy(&log);
+        assert_eq!(
+            lines,
+            vec!["1".to_string(), url.clone()],
+            "{url:?} must launch after confirmation as exactly one literal argv \
+             element (count first)"
+        );
+        assert!(
+            !marker.exists(),
+            "even a confirmed metacharacter URL must never execute its payload"
+        );
+        assert!(view.launch_url_dialog.is_none());
+        assert!(view.pending_launch_url.is_none());
+    }
+}
+
+/// CVE-2007-4040, header-derived face: the `List-Archive` header can
+/// carry attacker-controlled metacharacter bytes past the RFC 2369
+/// parser and the scheme whitelist (an `https:` archive URL is
+/// legitimate); its launcher invocation must still be one literal argv
+/// element.
+#[test]
+fn list_archive_metacharacter_url_is_one_literal_argv_element() {
+    let mut ctx = mock_context();
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pwned-marker");
+    let url = format!("https://lists.example/arch/$(touch {})", marker.display());
+    let (script, log) = argv_spy_launcher(dir.path());
+    use_spy_launcher(&mut ctx, &script);
+    _ = register_inbox(&mut ctx);
+    let coordinates = insert_envelope_with_headers(&ctx, &format!("List-Archive: <{url}>\r\n"));
+    let mut view = MailView::new(Some(coordinates), false, &mut ctx);
+
+    let mut event = UIEvent::Action(Action::MailingListAction(MailingListAction::ListArchive));
+    _ = view.process_event(&mut event, &mut ctx);
+
+    let lines = wait_for_argv_spy(&log);
+    assert_eq!(
+        lines,
+        vec!["1".to_string(), url],
+        "the archive metacharacter URL must reach the launcher as exactly one \
+         byte-identical argv element (count first)"
+    );
+    assert!(
+        !marker.exists(),
+        "the `$(touch …)` payload must never execute from header bytes either"
+    );
+}
+
 /// MIME payload of the shared multipart/mixed fixture: a text/plain body
 /// part plus an `application/pdf` attachment and an inline `image/png` part
 /// carrying a filename (both count as attachments for the batch save).
