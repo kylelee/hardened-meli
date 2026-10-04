@@ -721,9 +721,10 @@ fn write_leave_alternate_screen(out: &mut impl Write, mouse: bool) {
 
 /// Strip the characters that would let a configuration string break
 /// out of an OSC string body: Unicode control characters (C0 U+0000..U+001F,
-/// DEL U+007F, C1 U+0080..U+009F — `char::is_control`). BEL terminates an
-/// OSC string and `ESC \\` (ST) closes one, and every other control byte is
-/// a live terminal directive with no business in a window title.
+/// DEL U+007F, C1 U+0080..U+009F — `char::is_control`).
+///
+/// BEL terminates an OSC string and `ESC \\` (ST) closes one, and every other
+/// control byte is a live terminal directive with no business in a window title.
 /// CVE-2024-37384 (issue #74): preference values must never smuggle
 /// terminal control sequences into the tty byte stream.
 pub fn sanitize_osc_payload(s: &str) -> std::borrow::Cow<'_, str> {
@@ -734,10 +735,11 @@ pub fn sanitize_osc_payload(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Write the OSC 2 "set window title" sequence with the payload
-/// sanitized (see [`sanitize_osc_payload`]). A title that sanitizes to
-/// empty writes nothing. This is the only place the user-configured
-/// `terminal.window_title` becomes wire bytes; it used to be
+/// Write the OSC 2 "set window title" sequence with the payload sanitized (see
+/// [`sanitize_osc_payload`]).
+///
+/// A title that sanitizes to empty writes nothing. This is the only place the
+/// user-configured `terminal.window_title` becomes wire bytes; it used to be
 /// interpolated raw (CVE-2024-37384, issue #74).
 pub fn write_set_window_title(out: &mut impl Write, title: &str) {
     let sanitized = sanitize_osc_payload(title);

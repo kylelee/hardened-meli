@@ -2057,3 +2057,46 @@ mod cve_2016_4068;
 #[cfg(test)]
 #[path = "CVE-2024-37384.rs"]
 mod cve_2024_37384;
+
+/// CVE-2025-48700（Synacor Zimbra Collaboration Suite，Zimbra Classic UI；NVD 未分配
+/// CVSS 分数；CISA KEV 2026-04-20 收录，在野利用）存储型 XSS regression（issue #75，
+/// 表 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 / web/HTML embedding）：
+/// KEV 原文记录攻击者可在受害会话内执行任意 JavaScript、可能触达敏感信息。
+/// 与同族 CVE-2025-66376（CSS `@import` 标签切分 mXSS）互补，本语料聚焦 issue #75
+/// 指定的**解析差异 / mXSS** 三大类：(1) math / `annotation-xml` 命名空间混淆；
+/// (2) HTML / SVG / MathML 命名空间 `style` 文本重组；(3) 属性引号差异
+/// （无引号 / 单引号 / 双引号 / 反引号 / 缺右引号吞尾 / 引号内 tab-LF-CR）。
+///
+/// meli 等价面映射（issue #75 明确要求）：meli 是终端邮件客户端，**没有 webmail
+/// 功能面**——没有 HTTP 页面、会话 Cookie、浏览器 DOM、JavaScript 引擎，也没有把
+/// 邮件 HTML 注入页面的服务端清洗器。邮件 HTML 唯一的消费通路是邮件视图的显示
+/// 管线 [`sanitize`]（ammonia 白名单：html5ever **恰好一次**解析 → 过滤树 → 带转义
+/// 再序列化）→ [`render`]（html2text → 纯终端文本）。mXSS 的成立前提是"清洗后的
+/// 字符串被第二次交给 HTML 解析器"，而 meli 只解析一次、输出面向纯文本，攻击链在
+/// 结构上即断：ammonia 的 `check_expected_namespace` 对 HTML/SVG/MathML 命名空间
+/// 切换做白名单检查，不合法的切换连整棵子树删除；`script`/`style` 属
+/// `clean_content_tags` 连内容整体删除；`tag_attributes` 整体替换只留
+/// `a[href]`/`a[title]` 与通用 `{lang,title}`；`url_schemes` 只有 http/https/mailto，
+/// `href` 经 `attribute_filter` trim 首尾不可见填充后**重新**校验（CVE-2025-66376
+/// 时代硬化）；序列化时属性值内的 `&`/`"`/`<`/`>` 被转义，引号差异无法再生标签边界。
+///
+/// [`cve_2025_48700`] 以内嵌 `multipart/alternative` 语料（plain + html 双叶）
+/// 逐层锁定为**免疫证明，未发现缺口，无需改动生产代码**。语料与 CVE-2025-66376
+/// `TAG_SPLITTING_CORPUS` 的 12 个 payload **逐字不重复**（同族不同形），三大类各
+/// ≥ 6、总数 45 个向量，每个向量都过独立惰性预言机（`scan_tags` 白名单扫描 +
+/// 无 `on*`/禁止属性 + 无活的危险 scheme href + `sanitize` 不动点）。分层：L1 melib
+/// 解析出双叶且全部攻击字节逐字在场（LF→CRLF 容忍），并自检三大类规模与命名唯一性；
+/// L2 sanitize 输出无任何非白名单 math/SVG/style 标签、无 `on*`、无活的危险 scheme
+/// href 且为不动点；L3 render 里 script/style 脚本体与危险 scheme 脚注整体消失，
+/// 引号内嵌标记只解出惰性字面文本，惰性边界的 `url_scheme` 为 `None` 且确认门拒绝；
+/// L4 整封攻击邮件端到端纯文本且诚实 `http`/`https`/`mailto` 链接保持可用
+/// （sanitize 保留、render 脚注可见、`is_default_launchable_scheme` 放行），
+/// `l4_no_webmail_script_pathway_exists` 的注释记录全仓无 webmail / 浏览器 / JS 引擎 /
+/// 第二次 HTML 解析通路的映射依据。仓内孪生改动：无（免疫证明，未触碰生产代码）。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`cve_2025_48700`]: self::cve_2025_48700
+#[cfg(test)]
+#[path = "CVE-2025-48700.rs"]
+mod cve_2025_48700;
