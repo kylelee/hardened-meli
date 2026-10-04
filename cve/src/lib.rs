@@ -2742,3 +2742,55 @@ mod cve_2009_1390;
 #[cfg(test)]
 #[path = "CVE-2009-3765.rs"]
 mod cve_2009_3765;
+
+/// CVE-2009-3766（mutt 1.5.19 / 1.5.20，OpenSSL；CWE-295 / CWE-310）**TLS 服务器
+/// 证书主机名完全不校验** regression（issue #89，表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：NVD 原文指出 mutt 使用 OpenSSL 时未正确
+/// 校验证书 CN 字段，中间人可用**合法 CA 签发**、名字完全无关的证书冒充任意
+/// SSL 服务器。它与同族 CVE-2009-3765 的差别是「根本不比」而非「截断后比」；
+/// issue #89 指定攻击样例形态为 CN 内嵌 NUL 截断（`good.example\0evil.example`
+/// 伪装匹配 `good.example`），并要求「含 NUL 的 CN/SAN 一律判定不匹配、拒绝」，
+/// 语料域名 `good.example` / `evil.example` 与 issue #88 完全独立。
+///
+/// meli 等价面：issue 指定的 `melib/src/utils/connections.rs` 只是传输层包装
+///（`Connection::Tls` 包 `native_tls::TlsStream`，无任何 CN / 主机名逻辑）；
+/// 主机名校验策略全在 native-tls（Linux=OpenSSL 的 `X509_check_host` 语义）
+/// 内部，入口在三处 `connector.connect(&path, socket)`——
+/// `melib/src/imap/connection.rs`（path=`server_conf.server_hostname`）、
+/// `melib/src/nntp/connection.rs`、`melib/src/smtp.rs`（path=`server_conf.hostname`）；
+/// 三处 `TlsConnector::builder()` 都是默认校验器，只有账号配置显式打开
+/// `danger_accept_invalid_certs` 时才追加危险开关，全仓无
+/// `danger_accept_invalid_hostnames`；JMAP 的 isahc 客户端
+///（`melib/src/jmap/connection.rs`、`eventsource.rs`）三个 `danger_*`
+///（certs/hosts/revoked）由同一账号开关门控；四个账号配置默认全是 `false`，
+/// `SmtpSecurity::default` 亦然。workspace 无 rustls / webpki，也无
+/// `X509_check_host`/`verify_callback`/自定义 CN 解析代码。
+///
+/// **为何单元级 mock**：`native-tls`/`openssl` 不是 melib 公开 API，`cve` 依赖
+/// 只有 `meli`，issue 约束「不新增 test-only 依赖」，melib 亦无 TLS 服务器实现，
+/// 故按 issue 允许的「真实证书语料 + 单元级 mock」做免疫证明。语料是 openssl
+/// 离线生成的真实 ECDSA P-256 证书（受信根 + 四张由它直接真实签名的叶子：
+/// L_MATCH 正确基线 `good.example`、A1 名字不匹配 `evil.example`、A2 的 CN 内嵌
+/// `\0`（`good.example\0evil.example`，25 字节、无 SAN）、A3 的 SAN dNSName 内嵌
+/// `\0` 且 CN 干净），`openssl verify` 转录逐字内嵌（无主机名校验四叶全 `OK`；
+/// 带 `-verify_hostname good.example` 时 L_MATCH `OK`、A1/A2/A3 全 `error 62
+/// hostname mismatch`）。
+///
+/// [`cve_2009_3766`] 分层锁定：(a) 语料真实性——四叶 issuer TLV 逐字节等于受信
+/// 根 subject TLV，A2 的 CN 恰为 `good.example\0evil.example`（25 字节、无 SAN），
+/// A3 的 SAN 内嵌 `\0` 而 CN 干净，SPKI 互异，DER 长度与 `asn1parse` NUL 证据
+/// 命中；(b) 攻击复现——旧 mutt 三面缺陷谓词（完全不比主机名 / CN 截断到首个
+/// `\0` / SAN 全量比较失败后回退 CN）对 L_MATCH/A1/A2/A3 全部接受；(c) 核心
+/// 断言——RFC 6125 正确语义只接受 L_MATCH，A1/A2/A3 全拒绝，**NUL 不截断比较**：
+/// 含 NUL 的 CN/SAN 永不匹配（即使其 NUL 前缀恰等于 `good.example`），SAN 在场
+/// 即权威且绝不回退 CN；(d) L3 源码 / manifest 扫描锁定三处 connector 的默认
+/// 校验器 + 门控 danger + 主机名、`utils/connections.rs` 仅传输包装、账号配置
+/// 默认 false、无自定义主机名校验面、TLS 栈为 native-tls，以及可直达的
+/// [`SmtpSecurity::default`] danger=false。
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**。
+///
+/// [`cve_2009_3766`]: self::cve_2009_3766
+/// [`SmtpSecurity::default`]: meli::melib::smtp::SmtpSecurity
+#[cfg(test)]
+#[path = "CVE-2009-3766.rs"]
+mod cve_2009_3766;
