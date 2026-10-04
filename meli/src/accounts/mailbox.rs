@@ -22,7 +22,7 @@
 
 use indexmap::IndexMap;
 use melib::{
-    backends::{Mailbox, MailboxHash},
+    backends::{Mailbox, MailboxHash, MAX_MAILBOX_HIERARCHY_DEPTH},
     error::Error,
     tracing,
 };
@@ -109,13 +109,97 @@ impl MailboxEntry {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct MailboxNode {
     pub hash: MailboxHash,
     pub depth: usize,
     pub indentation: u32,
     pub has_sibling: bool,
     pub children: Vec<Self>,
+}
+
+// CVE-2020-16094 (Claws Mail ≤ 3.17.6, CWE-674): a malicious IMAP server
+// rebuilds an arbitrarily deep mailbox tree by stacking the hierarchy
+// delimiter in LIST paths, and this owned tree is the exact equivalent of
+// Claws Mail's directory tree. Every structural walk of it —
+// construction in [`build_mailboxes_order`], the sidebar snapshot through
+// `Account::list_mailboxes`, and teardown — used to spend one stack frame
+// per hierarchy level (derive glue included), so a deep enough hostile
+// tree walked the stack pointer into its guard page and aborted the
+// process. `Clone` and `Drop` are therefore implemented iteratively: an
+// explicit work stack spends constant stack no matter how deep the tree
+// nests.
+impl Clone for MailboxNode {
+    fn clone(&self) -> Self {
+        // Same two-pass arena discipline as the tree construction in
+        // [`build_mailboxes_order`]: every node is copied into a flat
+        // arena walked by an explicit stack, then linked into its parent
+        // deepest-first (a child always has a higher arena index than its
+        // parent, so reverse order moves every subtree intact). Children
+        // are pushed onto the walk stack in *reverse* order: the LIFO pop
+        // then creates them in natural sibling order, so their arena
+        // indices ascend first-child-to-last and the deepest-first
+        // linking — which pushes descending indices — restores the
+        // original sibling order. The clone is structurally identical to
+        // its source.
+        let mut arena: Vec<Self> = Vec::new();
+        let mut parent: Vec<Option<usize>> = Vec::new();
+        let mut stack: Vec<(&Self, usize)> = Vec::new();
+        let root_idx = arena.len();
+        arena.push(Self {
+            hash: self.hash,
+            depth: self.depth,
+            indentation: self.indentation,
+            has_sibling: self.has_sibling,
+            children: Vec::new(),
+        });
+        parent.push(None);
+        stack.push((self, root_idx));
+        while let Some((src, idx)) = stack.pop() {
+            for sc in src.children.iter().rev() {
+                let child = arena.len();
+                arena.push(Self {
+                    hash: sc.hash,
+                    depth: sc.depth,
+                    indentation: sc.indentation,
+                    has_sibling: sc.has_sibling,
+                    children: Vec::new(),
+                });
+                parent.push(Some(idx));
+                stack.push((sc, child));
+            }
+        }
+        let mut root = Self {
+            hash: self.hash,
+            depth: self.depth,
+            indentation: self.indentation,
+            has_sibling: self.has_sibling,
+            children: Vec::new(),
+        };
+        for idx in (0..arena.len()).rev() {
+            let node = std::mem::take(&mut arena[idx]);
+            match parent[idx] {
+                Some(p) => arena[p].children.push(node),
+                None => root = node,
+            }
+        }
+        root
+    }
+}
+
+impl Drop for MailboxNode {
+    fn drop(&mut self) {
+        if self.children.is_empty() {
+            return;
+        }
+        // Flatten the subtree onto a work list and let each node drop
+        // with its children already moved out, so the compiler-generated
+        // recursive drop glue never descends more than one level.
+        let mut stack: Vec<Self> = std::mem::take(&mut self.children);
+        while let Some(mut node) = stack.pop() {
+            stack.append(&mut node.children);
+        }
+    }
 }
 
 pub fn build_mailboxes_order(
@@ -127,27 +211,86 @@ pub fn build_mailboxes_order(
     mailboxes_order.clear();
     for (h, f) in mailbox_entries.iter() {
         if f.ref_mailbox.parent().is_none() {
-            fn rec(
-                h: MailboxHash,
-                mailbox_entries: &IndexMap<MailboxHash, MailboxEntry>,
-                depth: usize,
-            ) -> MailboxNode {
-                let mut node = MailboxNode {
-                    hash: h,
-                    children: Vec::new(),
-                    depth,
-                    indentation: 0,
-                    has_sibling: false,
-                };
-                for &c in mailbox_entries[&h].ref_mailbox.children() {
+            // CVE-2020-16094 (Claws Mail ≤ 3.17.6, CWE-674): rebuild the
+            // owned node tree iteratively, and never deeper than
+            // `MAX_MAILBOX_HIERARCHY_DEPTH` levels. The recursive walk
+            // this replaces spent one stack frame per hierarchy level, so
+            // a mailbox tree nested deeper than the stack budget — a
+            // malicious server's delimiter-stacked LIST paths, or any
+            // other backend feeding arbitrary parent chains (the sync
+            // cache included) — exhausted the stack exactly like Claws
+            // Mail's directory-tree rebuild, and the unbounded subtree
+            // clones of the sidebar snapshot exhausted memory with it.
+            // Nodes are created in a flat arena walked by an explicit
+            // stack, then linked into their parents deepest first (a
+            // child always has a higher arena index than its parent, so
+            // reverse order moves every subtree intact). Children are
+            // pushed onto the walk stack in *reverse* order: the LIFO pop
+            // then creates them in natural sibling order, so their arena
+            // indices ascend first-child-to-last and the deepest-first
+            // linking — which pushes descending indices — restores the
+            // original sibling order. The depth cap keeps every later
+            // walk of the tree (order, snapshot, teardown) linear in the
+            // number of mailboxes, whatever the backend feeds it.
+            let mut arena: Vec<MailboxNode> = Vec::new();
+            let mut parent: Vec<Option<usize>> = Vec::new();
+            let mut stack: SmallVec<[usize; 16]> = SmallVec::new();
+            arena.push(MailboxNode {
+                hash: *h,
+                children: Vec::new(),
+                depth: 0,
+                indentation: 0,
+                has_sibling: false,
+            });
+            parent.push(None);
+            stack.push(0);
+            let mut capped = false;
+            while let Some(idx) = stack.pop() {
+                // Mailboxes nested past the cap are not admitted to the
+                // owned tree: their subtrees stay out of the sidebar and
+                // out of every tree walk's budget.
+                if arena[idx].depth + 1 >= MAX_MAILBOX_HIERARCHY_DEPTH {
+                    capped = capped
+                        || mailbox_entries[&arena[idx].hash]
+                            .ref_mailbox
+                            .children()
+                            .iter()
+                            .any(|&c| mailbox_entries.contains_key(&c));
+                    continue;
+                }
+                for &c in mailbox_entries[&arena[idx].hash]
+                    .ref_mailbox
+                    .children()
+                    .iter()
+                    .rev()
+                {
                     if mailbox_entries.contains_key(&c) {
-                        node.children.push(rec(c, mailbox_entries, depth + 1));
+                        let child = arena.len();
+                        arena.push(MailboxNode {
+                            hash: c,
+                            children: Vec::new(),
+                            depth: arena[idx].depth + 1,
+                            indentation: 0,
+                            has_sibling: false,
+                        });
+                        parent.push(Some(idx));
+                        stack.push(child);
                     }
                 }
-                node
             }
-
-            tree.push(rec(*h, mailbox_entries, 0));
+            if capped {
+                tracing::warn!(
+                    "mailbox hierarchy deeper than {} levels; deeper mailboxes not shown",
+                    MAX_MAILBOX_HIERARCHY_DEPTH
+                );
+            }
+            for idx in (0..arena.len()).rev() {
+                let node = std::mem::take(&mut arena[idx]);
+                match parent[idx] {
+                    Some(p) => arena[p].children.push(node),
+                    None => tree.push(node),
+                }
+            }
         }
     }
 
@@ -228,33 +371,38 @@ pub fn build_mailboxes_order(
     }
     drop(stack);
     for node in tree.iter_mut() {
-        fn rec(
-            node: &mut MailboxNode,
-            mailbox_entries: &IndexMap<MailboxHash, MailboxEntry>,
-            mut indentation: u32,
-            has_sibling: bool,
-        ) {
+        // CVE-2020-16094: the indentation walk is flattened with the same
+        // explicit-stack discipline as the construction above — constant
+        // stack regardless of hierarchy depth. Semantics are preserved
+        // exactly from the recursive form: only subscribed children
+        // descend, the child indentation shifts one bit left per level
+        // and inherits the parent's has_sibling bit, and a child's
+        // has_sibling is "is not the last subscribed sibling". Children
+        // are processed off the stack in reverse order, but each node's
+        // (indentation, has_sibling) is computed from its parent alone,
+        // so the final state is identical.
+        let mut stack: SmallVec<[(&mut MailboxNode, u32, bool); 16]> = SmallVec::new();
+        stack.push((node, 0, false));
+        while let Some((node, indentation, has_sibling)) = stack.pop() {
             node.indentation = indentation;
             node.has_sibling = has_sibling;
-            let mut iter = (0..node.children.len())
-                .filter(|i| {
-                    mailbox_entries[&node.children[*i].hash]
-                        .ref_mailbox
-                        .is_subscribed()
-                })
-                .collect::<SmallVec<[_; 8]>>()
-                .into_iter()
-                .peekable();
-            indentation <<= 1;
+            let subscribed = node
+                .children
+                .iter()
+                .filter(|c| mailbox_entries[&c.hash].ref_mailbox.is_subscribed())
+                .count();
+            let mut child_indentation = indentation << 1;
             if has_sibling {
-                indentation |= 1;
+                child_indentation |= 1;
             }
-            while let Some(i) = iter.next() {
-                let c = &mut node.children[i];
-                rec(c, mailbox_entries, indentation, iter.peek().is_some());
+            let mut seen = 0;
+            for c in node.children.iter_mut() {
+                if !mailbox_entries[&c.hash].ref_mailbox.is_subscribed() {
+                    continue;
+                }
+                seen += 1;
+                stack.push((c, child_indentation, seen != subscribed));
             }
         }
-
-        rec(node, mailbox_entries, 0, false);
     }
 }
