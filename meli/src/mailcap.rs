@@ -27,6 +27,7 @@
 
 use std::{
     borrow::Cow,
+    collections::VecDeque,
     io::{Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
@@ -83,14 +84,26 @@ pub struct MailcapEntry<'a> {
     pub nametemplate: Option<Cow<'a, str>>,
 }
 
-/// Quote a value for safe interpolation into a shell command line using
-/// POSIX single-quote semantics: the value is wrapped in `'...'` and any
-/// embedded `'` becomes `'\''`.
+/// Quote a value for safe interpolation into an *unquoted* shell command
+/// line using POSIX single-quote semantics: the value is wrapped in `'...'`
+/// and any embedded `'` becomes `'\''`.
 ///
-/// Every mailcap `%` substitution that carries untrusted data (`%t`,
-/// `%{param}`) or a filesystem path (`%s`, `%n`, `%F`) is passed through this
-/// function before being spliced into the command string, so that a crafted
-/// content type or MIME parameter cannot inject shell syntax.
+/// # Trust boundary
+///
+/// A mailcap command string is local, user-controlled configuration: it may
+/// legitimately contain pipes, redirections and even command substitutions
+/// (for example `... | uniq` or `t=`echo %{charset}``), and that is part of
+/// the mailcap contract. The *values* spliced into it, on the other hand,
+/// are mail-controlled bytes (`%t` content type, `%{param}` MIME parameter,
+/// `%s`/`%F` temporary-file names) and must never be able to activate shell
+/// syntax, whatever quoting context the template places them in.
+///
+/// This function protects only the unquoted/bare context, where a single
+/// fully quoted word is exactly right. It is *not* sufficient inside
+/// `"..."`, `'...'`, backticks or a here-document body, where the template
+/// already opened a region and the shell reinterprets the value: use
+/// [`encode_for_context`] from [`expand_args`] so the value is encoded for
+/// the context it actually lands in.
 fn quote_shell_word(s: &str) -> String {
     let mut ret = String::with_capacity(s.len() + 2);
     ret.push('\'');
@@ -103,6 +116,453 @@ fn quote_shell_word(s: &str) -> String {
     }
     ret.push('\'');
     ret
+}
+
+/// The shell quoting context immediately before a mailcap `%` substitution
+/// point, as computed by [`shell_quote_context`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellContext {
+    /// Unquoted command text: word splitting and every shell metacharacter
+    /// are active. [`quote_shell_word`] is the correct armor here. This is
+    /// also the context inside a `$(...)` command substitution, whose body is
+    /// parsed as an ordinary command, not as double-quoted text.
+    Bare,
+    /// Inside `'...'`: only a literal `'` can close the region and nothing
+    /// else expands, so the value must be emitted as
+    /// close-quote/`'value'`/reopen-quote.
+    Single,
+    /// Inside `"..."`: `\`, `$`, a backtick and `"` stay live, so the value is
+    /// backslash-escaped for the double-quote grammar.
+    Double,
+    /// Inside an old-style backtick command substitution. Unlike `"..."`,
+    /// the outer shell strips a backslash before `$`, a backtick or `\` while
+    /// searching for the closing backtick, so a bare `\`` or `\$` is *not*
+    /// inert: it merely keeps the outer scanner going and then re-executes in
+    /// the inner shell. The value therefore needs two layers — an inner
+    /// single-quoted word plus outer escaping of the backticks and
+    /// backslashes it contains; see [`encode_backtick_quoted`].
+    Backtick,
+    /// Inside an unquoted here-document body: `\`, `$` and a backtick expand,
+    /// while `"` and `'` are literal.
+    Heredoc,
+    /// A construct the scanner cannot pin down (unterminated `${`, more than
+    /// [`MAX_COMMAND_SUBSTITUTION_DEPTH`] levels of nested `$(...)`, an
+    /// unparsable here-document delimiter). Encoding here would be a guess,
+    /// so [`expand_args`] refuses to substitute.
+    Ambiguous,
+}
+
+/// One open shell region tracked by [`shell_quote_context`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuoteState {
+    DoubleQuote,
+    SingleQuote,
+    Backtick,
+    CommandSub,
+}
+
+/// Maximum `$(...)` nesting the scanner follows before declaring the
+/// surrounding context [`ShellContext::Ambiguous`].
+const MAX_COMMAND_SUBSTITUTION_DEPTH: usize = 2;
+
+/// A here-document redirection whose body has not started yet.
+#[derive(Clone, Debug)]
+struct Heredoc {
+    delimiter: String,
+    strip_tabs: bool,
+}
+
+/// Classify the POSIX shell quoting context at the end of `prefix`, where
+/// `prefix` is the part of the mailcap command that precedes a `%`
+/// substitution point.
+///
+/// The scanner follows single quotes, double quotes, backticks and
+/// `$(...)` command substitutions; outside single quotes a backslash
+/// escapes the next character; `${...}` parameter expansions are skipped
+/// atomically so `${t/2312/18030}` stays ordinary bare text. A here-document
+/// redirection (`<<` / `<<-`) puts the body that follows its newline into
+/// [`ShellContext::Heredoc`] until the delimiter line reappears. Anything
+/// that cannot be resolved deterministically (an unterminated `${`, a third
+/// level of `$(...)` nesting, an unparsable here-document delimiter)
+/// becomes [`ShellContext::Ambiguous`]; the caller must then fail closed
+/// instead of guessing an encoding.
+fn shell_quote_context(prefix: &str) -> ShellContext {
+    let chars: Vec<char> = prefix.chars().collect();
+    let mut stack: Vec<QuoteState> = Vec::new();
+    let mut cmdsub_depth = 0usize;
+    let mut pending_heredocs: VecDeque<Heredoc> = VecDeque::new();
+    let mut active_heredoc: Option<Heredoc> = None;
+    let mut i = 0;
+
+    while i < chars.len() {
+        // A here-document body is read line by line: it ends at a line that
+        // is exactly the delimiter (leading tabs stripped for `<<-`), and
+        // any queued here-document starts on the following line.
+        if let Some(heredoc) = active_heredoc.take() {
+            let mut line_end = i;
+            while line_end < chars.len() && chars[line_end] != '\n' {
+                line_end += 1;
+            }
+            let mut line: String = chars[i..line_end].iter().collect();
+            if heredoc.strip_tabs {
+                line = line.trim_start_matches('\t').to_string();
+            }
+            if line == heredoc.delimiter {
+                i = if line_end < chars.len() {
+                    line_end + 1
+                } else {
+                    line_end
+                };
+                active_heredoc = pending_heredocs.pop_front();
+            } else if line_end >= chars.len() {
+                // The substitution point is inside the body, which undergoes
+                // parameter and command expansion.
+                return ShellContext::Heredoc;
+            } else {
+                active_heredoc = Some(heredoc);
+                i = line_end + 1;
+            }
+            continue;
+        }
+
+        let c = chars[i];
+        if c == '\n' {
+            i += 1;
+            // A here-document body begins after the newline that ends the
+            // command line on which `<<` appeared.
+            if !pending_heredocs.is_empty() && stack.is_empty() {
+                active_heredoc = pending_heredocs.pop_front();
+            }
+            continue;
+        }
+
+        let top = stack.last().copied();
+        match top {
+            None => match c {
+                '\\' => {
+                    if i + 1 >= chars.len() {
+                        return ShellContext::Ambiguous;
+                    }
+                    i += 2;
+                }
+                '\'' => {
+                    stack.push(QuoteState::SingleQuote);
+                    i += 1;
+                }
+                '"' => {
+                    stack.push(QuoteState::DoubleQuote);
+                    i += 1;
+                }
+                '`' => {
+                    stack.push(QuoteState::Backtick);
+                    i += 1;
+                }
+                '$' if chars.get(i + 1) == Some(&'(') => {
+                    if cmdsub_depth >= MAX_COMMAND_SUBSTITUTION_DEPTH {
+                        return ShellContext::Ambiguous;
+                    }
+                    cmdsub_depth += 1;
+                    stack.push(QuoteState::CommandSub);
+                    i += 2;
+                }
+                '$' if chars.get(i + 1) == Some(&'{') => {
+                    let Some(end) = param_expansion_end(&chars, i) else {
+                        return ShellContext::Ambiguous;
+                    };
+                    i = end;
+                }
+                '<' if chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') => {
+                    let Some((heredoc, next)) = parse_heredoc(&chars, i + 2) else {
+                        return ShellContext::Ambiguous;
+                    };
+                    pending_heredocs.push_back(heredoc);
+                    i = next;
+                }
+                _ => i += 1,
+            },
+            Some(QuoteState::SingleQuote) => {
+                if c == '\'' {
+                    stack.pop();
+                }
+                i += 1;
+            }
+            Some(QuoteState::DoubleQuote) => match c {
+                '\\' => {
+                    if i + 1 >= chars.len() {
+                        return ShellContext::Ambiguous;
+                    }
+                    i += 2;
+                }
+                '"' => {
+                    stack.pop();
+                    i += 1;
+                }
+                '`' => {
+                    stack.push(QuoteState::Backtick);
+                    i += 1;
+                }
+                '$' if chars.get(i + 1) == Some(&'(') => {
+                    if cmdsub_depth >= MAX_COMMAND_SUBSTITUTION_DEPTH {
+                        return ShellContext::Ambiguous;
+                    }
+                    cmdsub_depth += 1;
+                    stack.push(QuoteState::CommandSub);
+                    i += 2;
+                }
+                '$' if chars.get(i + 1) == Some(&'{') => {
+                    let Some(end) = param_expansion_end(&chars, i) else {
+                        return ShellContext::Ambiguous;
+                    };
+                    i = end;
+                }
+                _ => i += 1,
+            },
+            Some(QuoteState::Backtick) | Some(QuoteState::CommandSub) => match c {
+                '\\' => {
+                    if i + 1 >= chars.len() {
+                        return ShellContext::Ambiguous;
+                    }
+                    i += 2;
+                }
+                '`' if top == Some(QuoteState::Backtick) => {
+                    stack.pop();
+                    i += 1;
+                }
+                ')' if top == Some(QuoteState::CommandSub) => {
+                    stack.pop();
+                    cmdsub_depth -= 1;
+                    i += 1;
+                }
+                '"' => {
+                    stack.push(QuoteState::DoubleQuote);
+                    i += 1;
+                }
+                '\'' => {
+                    stack.push(QuoteState::SingleQuote);
+                    i += 1;
+                }
+                '`' => {
+                    stack.push(QuoteState::Backtick);
+                    i += 1;
+                }
+                '$' if chars.get(i + 1) == Some(&'(') => {
+                    if cmdsub_depth >= MAX_COMMAND_SUBSTITUTION_DEPTH {
+                        return ShellContext::Ambiguous;
+                    }
+                    cmdsub_depth += 1;
+                    stack.push(QuoteState::CommandSub);
+                    i += 2;
+                }
+                '$' if chars.get(i + 1) == Some(&'{') => {
+                    let Some(end) = param_expansion_end(&chars, i) else {
+                        return ShellContext::Ambiguous;
+                    };
+                    i = end;
+                }
+                _ => i += 1,
+            },
+        }
+    }
+
+    // A body that ran to the end of the prefix without meeting its delimiter
+    // still surrounds the substitution point.
+    if active_heredoc.is_some() {
+        return ShellContext::Heredoc;
+    }
+
+    match stack.last() {
+        None => ShellContext::Bare,
+        Some(QuoteState::SingleQuote) => ShellContext::Single,
+        Some(QuoteState::DoubleQuote) => ShellContext::Double,
+        Some(QuoteState::Backtick) => ShellContext::Backtick,
+        // The body of `$(...)` is an ordinary command, so the substitution is
+        // in bare context even when the substitution as a whole sits inside a
+        // surrounding double quote.
+        Some(QuoteState::CommandSub) => ShellContext::Bare,
+    }
+}
+
+/// Return the index just past the `}` matching the `${` at `start`, or
+/// `None` when the expansion is unterminated within `chars`.
+///
+/// Skipping `${...}` atomically keeps its `/`, `{` and `}` — e.g.
+/// `${t/2312/18030}` — from confusing the quote scanner; that expansion is
+/// ordinary bare text, not a quoting region.
+fn param_expansion_end(chars: &[char], start: usize) -> Option<usize> {
+    debug_assert_eq!(chars.get(start), Some(&'$'));
+    debug_assert_eq!(chars.get(start + 1), Some(&'{'));
+    let mut depth = 0usize;
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse the delimiter of a `<<`/`<<-` here-document whose `<` `<` end just
+/// before `start`. Returns the redirection description and the index at
+/// which to resume scanning the command line, or `None` for a delimiter the
+/// scanner cannot pin down.
+fn parse_heredoc(chars: &[char], start: usize) -> Option<(Heredoc, usize)> {
+    let mut i = start;
+    let strip_tabs = chars.get(i) == Some(&'-');
+    if strip_tabs {
+        i += 1;
+    }
+    while chars.get(i).is_some_and(|c| matches!(c, ' ' | '\t')) {
+        i += 1;
+    }
+    let mut delimiter = String::new();
+    let mut quote: Option<char> = None;
+    while let Some(&c) = chars.get(i) {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+                i += 1;
+                continue;
+            }
+            if q == '"' && c == '\\' {
+                let next = *chars.get(i + 1)?;
+                delimiter.push(next);
+                i += 2;
+                continue;
+            }
+            delimiter.push(c);
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                i += 1;
+            }
+            '\\' => {
+                delimiter.push(*chars.get(i + 1)?);
+                i += 2;
+            }
+            c if c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')') => break,
+            _ => {
+                delimiter.push(c);
+                i += 1;
+            }
+        }
+    }
+    if delimiter.is_empty() {
+        return None;
+    }
+    Some((
+        Heredoc {
+            delimiter,
+            strip_tabs,
+        },
+        i,
+    ))
+}
+
+/// Encode `value` for a [`ShellContext::Single`] substitution point.
+///
+/// The template already opened a `'...'` region around the substitution.
+/// Emit a closing `'`, the value as one fully single-quoted word (so no
+/// `$`, backtick or backslash inside it can expand) and a reopening `'`;
+/// the template's own trailing quote then closes the region again. This
+/// leaves the shell state exactly as the template intended while keeping
+/// the value a single literal argument.
+fn encode_single_quoted(value: &str) -> String {
+    format!("'{}'", quote_shell_word(value))
+}
+
+/// Encode `value` for a [`ShellContext::Double`] substitution point.
+///
+/// In a double-quote region a backslash, `"`, `$` and a backtick stay
+/// special, so each is backslash-escaped; every other character (including
+/// newlines and `;`, `|`, `&`, `(`, `)`, `<`, `>`) is literal there and is
+/// emitted unchanged.
+fn encode_double_quoted(value: &str) -> String {
+    let mut ret = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' | '"' | '$' | '`' => {
+                ret.push('\\');
+                ret.push(c);
+            }
+            _ => ret.push(c),
+        }
+    }
+    ret
+}
+
+/// Encode `value` for a [`ShellContext::Backtick`] substitution point.
+///
+/// This needs two layers. The inner shell must see the value as one
+/// single-quoted literal ([`quote_shell_word`]); the outer shell, while
+/// looking for the backtick that closes the substitution, strips a backslash
+/// that precedes `$`, a backtick or `\`. Escaping a backtick only once would
+/// therefore still yield a live backtick (and `\$` a live `$`) in the inner
+/// command. Every backtick and backslash of the inner encoding is doubled for
+/// the outer scanner, and the `$` characters stay protected by the inner
+/// single quotes.
+fn encode_backtick_quoted(value: &str) -> String {
+    let inner = quote_shell_word(value);
+    let mut ret = String::with_capacity(inner.len() + 2);
+    for c in inner.chars() {
+        match c {
+            '\\' | '`' => {
+                ret.push('\\');
+                ret.push(c);
+            }
+            _ => ret.push(c),
+        }
+    }
+    ret
+}
+
+/// Encode `value` for a [`ShellContext::Heredoc`] substitution point.
+///
+/// A here-document body is not tokenized: quotes are literal, while `\`, `$`
+/// and a backtick expand. Only those three are escaped.
+fn encode_heredoc(value: &str) -> String {
+    let mut ret = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' | '$' | '`' => {
+                ret.push('\\');
+                ret.push(c);
+            }
+            _ => ret.push(c),
+        }
+    }
+    ret
+}
+
+/// Encode an untrusted `value` for the shell context it is about to be
+/// spliced into.
+///
+/// [`ShellContext::Bare`] (and the body of a `$(...)`) keeps the historical
+/// [`quote_shell_word`]; the other variants armor the value for their exact
+/// region; [`ShellContext::Ambiguous`] is refused so a template we do not
+/// understand can never be completed with a guessed encoding.
+fn encode_for_context(context: ShellContext, value: &str) -> Result<String> {
+    match context {
+        ShellContext::Bare => Ok(quote_shell_word(value)),
+        ShellContext::Single => Ok(encode_single_quoted(value)),
+        ShellContext::Double => Ok(encode_double_quoted(value)),
+        ShellContext::Backtick => Ok(encode_backtick_quoted(value)),
+        ShellContext::Heredoc => Ok(encode_heredoc(value)),
+        ShellContext::Ambiguous => Err(Error::new(
+            "mailcap: refusing to substitute untrusted data: the command template places this \
+             substitution in an ambiguous shell quoting context",
+        )),
+    }
 }
 
 fn expand_nametemplate(nametemplate: Option<&str>, a: &Attachment) -> Option<String> {
@@ -155,6 +615,16 @@ fn expand_args(
             cursor += percent + 1;
             continue;
         }
+        // The value that will replace this `%` sequence is mail-controlled;
+        // encode it for the shell context the template has opened around the
+        // substitution point. An undecidable context fails closed.
+        let context = shell_quote_context(&command[..cursor + percent]);
+        if context == ShellContext::Ambiguous {
+            return Err(Error::new(
+                "mailcap: refusing to substitute untrusted data: the command template places this \
+                 substitution in an ambiguous shell quoting context",
+            ));
+        }
         let arg = &command[cursor..][percent..];
         match arg {
             arg if arg.starts_with("%s") => {
@@ -172,13 +642,13 @@ fn expand_args(
                         "mailcap: internal error expanding %s: temporary file missing",
                     ));
                 };
-                let p = quote_shell_word(&file.path().display().to_string());
+                let p = encode_for_context(context, &file.path().display().to_string())?;
                 command.replace_range((cursor + percent)..=((cursor + percent) + 1), &p);
                 needs_stdin = false;
                 cursor += percent + p.len();
             }
             arg if arg.starts_with("%t") => {
-                let t = quote_shell_word(&a.content_type().to_string());
+                let t = encode_for_context(context, &a.content_type().to_string())?;
                 command.replace_range((cursor + percent)..=((cursor + percent) + 1), &t);
                 cursor += percent + t.len();
             }
@@ -191,6 +661,8 @@ fn expand_args(
                 } else {
                     "0".to_string()
                 };
+                // `%n` is a meli-generated integer, not mail-controlled data:
+                // keep the historical quoting.
                 let n = quote_shell_word(&n);
                 command.replace_range((cursor + percent)..=((cursor + percent) + 1), &n);
                 cursor += percent + n.len();
@@ -210,19 +682,25 @@ fn expand_args(
                     needs_stdin = false;
                 }
                 let mut f = String::new();
-                for a in parts {
+                for part in parts {
                     let file = File::create_temp_file(
-                        &a.decode(Default::default()),
+                        &part.decode(Default::default()),
                         None,
                         None,
                         None,
                         false,
                     )?;
-                    let p = quote_shell_word(&file.path().display().to_string());
+                    let p = encode_for_context(context, &file.path().display().to_string())?;
+                    let content_type =
+                        encode_for_context(context, &part.content_type().to_string())?;
                     if !f.is_empty() {
+                        // Inside a quoted region this space is literal, so the
+                        // alternating content-type/path pairs collapse into a
+                        // single argument instead of separate shell words.
+                        // That is the least surprising tradeoff for a
+                        // multi-word expansion inside one already-open quote.
                         f.push(' ');
                     }
-                    let content_type = quote_shell_word(&a.content_type().to_string());
                     f = format!("{f}{content_type} {p}");
                     temporary_files.push(file.into());
                 }
@@ -243,7 +721,7 @@ fn expand_args(
                 } else {
                     String::new()
                 };
-                let value = quote_shell_word(&value);
+                let value = encode_for_context(context, &value)?;
                 command.replace_range((cursor + percent)..=((cursor + percent) + close), &value);
                 cursor += percent + value.len();
             }
@@ -2662,6 +3140,161 @@ text/html; less; needsterminal;
         assert_eq!(
             expand_nametemplate(Some("%s.html"), &attachment).as_deref(),
             Some("file.html")
+        );
+    }
+
+    /// The CVE-2020-12641 corpus (in-crate twin, see
+    /// `cve/src/CVE-2020-12641.rs`): a `%t` substitution inside `"..."` must
+    /// backslash-escape every character that stays live in double quotes, so
+    /// a content-type tag cannot close the quote or start a backtick/`$(...)`
+    /// command substitution.
+    #[test]
+    fn expand_args_double_quoted_context_escapes() {
+        let attachment = test_attachment(
+            "",
+            ContentType::Other {
+                name: None,
+                tag: b"x\"; $(id); `id`".to_vec(),
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let (_, expanded) =
+            expand_args("handler \"%t\"", None, &mut temporary_files, &attachment).unwrap();
+        assert_eq!(expanded, "handler \"x\\\"; \\$(id); \\`id\\`\"");
+    }
+
+    /// The `%t` substitution inside `'...'`: the value's own `'` must not
+    /// truncate the template's quote, and the emitted form must parse back to
+    /// the literal value (`it's $x`), not to a backslash-mangled word.
+    #[test]
+    fn expand_args_single_quoted_context_reopens_quote() {
+        let attachment = test_attachment(
+            "",
+            ContentType::Other {
+                name: None,
+                tag: b"it's $x".to_vec(),
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let (_, expanded) =
+            expand_args("handler '%t'", None, &mut temporary_files, &attachment).unwrap();
+        assert_eq!(expanded, "handler '''it'\\''s $x'''");
+    }
+
+    /// The `%t` substitution inside a backtick command substitution (the
+    /// `test="`echo %{charset}`"` shape of the repository mailcap corpus): the
+    /// outer scanner strips a backslash before a backtick, so a single
+    /// `\`` would still execute. The value is emitted as a single-quoted word
+    /// with every backtick and backslash doubled for the outer scanner, and
+    /// `$` stays protected by the inner quotes.
+    #[test]
+    fn expand_args_backtick_context_escapes() {
+        let attachment = test_attachment(
+            "",
+            ContentType::Other {
+                name: None,
+                tag: b"a`b$(id)c".to_vec(),
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let (_, expanded) =
+            expand_args("cmd `%t`", None, &mut temporary_files, &attachment).unwrap();
+        assert_eq!(expanded, "cmd `'a\\`b$(id)c'`");
+    }
+
+    /// The body of a `$(...)` command substitution is an ordinary command, not
+    /// double-quoted text: the bare `quote_shell_word` armor is correct there,
+    /// so a `;`/`|`/`&` payload stays one single-quoted word.
+    #[test]
+    fn expand_args_command_substitution_context_is_bare() {
+        let attachment = test_attachment(
+            "",
+            ContentType::Other {
+                name: None,
+                tag: b"x; touch /tmp/pwned".to_vec(),
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let (_, expanded) =
+            expand_args("echo $(id %t)", None, &mut temporary_files, &attachment).unwrap();
+        assert_eq!(expanded, "echo $(id 'x; touch /tmp/pwned')");
+    }
+
+    /// A `%s` path inside `"..."` is encoded for the double-quote context too:
+    /// the mail-controlled filename's `$(` is escaped instead of executing.
+    #[test]
+    fn expand_args_double_quoted_percent_s_is_escaped() {
+        let attachment = test_attachment(
+            "",
+            ContentType::Other {
+                name: Some("a$(:>meli-cve-2020-12641-twin.mk)b".to_string()),
+                tag: b"application/octet-stream".to_vec(),
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let (needs_stdin, expanded) =
+            expand_args("handler \"%s\"", None, &mut temporary_files, &attachment).unwrap();
+        assert!(!needs_stdin);
+        assert!(
+            expanded.contains("\\$("),
+            "the `$(` of the temp path must be escaped: {expanded}"
+        );
+        assert!(
+            !expanded.contains("\"$("),
+            "an unescaped substitution reached the double-quoted template: {expanded}"
+        );
+        for file in &temporary_files {
+            let _ = std::fs::remove_file(file.path());
+        }
+    }
+
+    /// A template the scanner cannot resolve (a third level of `$(...)`
+    /// nesting) must be refused outright, never completed with a guessed
+    /// encoding.
+    #[test]
+    fn expand_args_ambiguous_context_fails_closed() {
+        let attachment = test_attachment(
+            "",
+            ContentType::Other {
+                name: None,
+                tag: b"application/x; touch /tmp/pwned".to_vec(),
+                parameters: vec![],
+            },
+        );
+        let mut temporary_files = vec![];
+        let err = expand_args(
+            "cmd $(echo $(echo $(echo %t",
+            None,
+            &mut temporary_files,
+            &attachment,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err}");
+    }
+
+    /// The repository's own mailcap corpus keeps its context classification:
+    /// `${t/2312/18030}` stays bare text (it is a parameter expansion, not a
+    /// quoting region), `%{charset}` inside the backtick pipeline is in the
+    /// backtick class, and `$(...)` bodies are ordinary commands.
+    #[test]
+    fn shell_quote_context_classifies_corpus_templates() {
+        assert_eq!(
+            shell_quote_context("t='utf-8' ; w3m -dump -I ${t/2312/18030} -T text/html "),
+            ShellContext::Bare
+        );
+        assert_eq!(shell_quote_context("test=\"`echo "), ShellContext::Backtick);
+        assert_eq!(shell_quote_context("handler '"), ShellContext::Single);
+        assert_eq!(shell_quote_context("handler \""), ShellContext::Double);
+        assert_eq!(shell_quote_context("handler "), ShellContext::Bare);
+        assert_eq!(shell_quote_context("echo $(id "), ShellContext::Bare);
+        assert_eq!(
+            shell_quote_context("cat <<EOF\nbody\n"),
+            ShellContext::Heredoc
         );
     }
 }
