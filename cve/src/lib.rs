@@ -1481,3 +1481,42 @@ mod cve_2002_1210;
 #[cfg(test)]
 #[path = "CVE-2001-1326.rs"]
 mod cve_2001_1326;
+
+/// CVE-2002-2351（Qualcomm Eudora 5.1，Windows；NVD 未分配 CVSS 分数）
+/// 附件名尾点绕过可执行附件告警 regression（issue #61，表 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 / web/HTML embedding）：
+/// 附件名以 `.` 结尾（`evil.exe.`）或点号堆积（`evil.exe....`）时，
+/// Eudora 的「可执行附件安全告警」被绕过——Win32 文件创建 API 会剥离
+/// 最终路径组件的尾部点号 / 空格，文件实际落盘为 `evil.exe`，而告警
+/// 检查看到的是带尾点的 `evil.exe.`，把扩展名判定为空 / 非 exe，检查与
+/// 落盘不一致（check/use divergence）。
+///
+/// meli 等价面与结论：meli 全仓库（`meli/src`）没有「可执行附件告警」
+/// 功能面，本 CVE 的字面「绕过告警」没有可绕过的对象；真正对应的是
+/// **邮件控制附件名的落盘汇**——`File::create_temp_file`（mailcap `%s`、
+/// open-with 默认应用、envelope.rs 临时落盘）与
+/// [`sanitize_filename_component`] + [`unique_filename_component`]（单 /
+/// 批量保存、`eml_filename`）。本次发现真实缺口：
+/// [`sanitize_filename`] 原先不剥离尾部点号，`evil.exe.` 会原样带着尾点
+/// 进入所有落盘汇；在按 Win32 语义归一化的文件系统（WSL `/mnt/c`
+/// drvfs、Samba、部分 FUSE）上 OS 会创建为 `evil.exe`，check/use
+/// divergence 原样重演。修复：管线末尾追加尾点剥离
+/// （`meli/src/types/helpers.rs` 的 `strip_trailing_dots`），并让 192 字节
+/// 截断后复剥一次，避免字节上限重新引入尾点；只剥尾点，中缀点号堆积
+/// （CVE-2003-0376 契约）与前导点保留，全点名归一为 `""` 走生成名回退。
+/// [`cve_2002_2351`] 以内嵌 `multipart/mixed` 语料逐层锁定：wire 真实性
+/// （melib 逐字返回尾点名）、规范化剥离表、临时落盘（无尾点、`.exe`
+/// 扩展名可见、`<tmp>/meli/`、`0o600` 无执行位、UUID 中缀随机）、孪生
+/// 去重（`evil.exe` / `evil.exe.` 不碰撞不丢）、以及免疫映射（`MZ` 头
+/// 可执行内容解析 / 显示不物化临时文件；打开附件是 `open_mailcap` +
+/// `cmd_buf` 门控的用户显式动作；mailcap shell 上下文编码由 issue
+/// #57/#56 锁定）。结论：一个真实缺口，已随本回归修复，生产代码改动
+/// 仅限 `meli/src/types/helpers.rs`。
+///
+/// [`sanitize_filename`]: meli::types::sanitize_filename
+/// [`sanitize_filename_component`]: meli::types::sanitize_filename_component
+/// [`unique_filename_component`]: meli::types::unique_filename_component
+/// [`cve_2002_2351`]: self::cve_2002_2351
+#[cfg(test)]
+#[path = "CVE-2002-2351.rs"]
+mod cve_2002_2351;
