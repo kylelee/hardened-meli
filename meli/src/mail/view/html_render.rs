@@ -158,20 +158,83 @@ fn trim_predicate(c: char) -> bool {
         )
 }
 
+/// Maximum number of decoded input bytes [`render`] hands to the
+/// `sanitize` → html2text pipeline.
+///
+/// This is the CWE-400 open-mail availability bound for the regression
+/// tracked as CVE-1999-1016 (MS HTML control in IE5 / Outlook Express 5 /
+/// Eudora): a hostile HTML mail with giant form fields pinned the renderer
+/// at 100% CPU. Form tags themselves are already inert in [`sanitize`]
+/// (`input`/`textarea`/`select`/`button`/`form` are not in the allowlist,
+/// so the literal trigger dies there), but the decoded HTML that [`render`]
+/// accepts had no size ceiling of its own. The blocking view job renders
+/// whatever the message contains the moment the mail is opened, so a 100 MiB
+/// HTML mail used to burn ~33 s of 100% CPU and ~1 GiB of allocations on
+/// that thread (10 MiB of pure nested-table markup measured ~3.3 s release,
+/// the worst shape).
+///
+/// 10 MiB is far above any legitimate HTML mail body (base64 inflates the
+/// wire size by ~33%, so this is a ~14 MiB mail) and bounds the worst-case
+/// release render to a few seconds.
+pub const MAX_HTML_RENDER_INPUT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Terminal-friendly marker appended to the rendered text when the decoded
+/// HTML body exceeded [`MAX_HTML_RENDER_INPUT_BYTES`]. User-visible, so it
+/// states both that truncation happened and the cap that caused it.
+const HTML_INPUT_TRUNCATED_NOTICE: &str =
+    "\n[-- HTML body exceeded the 10 MiB render cap and was truncated --]\n";
+
+/// Largest byte index `<= index` that is a UTF-8 character boundary of `s`.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut floor = index;
+    while !s.is_char_boundary(floor) {
+        floor -= 1;
+    }
+    floor
+}
+
 /// Sanitize and render HTML `bytes` to plain text wrapped at `width` display
 /// columns.
+///
+/// The decoded input is truncated to [`MAX_HTML_RENDER_INPUT_BYTES`] before
+/// [`sanitize`] runs when it is larger (cut at the largest UTF-8 character
+/// boundary at or below the cap); a one-line notice is then appended to the
+/// rendered text. Truncating before the parse — rather than after — means the
+/// sanitizer sees the final document, with no parse differential for a
+/// truncated tail to smuggle markup through. Input within the cap behaves
+/// exactly as before (no notice).
 ///
 /// Never panics: invalid UTF-8 input is replaced lossily, sanitization always
 /// returns a `String`, and rendering failures are reported as [`Error`].
 pub fn render(bytes: &[u8], width: usize) -> Result<String> {
-    let html = sanitize(&String::from_utf8_lossy(bytes));
-    html2text::config::plain()
+    let decoded = String::from_utf8_lossy(bytes);
+    let (input, truncated) = if decoded.len() > MAX_HTML_RENDER_INPUT_BYTES {
+        (
+            &decoded[..floor_char_boundary(&decoded, MAX_HTML_RENDER_INPUT_BYTES)],
+            true,
+        )
+    } else {
+        (decoded.as_ref(), false)
+    };
+    let html = sanitize(input);
+    let mut rendered = html2text::config::plain()
         .string_from_read(html.as_bytes(), width)
-        .map_err(|err| Error::new("Could not render html to text").set_source(Some(Arc::new(err))))
+        .map_err(|err| {
+            Error::new("Could not render html to text").set_source(Some(Arc::new(err)))
+        })?;
+    if truncated {
+        rendered.push_str(HTML_INPUT_TRUNCATED_NOTICE);
+    }
+    Ok(rendered)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use melib::text::TextProcessing;
 
     use super::*;
@@ -783,6 +846,212 @@ mod tests {
             sanitize(r#"<style>@import url(evil);s_@import;_v_g/onload=ev</style>ok"#),
             "ok",
             "style element must die whole with its @import cargo"
+        );
+    }
+
+    /// Alias for the cap the regression tests below build inputs against.
+    const CAP: usize = MAX_HTML_RENDER_INPUT_BYTES;
+
+    /// Exactly-at-cap input renders in full with no notice: the cap is a
+    /// strict `>` bound, not an off-by-one. A whitespace-heavy ASCII body
+    /// keeps this at-cap assertion cheap; the content proves the input was
+    /// actually processed rather than short-circuited.
+    #[test]
+    fn render_at_input_cap_has_no_truncation_notice() {
+        let mut html = String::with_capacity(CAP);
+        html.push_str("<p>");
+        html.push_str("at-cap");
+        while html.len() < CAP - "</p>".len() {
+            html.push(' ');
+        }
+        html.push_str("</p>");
+        assert_eq!(
+            html.len(),
+            CAP,
+            "test input must land byte-exactly on the cap"
+        );
+        let text = render(html.as_bytes(), 80).expect("at-cap html must render");
+        assert!(
+            !text.contains("truncated") && !text.contains("render cap"),
+            "at-cap input must not be reported as truncated: {text:?}"
+        );
+        assert!(
+            text.contains("at-cap"),
+            "at-cap input content must render: {text:?}"
+        );
+    }
+
+    /// Over-cap ASCII: the prefix up to the cap is sanitized and rendered,
+    /// then the notice is appended exactly once, and the output stays bounded
+    /// by the cap plus the notice.
+    #[test]
+    fn render_over_input_cap_truncates_ascii_with_single_notice() {
+        let mut html = String::with_capacity(CAP + 8);
+        html.push_str("<p>");
+        html.push_str(&"A".repeat(CAP));
+        html.push_str("</p>");
+        assert!(html.len() > CAP, "precondition: input must exceed the cap");
+        let text = render(html.as_bytes(), 80).expect("over-cap html must render");
+        assert_eq!(
+            text.matches(HTML_INPUT_TRUNCATED_NOTICE).count(),
+            1,
+            "the truncation notice must be appended exactly once"
+        );
+        assert!(
+            text.len() <= CAP + CAP / 80 + HTML_INPUT_TRUNCATED_NOTICE.len() + 8,
+            "truncated render must stay bounded by the cap, got {} bytes",
+            text.len()
+        );
+        assert!(
+            text.contains('A'),
+            "the prefix content must survive the cut: {text:?}"
+        );
+    }
+
+    /// Over-cap CJK: the cap lands inside a 3-byte character, so the cut must
+    /// back up to a UTF-8 character boundary before `sanitize`; no panic,
+    /// notice present, output valid UTF-8 by construction.
+    #[test]
+    fn render_over_input_cap_cuts_on_cjk_char_boundary() {
+        // `CAP - 2` ASCII bytes, then `攻` spans bytes `CAP-2..CAP+1`, putting
+        // the cut byte `CAP` inside the character.
+        let mut html = String::with_capacity(CAP + 64);
+        html.push_str(&"a".repeat(CAP - 2));
+        html.push_str(&"攻".repeat(16));
+        assert!(html.len() > CAP, "precondition: input must exceed the cap");
+        assert!(
+            !html.is_char_boundary(CAP),
+            "precondition: the cap must land inside a multibyte character"
+        );
+        let text = render(html.as_bytes(), 80).expect("over-cap CJK must render");
+        assert_eq!(
+            text.matches(HTML_INPUT_TRUNCATED_NOTICE).count(),
+            1,
+            "CJK truncation must still append the notice"
+        );
+        assert!(
+            !text.contains('攻'),
+            "the cut must land before the straddling character: {text:?}"
+        );
+        assert!(
+            std::str::from_utf8(text.as_bytes()).is_ok(),
+            "the truncated render must be valid UTF-8"
+        );
+    }
+
+    /// Over-cap invalid UTF-8: the lossy replacement and the cap compose
+    /// without a panic; the cut still lands on a character boundary and the
+    /// notice is present.
+    #[test]
+    fn render_over_input_cap_with_invalid_utf8_does_not_panic() {
+        let mut bytes = Vec::with_capacity(CAP + 4);
+        bytes.extend(std::iter::repeat_n(b'A', CAP - 1));
+        bytes.extend_from_slice(&[0xff, 0xfe, 0xff, 0xff]);
+        assert!(bytes.len() > CAP, "precondition: input must exceed the cap");
+        let text = render(&bytes, 80).expect("over-cap invalid UTF-8 must render");
+        assert_eq!(
+            text.matches(HTML_INPUT_TRUNCATED_NOTICE).count(),
+            1,
+            "notice must survive the lossy decode + cap composition"
+        );
+        assert!(
+            std::str::from_utf8(text.as_bytes()).is_ok(),
+            "lossy decode plus boundary cut must produce valid UTF-8"
+        );
+    }
+
+    /// Truncation cannot smuggle markup: cutting *before* `sanitize` means the
+    /// sanitizer parses the final prefix. An unterminated `<script>` head
+    /// swallows the whole truncated rest (ammonia removes raw-text content
+    /// entirely), and a giant `<input value=…>` void element loses its
+    /// attribute with the element.
+    #[test]
+    fn render_truncation_cannot_smuggle_markup_past_sanitize() {
+        // Unterminated `<script>` in the head: the truncated prefix is one
+        // raw-text element to EOF, so `clean_content_tags` drops it whole.
+        let script = format!("<script>{}", "A".repeat(CAP));
+        assert!(
+            script.len() > CAP,
+            "precondition: input must exceed the cap"
+        );
+        let text = render(script.as_bytes(), 80).expect("script payload must render");
+        assert_eq!(
+            text.matches(HTML_INPUT_TRUNCATED_NOTICE).count(),
+            1,
+            "script payload must append the notice"
+        );
+        assert!(
+            !text.contains('A') && !text.contains("script"),
+            "unterminated script content must be removed entirely: {text:?}"
+        );
+
+        // Giant form field: `input` is not in the allowlist and carries no
+        // child text, so the whole element (with its `value=` attribute)
+        // disappears.
+        let input = format!("<input type=\"text\" value=\"{}\">", "A".repeat(CAP));
+        assert!(input.len() > CAP, "precondition: input must exceed the cap");
+        let text = render(input.as_bytes(), 80).expect("input payload must render");
+        assert_eq!(
+            text.matches(HTML_INPUT_TRUNCATED_NOTICE).count(),
+            1,
+            "input payload must append the notice"
+        );
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            !lower.contains("<input") && !lower.contains("value=") && !lower.contains("type="),
+            "no input/value= marker may survive truncation: {text:?}"
+        );
+    }
+
+    /// The one heavy worst-shape test: ~12 MiB of nested `<table><tr><td>`
+    /// markup (measured ~16 s in a debug build for a full 10 MiB) must render
+    /// `Ok` within a generous watchdog and produce a bounded output with the
+    /// truncation notice. This is the regression lock for the unbounded
+    /// open-mail render cost (the CVE-1999-1016 availability face). Every
+    /// other cap test above uses a cheap shape on purpose.
+    /// The one heavy worst-shape test: a >12 MiB corpus dominated by nested
+    /// `<table><tr><td>` markup must render `Ok` within a generous watchdog,
+    /// truncated to the cap with the notice and a bounded output.
+    ///
+    /// This is the regression lock for the unbounded open-mail render cost
+    /// (the CVE-1999-1016 availability face). Pure open-only nesting to the
+    /// full cap reaches ~700k levels, which overflows html2text's own stack
+    /// in a debug test thread (its deep-nesting tests only cover 1000), so the
+    /// peak depth here is deliberately held at 1000 genuinely nested levels
+    /// wrapping a bulk of shallow sibling table cells: the cap, not the
+    /// depth, is what this test locks. Every other cap test above uses a
+    /// cheap shape on purpose.
+    #[test]
+    fn render_over_cap_nested_tables_completes_within_watchdog() {
+        const WATCHDOG: Duration = Duration::from_secs(180);
+        const DEPTH: usize = 1_000;
+        let mut html = String::with_capacity(12 * 1024 * 1024 + DEPTH * 18);
+        for _ in 0..DEPTH {
+            html.push_str("<table><tr><td>");
+        }
+        while html.len() < 12 * 1024 * 1024 {
+            html.push_str("<table><tr><td></td></tr></table>");
+        }
+        for _ in 0..DEPTH {
+            html.push_str("</td></tr></table>");
+        }
+        assert!(html.len() > CAP, "precondition: input must exceed the cap");
+        let started = Instant::now();
+        let text = render(html.as_bytes(), 80).expect("nested-table markup must render");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < WATCHDOG,
+            "nested-table render took {elapsed:?}, watchdog {WATCHDOG:?}"
+        );
+        assert_eq!(
+            text.matches(HTML_INPUT_TRUNCATED_NOTICE).count(),
+            1,
+            "over-cap nested tables must be truncated with the notice"
+        );
+        assert!(
+            text.len() <= CAP,
+            "nested-table output must stay bounded, got {} bytes",
+            text.len()
         );
     }
 }
