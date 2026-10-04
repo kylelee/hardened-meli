@@ -1243,6 +1243,42 @@ mod cve_2015_8708;
 #[path = "CVE-2015-8614.rs"]
 mod cve_2015_8614;
 
+/// CVE-2020-16094 (issue #55, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// malicious IMAP server made Claws Mail ≤ 3.17.6 rebuild the
+/// client-side directory tree from an unbounded chain of subfolders,
+/// exhausting the client during the rebuild (CWE-674; CVSS 7.5).
+/// [`cve_2020_16094`] maps the attack onto meli's issue-prescribed
+/// surface — `melib/src/imap/protocol_parser.rs`'s
+/// [`list_mailbox_result`] LIST/LSUB ingestion, the mailbox-map
+/// construction it feeds (`ImapType::ingest_mailbox_list_line`), and
+/// the mailbox-tree consumer in `meli/src/accounts` that is meli's
+/// directory-tree equivalent — and locks it on the verbatim 「delimiter
+/// 堆叠 10^5 层路径」 corpus plus the every-ancestor ladder Claws
+/// Mail's rebuild consumed. Four real gaps it exposed are fixed with
+/// this regression: the LIST hierarchy depth was unbounded (now
+/// capped at [`MAX_MAILBOX_HIERARCHY_DEPTH`] = 20 levels with a clean
+/// deterministic parse error, the 「畸形层级确定报错」 prescription);
+/// `build_mailboxes_order` built the owned `MailboxNode` tree with no
+/// depth limit of its own and one recursive call per hierarchy level
+/// (now an explicit-stack arena rebuild that also refuses to nest
+/// deeper than the cap whatever the backend feeds it — foreign
+/// backends and the sqlite3 sync cache included — keeping every later
+/// walk linear in the number of mailboxes, so the uncapped rebuild's
+/// O(depth²) snapshot memory can no longer exhaust the system);
+/// `Account::list_mailboxes` plus the tree's derive `Clone`/`Drop`
+/// glue spent a frame per level on the sidebar snapshot and teardown
+/// as well (now iterative, via [`flatten_mailbox_tree`] and manual
+/// constant-stack `Clone`/`Drop`); and the first iterative rewrite
+/// linked arena children in reversed sibling order, flipping deep
+/// sidebar order and `has_sibling` bits (now pushed off the walk
+/// stack in reverse so the deepest-first linking restores natural
+/// order). In-crate twins: `melib/src/imap/protocol_parser/tests.rs::
+/// test_imap_list_mailbox_result_hierarchy_depth_limit`.
+#[cfg(test)]
+#[path = "CVE-2020-16094.rs"]
+mod cve_2020_16094;
+
 /// CVE-2020-12641 (Roundcube Webmail `<= 1.4.3`, CVSS 9.8, CWE-78) OS
 /// command-injection regression (issue #57, table 2 of
 /// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): the
