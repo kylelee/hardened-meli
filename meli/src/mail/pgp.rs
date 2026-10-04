@@ -168,8 +168,23 @@ pub fn verify(
     }
 }
 
+/// Turn raw backend verification output into the per-signature user-facing
+/// result, failing closed: an empty signature list is an error, never a
+/// silent success.
+///
+/// CVE-2007-1268 (mutt ≤ 1.5.13) was exactly this class of bug — an
+/// unread/missing `GnuPG` status (`--status-fd`) read as "verified",
+/// letting unsigned portions ride a valid signature. The gpgme backend
+/// already refuses to return empty metadata (`"No signatures found."`);
+/// the CLI backend trusts a user script's JSON, and a script answering
+/// `[]` must not mark a `multipart/signed` container `SignedVerified`
+/// with no signature at all.
 pub fn signatures_into_error(metadata: SignaturesMetadata) -> Result<Option<String>> {
     let mut comment = String::new();
+
+    if metadata.signatures.is_empty() {
+        return Err(Error::new("No signatures found.").set_kind(ErrorKind::NotFound));
+    }
 
     for sig in metadata.signatures.into_iter().rev() {
         let Signature {
