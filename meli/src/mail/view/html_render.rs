@@ -196,22 +196,138 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
     floor
 }
 
+/// Maximum element nesting depth [`render`] hands to the html2text stage.
+///
+/// This is the CWE-674 open-mail availability bound of the CVE-1999-1016
+/// regression: html2text 0.17.1 tears its `RenderNode` tree (and the parsed
+/// DOM) down with **recursive `Drop` glue** — a gdb-verified
+/// `RenderTable → Vec<RenderTableRow> → RenderTableCell → Vec<RenderNode> →
+/// RenderTable → …` chain costing ~700 B of stack per table-nesting level.
+/// Rust cannot catch a stack overflow, so past the threshold the whole meli
+/// process aborts the moment the mail is opened. Measured on the default
+/// 2 MiB job-thread stack (tokio `spawn_blocking`): a mail of only ~75 KiB
+/// (`<table><tr><td>` repeated 5 000 times, no closing tags — the parser
+/// auto-nests them the same way as the balanced form) already aborts the
+/// process; 2 000 levels survive. [`MAX_HTML_RENDER_INPUT_BYTES`] bounds
+/// input *size*, not depth, so the byte cap alone leaves this crash
+/// reachable.
+///
+/// 256 is ~12× below the measured abort threshold and an order of magnitude
+/// above any legitimate HTML-mail nesting (generator mails nest ≲30 tables);
+/// html2text's own deep-nesting regression corpus covers 1 000 levels.
+pub const MAX_HTML_RENDER_NESTING_DEPTH: usize = 256;
+
+/// Terminal-friendly marker appended to the rendered text when the sanitized
+/// document exceeded [`MAX_HTML_RENDER_NESTING_DEPTH`] nesting levels.
+const HTML_NESTING_TRUNCATED_NOTICE: &str =
+    "\n[-- HTML body exceeded the 256-element nesting-depth render cap and was truncated --]\n";
+
+/// Void elements of [`sanitize`]'s allowlist: serialized without closing
+/// tags, so they never contribute nesting depth.
+const VOID_TAGS: &[&str] = &["br", "hr"];
+
+/// Cap the element nesting depth of *sanitized* markup at
+/// [`MAX_HTML_RENDER_NESTING_DEPTH`] by cutting the document at the first
+/// start tag that would exceed it.
+///
+/// The scan runs on ammonia's serialized output, which is canonical: text
+/// `<`/`>` are escaped, comments are stripped, and the only tags present are
+/// allowlisted ones, so every `<` starts a real tag and quoted attribute
+/// values (where html5ever leaves `<`/`>` unescaped) are the sole nesting a
+/// lexer must skip. Returns `None` when the document is within the cap (no
+/// allocation), or the truncated prefix past which nothing may nest deeper.
+fn cap_nesting_depth(sanitized: &str) -> Option<String> {
+    let bytes = sanitized.as_bytes();
+    let mut depth: usize = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let tag_start = i;
+        match bytes.get(i + 1) {
+            Some(b'/') => {
+                // End tag: html5ever serializes end tags bare (`</name>`),
+                // so the next `>` closes them; nesting pops one level.
+                match bytes[i + 2..].iter().position(|&b| b == b'>') {
+                    Some(pos) => {
+                        depth = depth.saturating_sub(1);
+                        i += 2 + pos + 1;
+                    }
+                    // Unterminated end tag: parse it as text and stop —
+                    // whatever follows was cut by the serializer already.
+                    None => break,
+                }
+            }
+            Some(b) if b.is_ascii_alphabetic() => {
+                // Start tag: scan the name, then walk to the closing `>`
+                // skipping double-quoted attribute values (the serializer
+                // escapes `"` inside values, so a raw `"` toggles quotes).
+                let mut j = i + 1;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric()) {
+                    j += 1;
+                }
+                let name = &sanitized[i + 1..j];
+                let mut k = j;
+                let mut in_quotes = false;
+                while k < bytes.len() {
+                    match bytes[k] {
+                        b'"' => in_quotes = !in_quotes,
+                        b'>' if !in_quotes => break,
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                if k >= bytes.len() {
+                    // Unterminated start tag: cannot nest further.
+                    break;
+                }
+                if !VOID_TAGS.contains(&name) {
+                    depth += 1;
+                    if depth > MAX_HTML_RENDER_NESTING_DEPTH {
+                        return Some(sanitized[..tag_start].to_owned());
+                    }
+                }
+                i = k + 1;
+            }
+            // `<!` / `<?` constructions cannot survive `strip_comments`, but
+            // skip them defensively to the next `>` without depth changes.
+            Some(b'!') | Some(b'?') => match bytes[i + 2..].iter().position(|&b| b == b'>') {
+                Some(pos) => i += 2 + pos + 1,
+                None => break,
+            },
+            // A `<` that is not tag-shaped (cannot happen in serialized
+            // output): treat as text.
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Sanitize and render HTML `bytes` to plain text wrapped at `width` display
 /// columns.
 ///
-/// The decoded input is truncated to [`MAX_HTML_RENDER_INPUT_BYTES`] before
-/// [`sanitize`] runs when it is larger (cut at the largest UTF-8 character
-/// boundary at or below the cap); a one-line notice is then appended to the
-/// rendered text. Truncating before the parse — rather than after — means the
-/// sanitizer sees the final document, with no parse differential for a
-/// truncated tail to smuggle markup through. Input within the cap behaves
-/// exactly as before (no notice).
+/// Two CVE-1999-1016 availability bounds guard the pipeline, both enforced
+/// *before* html2text and both surfaced as a one-line notice appended to the
+/// rendered text:
+///
+/// - the decoded input is truncated to [`MAX_HTML_RENDER_INPUT_BYTES`] before
+///   [`sanitize`] runs when it is larger (cut at the largest UTF-8 character
+///   boundary at or below the cap). Truncating before the parse — rather than
+///   after — means the sanitizer sees the final document, with no parse
+///   differential for a truncated tail to smuggle markup through;
+/// - the *sanitized* markup is then truncated at
+///   [`MAX_HTML_RENDER_NESTING_DEPTH`] nesting levels, bounding the depth of
+///   the trees html2text builds and (recursively) drops.
+///
+/// Input within both caps behaves exactly as before (no notice).
 ///
 /// Never panics: invalid UTF-8 input is replaced lossily, sanitization always
 /// returns a `String`, and rendering failures are reported as [`Error`].
 pub fn render(bytes: &[u8], width: usize) -> Result<String> {
     let decoded = String::from_utf8_lossy(bytes);
-    let (input, truncated) = if decoded.len() > MAX_HTML_RENDER_INPUT_BYTES {
+    let (input, byte_truncated) = if decoded.len() > MAX_HTML_RENDER_INPUT_BYTES {
         (
             &decoded[..floor_char_boundary(&decoded, MAX_HTML_RENDER_INPUT_BYTES)],
             true,
@@ -220,13 +336,20 @@ pub fn render(bytes: &[u8], width: usize) -> Result<String> {
         (decoded.as_ref(), false)
     };
     let html = sanitize(input);
+    let (html, depth_truncated) = match cap_nesting_depth(&html) {
+        Some(truncated) => (truncated, true),
+        None => (html, false),
+    };
     let mut rendered = html2text::config::plain()
         .string_from_read(html.as_bytes(), width)
         .map_err(|err| {
             Error::new("Could not render html to text").set_source(Some(Arc::new(err)))
         })?;
-    if truncated {
+    if byte_truncated {
         rendered.push_str(HTML_INPUT_TRUNCATED_NOTICE);
+    }
+    if depth_truncated {
+        rendered.push_str(HTML_NESTING_TRUNCATED_NOTICE);
     }
     Ok(rendered)
 }
@@ -1003,28 +1126,19 @@ mod tests {
         );
     }
 
-    /// The one heavy worst-shape test: ~12 MiB of nested `<table><tr><td>`
-    /// markup (measured ~16 s in a debug build for a full 10 MiB) must render
-    /// `Ok` within a generous watchdog and produce a bounded output with the
-    /// truncation notice. This is the regression lock for the unbounded
-    /// open-mail render cost (the CVE-1999-1016 availability face). Every
-    /// other cap test above uses a cheap shape on purpose.
-    /// The one heavy worst-shape test: a >12 MiB corpus dominated by nested
-    /// `<table><tr><td>` markup must render `Ok` within a generous watchdog,
-    /// truncated to the cap with the notice and a bounded output.
-    ///
-    /// This is the regression lock for the unbounded open-mail render cost
-    /// (the CVE-1999-1016 availability face). Pure open-only nesting to the
-    /// full cap reaches ~700k levels, which overflows html2text's own stack
-    /// in a debug test thread (its deep-nesting tests only cover 1000), so the
-    /// peak depth here is deliberately held at 1000 genuinely nested levels
-    /// wrapping a bulk of shallow sibling table cells: the cap, not the
-    /// depth, is what this test locks. Every other cap test above uses a
-    /// cheap shape on purpose.
+    /// The one heavy worst-shape test: a >12 MiB corpus dominated by
+    /// `<table>` markup at the maximum legal nesting depth
+    /// ([`MAX_HTML_RENDER_NESTING_DEPTH`]) wrapping a bulk of shallow sibling
+    /// tables must render `Ok` within a generous watchdog, byte-truncated to
+    /// the cap with the notice and a bounded output — and the depth cap must
+    /// *not* fire on it (depth stays within the cap). This is the regression
+    /// lock for the unbounded open-mail render cost (the CVE-1999-1016
+    /// availability face). Every other cap test above uses a cheap shape on
+    /// purpose.
     #[test]
     fn render_over_cap_nested_tables_completes_within_watchdog() {
         const WATCHDOG: Duration = Duration::from_secs(180);
-        const DEPTH: usize = 1_000;
+        const DEPTH: usize = MAX_HTML_RENDER_NESTING_DEPTH;
         let mut html = String::with_capacity(12 * 1024 * 1024 + DEPTH * 18);
         for _ in 0..DEPTH {
             html.push_str("<table><tr><td>");
@@ -1051,6 +1165,155 @@ mod tests {
         assert!(
             text.len() <= CAP,
             "nested-table output must stay bounded, got {} bytes",
+            text.len()
+        );
+    }
+    // ------------------------------------------------------------------
+    // Nesting-depth cap (CWE-674 face of CVE-1999-1016)
+    // ------------------------------------------------------------------
+
+    /// The verbatim process killer, now bounded: `<table><tr><td>` repeated
+    /// with no closing tags nests the same way the balanced form does (the
+    /// parser auto-nests each table inside the open cell), and html2text
+    /// drops its render tree with recursive `Drop` glue — ~700 B of stack
+    /// per level. At the default 2 MiB job-thread stack 5 000 levels of this
+    /// 75 KiB markup used to abort the whole meli process on mail open; the
+    /// depth cap must cut it at [`MAX_HTML_RENDER_NESTING_DEPTH`] levels and
+    /// render the prefix with the notice instead.
+    #[test]
+    fn render_deep_open_only_tables_do_not_abort() {
+        for levels in [5_000usize, 30_000, 699_051] {
+            let html = "<table><tr><td>".repeat(levels);
+            let text = render(html.as_bytes(), 80).unwrap_or_else(|err| panic!("{levels}: {err}"));
+            assert_eq!(
+                text.matches(HTML_NESTING_TRUNCATED_NOTICE).count(),
+                1,
+                "{levels} open-only levels must be depth-truncated with the notice"
+            );
+            // The prefix that survives is exactly the capped nesting: tiny.
+            assert!(
+                text.len() < 4 * 1024,
+                "{levels}: capped prefix must render tiny, got {} bytes",
+                text.len()
+            );
+        }
+    }
+
+    /// The depth cap boundary: exactly [`MAX_HTML_RENDER_NESTING_DEPTH`]
+    /// nested elements render untouched (no notice), one more is cut. The
+    /// corpus nests `<b>` — one start tag per level, nothing synthesized and
+    /// width-neutral (a `<blockquote>` chain consumes ~2 columns per level
+    /// and legitimately fails `TooNarrow` long before 256), because a table
+    /// unit (`<table><tr><td>`, three counted tags) may gain an implied
+    /// `tbody` in html2text's own parse, which would blur the literal-tag
+    /// boundary.
+    #[test]
+    fn render_nesting_depth_boundary_is_inclusive() {
+        // Nest from the inside out: exactly-cap and over-cap documents.
+        let mut at_cap = String::from("DEPTH-MARKER");
+        for _ in 0..MAX_HTML_RENDER_NESTING_DEPTH {
+            at_cap = format!("<b>{at_cap}</b>");
+        }
+        let text = render(at_cap.as_bytes(), 80).expect("at-depth-cap html must render");
+        assert!(
+            !text.contains("nesting-depth"),
+            "depth exactly at the cap must not be truncated: {text:?}"
+        );
+        assert!(
+            text.contains("DEPTH-MARKER"),
+            "at-cap nesting must render its innermost text"
+        );
+
+        let over = format!("<b>{at_cap}</b>");
+        let text = render(over.as_bytes(), 80).expect("over-depth-cap html must render");
+        assert_eq!(
+            text.matches(HTML_NESTING_TRUNCATED_NOTICE).count(),
+            1,
+            "one level past the cap must be truncated with the notice"
+        );
+        assert!(
+            !text.contains("DEPTH-MARKER"),
+            "the cut precedes the innermost text of the over-cap document"
+        );
+    }
+
+    /// The depth scan counts only real element nesting: void elements
+    /// (`<br>`, `<hr>` — serialized bare) never nest, and quoted attribute
+    /// values (where html5ever leaves `>` and fake closers unescaped) are
+    /// skipped by the scanner, so neither can push a shallow document over
+    /// the cap or shield a deep one from it.
+    #[test]
+    fn render_nesting_cap_ignores_void_elements_and_quoted_closers() {
+        // Thousands of void elements at shallow depth: no truncation.
+        let mut html = String::from("<p>");
+        for i in 0..10_000 {
+            html.push_str(&format!("line {i}<br>"));
+        }
+        html.push_str("<hr></p>");
+        let text = render(html.as_bytes(), 80).expect("void-heavy html must render");
+        assert!(
+            !text.contains("nesting-depth"),
+            "void elements must not count as nesting: {text:?}"
+        );
+        assert!(
+            text.contains("line 9999"),
+            "void-heavy content must render whole: {} bytes",
+            text.len()
+        );
+
+        // Fake closers inside quoted attribute values must not pop depth:
+        // a document that is genuinely over the cap cannot be shielded by
+        // embedding `</table>` strings in `title` attributes.
+        let mut shielded = String::new();
+        for _ in 0..(MAX_HTML_RENDER_NESTING_DEPTH + 4) {
+            shielded.push_str("<table><tr><td>");
+        }
+        shielded.push_str(r#"<a title="</table></table></table>">z</a>"#);
+        let text = render(shielded.as_bytes(), 80).expect("shielded html must render");
+        assert_eq!(
+            text.matches(HTML_NESTING_TRUNCATED_NOTICE).count(),
+            1,
+            "quoted fake closers must not shield real nesting from the cap"
+        );
+
+        // Conversely, `>` inside a quoted value at *shallow* depth must not
+        // confuse the scanner into truncation.
+        let shallow = r#"<p><a title="a > b </table> c">ok</a></p>"#;
+        let text = render(shallow.as_bytes(), 80).expect("quoted-gt html must render");
+        assert_eq!(text, "ok\n", "quoted `>` must not disturb rendering");
+        assert!(
+            !text.contains("nesting-depth"),
+            "quoted `>` must not trip the depth cap"
+        );
+    }
+
+    /// Both caps compose on one hostile document: an over-10 MiB body whose
+    /// sanitized form also nests past the depth cap is cut by both, each
+    /// notice appears exactly once, and the result stays bounded.
+    #[test]
+    fn render_both_caps_compose_on_one_document() {
+        let mut html = String::with_capacity(CAP + 4096);
+        for _ in 0..(MAX_HTML_RENDER_NESTING_DEPTH + 8) {
+            html.push_str("<table><tr><td>");
+        }
+        while html.len() <= CAP {
+            html.push_str("<table><tr><td></td></tr></table>");
+        }
+        assert!(html.len() > CAP, "precondition: over the byte cap");
+        let text = render(html.as_bytes(), 80).expect("double-cap html must render");
+        assert_eq!(
+            text.matches(HTML_INPUT_TRUNCATED_NOTICE).count(),
+            1,
+            "byte-cap notice must appear exactly once"
+        );
+        assert_eq!(
+            text.matches(HTML_NESTING_TRUNCATED_NOTICE).count(),
+            1,
+            "depth-cap notice must appear exactly once"
+        );
+        assert!(
+            text.len() < 4 * 1024,
+            "depth cut bounds the rendered prefix, got {} bytes",
             text.len()
         );
     }
