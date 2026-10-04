@@ -146,8 +146,21 @@ impl NntpStream {
 
             {
                 let path = Arc::new(path.to_string());
+                // See the IMAP STARTTLS block: `Async::into_inner` leaves the
+                // socket in non-blocking mode, so a server that answers the
+                // negotiation and then goes silent makes this `WouldBlock`
+                // retry loop hot-spin at 100% CPU
+                // (CVE-2020-15917 STARTTLS-upgrade availability gap). Restore
+                // blocking mode, bound the handshake by the account timeout and
+                // enforce a deadline.
+                let socket = ret.stream.into_inner()?;
+                socket.set_nonblocking(false)?;
+                if let Some(timeout_dur) = server_conf.timeout_dur {
+                    socket.set_read_timeout(Some(timeout_dur))?;
+                    socket.set_write_timeout(Some(timeout_dur))?;
+                }
+                let deadline = server_conf.timeout_dur.map(|t| Instant::now() + t);
                 let conn = smol::unblock({
-                    let socket = ret.stream.into_inner()?;
                     let path = Arc::clone(&path);
                     move || {
                         let conn_result = connector.connect(&path, socket);
@@ -156,6 +169,13 @@ impl NntpStream {
                         {
                             let mut midhandshake_stream = Some(midhandshake_stream);
                             loop {
+                                if deadline.is_some_and(|d| Instant::now() >= d) {
+                                    return Err(Error::new(format!(
+                                        "Could not initiate TLS negotiation to {path}: handshake \
+                                         timed out."
+                                    ))
+                                    .set_kind(ErrorKind::TimedOut));
+                                }
                                 match midhandshake_stream.take().unwrap().handshake() {
                                     Ok(r) => {
                                         return Ok(r);

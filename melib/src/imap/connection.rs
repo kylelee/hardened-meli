@@ -534,8 +534,22 @@ impl ImapStream {
 
             {
                 let path = Arc::new(path.to_string());
+                // `Async::into_inner` leaves the file descriptor in
+                // non-blocking mode (async-io's own docs require the caller to
+                // put it back). Left as-is, the `WouldBlock` retry loop below
+                // hot-spins at 100% CPU against a server that
+                // answers the tagged OK and then goes silent — the
+                // CVE-2020-15917 STARTTLS-upgrade availability gap. Restore
+                // blocking mode and bound every handshake read/write by the
+                // account timeout, exactly as the SMTP path already does.
+                let socket = socket.into_inner()?;
+                socket.set_nonblocking(false)?;
+                if let Some(timeout_dur) = server_conf.timeout {
+                    socket.set_read_timeout(Some(timeout_dur))?;
+                    socket.set_write_timeout(Some(timeout_dur))?;
+                }
+                let deadline = server_conf.timeout.map(|t| Instant::now() + t);
                 let conn = smol::unblock({
-                    let socket = socket.into_inner()?;
                     let path = Arc::clone(&path);
                     move || {
                         let conn_result = connector.connect(&path, socket);
@@ -544,6 +558,13 @@ impl ImapStream {
                         {
                             let mut midhandshake_stream = Some(midhandshake_stream);
                             loop {
+                                if deadline.is_some_and(|d| Instant::now() >= d) {
+                                    return Err(Error::new(format!(
+                                        "Could not initiate TLS negotiation to {path}: handshake \
+                                         timed out."
+                                    ))
+                                    .set_kind(ErrorKind::TimedOut));
+                                }
                                 match midhandshake_stream.take().unwrap().handshake() {
                                     Ok(r) => {
                                         return Ok(r);
