@@ -176,6 +176,29 @@ fn wrap_search_result(
     })
 }
 
+/// Flattens the owned mailbox tree into the pre-order sidebar
+/// snapshot.
+///
+/// CVE-2020-16094 (Claws Mail ≤ 3.17.6, CWE-674): this flatten feeds the
+/// sidebar draw path and used to be a recursive walk — one stack frame
+/// per hierarchy level — so a hostile tree nested deeper than the stack
+/// budget (delimiter-stacked LIST paths) aborted the process. The
+/// explicit stack below spends constant stack regardless of depth;
+/// [`MailboxNode`]'s iterative `Clone` keeps the per-node snapshot
+/// constant-stack too.
+pub fn flatten_mailbox_tree(tree: &[MailboxNode], len_hint: usize) -> Vec<MailboxNode> {
+    let mut ret = Vec::with_capacity(len_hint);
+    let mut stack: Vec<&MailboxNode> = Vec::new();
+    for node in tree.iter().rev() {
+        stack.push(node);
+    }
+    while let Some(node) = stack.pop() {
+        ret.push(node.clone());
+        stack.extend(node.children.iter().rev());
+    }
+    ret
+}
+
 #[derive(Debug)]
 pub struct Account {
     pub name: Arc<str>,
@@ -1027,17 +1050,7 @@ impl Account {
     }
 
     pub fn list_mailboxes(&self) -> Vec<MailboxNode> {
-        let mut ret = Vec::with_capacity(self.mailbox_entries.len());
-        fn rec(node: &MailboxNode, ret: &mut Vec<MailboxNode>) {
-            ret.push(node.clone());
-            for c in node.children.iter() {
-                rec(c, ret);
-            }
-        }
-        for node in &self.tree {
-            rec(node, &mut ret);
-        }
-        ret
+        flatten_mailbox_tree(&self.tree, self.mailbox_entries.len())
     }
 
     pub fn mailboxes_order(&self) -> &[MailboxHash] {
