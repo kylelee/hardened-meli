@@ -3183,7 +3183,7 @@ fn missing_structural_fields_mail_renders_degraded_in_envelope_view() {
 
 /// Synthetic S/MIME mail: a `multipart/signed` body whose detached
 /// signature part is `application/pkcs7-signature` (S/MIME, not
-/// OpenPGP). The signature bytes are an inert base64 placeholder — the
+/// `OpenPGP`). The signature bytes are an inert base64 placeholder — the
 /// open-view path never parses them, so validity does not matter.
 ///
 /// This is the corpus for `issue #16` / CVE-2008-3068 (S/MIME
@@ -3256,8 +3256,10 @@ fn collect_rendered_text(displays: &[AttachmentDisplay]) -> String {
 #[test]
 fn smime_open_renders_content_offline_without_engine() {
     let ctx = mock_context();
-    let mut settings = ViewSettings::default();
-    settings.auto_verify_signatures = true.into();
+    let settings = ViewSettings {
+        auto_verify_signatures: true.into(),
+        ..Default::default()
+    };
     let backend_available = settings.pgp_backend.instantiate().is_ok();
 
     let view = smime_envelope_view(&ctx, settings);
@@ -3330,8 +3332,10 @@ fn smime_open_verify_job_dies_at_protocol_gate() {
 #[test]
 fn smime_open_auto_verify_off_shows_unverified() {
     let ctx = mock_context();
-    let mut settings = ViewSettings::default();
-    settings.auto_verify_signatures = false.into();
+    let settings = ViewSettings {
+        auto_verify_signatures: false.into(),
+        ..Default::default()
+    };
 
     let view = smime_envelope_view(&ctx, settings);
     let root = view

@@ -3242,9 +3242,9 @@ text/html; less; needsterminal;
     /// The `%t` substitution inside a backtick command substitution (the
     /// `test="echo %{charset}"` shape of the repository mailcap corpus): the
     /// outer scanner strips a backslash before a backtick, so a single
-    /// `\`` would still execute. The value is emitted as a single-quoted word
-    /// with every backtick and backslash doubled for the outer scanner, and
-    /// `$` stays protected by the inner quotes.
+    /// escaped backtick would still execute. The value is emitted as a
+    /// single-quoted word with every backtick and backslash doubled for the
+    /// outer scanner, and `$` stays protected by the inner quotes.
     #[test]
     fn expand_args_backtick_context_escapes() {
         let attachment = test_attachment(
