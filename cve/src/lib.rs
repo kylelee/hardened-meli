@@ -2247,3 +2247,71 @@ mod cve_2021_30858;
 #[cfg(test)]
 #[path = "CVE-2023-4863.rs"]
 mod cve_2023_4863;
+
+/// CVE-2023-41061（Apple Wallet / PassKit；Apple 公告原文 *"A validation issue
+/// was addressed with improved logic"*；2023-09 在野利用；与 CVE-2023-41064 组成
+/// BLASTPASS 零点击链，经 iMessage 附件投递，Citizen Lab / Lookout 归因）**附件
+/// 校验绕过 → 任意代码执行** regression（issue #79，表 4 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：iOS/iPadOS/watchOS 的 Wallet 对伪造 Apple
+/// Wallet `.pass` 附件的校验被绕过——`.pass` 本质是一个 ZIP 归档（`pass.json` /
+/// `manifest.json` / `logo.png` / `zh-CN.lproj/pass.strings` 等条目），Wallet 在
+/// 检查 SHA1 清单与结构约束时逻辑不完善，恶意 `.pass` 被当作合法凭证处理；链上
+/// 再配合 CVE-2023-41064（ImageIO 处理 `.pass` 内嵌恶意 PNG 的缓冲区溢出）完成
+/// 代码执行。攻击面对邮件客户端附件处理同等适用。
+///
+/// meli 等价面映射（issue #79 明确要求）：meli 是终端邮件客户端，**没有 Wallet /
+/// PassKit 解析器、没有 ZIP 归档解析器、也没有任何内嵌图片解码器**。本 CVE 的触发
+/// 原语在结构上不存在。`Content-Disposition: attachment` 叶只以元数据进列表；
+/// `.pass` / `application/zip` / `application/octet-stream` 在 melib 解析路径
+/// 按 Content-Type 归为 `ContentType::Other { tag }`、`is_text() == false`（不看
+/// 扩展名），[`Attachment::decode`] 只做 base64 / quoted-printable / 8bit 传输编码
+/// 反转，不做任何 ZIP 记录头 / EOCD / PassKit / PNG 结构解释；inline `Other` 原样
+/// 文本分支只把已到达字节当纯文本；`multipart/related` 的 `<img src="cid:…">` /
+/// `data:application/vnd.apple.pass;…` / 远程 `https://evil79.example/x.pass` /
+/// `<object>` / `<embed>` / `<iframe>` 引用在 [`sanitize`]（ammonia 白名单，`img` /
+/// `object` / `embed` / `iframe` / `source` 非白名单，URL scheme 只有
+/// http/https/mailto）里整体死亡；打开 `.pass` 只有 `open_mailcap` 与
+/// `open_attachment` 两条汇，两者都以 `context.cmd_buf().is_some()`（先输入附件
+/// 编号）为前置，命中后字节经 `sanitize_filename` 压平路径穿越再落入
+/// `<temp_dir>/meli/` 的 `0o600` 随机名临时文件、交给进程外程序。
+///
+/// [`cve_2023_41061`] 以内嵌「等价结构」伪造 `.pass` 语料（真 `PK\x03\x04` 本地
+/// 文件头 + `PK\x01\x02` 中央目录 + `PK\x05\x06` EOCD 的 stored 容器，逐条内嵌
+/// 恶意 `pass.json`（http `webServiceURL` 信标 / `backFields` script 事件载荷 /
+/// `authenticationToken` / 畸形 barcodes）、伪造 40 位十六进制 SHA1 的
+/// `manifest.json`、IHDR 声明尺寸与实际数据失配的畸形 PNG、`zh-CN.lproj/
+/// pass.strings` 本地化嵌套目录；外加 `PK\x06\x07` ZIP64 EOCD locator 混淆与
+/// 截断 / 篡改 EOCD 变体，共 18 个 ZIP 向量；投递形态覆盖正确申报
+/// `application/vnd.apple.pass`、伪装 `application/zip` 与
+/// `application/octet-stream` + `.pass` 文件名、RFC 2231 `filename*=UTF-8''…%2Epass`
+/// 与 `filename*0=`/`filename*1=` 分段拼写、inline vs attachment、双扩展
+/// `boarding79.pass.txt`、`text/plain` 伪装、路径穿越 `../../evil79.pass`、
+/// `multipart/related` + `<img src="cid:pass79@evil79.example">`、嵌套
+/// `message/rfc822`，共 11 个投递向量；另有 7 个 HTML 引用向量）逐层锁定为
+/// **免疫证明，未发现缺口，未触碰生产代码**。
+///
+/// L1 melib 解析出精确的 `multipart/mixed` 附件树（19 个根部件），全部语料字节在
+/// wire 上逐字在场，`application/vnd.apple.pass` / `application/zip` /
+/// `application/octet-stream` 归类 `ContentType::Other`、`is_text() == false`，
+/// [`Attachment::decode`] 只做传输编码反转（8bit 原样、base64 `UEsDBA==` →
+/// `PK\x03\x04`、quoted-printable 同已知答案），无任何 ZIP / PassKit / PNG 结构
+/// 解释；L2 `.pass` 叶只以元数据条目显示，HTML 引用在 [`sanitize`] 里整体死亡且为
+/// 不动点，inline `Other` 原样分支惰性；L3 源码扫描锁定 `open_mailcap` /
+/// `open_attachment` 的 `cmd_buf().is_some()` 前置，路径穿越文件名经
+/// `sanitize_filename` / `sanitize_filename_component` 不产生目录分量，
+/// `l3_workspace_has_no_zip_or_archive_parser_dependency` 断言全仓清单无任何
+/// ZIP / 归档解析依赖，`l3_flate2_is_only_used_outside_attachment_paths` 断言
+/// `flate2` 的使用点仅为协议连接层（`melib/src/utils/connections.rs`）、本地
+/// manpage 资产（`meli/src/manpages.rs`）、可选补丁抓取工具
+///（`melib/src/utils/patch_retrieve.rs`）与测试代码（`meli/src/sqlite3/tests.rs`），
+/// `melib/src/email/` 下零引用；L4 整封攻击邮件端到端解析 + 渲染纯文本，合法内容
+/// （`LEGITIMATE-MARKER-79`）交付、`.pass` 字节 / 引用不出现，诚实
+/// `http`/`https`/`mailto` 链接保持可用（sanitize 保留 href、render 脚注可见、
+/// 确认门放行）。仓内孪生改动：无（免疫证明，未触碰生产代码）。
+///
+/// [`Attachment::decode`]: meli::melib::Attachment::decode
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`cve_2023_41061`]: self::cve_2023_41061
+#[cfg(test)]
+#[path = "CVE-2023-41061.rs"]
+mod cve_2023_41061;
