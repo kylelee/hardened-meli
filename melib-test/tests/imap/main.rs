@@ -82,13 +82,14 @@ fn test_imap_search_subject_cjk_literal() {
 }
 
 /// QQ Mail never answers a synchronizing-literal `SEARCH` with a `+ `
-/// continuation, so the search must fail within a bounded wait instead of
-/// hanging. See `tests::run_imap_search_qq_literal_no_continuation`.
+/// continuation: the search must drop the literal exchange within a bounded
+/// wait and succeed by resending the query with quoted strings. See
+/// `tests::run_imap_search_qq_quoted_retry`.
 #[test]
-fn test_imap_search_qq_literal_no_continuation() {
+fn test_imap_search_qq_quoted_retry() {
     let _env = env_lock();
     tokio_test::block_on(async {
-        tests::run_imap_search_qq_literal_no_continuation();
+        tests::run_imap_search_qq_quoted_retry();
     });
 }
 
@@ -759,8 +760,8 @@ pub mod server {
         /// answered with the command's tagged completion (optionally
         /// preceded by an untagged `* SEARCH` line) instead of a `+ `
         /// continuation request, without reading the literal octets. The
-        /// client must fail the search within its bounded wait instead of
-        /// hanging.
+        /// client must drop the literal exchange and retry the command
+        /// with quoted strings.
         pub search_ignore_literal_continuation: bool,
         /// How many `+ ` continuation requests the mock sent in response to
         /// `UID SEARCH CHARSET UTF-8 ... {N}` literal lines, for asserting
@@ -783,6 +784,11 @@ pub mod server {
         /// CRLF) received by each `UID SEARCH CHARSET UTF-8 ... {N}`
         /// continuation exchange, for assertions on non-ASCII search terms.
         pub search_literals: Vec<Vec<u8>>,
+        /// The first quoted value of each `UID SEARCH CHARSET UTF-8 ...`
+        /// command that carries no literal (the quoted-string retry the
+        /// client sends after a server skipped a literal continuation),
+        /// for assertions on the retry path.
+        pub search_quoted_terms: Vec<String>,
         /// The raw bytes of the RFC 2971 `ID` command line received at the
         /// `M4` handshake stage, for assertions on `imap_id_name` (the
         /// client name). `None` when the client sent no `ID` at all
@@ -859,6 +865,7 @@ pub mod server {
                 advertise_unselect: true,
                 x_gm_raw_literals: Vec::new(),
                 search_literals: Vec::new(),
+                search_quoted_terms: Vec::new(),
                 id_handshake_line: None,
                 omit_uidnext: false,
                 fetch_underdelivers: None,
@@ -1967,6 +1974,87 @@ pub mod server {
                                 .unwrap()
                                 .search_literals
                                 .push(literal[..n].to_vec());
+                            let uids = state
+                                .lock()
+                                .unwrap()
+                                .envelopes
+                                .iter()
+                                .filter(|(_, mail)| {
+                                    mail.envelope()
+                                        .subject()
+                                        .to_lowercase()
+                                        .contains(&query.to_lowercase())
+                                })
+                                .map(|(u, _)| *u)
+                                .collect::<Vec<_>>();
+                            if uids.is_empty() {
+                                tcp_stream.write_all(b"* SEARCH\r\n").await.unwrap();
+                            } else {
+                                let uid_list = uids
+                                    .iter()
+                                    .map(|u| u.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                tcp_stream
+                                    .write_all(format!("* SEARCH {uid_list}\r\n").as_bytes())
+                                    .await
+                                    .unwrap();
+                            }
+                            tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                            tcp_stream
+                                .write_all(b" OK SEARCH completed\r\n")
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
+                        uid_search_charset_quoted
+                            if uid_search_charset_quoted
+                                .starts_with("UID SEARCH CHARSET UTF-8 ")
+                                && uid_search_charset_quoted.contains('"')
+                                && !uid_search_charset_quoted.contains('{') =>
+                        {
+                            // A quoted-string `SEARCH`: the non-ASCII term
+                            // travels inline inside the quoted value. This is
+                            // the retry the client sends after a server
+                            // completed a synchronizing-literal `SEARCH`
+                            // without its `+ ` continuation (see
+                            // `ServerState::search_ignore_literal_continuation`),
+                            // and also the primary form for ASCII terms.
+                            // Extract the first quoted value and answer with
+                            // the UIDs whose subject contains it, so a test
+                            // can assert the retry happened and returned the
+                            // matching message.
+                            if !matches!(session_state, SessionState::SelectedMailbox) {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD no mailbox is selected\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            let trimmed = uid_search_charset_quoted.trim_end_matches("\r\n");
+                            let parse_query = || -> Option<String> {
+                                let open = trimmed.find('"')?;
+                                let rest = &trimmed[open + 1..];
+                                let close = rest.find('"')?;
+                                Some(rest[..close].to_string())
+                            };
+                            let Some(query) = parse_query() else {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD could not parse quoted query\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            };
+                            eprintln!("{name} loop_handler SEARCH quoted retry: {:?}", query);
+                            state
+                                .lock()
+                                .unwrap()
+                                .search_quoted_terms
+                                .push(query.clone());
                             let uids = state
                                 .lock()
                                 .unwrap()
@@ -7734,9 +7822,11 @@ hello poisoned revealed {i}.
     /// a `UID SEARCH CHARSET UTF-8 ... {N}` line carrying a synchronizing
     /// literal is answered with an untagged `* SEARCH` line plus the tagged
     /// completion instead of a `+ ` continuation request (QQ does not
-    /// advertise `LITERAL+`). The search must return `Err` within a bounded
-    /// wait rather than hang forever.
-    pub(crate) fn run_imap_search_qq_literal_no_continuation() {
+    /// advertise `LITERAL+`). The client must drop the literal exchange and
+    /// resend the query as `UID SEARCH CHARSET UTF-8 SUBJECT "..."` with the
+    /// non-ASCII term inline in a quoted string; the search must succeed
+    /// within a bounded wait rather than hang.
+    pub(crate) fn run_imap_search_qq_quoted_retry() {
         melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         let backend_event_queue =
@@ -7785,28 +7875,44 @@ hello poisoned revealed {i}.
                             let search_fut = imap
                                 .search(Query::Subject("账号".to_string()), Some(inbox_hash))
                                 .unwrap();
-                            match melib::utils::futures::timeout(
+                            let found = match melib::utils::futures::timeout(
                                 Some(Duration::from_secs(10)),
                                 search_fut,
                             )
                             .await
                             {
-                                Ok(res) => {
-                                    let err = res.expect_err(
-                                        "QQ completes the command without a literal continuation, \
-                                         so the search must fail",
-                                    );
-                                    eprintln!("QQ search error (expected): {err:?}");
-                                }
+                                Ok(res) => res.expect(
+                                    "the quoted-string retry must succeed after QQ skipped the \
+                                     literal continuation",
+                                ),
                                 Err(_) => panic!(
                                     "the search hung waiting for a continuation request that QQ \
                                      never sends"
                                 ),
-                            }
+                            };
+                            let expected: EnvelopeHash = seed_envs
+                                .iter()
+                                .find(|env| env.subject().contains("账号"))
+                                .map(|env| env.hash())
+                                .expect("the CJK-subject seed must be fetched");
+                            assert_eq!(
+                                found,
+                                vec![expected],
+                                "the quoted retry must return the matching UID"
+                            );
                             let state_lck = server_state.lock().unwrap();
                             assert_eq!(
                                 state_lck.search_literal_continuations, 0,
                                 "the QQ mock must not have sent a continuation request"
+                            );
+                            assert!(
+                                state_lck.search_literals.is_empty(),
+                                "the QQ mock must never receive literal octets"
+                            );
+                            assert_eq!(
+                                state_lck.search_quoted_terms,
+                                vec!["账号".to_string()],
+                                "the client must retry with the term inline in a quoted string"
                             );
                         });
                     })
@@ -8222,6 +8328,7 @@ hello new world b.
             advertise_unselect: true,
             x_gm_raw_literals: vec![],
             search_literals: vec![],
+            search_quoted_terms: vec![],
             id_handshake_line: None,
             omit_uidnext: false,
             fetch_underdelivers: None,

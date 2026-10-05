@@ -79,6 +79,20 @@ pub trait ToImapSearch: private::Sealed {
     /// Convert [`crate::search::Query`] into IMAP search criteria, split into
     /// text and literal segments.
     fn to_imap_search_segments(&self) -> Vec<ImapSearchSegment>;
+
+    /// Convert [`crate::search::Query`] into IMAP search criteria with every
+    /// value inline in a quoted string, non-ASCII octets included.
+    ///
+    /// This is the retry form for servers that complete the `SEARCH` command
+    /// instead of answering a synchronizing literal's `+ ` continuation
+    /// request (observed: QQ Mail, which advertises neither `LITERAL+` nor
+    /// `LITERAL-`): after such a refusal a quoted string is the only wire
+    /// form left that the server may still accept.
+    ///
+    /// Returns `None` when the result would contain `CR`/`LF` inside a quoted
+    /// value: those octets terminate the command line early and can only
+    /// travel as a literal, so the query has no quoted form.
+    fn to_imap_search_segments_quoted(&self) -> Option<Vec<ImapSearchSegment>>;
 }
 
 impl private::Sealed for Query {}
@@ -101,14 +115,31 @@ macro_rules! space_pad {
 const LITERAL_MARKER_START: char = '\u{E000}';
 const LITERAL_MARKER_END: char = '\u{E001}';
 
+/// How a string-valued search condition is put on the wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiteralPolicy {
+    /// RFC 3501: pure ASCII values stay inline in quoted strings, non-ASCII
+    /// values travel as literals.
+    Literal,
+    /// Every value stays inline in a quoted string, 8-bit octets included.
+    Quoted,
+}
+
 /// Append a string-valued search condition.
 ///
 /// Pure ASCII values keep the historical inline quoted form. Anything else is
 /// emitted as an IMAP synchronizing literal: a `{n}` octet count goes into the
 /// command text and the raw UTF-8 octets are queued in `literals`, with a
-/// private-use marker recording their position.
-fn push_search_value(s: &mut String, value: &str, literals: &mut Vec<Vec<u8>>) {
-    if value.is_ascii() {
+/// private-use marker recording their position. Under
+/// [`LiteralPolicy::Quoted`] every value takes the inline quoted form
+/// regardless of its octets.
+fn push_search_value(
+    s: &mut String,
+    value: &str,
+    literals: &mut Vec<Vec<u8>>,
+    policy: LiteralPolicy,
+) {
+    if value.is_ascii() || policy == LiteralPolicy::Quoted {
         s.push('"');
         s.extend(escape_double_quote(value).chars());
         s.push('"');
@@ -216,6 +247,23 @@ pub fn search_send_steps_non_sync(segments: &[ImapSearchSegment]) -> Vec<ImapSea
 
 impl ToImapSearch for Query {
     fn to_imap_search_segments(&self) -> Vec<ImapSearchSegment> {
+        self.serialize(LiteralPolicy::Literal)
+    }
+
+    fn to_imap_search_segments_quoted(&self) -> Option<Vec<ImapSearchSegment>> {
+        let segments = self.serialize(LiteralPolicy::Quoted);
+        if segments.iter().any(|segment| match segment {
+            ImapSearchSegment::Text(text) => text.contains('\r') || text.contains('\n'),
+            ImapSearchSegment::Literal(_) => false,
+        }) {
+            return None;
+        }
+        Some(segments)
+    }
+}
+
+impl Query {
+    fn serialize(&self, policy: LiteralPolicy) -> Vec<ImapSearchSegment> {
         enum Step<'a> {
             Q(&'a Query),
             Lit(char),
@@ -235,32 +283,32 @@ impl ToImapSearch for Query {
                 Q(Subject(t)) => {
                     space_pad!(s);
                     s.push_str("SUBJECT ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                 }
                 Q(From(t)) => {
                     space_pad!(s);
                     s.push_str("FROM ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                 }
                 Q(To(t)) => {
                     space_pad!(s);
                     s.push_str("TO ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                 }
                 Q(Cc(t)) => {
                     space_pad!(s);
                     s.push_str("CC ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                 }
                 Q(Bcc(t)) => {
                     space_pad!(s);
                     s.push_str("BCC ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                 }
                 Q(AllText(t)) => {
                     space_pad!(s);
                     s.push_str("TEXT ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                 }
                 Q(Flags(v)) => {
                     space_pad!(s);
@@ -347,19 +395,19 @@ impl ToImapSearch for Query {
                 Q(InReplyTo(t)) => {
                     space_pad!(s);
                     s.push_str("HEADER \"In-Reply-To\" ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                 }
                 Q(References(t)) => {
                     space_pad!(s);
                     s.push_str("HEADER \"References\" ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                 }
                 Q(Header(t, v)) => {
                     space_pad!(s);
                     s.push_str("HEADER \"");
                     s.push_str(t.as_str());
                     s.push_str("\" ");
-                    push_search_value(&mut s, v, &mut literals);
+                    push_search_value(&mut s, v, &mut literals, policy);
                 }
                 Q(AllAddresses(t)) => {
                     let is_empty = space_pad!(s);
@@ -367,13 +415,13 @@ impl ToImapSearch for Query {
                         s.push('(');
                     }
                     s.push_str("OR FROM ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                     s.push_str(" (OR TO ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                     s.push_str(" (OR CC ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                     s.push_str(" BCC ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                     s.push_str("))");
                     if !is_empty {
                         s.push(')');
@@ -385,13 +433,13 @@ impl ToImapSearch for Query {
                     // IMAP `BODY` (which excludes the subject).
                     space_pad!(s);
                     s.push_str("OR SUBJECT ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                     s.push_str(" (OR FROM ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                     s.push_str(" (OR TO ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                     s.push_str(" (BODY ");
-                    push_search_value(&mut s, t, &mut literals);
+                    push_search_value(&mut s, t, &mut literals, policy);
                     s.push_str(")))");
                 }
                 Q(HasAttachment) => {
@@ -404,7 +452,7 @@ impl ToImapSearch for Query {
                 Q(AnsweredBy { by }) => {
                     space_pad!(s);
                     s.push_str("HEADER \"From\" ");
-                    push_search_value(&mut s, by, &mut literals);
+                    push_search_value(&mut s, by, &mut literals, policy);
                 }
                 Q(Larger { than }) => {
                     space_pad!(s);
@@ -420,6 +468,13 @@ impl ToImapSearch for Query {
         }
         while s.ends_with(' ') {
             s.pop();
+        }
+
+        if policy == LiteralPolicy::Quoted {
+            // No literal markers can appear under the quoted policy: every
+            // value went through the inline quoted branch, so the whole
+            // command is one text segment.
+            return vec![ImapSearchSegment::Text(s)];
         }
 
         let mut segments = Vec::new();
@@ -686,6 +741,60 @@ mod tests {
             steps.last(),
             Some(&ImapSearchSendStep::Write(b")))\r\n".to_vec()))
         );
+    }
+
+    #[test]
+    fn test_imap_query_quoted_serializes_non_ascii_inline() {
+        let query = Query::Subject("中".to_string());
+        assert_eq!(
+            query.to_imap_search_segments_quoted(),
+            Some(vec![ImapSearchSegment::Text("SUBJECT \"中\"".to_string())])
+        );
+    }
+
+    #[test]
+    fn test_imap_query_quoted_serializes_body_cjk_inline() {
+        let (_, query) = query().parse_complete("账号").unwrap();
+        assert_eq!(query, Query::Body("账号".to_string()));
+        assert_eq!(
+            query.to_imap_search_segments_quoted(),
+            Some(vec![ImapSearchSegment::Text(
+                "OR SUBJECT \"账号\" (OR FROM \"账号\" (OR TO \"账号\" (BODY \"账号\")))"
+                    .to_string(),
+            )])
+        );
+    }
+
+    #[test]
+    fn test_imap_query_quoted_has_no_form_for_newline_values() {
+        // CR/LF cannot travel inside a quoted string: the octets would
+        // terminate the command line early and desynchronize the exchange.
+        assert_eq!(
+            Query::Subject("a\r\nb".to_string()).to_imap_search_segments_quoted(),
+            None
+        );
+        assert_eq!(
+            Query::Body("a\rb".to_string()).to_imap_search_segments_quoted(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_imap_query_quoted_ascii_matches_literal_policy() {
+        // Pure ASCII queries serialize identically under both policies.
+        let (_, query) = query().parse_complete("subject: test and i").unwrap();
+        assert_eq!(
+            query.to_imap_search_segments_quoted(),
+            Some(query.to_imap_search_segments())
+        );
+        assert_eq!(
+            Query::Subject("a\"b".to_string()).to_imap_search_segments_quoted(),
+            Some(query_segments_ascii_quote())
+        );
+    }
+
+    fn query_segments_ascii_quote() -> Vec<ImapSearchSegment> {
+        vec![ImapSearchSegment::Text(r#"SUBJECT "a""b""#.to_string())]
     }
 
     #[test]
