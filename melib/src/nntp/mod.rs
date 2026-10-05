@@ -998,7 +998,16 @@ impl NntpType {
         }
         get_conf_val!(s["use_deflate"], false)?;
         get_conf_val!(s["trace"], false)?;
+        // The value may be a TOML boolean or a quoted string; coerce the raw
+        // value first (see the IMAP validator) and reject anything truthy.
+        let danger_accept_invalid_certs = s
+            .extra_conf_string("danger_accept_invalid_certs")
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
         get_conf_val!(s["danger_accept_invalid_certs"], false)?;
+        crate::conf::reject_danger_accept_invalid_certs(
+            danger_accept_invalid_certs,
+            &format!("NNTP account `{}`", s.name),
+        )?;
         get_conf_val!(s["timeout"], 16_u64)?;
         let extra_keys = s
             .extra
@@ -1258,5 +1267,67 @@ mod tests {
         assert_eq!(newnews_since_timestamp(600), 0);
         assert_eq!(newnews_since_timestamp(601), 1);
         assert_eq!(newnews_since_timestamp(1_000_000), 999_400);
+    }
+
+    /// `danger_accept_invalid_certs = true` disables TLS certificate and
+    /// hostname validation, so startup must be refused (CVE-2009-3765
+    /// hardening); absent / `false`, string or boolean, is accepted.
+    #[test]
+    fn test_conf_danger_accept_invalid_certs_is_rejected() {
+        let account_with = |extra: indexmap::IndexMap<String, serde_json::Value>| AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: String::new(),
+            format: "nntp".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {
+                "example.test".to_string() => MailboxConf::default(),
+            },
+            manual_refresh: false,
+            extra,
+        };
+        let base = || {
+            let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
+            for (k, v) in [
+                ("server_hostname", "news.example.com"),
+                ("store_flags_locally", "false"),
+                ("use_tls", "true"),
+                ("use_starttls", "false"),
+            ] {
+                m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+            }
+            m
+        };
+
+        let mut account = account_with(base());
+        NntpType::validate_config(&mut account).unwrap();
+
+        for value in [
+            serde_json::Value::String("false".to_string()),
+            serde_json::Value::Bool(false),
+        ] {
+            let mut extra = base();
+            extra.insert("danger_accept_invalid_certs".to_string(), value);
+            let mut account = account_with(extra);
+            NntpType::validate_config(&mut account).unwrap();
+        }
+
+        for value in [
+            serde_json::Value::String("true".to_string()),
+            serde_json::Value::Bool(true),
+        ] {
+            let mut extra = base();
+            extra.insert("danger_accept_invalid_certs".to_string(), value);
+            let mut account = account_with(extra);
+            let err = NntpType::validate_config(&mut account).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Configuration);
+            assert!(err.summary.contains("danger_accept_invalid_certs"), "{err}");
+            assert!(err.summary.contains("CVE-2009-3765"), "{err}");
+            assert!(err.summary.contains("set it to false"), "{err}");
+            assert!(err.summary.contains("trust store"), "{err}");
+        }
     }
 }

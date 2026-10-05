@@ -1769,7 +1769,18 @@ impl JmapType {
             }
         }
 
+        // This single account setting gates all three isahc `danger_*` knobs
+        // (invalid certs / hosts / revoked certs), so rejecting it here closes
+        // the whole JMAP TLS-validation bypass. It may be a TOML boolean or a
+        // quoted string; coerce the raw value first (see the IMAP validator).
+        let danger_accept_invalid_certs = s
+            .extra_conf_string("danger_accept_invalid_certs")
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
         get_conf_val!(s["danger_accept_invalid_certs"], false, "true or false")?;
+        crate::conf::reject_danger_accept_invalid_certs(
+            danger_accept_invalid_certs,
+            &format!("JMAP account `{}`", s.name),
+        )?;
         get_conf_val!(
             s["timeout"],
             16_u64,
