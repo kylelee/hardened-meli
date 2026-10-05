@@ -3021,3 +3021,50 @@ mod cve_2019_10732;
 #[cfg(test)]
 #[path = "CVE-2020-16947.rs"]
 mod cve_2020_16947;
+
+/// CVE-2009-0587（Evolution Data Server < 2.24.5；libcamel
+/// `camel-mime-utils.c` 与通讯录 `e-vcard.c`；CVSS v2 7.5）超长字符串
+/// 转 base64 表示的整数溢出 → RCE regression（issue #106，表 2 病毒/代码
+/// 执行 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：把超长附件/正文串转换为
+/// base64 时，原生 `int` 长度运算（`len * 4 / 3` 一类）回绕，用回绕后的
+/// 长度分配缓冲区，随后的拷贝/编码越界写入；通讯录 `e-vcard.c` 的 base64
+/// 转换同型，因此携带 vCard 的邮件本身即投递向量。meli 不链接 libcamel /
+/// Evolution 通讯录，等价面按 issue 指定映射到 meli 自身的两处
+/// 「字节串 ↔ base64」转换与 vCard 解析：
+///
+/// 1. MIME 传输编码（`melib/src/email/attachments.rs`）：解码侧是
+///    `decode_helper` 的 `ContentTransferEncoding::Base64` 分支
+///    （`data_encoding::BASE64_MIME.decode(self.body())`，`Err` 时整体回退
+///    原始 body 字节），编码侧是 `into_raw_helper` 的两处
+///    `BASE64_MIME.encode(...)`（`ContentType::OctetStream` 与非常规
+///    `ContentType::Other` 分支）——`camel-mime-utils.c` 的直接对应。
+/// 2. vCard 属性（`melib/src/utils/vobject/vcard.rs`）：`Vcard::build`
+///    （`parse_component` → `from_component`）把每个属性值存为自有
+///    `String`，`PHOTO` / `KEY` 的 `ENCODING=BASE64` 巨型值因此成为解析器
+///    内的超长受控串，正是 `e-vcard.c` 转换越界的输入；meli 解析期从不对
+///    vCard 属性做 base64 解码，getter 原样返回。
+///
+/// [`cve_2009_0587`] 分层锁定语料并给出免疫依据：(A) MIME 面——4 MiB /
+/// 16 MiB 合法 base64 完整邮件解码成功、不 panic、时间有界且
+/// `解码长度 ≤ 输入 × 3/4 + 3`（绝不放大；用 `ABC` 重复逐字节反查真实
+/// 解码而非回退）；缺/多 `=`、截断末组、非法字母（NUL、高位字节、`*`、
+/// `!`、SP/TAB）全部被 `BASE64_MIME.decode` 拒绝并逐字节回退原始 body，
+/// CRLF/LF/CR 换行属声明忽略集而正常解码；编码侧断言
+/// `规范 base64 长度 ≤ 输入 × 4/3 + 4` 且 `decode(encode(x)) == x`
+/// 在 0/1/2/3 字节及 76 列边界、1 MiB 规模全部成立。(B) vCard 面——4 MiB /
+/// 16 MiB 的 `PHOTO` / `KEY` base64（折叠与非折叠）解析为 `Ok`、getter
+/// 取回全长、`write_component` 折叠/展开往返逐字节保留；截断、缺
+/// `BEGIN`/`END`、标签不匹配、多字节 UTF-8 折叠均干净 `Err` 或有界 `Ok`，
+/// 无 panic。
+///
+/// 免疫依据：`data_encoding` 2.11 的长度运算为 checked 语义——
+/// `Encoding::encode_len` 先断言 `len <= usize::MAX / 512` 再算
+/// `div_ceil(8 * len, 6)`，`Encoding::decode_len` 先断言
+/// `len <= usize::MAX / 8`，任何可驻留内存的输入都无法回绕；且解码失败
+/// 走全量 `self.body().to_vec()`，不产生部分或有界外分配。meli 为安全
+/// Rust，无 `int` 型长度乘积、无长度派生缓冲上的 `memcpy`、无
+/// `e-vcard.c` 式 base64 分配器。结论：**免疫证明，未发现缺口，未触碰
+/// 生产代码**。
+#[cfg(test)]
+#[path = "CVE-2009-0587.rs"]
+mod cve_2009_0587;
