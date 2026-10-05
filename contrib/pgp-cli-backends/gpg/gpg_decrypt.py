@@ -77,7 +77,17 @@ status = status.read()
 logger = os.fdopen(logger_fd[0])
 logger = logger.read()
 
-is_okay = re.compile(r"^\[GNUPG:\] DECRYPTION_OKAY$", flags=re.M).search(status)
+# CVE-2018-12020 (SigSpoof 1) class: a verdict (and a plaintext release)
+# must never rest on the parseable --status-fd text alone. GnuPG < 2.2.8
+# wrote the raw literal-packet filename into the status stream, so
+# attacker bytes could arrive as forged "[GNUPG:] ..." lines; and GnuPG
+# streams DECRYPTION_OKAY before the MDC verdict (CVE-2017-17688), so the
+# line can be present on a failing exit (BADMDC, exit 2). gpg's exit
+# status is authoritative: release data only when gpg itself exited 0 AND
+# explicitly reported DECRYPTION_OKAY.
+is_okay = s.returncode == 0 and re.compile(
+    r"^\[GNUPG:\] DECRYPTION_OKAY$", flags=re.M
+).search(status)
 
 if is_okay:
     # The CLI backend contract: a JSON object with the decryption
