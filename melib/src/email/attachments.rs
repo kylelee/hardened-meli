@@ -1179,14 +1179,17 @@ impl Attachment {
                     vec
                 }
                 MultipartType::Encrypted => {
-                    let mut vec = Vec::new();
-                    for a in parts {
-                        if a.content_type == "application/octet-stream" {
-                            vec.extend(a.decode_rec_helper_with_depth(options, depth));
-                        }
-                    }
-                    vec.extend(self.decode_helper(options));
-                    vec
+                    // CVE-2019-10732 (issue #104): the parse layer never
+                    // decrypts, so an `multipart/encrypted` subtree has no
+                    // plaintext to contribute to the recursive decode.
+                    // Contributing its wire body instead — the whole
+                    // ciphertext plus the `Version` control part — re-ships
+                    // attacker-supplied bytes into every `decode_rec`
+                    // consumer, most notably [`Draft::new_reply`]'s quote,
+                    // where ciphertext hidden inside a seemingly harmless
+                    // `multipart` carrier would ride the outgoing reply.
+                    // Decode the subtree as inert nothing.
+                    Vec::new()
                 }
                 _ => {
                     let mut vec = Vec::new();

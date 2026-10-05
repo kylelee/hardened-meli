@@ -113,6 +113,12 @@ pub struct ViewFilter {
     pub content_type: ContentType,
     pub headers: Vec<(HeaderName, String)>,
     pub notice: Option<Cow<'static, str>>,
+    /// `true` when this filter's whole subtree originates from an
+    /// auto-decryption job (`gpg::decrypt`): its content was ciphertext on
+    /// the wire. The envelope view's `body_text` assembly keeps
+    /// decrypt-origin subtrees that sit below the root filter out of the
+    /// reply-quote mirror (CVE-2019-10732).
+    pub decrypt_origin: bool,
     /// Size of viewed attachment in bytes.
     pub size: usize,
     pub body_text: ViewFilterContent,
@@ -128,6 +134,7 @@ impl std::fmt::Debug for ViewFilter {
             .field("content_type", &self.content_type)
             .field("headers", &self.headers)
             .field("notice", &self.notice)
+            .field("decrypt_origin", &self.decrypt_origin)
             .field("size", &self.size)
             .field("body_text", &self.body_text)
             .field("event_handler", &self.event_handler.is_some())
@@ -344,6 +351,7 @@ impl ViewFilter {
             IsAsync::Blocking,
         );
         let mut retval = Self {
+            decrypt_origin: false,
             filter_invocation: filter_invocation.to_string(),
             content_type: att.content_type.clone(),
             size: att.size(),
@@ -367,6 +375,7 @@ impl ViewFilter {
             return Ok(retval);
         }
         Ok(Self {
+            decrypt_origin: false,
             body_text: ViewFilterContent::Running {
                 job_id: job_handle.job_id,
                 job_handle,
@@ -411,6 +420,7 @@ impl ViewFilter {
                 let bytes = att.decode(view_settings.charset.into());
                 if let Ok(text) = String::from_utf8(bytes) {
                     return Ok(Self {
+                        decrypt_origin: false,
                         filter_invocation: String::new(),
                         content_type: att.content_type.clone(),
                         size: att.size(),
@@ -437,6 +447,7 @@ impl ViewFilter {
         {
             if parts.is_empty() {
                 return Ok(Self {
+                    decrypt_origin: false,
                     filter_invocation: String::new(),
                     content_type: att.content_type.clone(),
                     size: att.size(),
@@ -497,6 +508,7 @@ impl ViewFilter {
         } = att.content_type
         {
             return Ok(Self {
+                decrypt_origin: false,
                 filter_invocation: String::new(),
                 content_type: att.content_type.clone(),
                 size: att.size(),
@@ -528,6 +540,7 @@ impl ViewFilter {
             }
         ) {
             return Ok(Self {
+                decrypt_origin: false,
                 filter_invocation: String::new(),
                 content_type: att.content_type.clone(),
                 size: att.size(),
@@ -558,6 +571,7 @@ impl ViewFilter {
                     ..att.clone()
                 };
                 return Ok(Self {
+                    decrypt_origin: false,
                     notice: Some("Unverified signature.".into()),
                     ..Self::new_attachment_with_depth(&att, view_settings, context, rfc822_depth)?
                 });
@@ -565,6 +579,7 @@ impl ViewFilter {
             if view_settings.pgp_backend.instantiate().is_err() {
                 let unfiltered = att.decode(view_settings.charset.into()).to_vec();
                 return Ok(Self {
+                    decrypt_origin: false,
                     filter_invocation: String::new(),
                     content_type: att.content_type.clone(),
                     size: att.size(),
@@ -631,6 +646,7 @@ impl ViewFilter {
                         IsAsync::Blocking,
                     );
                     let mut retval = Self {
+                        decrypt_origin: false,
                         filter_invocation: "gpg::verify".into(),
                         content_type: att.content_type.clone(),
                         size: att.size(),
@@ -654,6 +670,7 @@ impl ViewFilter {
                         return Ok(retval);
                     }
                     return Ok(Self {
+                        decrypt_origin: false,
                         body_text: ViewFilterContent::Running {
                             job_id: job_handle.job_id,
                             job_handle,
@@ -721,6 +738,7 @@ impl ViewFilter {
                         IsAsync::Blocking,
                     );
                     let mut retval = Self {
+                        decrypt_origin: false,
                         filter_invocation: "gpg::decrypt".into(),
                         content_type: att.content_type.clone(),
                         size: att.size(),
@@ -744,6 +762,7 @@ impl ViewFilter {
                         return Ok(retval);
                     }
                     return Ok(Self {
+                        decrypt_origin: false,
                         body_text: ViewFilterContent::Running {
                             job_id: job_handle.job_id,
                             job_handle,
@@ -791,6 +810,7 @@ impl ViewFilter {
                     IsAsync::Blocking,
                 );
                 let mut retval = Self {
+                    decrypt_origin: false,
                     filter_invocation: "gpg::decrypt".into(),
                     content_type: att.content_type.clone(),
                     size: att.size(),
@@ -814,6 +834,7 @@ impl ViewFilter {
                     return Ok(retval);
                 }
                 return Ok(Self {
+                    decrypt_origin: false,
                     body_text: ViewFilterContent::Running {
                         job_id: job_handle.job_id,
                         job_handle,
@@ -831,6 +852,7 @@ impl ViewFilter {
                 // walked.
                 let filtered = String::from_utf8_lossy(unfiltered.as_slice()).into();
                 return Ok(Self {
+                    decrypt_origin: false,
                     filter_invocation: String::new(),
                     content_type: att.content_type.clone(),
                     size: att.size(),
@@ -855,6 +877,7 @@ impl ViewFilter {
                 ))
             }) {
                 return Ok(Self {
+                    decrypt_origin: false,
                     filter_invocation: String::new(),
                     content_type: att.content_type.clone(),
                     notice: None,
@@ -871,6 +894,7 @@ impl ViewFilter {
             }
             let filtered = String::from_utf8_lossy(unfiltered.as_slice()).into();
             return Ok(Self {
+                decrypt_origin: false,
                 filter_invocation: String::new(),
                 content_type: att.content_type.clone(),
                 size: att.size(),
@@ -904,6 +928,7 @@ impl ViewFilter {
             )
         };
         Ok(Self {
+            decrypt_origin: false,
             filter_invocation: String::new(),
             content_type: att.content_type.clone(),
             size: att.size(),
@@ -922,6 +947,7 @@ impl ViewFilter {
     #[inline]
     fn new_placeholder(att: &Attachment, view_settings: &ViewSettings) -> Self {
         Self {
+            decrypt_origin: false,
             filter_invocation: String::new(),
             content_type: att.content_type.clone(),
             size: att.size(),
@@ -1089,6 +1115,16 @@ impl ViewFilter {
                         if self.content_type.is_text_html() {
                             new_self.event_handler = Some(Self::html_process_event);
                         }
+                        // CVE-2019-10732 (issue #104): keep a persistent
+                        // marker that this subtree's content originates
+                        // from an auto-decryption job. The envelope view
+                        // keeps decrypt-origin subtrees that are embedded
+                        // in a multipart carrier out of `body_text` (the
+                        // reply-quote mirror), so ciphertext hidden inside
+                        // a seemingly harmless carrier cannot turn a reply
+                        // into a decryption oracle.
+                        new_self.decrypt_origin =
+                            self.decrypt_origin || self.filter_invocation == "gpg::decrypt";
                         new_self.unfiltered = raw;
                         new_self.notice = notice;
                         *self = new_self;
