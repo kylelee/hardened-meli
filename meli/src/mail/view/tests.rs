@@ -3832,7 +3832,7 @@ fn partial_signature_filter_notice_stays_off_the_unsigned_sibling() {
 // ---------------------------------------------------------------------------
 
 /// CVE-2024-49393 (issue #84) corpus: a genuine `multipart/signed` confidential
-/// report whose detached OpenPGP signature covers only the signed part's own
+/// report whose detached `OpenPGP` signature covers only the signed part's own
 /// bytes. The outer RFC 5322 `To`/`Cc` headers live outside the signature and
 /// a MITM can rewrite them freely. This is the same one-time Ed25519 corpus as
 /// `cve/src/CVE-2024-49393.rs`; the real signature armor is embedded verbatim
