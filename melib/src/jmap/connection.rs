@@ -46,7 +46,7 @@ use crate::{
         objects::{Id, State},
         protocol::{self, JmapMailCapability, Request},
         session::Session,
-        JmapServerConf, Store,
+        validate_session_urls, validate_transport_url, JmapServerConf, Store,
     },
     BackendEvent, Flag, RefreshEvent, RefreshEventKind,
 };
@@ -129,6 +129,11 @@ impl JmapConnection {
     pub async fn connect(&mut self) -> Result<()> {
         if self.store.online_status.is_ok().await {
             return Ok(());
+        }
+
+        if let Err(err) = validate_transport_url(&self.server_conf.server_url, "`server_url`") {
+            _ = self.store.online_status.set(None, Err(err.clone())).await;
+            return Err(err);
         }
 
         fn to_well_known(uri: &Url) -> Url {
@@ -291,6 +296,14 @@ impl JmapConnection {
             }
             Ok(s) => s,
         };
+        if let Err(err) = validate_session_urls(&session) {
+            _ = self
+                .store
+                .online_status
+                .set(Some(req_instant), Err(err.clone()))
+                .await;
+            return Err(err);
+        }
         macro_rules! check_for_cap {
             ($cap:ident) => {{
                 if !session.capabilities.contains_key($cap::URI) {

@@ -150,6 +150,70 @@ pub struct JmapServerConf {
     pub timeout: Option<Duration>,
 }
 
+/// Whether `url`'s host is a loopback host: the `localhost` domain (RFC 6761
+/// semantics — it never leaves the machine), or a loopback IPv4/IPv6 address.
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// CVE-2024-50624 hardening: every JMAP transport URL must use `https`.
+///
+/// Plaintext `http` is only tolerated for loopback hosts, where the traffic
+/// never leaves the machine (local development and test servers); a plaintext
+/// connection to a remote host lets a man-in-the-middle answer the session
+/// discovery with an attacker-controlled endpoint set, the exact primitive of
+/// CVE-2024-50624 (`KMail` autoconfig over cleartext HTTP).
+pub fn validate_transport_url(url: &Url, what: &str) -> Result<()> {
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(url) => Ok(()),
+        scheme => Err(Error::new(format!(
+            "Configuration error: {what} must use `https` (plaintext `http` is only allowed \
+             for loopback hosts such as 127.0.0.1 or localhost), got scheme `{scheme}` in \
+             `{url}`: over a plaintext connection a man-in-the-middle can answer session \
+             discovery with attacker-controlled endpoints (CVE-2024-50624)."
+        ))
+        .set_kind(ErrorKind::Configuration)),
+    }
+}
+
+/// Validate the transport URLs the server returned in the JMAP session
+/// object (CVE-2024-50624).
+///
+/// Every endpoint meli is about to send authenticated traffic to (`apiUrl`,
+/// `uploadUrl`, `downloadUrl`, `eventSourceUrl`) must be `https` — plaintext
+/// `http` is only tolerated for loopback hosts. Fails closed: a
+/// man-in-the-middle (or a hostile server) cannot hijack the connection layer
+/// to plaintext or unknown transports via the session-discovery response.
+pub fn validate_session_urls(session: &session::Session) -> Result<()> {
+    validate_transport_url(
+        &session.api_url,
+        "`apiUrl` returned by the server session object",
+    )
+    .map_err(|err| err.set_kind(ErrorKind::ProtocolError))?;
+    validate_transport_url(
+        &session.upload_url.url,
+        "`uploadUrl` returned by the server session object",
+    )
+    .map_err(|err| err.set_kind(ErrorKind::ProtocolError))?;
+    validate_transport_url(
+        &session.download_url.url,
+        "`downloadUrl` returned by the server session object",
+    )
+    .map_err(|err| err.set_kind(ErrorKind::ProtocolError))?;
+    validate_transport_url(
+        &session.event_source_url.url,
+        "`eventSourceUrl` returned by the server session object",
+    )
+    .map_err(|err| err.set_kind(ErrorKind::ProtocolError))?;
+    Ok(())
+}
+
 macro_rules! get_conf_val {
     ($s:ident[$var:literal]) => {
         $s.extra_conf_string($var).ok_or_else(|| {
@@ -214,8 +278,10 @@ impl JmapServerConf {
                 s.name,
             )));
         }
+        let server_url = get_conf_val!(s["server_url"], Url, "a string containing a URL")?;
+        validate_transport_url(&server_url, "`server_url`")?;
         Ok(Self {
-            server_url: get_conf_val!(s["server_url"], Url, "a string containing a URL")?,
+            server_url,
             server_username: get_conf_val!(s["server_username"], String, "a string")?,
             server_password: s.server_password_field()?,
             use_token,
@@ -1723,7 +1789,8 @@ impl JmapType {
                     .unwrap_or_else(|| Ok($default))
             };
         }
-        get_conf_val!(s["server_url"], Url, "a string containing a URL")?;
+        let server_url = get_conf_val!(s["server_url"], Url, "a string containing a URL")?;
+        validate_transport_url(&server_url, "`server_url`")?;
         get_conf_val!(s["server_username"])?;
 
         get_conf_val!(s["use_token"], false, "true or false")?;
