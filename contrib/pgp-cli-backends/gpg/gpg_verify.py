@@ -82,28 +82,39 @@ logger = logger.read()
 
 fpr = r"^\[GNUPG:\] KEY_CONSIDERED (?P<fingerprint>[^ ]*).*$"
 trust = r"^\[GNUPG:\] TRUST_(?P<trust>[^ ]*) (?P<error_token>\d\d*)(?: (?P<validation_model>\w+))?.*$"
-validity = r"^\[GNUPG:\] VALIDSIG (?P<fingerprint_in_hex>\w+) (?P<sig_creation_date>\d{4}-\d{2}-\d{2}) (?P<sig_timestamp>(?:(?:\d{4}-\d{2}-\d{2})|(:?\d+))) (?P<expire_timestamp>(?:(?:\d{4}-\d{2}-\d{2})|(:?\d+))) (?P<sig_version>\d+) (?P<reserved>\d+) (?P<pubkey_algo>\d+) (?P<hash_algo>\d+) (?P<sig_class>\d+)(?: (?P<primary_key_fpr>\w+))?$"
 summary = r"^\[GNUPG:\] (?P<summary>(?:GOODSIG|BADSIG|REVKEYSIG|EXPKEYSIG|EXPSIG)) (?P<keyid>\w+)"
 err = r"^\[GNUPG:\] ERRSIG (?P<keyid>\w+) (?P<pkalgo>\w+) (?P<hashalgo>\w+) (?P<sig_class>\w+) (?P<time>(?:(?:\d{4}-\d{2}-\d{2})|(:?\d+))) (?P<rc>\d+)"
 
 err = re.compile(err, flags=re.M).search(status)
+summary_match = re.compile(summary, flags=re.M).search(status)
 
-if err:
-    print(json.dumps(err.group(0)))
+# CVE-2018-12020 (SigSpoof 1): GnuPG < 2.2.8 wrote the raw plaintext
+# packet filename into the --status-fd stream, so attacker bytes could
+# arrive as forged "[GNUPG:] GOODSIG/VALIDSIG/TRUST_* ..." lines. The
+# verdict must therefore never rest on the parseable status text alone:
+# gpg's exit status is the authoritative verdict (0 == every signature
+# verified), and only an explicit GOODSIG summary on a successful exit
+# affirms. ERRSIG, a failing exit, or a missing summary are reported as
+# error statuses so the client fails closed.
+if err or summary_match is None or s.returncode != 0:
+    if err:
+        detail = err.group(0)
+    elif summary_match is not None:
+        # gpg itself reported a failing verdict (e.g. BADSIG or a mixed
+        # multi-signature run whose exit status is non-zero).
+        detail = summary_match.group(0)
+    else:
+        detail = f"gpg exited with status {s.returncode} without a signature summary"
+    print(json.dumps(detail))
 else:
     fingerprint = re.compile(fpr, flags=re.M).search(status).group("fingerprint")
     trust = re.compile(trust, flags=re.M).search(status)
     trust_level = trust.group("trust")
-    trust_error = trust.group("error_token") if trust.group("error_token") else 0
-    validation_model = trust.group("validation_model")
-    validity = bool(re.compile(validity, flags=re.M).search(status))
-    summary = re.compile(summary, flags=re.M).search(status).group("summary")
+    summary = summary_match.group("summary")
 
     summary_val = []
 
     if summary == "GOODSIG":
-        # TODO: When is it GREEN?
-        # summary_val.append("GREEN")
         pass
     elif summary == "BADSIG":
         summary_val.append("RED")
@@ -113,24 +124,44 @@ else:
         summary_val.append("KEY_EXPIRED")
     elif summary == "EXPSIG":
         summary_val.append("SIG_EXPIRED")
-    print(
-        json.dumps(
-            [
-                {
-                    "summary": summary_val,
-                    "cert": {
-                        "keyid": fingerprint,
-                        # The CLI backend contract requires the status to be
-                        # explicit: "OK" affirms a good signature, any other
-                        # string is an error message, and an absent status is
-                        # treated by meli as "not reported" and fails closed
-                        # (CVE-2007-1265: KMail showed mails as signed when
-                        # it failed to read GnuPG's status output).
-                        "status": "OK",
-                    },
-                    "validity": trust_level,
-                    "cleartext": is_cleartext,
-                }
-            ]
+    if summary == "GOODSIG":
+        print(
+            json.dumps(
+                [
+                    {
+                        "summary": summary_val,
+                        "cert": {
+                            "keyid": fingerprint,
+                            # The CLI backend contract requires the status to be
+                            # explicit: "OK" affirms a good signature, any other
+                            # string is an error message, and an absent status is
+                            # treated by meli as "not reported" and fails closed
+                            # (CVE-2007-1265: KMail showed mails as signed when
+                            # it failed to read GnuPG's status output).
+                            "status": "OK",
+                        },
+                        "validity": trust_level,
+                        "cleartext": is_cleartext,
+                    }
+                ]
+            )
         )
-    )
+    else:
+        # Exit status 0 with a non-affirming summary (BADSIG, REVKEYSIG,
+        # EXPKEYSIG, EXPSIG): report the verdict as an error status so the
+        # client renders a bad signature instead of a good one.
+        print(
+            json.dumps(
+                [
+                    {
+                        "summary": summary_val,
+                        "cert": {
+                            "keyid": fingerprint,
+                            "status": summary_match.group(0),
+                        },
+                        "validity": trust_level,
+                        "cleartext": is_cleartext,
+                    }
+                ]
+            )
+        )
