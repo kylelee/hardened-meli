@@ -3585,3 +3585,47 @@ mod cve_2022_29360;
 #[cfg(test)]
 #[path = "CVE-2024-42009.rs"]
 mod cve_2024_42009;
+
+/// CVE-2024-42010（Roundcube < 1.5.8、1.6.x < 1.6.8；CVSS v3.1 7.5；
+/// NVD / Roundcube 安全公告）**CSS 清洗绕过信息泄露** regression
+/// （Gitea issue #116），调研报告「网页嵌入与 HTML/链接渲染」批次成员：
+/// Roundcube 的 `mod_css_styles` 对渲染邮件里的 CSS token 序列过滤不足，攻击者
+/// 可在邮件 HTML 里夹带 CSS 指令，借 CSS 侧信道（`@import`/`url(...)` 的资源
+/// 请求、属性选择器/动画的时间差）把敏感信息编码进外发请求实现外传。根因是
+/// 「CSS 被当数据渲染」：清洗没有一并抽取指令原料，残留的 `@import`/`url(`/
+/// `expression(` 在存在 CSS 引擎的消费者里是活指令。
+///
+/// meli 等价面映射（终端客户端无 CSS 引擎/浏览器/JS 运行时，按 issue 要求做
+/// 等价面断言）：
+///
+/// 1. 内置 HTML 清理管线：`meli/src/mail/view/html_render.rs` 的 [`sanitize`]
+///    （ammonia 白名单单次解析 → 序列化）＋ [`render`]（sanitize → 嵌套上限 →
+///    html2text 纯文本），调用点 `meli/src/mail/view/filters.rs` 的
+///    `HtmlFilter::Builtin`。html2text **不加载任何远程资源、不执行布局/动画**，
+///    这是 CSS 侧信道的第二道防线。可复现的等价物是清洗输出里的 **CSS 指令
+///    原料**：白名单标签保留的属性值（`a[title]`/`a[href]`）可原样携带
+///    `@import url("…")`/`url(…)`/`expression(…)`。
+/// 2. **本 issue 检出并修复该缺口**：生产改动给 [`sanitize`] 的 `attribute_filter`
+///    增加了「保留属性值以 ASCII 大小写不敏感方式含 `@import`/`url(`/
+///    `expression(` 即整属性丢弃」的第四处 nh3 parity 有意偏离（`href` 在内，与
+///    42009 同判例：清洗输出不得携带下游再消费的活原料）。issue 原样的
+///    `<style>`/`<link>`/`style=` 载体本就死在白名单，但属性值走私形会在修复前
+///    把指令原料原样带进输出。
+///
+/// [`cve_2024_42010`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// sanitize 平面＋独立白名单预言机＋不动点、五种嵌入上下文探测、每条语料单独
+/// 成信的端到端（多宽度 40/80/120）＋组合邮件、缺口回归与惰性文本观测（含
+/// 「可见链接对照」只作为 html2text 脚注文本出现、永不自动抓取）。
+///
+/// 结论：**检出并修复属性值 CSS 指令走私缺口，非纯免疫证明**——issue 原样的
+/// `<style>`/`<link>`/`style=` 载体本就干净通过，但保留属性值可把 `@import`/
+/// `url(`/`expression(` 原样带进清洗输出，违反 issue 的「输出不含 `@import`、
+/// `url(`」断言；修复后全部语料满足不变量。纯文本形（正文散文里的字面 token）
+/// 是惰性转义文本，用结构化预言机区分，不做会误报的裸子串匹配。
+///
+/// [`cve_2024_42010`]: self::cve_2024_42010
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2024-42010.rs"]
+mod cve_2024_42010;
