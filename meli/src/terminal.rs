@@ -82,6 +82,17 @@ macro_rules! emoji_text_presentation_selector {
 /// `Display` utility to print text as a clickable hyperlink with the [`OSC8`]
 /// format.
 ///
+/// The URL is interpolated **as-is** in [`Hyperlink::fmt_start`] and
+/// [`Hyperlink::write_start`]: these constructors are for trusted URL
+/// sources only (e.g. CLI hyperlinks built from a hostname and
+/// user-supplied path in [`crate::args`]). When the URL originates in
+/// untrusted bytes — mail body, mail header, configuration values the
+/// user may have forwarded — use [`Hyperlink::fmt_start_sanitized`] /
+/// [`Hyperlink::write_start_sanitized`] instead, which route the URL
+/// through [`sanitize_osc_payload`] and drop the whole OSC 8 sequence
+/// when the sanitized URL is empty (issue #97, follow-up to
+/// CVE-2024-37384 / issue #74).
+///
 /// [`OSC8`]: <https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda>
 ///
 /// # Examples
@@ -167,7 +178,10 @@ impl<
 
     #[inline]
     pub fn fmt_start(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let id: &dyn std::fmt::Display = if let Some(ref id) = self.id { id } else { &"" };
+        let id: &dyn std::fmt::Display = match &self.id {
+            Some(id) => id,
+            None => &"",
+        };
         write!(
             f,
             "\x1b]8;{ideq}{id};{url}\x07",
@@ -175,6 +189,44 @@ impl<
             ideq = if self.id.is_some() { "id=" } else { "" },
             id = id
         )
+    }
+
+    /// Like [`Hyperlink::fmt_start`], but the URL is routed through
+    /// [`sanitize_osc_payload`]: every C0/DEL/C1 control character
+    /// (`char::is_control`) is stripped before interpolation, so a
+    /// mail-borne URL like `https://evil.example/\x07\x1b[2J` cannot
+    /// early-terminate OSC 8 with BEL and turn the trailing bytes into
+    /// live terminal directives (CVE-2024-37384 follow-up / issue #97).
+    /// When the sanitized URL is empty, writes nothing — the URL was
+    /// all control bytes, so emitting the sequence would either be a
+    /// no-op or hide an attack intent, and the link text still renders
+    /// normally.
+    /// Returns `true` when bytes were written, `false` when the
+    /// sanitized URL was empty (the caller should not emit an OSC 8
+    /// close in that case).
+    pub fn fmt_start_sanitized(
+        &self,
+        f: &mut std::fmt::Formatter,
+    ) -> std::result::Result<bool, std::fmt::Error> {
+        let id: &dyn std::fmt::Display = match &self.id {
+            Some(id) => id,
+            None => &"",
+        };
+        let url_string = self.url.to_string();
+        let sanitized = sanitize_osc_payload(&url_string);
+        if sanitized.is_empty() {
+            return Ok(false);
+        }
+        let ideq = if self.id.is_some() { "id=" } else { "" };
+        match sanitized {
+            std::borrow::Cow::Borrowed(_) => {
+                write!(f, "\x1b]8;{ideq}{id};{url}\x07", url = self.url)?;
+            }
+            std::borrow::Cow::Owned(cleaned) => {
+                write!(f, "\x1b]8;{ideq}{id};{cleaned}\x07")?;
+            }
+        }
+        Ok(true)
     }
 
     #[inline]
@@ -184,7 +236,10 @@ impl<
 
     #[inline]
     pub fn write_start<W: std::io::Write>(&self, f: &mut W) -> std::io::Result<()> {
-        let id: &dyn std::fmt::Display = if let Some(ref id) = self.id { id } else { &"" };
+        let id: &dyn std::fmt::Display = match &self.id {
+            Some(id) => id,
+            None => &"",
+        };
         write!(
             f,
             "\x1b]8;{ideq}{id};{url}\x07",
@@ -192,6 +247,32 @@ impl<
             ideq = if self.id.is_some() { "id=" } else { "" },
             id = id
         )
+    }
+
+    /// Like [`Hyperlink::write_start`], but the URL is routed through
+    /// [`sanitize_osc_payload`]. See [`Hyperlink::fmt_start_sanitized`].
+    /// Returns `true` when bytes were written, `false` when the
+    /// sanitized URL was empty.
+    pub fn write_start_sanitized<W: std::io::Write>(&self, f: &mut W) -> std::io::Result<bool> {
+        let id: &dyn std::fmt::Display = match &self.id {
+            Some(id) => id,
+            None => &"",
+        };
+        let url_string = self.url.to_string();
+        let sanitized = sanitize_osc_payload(&url_string);
+        if sanitized.is_empty() {
+            return Ok(false);
+        }
+        let ideq = if self.id.is_some() { "id=" } else { "" };
+        match sanitized {
+            std::borrow::Cow::Borrowed(_) => {
+                write!(f, "\x1b]8;{ideq}{id};{url}\x07", url = self.url)?;
+            }
+            std::borrow::Cow::Owned(cleaned) => {
+                write!(f, "\x1b]8;{ideq}{id};{cleaned}\x07")?;
+            }
+        }
+        Ok(true)
     }
 
     #[inline]
