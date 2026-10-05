@@ -1499,7 +1499,11 @@ impl ThreadView {
                     }
                 }
 
-                let failures = results.iter().filter(|b| **b).count();
+                // `results` holds one entry per mail: `true` = saved, `false` =
+                // failed. Count the failures, not the successes, so an
+                // all-success export reports "Saved …" instead of the error
+                // summary (issue #94).
+                let failures = results.iter().filter(|b| !**b).count();
                 let body = if failures == results.len() {
                     "Could not export thread, check error logs.".into()
                 } else if failures > 0 {
@@ -3590,6 +3594,216 @@ ZHVtbXk=\r\n\
                 .iter()
                 .any(|e| e.heading.contains("Carol Example")),
             "Carol's heading must carry her From identity"
+        );
+    }
+
+    /// Force every entry of a two-mail fixture to the `Loaded` state so an
+    /// `ExportThread` action does not take the "Thread is still loading"
+    /// early return. `MailViewState::load_bytes` cannot be reused here: it
+    /// looks up per-mailbox settings (absent in the synthetic mailbox) and
+    /// spawns backend jobs. Building the state directly, as
+    /// `meli/src/mail/view/tests.rs` does, keeps the test synchronous and
+    /// self-contained.
+    fn force_all_entries_loaded(view: &mut ThreadView, context: &mut Context) {
+        let root_hash = Envelope::from_bytes(ROOT_MAIL_BYTES, None)
+            .expect("could not parse root test envelope")
+            .hash();
+        let reply_hash = Envelope::from_bytes(REPLY_MAIL_BYTES, None)
+            .expect("could not parse reply test envelope")
+            .hash();
+        for entry in &mut view.entries {
+            let bytes = if entry.msg_hash == root_hash {
+                ROOT_MAIL_BYTES
+            } else {
+                assert_eq!(
+                    entry.msg_hash, reply_hash,
+                    "the two-mail fixture must contain only the root and reply mails"
+                );
+                REPLY_MAIL_BYTES
+            };
+            let mail = Mail::new(bytes.to_vec(), None).expect("could not parse test mail");
+            let env_view = Box::new(EnvelopeView::new(
+                Mail {
+                    envelope: mail.envelope.clone(),
+                    bytes: bytes.to_vec(),
+                },
+                None,
+                None,
+                None,
+                context.main_loop_handler.clone(),
+            ));
+            entry.mailview.state = MailViewState::Loaded {
+                bytes: bytes.to_vec(),
+                env: Box::new(mail.envelope),
+                env_view,
+                stack: vec![],
+            };
+        }
+    }
+
+    /// Regression for issue #94: `results` marks a *successful* save with
+    /// `true`, but the summary counted the `true` entries as failures. An
+    /// export where every mail is written therefore reported "Could not
+    /// export thread, check error logs." instead of the saved count. Drive
+    /// the real `ExportThread` event end to end and lock both the
+    /// notification text and the files on disk.
+    #[test]
+    fn export_thread_summary_counts_failures_not_successes() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        force_all_entries_loaded(&mut view, &mut ctx);
+
+        let tempdir = tempfile::tempdir().expect("could not create tempdir");
+        let out_dir = tempdir.path().join("export");
+        std::fs::create_dir(&out_dir).expect("could not create export directory");
+
+        // Absolute path so the export cannot resolve it relative to
+        // `context.current_dir()` (the shared test HOME).
+        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(
+            out_dir.display().to_string(),
+        )));
+        assert!(
+            view.process_event(&mut event, &mut ctx),
+            "the export action must be consumed"
+        );
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies.iter().any(|ev| matches!(
+                ev,
+                UIEvent::Notification { ref body, .. }
+                    if body.contains("Saved 2 mails at")
+            )),
+            "an all-successful export must report the saved count, got: {replies:?}"
+        );
+        assert!(
+            !replies.iter().any(|ev| matches!(
+                ev,
+                UIEvent::Notification { ref body, .. }
+                    if body.contains("Could not export thread")
+            )),
+            "an all-successful export must not report the failure summary, got: {replies:?}"
+        );
+
+        let eml_count = std::fs::read_dir(&out_dir)
+            .expect("could not read the export directory")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "eml"))
+            .count();
+        assert_eq!(
+            eml_count, 2,
+            "both loaded mails must be written as .eml files"
+        );
+    }
+
+    /// All-failure twin of `export_thread_summary_counts_failures_not_successes`:
+    /// when every save fails, the summary must be the "Could not export"
+    /// message rather than a saved count. The saves are failed
+    /// deterministically, independently of process privileges, by
+    /// pre-creating a *directory* at each landing name: `save_attachment`
+    /// opens with `create_new`, which cannot replace an existing directory.
+    #[test]
+    fn export_thread_summary_all_failures_reports_error() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        force_all_entries_loaded(&mut view, &mut ctx);
+
+        let tempdir = tempfile::tempdir().expect("could not create tempdir");
+        let out_dir = tempdir.path().join("export");
+        std::fs::create_dir(&out_dir).expect("could not create export directory");
+
+        for bytes in [ROOT_MAIL_BYTES, REPLY_MAIL_BYTES] {
+            let envelope =
+                Envelope::from_bytes(bytes, None).expect("could not parse the test envelope");
+            let filename = thread_export_filename(envelope.message_id());
+            std::fs::create_dir(out_dir.join(filename))
+                .expect("could not pre-create the blocking directory");
+        }
+
+        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(
+            out_dir.display().to_string(),
+        )));
+        assert!(
+            view.process_event(&mut event, &mut ctx),
+            "the export action must be consumed"
+        );
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies.iter().any(|ev| matches!(
+                ev,
+                UIEvent::Notification { ref body, .. }
+                    if body.contains("Could not export thread, check error logs.")
+            )),
+            "an all-failed export must report the failure summary, got: {replies:?}"
+        );
+        assert!(
+            !replies.iter().any(|ev| matches!(
+                ev,
+                UIEvent::Notification { ref body, .. } if body.contains("Saved ")
+            )),
+            "an all-failed export must not report a saved count, got: {replies:?}"
+        );
+    }
+
+    /// Partial-failure branch of the summary: with exactly one save blocked
+    /// and one saved, the notification must report the exact "1/2 could not
+    /// be saved" counts at the export path. Pre-fix, the inverted counter
+    /// made this branch misreport the success count as the failure count.
+    #[test]
+    fn export_thread_summary_partial_failure_reports_counts() {
+        let mut ctx = mock_context();
+        let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
+        force_all_entries_loaded(&mut view, &mut ctx);
+
+        let tempdir = tempfile::tempdir().expect("could not create tempdir");
+        let out_dir = tempdir.path().join("export");
+        std::fs::create_dir(&out_dir).expect("could not create export directory");
+
+        // Block only the root mail's landing name; the reply still saves.
+        let root_envelope =
+            Envelope::from_bytes(ROOT_MAIL_BYTES, None).expect("could not parse the test envelope");
+        std::fs::create_dir(out_dir.join(thread_export_filename(root_envelope.message_id())))
+            .expect("could not pre-create the blocking directory");
+
+        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(
+            out_dir.display().to_string(),
+        )));
+        assert!(
+            view.process_event(&mut event, &mut ctx),
+            "the export action must be consumed"
+        );
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            replies.iter().any(|ev| matches!(
+                ev,
+                UIEvent::Notification { ref body, .. }
+                    if body.contains("1/2 could not be saved")
+            )),
+            "a one-of-two failure must report the exact counts, got: {replies:?}"
+        );
+        assert!(
+            !replies.iter().any(|ev| matches!(
+                ev,
+                UIEvent::Notification { ref body, .. } if body.contains("Saved 2 mails at")
+            )),
+            "a partial failure must not report the all-success summary, got: {replies:?}"
+        );
+
+        // Count only regular files: the blocking entry is a *directory*
+        // whose name also ends in `.eml`.
+        let eml_count = std::fs::read_dir(&out_dir)
+            .expect("could not read the export directory")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_type().is_ok_and(|t| t.is_file())
+                    && entry.path().extension().is_some_and(|ext| ext == "eml")
+            })
+            .count();
+        assert_eq!(
+            eml_count, 1,
+            "only the unblocked reply mail must be written as an .eml file"
         );
     }
 }
