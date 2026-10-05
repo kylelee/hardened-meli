@@ -1560,3 +1560,81 @@ mod pgp_backend_choice_tests {
         );
     }
 }
+
+/// `FileSettings::validate_string` must refuse to load an IMAP account whose
+/// `danger_accept_invalid_certs` is enabled — in either TOML boolean or quoted
+/// string form — with the setting name and the remediation (CVE-2009-3765
+/// hardening). Absent / `false` must keep loading.
+#[test]
+fn test_validate_string_rejects_imap_danger_accept_invalid_certs() {
+    const BASE: &str = r#"
+[accounts.imap-danger]
+root_mailbox = "INBOX"
+format = "imap"
+send_mail = 'false'
+identity = "user@example.com"
+server_hostname = "example.com"
+server_username = "user"
+server_password = "password"
+"#;
+
+    // Absent: accepted.
+    FileSettings::validate_string(BASE.to_string(), false).unwrap();
+
+    // Explicit `false`, both forms: accepted.
+    for value in ["false", "\"false\""] {
+        let config = format!("{BASE}danger_accept_invalid_certs = {value}\n");
+        FileSettings::validate_string(config, false).unwrap();
+    }
+
+    // `true`, both forms: refused with the setting name, the CVE and the fix.
+    for value in ["true", "\"true\""] {
+        let config = format!("{BASE}danger_accept_invalid_certs = {value}\n");
+        let err = FileSettings::validate_string(config, false).unwrap_err();
+        assert!(err.summary.contains("danger_accept_invalid_certs"), "{err}");
+        assert!(err.summary.contains("CVE-2009-3765"), "{err}");
+        assert!(err.summary.contains("set it to false"), "{err}");
+        assert!(err.summary.contains("trust store"), "{err}");
+        // The offending account is named in the message.
+        assert!(err.summary.contains("imap-danger"), "{err}");
+    }
+}
+
+/// The per-account SMTP `send_mail` mailer is validated too: a
+/// `SmtpSecurity::{Tls,StartTLS,Auto}` carrying
+/// `danger_accept_invalid_certs = true` must abort startup, while the safe
+/// value loads (CVE-2009-3765 hardening).
+#[cfg(feature = "smtp")]
+#[test]
+fn test_validate_string_rejects_smtp_send_mail_danger_accept_invalid_certs() {
+    let config_with = |danger: &str| {
+        format!(
+            r#"
+[accounts.smtp-danger]
+root_mailbox = "INBOX"
+format = "imap"
+identity = "user@example.com"
+server_hostname = "example.com"
+server_username = "user"
+server_password = "password"
+
+[accounts.smtp-danger.send_mail]
+hostname = "smtp.example.com"
+port = 465
+auth = {{ type = "none" }}
+security = {{ type = "tls", danger_accept_invalid_certs = {danger} }}
+"#
+        )
+    };
+
+    // Safe value: loads.
+    FileSettings::validate_string(config_with("false"), false).unwrap();
+
+    // Enabled: refused, naming the SMTP mailer and the account.
+    let err = FileSettings::validate_string(config_with("true"), false).unwrap_err();
+    assert!(err.summary.contains("danger_accept_invalid_certs"), "{err}");
+    assert!(err.summary.contains("CVE-2009-3765"), "{err}");
+    assert!(err.summary.contains("set it to false"), "{err}");
+    assert!(err.summary.contains("send_mail"), "{err}");
+    assert!(err.summary.contains("smtp-danger"), "{err}");
+}

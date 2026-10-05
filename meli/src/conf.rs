@@ -683,7 +683,7 @@ impl FileSettings {
             let FileAccount {
                 root_mailbox,
                 format,
-                send_mail: _,
+                send_mail,
                 identity,
                 extra_identities,
                 read_only,
@@ -717,6 +717,16 @@ impl FileSettings {
             };
             s.validate_config()?;
             backends.validate_config(&lowercase_format, &mut s)?;
+            // Refuse to start if the account's SMTP mailer disables TLS
+            // certificate/hostname validation (CVE-2009-3765 hardening).
+            #[cfg(feature = "smtp")]
+            if let SendMail::Smtp(ref smtp_conf) = send_mail {
+                smtp_conf.validate().chain_err_summary(|| {
+                    format!("invalid `send_mail` configuration of account `{name}`")
+                })?;
+            }
+            #[cfg(not(feature = "smtp"))]
+            let _ = send_mail;
             if !s.extra.is_empty() {
                 return Err(Error::new(format!(
                     "Unrecognised configuration values: {:?}",
@@ -787,7 +797,7 @@ impl FileSettings {
             let FileAccount {
                 root_mailbox,
                 format,
-                send_mail: _,
+                send_mail,
                 identity,
                 extra_identities,
                 read_only,
@@ -821,6 +831,16 @@ impl FileSettings {
             };
             s.validate_config()?;
             backends.validate_config(&lowercase_format, &mut s)?;
+            // Refuse to start if the account's SMTP mailer disables TLS
+            // certificate/hostname validation (CVE-2009-3765 hardening).
+            #[cfg(feature = "smtp")]
+            if let SendMail::Smtp(ref smtp_conf) = send_mail {
+                smtp_conf.validate().chain_err_summary(|| {
+                    format!("invalid `send_mail` configuration of account `{name}`")
+                })?;
+            }
+            #[cfg(not(feature = "smtp"))]
+            let _ = send_mail;
             if !s.extra.is_empty() {
                 return Err(Error::new(format!(
                     "Unrecognised configuration values: {:?}",

@@ -1217,3 +1217,65 @@ fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
     );
     JmapServerConf::new(&account).unwrap_err();
 }
+
+/// `danger_accept_invalid_certs = true` gates all three isahc `danger_*` knobs
+/// (invalid certs / hosts / revoked certs), so it must be refused at startup
+/// (CVE-2009-3765 hardening); absent / `false`, string or boolean, is accepted.
+#[test]
+fn test_jmap_danger_accept_invalid_certs_is_rejected() {
+    use super::JmapType;
+    use crate::{error::ErrorKind, AccountSettings};
+
+    let account_with = |extra: indexmap::IndexMap<String, serde_json::Value>| AccountSettings {
+        name: "test".to_string(),
+        root_mailbox: String::new(),
+        format: "jmap".to_string(),
+        identity: "user@example.com".to_string(),
+        extra_identities: vec![],
+        read_only: false,
+        display_name: None,
+        subscribed_mailboxes: vec![],
+        mailboxes: indexmap::indexmap! {},
+        manual_refresh: false,
+        extra,
+    };
+    let base = || {
+        let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
+        for (k, v) in [
+            ("server_url", "https://jmap.example.com"),
+            ("server_username", "user"),
+            ("server_password", "password"),
+        ] {
+            m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+        }
+        m
+    };
+
+    let mut account = account_with(base());
+    JmapType::validate_config(&mut account).unwrap();
+
+    for value in [
+        serde_json::Value::String("false".to_string()),
+        serde_json::Value::Bool(false),
+    ] {
+        let mut extra = base();
+        extra.insert("danger_accept_invalid_certs".to_string(), value);
+        let mut account = account_with(extra);
+        JmapType::validate_config(&mut account).unwrap();
+    }
+
+    for value in [
+        serde_json::Value::String("true".to_string()),
+        serde_json::Value::Bool(true),
+    ] {
+        let mut extra = base();
+        extra.insert("danger_accept_invalid_certs".to_string(), value);
+        let mut account = account_with(extra);
+        let err = JmapType::validate_config(&mut account).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Configuration);
+        assert!(err.summary.contains("danger_accept_invalid_certs"), "{err}");
+        assert!(err.summary.contains("CVE-2009-3765"), "{err}");
+        assert!(err.summary.contains("set it to false"), "{err}");
+        assert!(err.summary.contains("trust store"), "{err}");
+    }
+}
