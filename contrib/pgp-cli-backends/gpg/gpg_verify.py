@@ -120,6 +120,13 @@ else:
                     "summary": summary_val,
                     "cert": {
                         "keyid": fingerprint,
+                        # The CLI backend contract requires the status to be
+                        # explicit: "OK" affirms a good signature, any other
+                        # string is an error message, and an absent status is
+                        # treated by meli as "not reported" and fails closed
+                        # (CVE-2007-1265: KMail showed mails as signed when
+                        # it failed to read GnuPG's status output).
+                        "status": "OK",
                     },
                     "validity": trust_level,
                     "cleartext": is_cleartext,
