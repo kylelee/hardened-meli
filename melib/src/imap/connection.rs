@@ -1540,56 +1540,60 @@ impl ImapConnection {
     /// are inspected one at a time:
     ///
     /// - a line starting with `+` is the continuation request: return
-    ///   `Ok(())`;
+    ///   `Ok(true)`;
     /// - a line starting with the pending command's `tag` means the server
     ///   answered (or refused) the command without consuming the literal:
-    ///   return `Err` with the server's response text;
+    ///   return `Ok(false)`; the exchange ended in a clean state, so the
+    ///   caller may send a fresh command (the `SEARCH` sender retries with
+    ///   quoted strings) instead of degrading to a local scan;
     /// - any other untagged line is inconclusive: keep waiting for the
     ///   continuation request or the tagged response;
     /// - no line before the timeout: return `Err(TimedOut)`.
     ///
     /// Other callers of [`ImapConnection::wait_for_continuation_request`] are
     /// unaffected.
-    pub async fn wait_for_literal_continuation(&mut self, tag: &[u8]) -> Result<()> {
+    pub async fn wait_for_literal_continuation(&mut self, tag: &[u8]) -> Result<bool> {
         let overall = self.uid_store.timeout;
-        timeout(
-            overall,
-            try_await(async move {
-                let mut buf: Vec<u8> = vec![0; Connection::IO_BUF_SIZE];
-                let mut pending: Vec<u8> = Vec::new();
-                loop {
-                    let read = self.stream.as_mut()?.stream.read(&mut buf).await?;
-                    if read == 0 {
-                        return Err(Error::new("Disconnected"));
-                    }
-                    pending.extend_from_slice(&buf[..read]);
-                    enforce_response_size_limit(pending.len())?;
-                    let mut consumed = 0;
-                    while let Some(rel) = pending[consumed..].find(b"\r\n") {
-                        let end = consumed + rel + b"\r\n".len();
-                        let line = &pending[consumed..end];
-                        let is_continuation = line.starts_with(b"+");
-                        let is_tagged = line.starts_with(tag);
-                        let repr = String::from_utf8_lossy(line).trim_end().to_string();
-                        consumed = end;
-                        if is_continuation {
-                            return Ok(());
-                        }
-                        if is_tagged {
-                            return Err(Error::new(format!(
-                                "Server did not send a literal continuation request: {repr}"
-                            )));
-                        }
-                        // Another untagged line (e.g. `* SEARCH ...`): the
-                        // literal is not accepted, but the tagged completion
-                        // still has to arrive to know the outcome.
-                    }
-                    if consumed > 0 {
-                        pending.drain(..consumed);
-                    }
+        timeout(overall, async move {
+            let mut buf: Vec<u8> = vec![0; Connection::IO_BUF_SIZE];
+            let mut pending: Vec<u8> = Vec::new();
+            loop {
+                let read = self.stream.as_mut()?.stream.read(&mut buf).await?;
+                if read == 0 {
+                    return Err(Error::new("Disconnected"));
                 }
-            }),
-        )
+                pending.extend_from_slice(&buf[..read]);
+                enforce_response_size_limit(pending.len())?;
+                let mut consumed = 0;
+                while let Some(rel) = pending[consumed..].find(b"\r\n") {
+                    let end = consumed + rel + b"\r\n".len();
+                    let line = &pending[consumed..end];
+                    let is_continuation = line.starts_with(b"+");
+                    let is_tagged = line.starts_with(tag);
+                    let repr = String::from_utf8_lossy(line).trim_end().to_string();
+                    consumed = end;
+                    if is_continuation {
+                        return Ok(true);
+                    }
+                    if is_tagged {
+                        imap_log!(
+                            debug,
+                            self,
+                            "server completed the command without a literal continuation \
+                                 request: {}",
+                            repr
+                        );
+                        return Ok(false);
+                    }
+                    // Another untagged line (e.g. `* SEARCH ...`): the
+                    // literal is not accepted, but the tagged completion
+                    // still has to arrive to know the outcome.
+                }
+                if consumed > 0 {
+                    pending.drain(..consumed);
+                }
+            }
+        })
         .await?
     }
 
@@ -2233,6 +2237,7 @@ impl ImapConnection {
                 // `send_bytes`, which must not add a CRLF.
                 let mut first_write = true;
                 let mut tag: Option<Vec<u8>> = None;
+                let mut server_skipped_literal = false;
                 for step in search_send_steps(&segments) {
                     match step {
                         ImapSearchSendStep::Write(bytes) if first_write => {
@@ -2250,9 +2255,40 @@ impl ImapConnection {
                         }
                         ImapSearchSendStep::WaitContinuation => {
                             let tag = tag.as_deref().expect("a write precedes every continuation");
-                            self.wait_for_literal_continuation(tag).await?;
+                            if !self.wait_for_literal_continuation(tag).await? {
+                                // The server completed the command without
+                                // reading the literal octets (see the method
+                                // documentation): drop the pending steps and
+                                // retry the whole command with quoted strings
+                                // below.
+                                server_skipped_literal = true;
+                                break;
+                            }
                         }
                     }
+                }
+                if server_skipped_literal {
+                    let Some(quoted_segments) = query.to_imap_search_segments_quoted() else {
+                        return Err(Error::new(
+                            "Server completed the SEARCH command without reading its literal \
+                             octets and the query cannot be resent with quoted strings",
+                        )
+                        .set_kind(ErrorKind::ProtocolError));
+                    };
+                    let query_str = quoted_segments
+                        .iter()
+                        .filter_map(ImapSearchSegment::as_text)
+                        .collect::<String>();
+                    imap_log!(
+                        debug,
+                        self,
+                        "retrying SEARCH with quoted strings: {}",
+                        query_str
+                    );
+                    self.send_command_raw(
+                        format!("UID SEARCH CHARSET UTF-8 {}", query_str.trim()).as_bytes(),
+                    )
+                    .await?;
                 }
             }
         } else {
