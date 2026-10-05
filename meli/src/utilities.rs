@@ -668,36 +668,38 @@ impl StatusBar {
     /// 2. `general.enter_command_mode`  — label `Command`
     /// 3. `scroll_up`
     /// 4. `scroll_down`
-    /// 5. `focus_left`
-    /// 6. `focus_right`
-    /// 7. `send_mail`                   — label `Send Mail` (only on
+    /// 5. `prev_page`
+    /// 6. `next_page`
+    /// 7. `focus_left`
+    /// 8. `focus_right`
+    /// 9. `send_mail`                   — label `Send Mail` (only on
     ///    views that expose a send binding, e.g. composing, immediately
     ///    before `close`)
-    /// 8. `close`                       — label `Close View` (only on
-    ///    sub-views that expose a close binding, e.g. composing)
-    /// 9. `search`
-    /// 10. `general.quit`               — label `Quit` (last, but only
+    /// 10. `close`                      — label `Close View` (only on
+    ///     sub-views that expose a close binding, e.g. composing)
+    /// 11. `search`
+    /// 12. `general.quit`               — label `Quit` (last, but only
     ///     when the focused view does not expose a `close` binding: a
     ///     view that carries its own Close View hint, such as composing,
     ///     hides Quit instead of advertising both)
     ///
-    /// Entries 3–6 and 9 (the scroll, pane-switch and search keys) are
-    /// scenario-sensitive: their label — or whether they render at all
-    /// — comes from the focused listing pane reported by
+    /// Entries 3–8 and 11 (the scroll/page, pane-switch and search keys)
+    /// are scenario-sensitive: their label — or whether they render at
+    /// all — comes from the focused listing pane reported by
     /// [`Component::hint_focus`], looked up in
     /// [`scenario_hint_labels`]: the same key is advertised with the
     /// wording of the action it performs from the pane that holds the
     /// keyboard.
     ///
-    /// | focus            | `scroll_up` | `scroll_down` | `focus_left`   | `focus_right`  | search   |
-    /// |------------------|-------------|---------------|----------------|----------------|----------|
-    /// | `Sidebar`        | Folder Up   | Folder Down   | hidden         | Open Mail      | hidden   |
-    /// | `NoView`         | Maillist Up | Maillist Down | hidden         | Open Mail      | hidden   |
-    /// | `GridSingleMail` | Maillist Up | Maillist Down | Focus Box      | Focus Content  | Search   |
-    /// | `GridThreads`    | Maillist Up | Maillist Down | Focus Box      | Focus Threads  | Search   |
-    /// | `ThreadList`     | Thread Up   | Thread Down   | Focus Maillist | Focus Content  | Search   |
-    /// | `MailView`       | hidden      | hidden        | hidden         | hidden         | hidden   |
-    /// | `None`           | Scroll Up   | Scroll Down   | Focus Left     | Focus Right    | Search   |
+    /// | focus            | `scroll_up` | `scroll_down` | `prev_page`       | `next_page`         | `focus_left`   | `focus_right`  | search   |
+    /// |------------------|-------------|---------------|-------------------|---------------------|----------------|----------------|----------|
+    /// | `Sidebar`        | Folder Up   | Folder Down   | Switch Mailbox Up | Switch Mailbox Down | hidden         | Open Mail      | hidden   |
+    /// | `NoView`         | Maillist Up | Maillist Down | Maillist Page Up  | Maillist Page Down  | hidden         | Open Mail      | hidden   |
+    /// | `GridSingleMail` | Maillist Up | Maillist Down | hidden            | hidden              | Focus Box      | Focus Content  | Search   |
+    /// | `GridThreads`    | Maillist Up | Maillist Down | hidden            | hidden              | Focus Box      | Focus Threads  | Search   |
+    /// | `ThreadList`     | Thread Up   | Thread Down   | hidden            | hidden              | Focus Maillist | Focus Content  | Search   |
+    /// | `MailView`       | hidden      | hidden        | hidden            | hidden              | hidden         | hidden         | hidden   |
+    /// | `None`           | Scroll Up   | Scroll Down   | hidden            | hidden              | Focus Left     | Focus Right    | Search   |
     ///
     /// `MailView` (the mail detail state of the single-mail and thread
     /// layouts) additionally appends three mail actions after the
@@ -756,12 +758,12 @@ impl StatusBar {
             }
             None
         };
-        // Nine entries in fixed display order: help first (so it
-        // survives narrow ellipsis), then scroll, then focus switches,
-        // then send mail and view close, then search. The five
-        // scenario-sensitive names start from a placeholder label that
-        // the per-focus table below resolves; the rest carry their one
-        // fixed label. `quit` is appended after the hint-focus
+        // Eleven entries in fixed display order: help first (so it
+        // survives narrow ellipsis), then scroll, then page, then focus
+        // switches, then send mail and view close, then search. The
+        // seven scenario-sensitive names start from a placeholder label
+        // that the per-focus table below resolves; the rest carry their
+        // one fixed label. `quit` is appended after the hint-focus
         // filtering below — and only when the view has no `close`
         // binding — so it stays the final actionable hint.
         let mut pickers: Vec<(
@@ -777,6 +779,8 @@ impl StatusBar {
             ),
             ("scroll_up", pick_key("scroll_up"), ""),
             ("scroll_down", pick_key("scroll_down"), ""),
+            ("prev_page", pick_key("prev_page"), ""),
+            ("next_page", pick_key("next_page"), ""),
             ("focus_left", pick_key("focus_left"), ""),
             ("focus_right", pick_key("focus_right"), ""),
             ("send_mail", pick_key("send_mail"), "Send Mail"),
@@ -875,7 +879,7 @@ impl StatusBar {
         }
         // Use a generous maximum: the status bar clips the segment at
         // the row's remaining width anyway; this only governs the
-        // ellipsis cutoff. Nine labelled hints run ~100–120 cells, so
+        // ellipsis cutoff. Eleven labelled hints run ~120–140 cells, so
         // the previous 80-column budget truncated too aggressively.
         let mut spans = truncate_spans_with_ellipsis(spans, 200, ellipsis);
         if spans.is_empty() {
@@ -2085,9 +2089,11 @@ impl Component for Tabbed {
 /// the listing layouts holds the keyboard; every other hint has one
 /// fixed label in all focuses. The order doubles as the column order of
 /// [`scenario_hint_labels`].
-const SCENARIO_HINT_NAMES: [&str; 5] = [
+const SCENARIO_HINT_NAMES: [&str; 7] = [
     "scroll_up",
     "scroll_down",
+    "prev_page",
+    "next_page",
     "focus_left",
     "focus_right",
     "search",
@@ -2099,42 +2105,55 @@ const SCENARIO_HINT_NAMES: [&str; 5] = [
 /// binding with that pane's wording — the same key names the action it
 /// performs from the pane that holds the keyboard — and `None` hides
 /// the hint in that focus.
-fn scenario_hint_labels(hint_focus: Option<HintFocus>) -> [Option<&'static str>; 5] {
+fn scenario_hint_labels(hint_focus: Option<HintFocus>) -> [Option<&'static str>; 7] {
     match hint_focus {
         // Non-listing views (contacts, composing, ...): default labels.
+        // The page keys carry no listing-specific wording, so they stay
+        // hidden here.
         None => [
             Some("Scroll Up"),
             Some("Scroll Down"),
+            None,
+            None,
             Some("Focus Left"),
             Some("Focus Right"),
             Some("Search"),
         ],
-        // Layout1 sidebar: the scroll keys walk the mailbox tree; Focus
-        // Right adopts the selected mailbox and opens the cursor entry
-        // directly (a single mail → layout2, a thread → layout3); no
-        // view is open, so Search has nothing to search and Focus Left
-        // has no pane further left.
+        // Layout1 sidebar: the scroll keys walk the mailbox tree and the
+        // page keys jump to the previous/next mailbox group (account);
+        // Focus Right adopts the selected mailbox and opens the cursor
+        // entry directly (a single mail → layout2, a thread → layout3);
+        // no view is open, so Search has nothing to search and Focus
+        // Left has no pane further left.
         Some(HintFocus::Sidebar) => [
             Some("Folder Up"),
             Some("Folder Down"),
+            Some("Switch Mailbox Up"),
+            Some("Switch Mailbox Down"),
             None,
             Some("Open Mail"),
             None,
         ],
-        // Layout1 grid: the scroll keys walk the mail rows, Focus
-        // Right opens the entry under the cursor.
+        // Layout1 grid: the scroll keys walk the mail rows, the page keys
+        // page the mail list, Focus Right opens the entry under the
+        // cursor.
         Some(HintFocus::NoView) => [
             Some("Maillist Up"),
             Some("Maillist Down"),
+            Some("Maillist Page Up"),
+            Some("Maillist Page Down"),
             None,
             Some("Open Mail"),
             None,
         ],
         // Layout2 grid: Focus Left closes the single-mail view, Focus
-        // Right hands the keyboard to the mail content.
+        // Right hands the keyboard to the mail content; the page keys
+        // are not advertised outside layout1.
         Some(HintFocus::GridSingleMail) => [
             Some("Maillist Up"),
             Some("Maillist Down"),
+            None,
+            None,
             Some("Focus Box"),
             Some("Focus Content"),
             Some("Search"),
@@ -2144,6 +2163,8 @@ fn scenario_hint_labels(hint_focus: Option<HintFocus>) -> [Option<&'static str>;
         Some(HintFocus::GridThreads) => [
             Some("Maillist Up"),
             Some("Maillist Down"),
+            None,
+            None,
             Some("Focus Box"),
             Some("Focus Threads"),
             Some("Search"),
@@ -2154,13 +2175,15 @@ fn scenario_hint_labels(hint_focus: Option<HintFocus>) -> [Option<&'static str>;
         Some(HintFocus::ThreadList) => [
             Some("Thread Up"),
             Some("Thread Down"),
+            None,
+            None,
             Some("Focus Maillist"),
             Some("Focus Content"),
             Some("Search"),
         ],
         // Mail detail: the whole scenario group is hidden; the mail
         // actions appended in `hints_metrics` take over.
-        Some(HintFocus::MailView) => [None, None, None, None, None],
+        Some(HintFocus::MailView) => [None, None, None, None, None, None, None],
     }
 }
 
