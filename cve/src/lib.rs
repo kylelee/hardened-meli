@@ -2979,3 +2979,45 @@ mod cve_2021_31855;
 #[cfg(test)]
 #[path = "CVE-2019-10732.rs"]
 mod cve_2019_10732;
+
+/// CVE-2020-16947（Microsoft Outlook 2016 / Office 2019 / Microsoft 365
+/// Apps for Enterprise，Windows；CVSS 7.5）打开特制文件/邮件时的内存破坏
+/// RCE regression（issue #105，表 2 病毒/代码执行 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：NVD/MSRC 记录 Outlook 在打开特制
+/// 文件或邮件时「未正确处理内存对象」，攻击者可以目标用户权限执行任意
+/// 代码；微软未披露具体原语。meli 不链接 MAPI store、COM 运行时、表单
+/// 引擎或脚本宿主，字面上的「内存破坏 → 执行」没有可运行的代码路径，故
+/// 按 issue 要求做等价面免疫证明：Windows 专属的内存破坏 → meli 的整个
+/// 「接收 → 解析 → 显示」输入面。
+///
+/// [`cve_2020_16947`] 分层锁定六类语料：(a) 超过 100 层的
+/// `multipart/*` 嵌套（含 100/101 精确边界与 150 层）建树必须被
+/// `MAX_MULTIPART_NESTING_DEPTH` 截断、第 100 层之后退化为不透明
+/// `ContentType::OctetStream` 叶，整树遍历/decode 不 panic——复用 C4 的
+/// multipart 递归上限；(b) 12 层 `message/rfc822` 递归链的
+/// [`Attachment::decode_rec`] 必须命中 `MAX_RFC822_DECODE_NESTING_DEPTH`
+/// (8) 并在越界处退化为惰性 `b"message/rfc822 attachment"` 标记，浅层
+/// （≤8 跳）仍解出内层正文——复用 CVE-2004-1944 的 hop 上限；(c) ≥256 KiB
+/// 单行头（超长 `Subject`/`X-Long`、超长无冒号行、超长折叠头）经
+/// `parser::mail` / `headers::headers` / `Envelope::from_bytes` 解析，
+/// 不 panic、结果确定、时间有界，且超长 `Subject` 逐字节保留（证明耗时
+/// 来自线性工作而非截断）；(d) 截断/残缺 boundary（声明的 boundary 无完整
+/// 分界行、只在前后缀出现、EOF 落在 dash-boundary 中间、缺闭合分界、
+/// 闭合分界截断）要么干净报错要么产出 ≤100 层的有界完整树，绝不空转或越界
+/// 切片（CWE-835 进度保证与 CWE-1287 EOF 保证）；(e) 非法 `Content-Type`
+/// 参数（参数截断、引号未闭合、重复 boundary、boundary 含非法字符/为空、
+/// type/子类型为空或超长、NUL 参数），容错分类、不 panic，尤其**空
+/// boundary 不得造成无限循环或退化 panic**，容器退化为零部件；(f) 恶意
+/// `Date`（10 万层嵌套注释、`99:99:99`、9999 年、多空白折叠、垃圾尾部、
+/// 空值）经 [`rfc5322_date`] 与 envelope 全链路，Ok/Err 皆不 panic、时间
+/// 有界（注释扫描器是迭代式，strptime 回退是线性）。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——语料中的每个字节要么
+/// 成为惰性 `Attachment`/时间戳数据，要么是干净的 `Err`；安全 checked Rust
+/// 无 MAPI 固定缓冲区可溢出，深度与宽度分别由上述上限约束。
+///
+/// [`Attachment::decode_rec`]: meli::melib::email::Attachment::decode_rec
+/// [`rfc5322_date`]: meli::melib::email::parser::dates::rfc5322_date
+#[cfg(test)]
+#[path = "CVE-2020-16947.rs"]
+mod cve_2020_16947;
