@@ -479,18 +479,25 @@ fn base_href_cannot_rebase_relative_urls() {
 }
 
 /// A CSS `url()` smuggled into a whitelisted *generic* attribute value
-/// (`title`) is dead text: the sanitizer keeps the attribute (nothing
-/// interprets CSS in an attribute value), html2text never shows it, and
-/// the rendered terminal text carries no trace of the URL. Immunity
-/// against MFSA-2005-11 rests on the absence of a fetcher, not on
-/// scrubbing inert strings — this locks that boundary explicitly.
+/// (`title`) used to be kept as dead text, resting on the absence of a
+/// fetcher. CVE-2024-42010 / issue #116 tightened that boundary: the
+/// sanitizer now drops any retained attribute whose decoded value carries a
+/// CSS directive token (`@import`/`url(`/`expression(`), so the smuggled
+/// URL is removed from the sanitized output entirely — strictly stronger
+/// than keeping an inert string. Immunity still rests on the absence of a
+/// fetcher, and the rendered terminal text still carries no trace of the
+/// URL.
 #[test]
 fn css_url_smuggled_into_generic_attribute_stays_dead_text() {
     let payload = r#"<p title="background:url(http://tracker.example/smuggled.png)">x</p>"#;
     let out = sanitize(payload);
+    assert_eq!(
+        out, "<p>x</p>",
+        "CSS url() attribute raw material must be dropped whole (CVE-2024-42010): {out:?}"
+    );
     assert!(
-        out.contains(r#"title="background:url(http://tracker.example/smuggled.png)""#),
-        "inert whitelisted attribute value must pass through untouched: {out:?}"
+        !out.contains("url(") && !out.to_ascii_lowercase().contains(TRACKER_HOST),
+        "smuggled CSS url() must not survive sanitize: {out:?}"
     );
     assert_eq!(sanitize(&out), out, "not a fixed point: {out:?}");
     let text = render(payload.as_bytes(), 80).expect("render must not fail");
