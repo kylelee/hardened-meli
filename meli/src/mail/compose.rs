@@ -4005,33 +4005,16 @@ hello world.
         let script = tmp.path().join("shim-editor.sh");
 
         // `create_pty` locates POSIX `sh` by parsing the raw stdout of
-        // `getconf PATH`, which carries a trailing `\n`. On systems whose
-        // `getconf PATH` is a single component (e.g. Fedora/Arch:
-        // `/usr/bin`), that unstripped newline makes every candidate path
-        // (`/usr/bin\n/sh`) fail `exists()`, so `create_pty` refuses to
-        // spawn anything. This is a pre-existing upstream defect in
-        // `terminal/embedded.rs` (untouched by the ratatui waves, zero
-        // diff vs main; see the task-6 evidence log) and is out of this
-        // todo's mandate to fix. To still verify the embedded path on
-        // this host, prepend a shim `getconf` that prints the same PATH
-        // without the newline artifact - exactly what a host like Debian
-        // (multi-component `getconf PATH`) yields, where the lookup
-        // succeeds. Only the `sh` lookup is affected; no bytes are
-        // altered.
-        let shimbin = tmp.path().join("bin");
-        std::fs::create_dir_all(&shimbin).unwrap();
-        std::fs::write(shimbin.join("getconf"), "#!/bin/sh\nprintf '/usr/bin'\n").unwrap();
-        std::fs::set_permissions(
-            shimbin.join("getconf"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        let _env = crate::utilities::tests::env_lock_shared();
-        let previous_path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", shimbin.display(), previous_path.to_string_lossy()),
-        );
+        // `getconf PATH`, which used to carry a trailing `\n` that made
+        // every candidate path (`/usr/bin\n/sh`) fail `exists()` on hosts
+        // whose `getconf PATH` is a single component (e.g. Fedora/Arch:
+        // `/usr/bin`), so `create_pty` refused to spawn anything. That
+        // defect was fixed in 70d145a: `find_sh_path` now `trim_ascii()`s
+        // the output before splitting it into candidate directories. This
+        // test therefore exercises the real production lookup path - no
+        // shim `getconf`, no `PATH` rewriting - so on exactly those
+        // single-component hosts it also provides end-to-end regression
+        // coverage for that fix.
 
         // Keys the editor must receive verbatim (`Ctrl-z` excluded: meli
         // consumes it itself to SIGSTOP the child). The last key is the
