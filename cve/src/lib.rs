@@ -3891,3 +3891,48 @@ mod cve_2020_15954;
 #[cfg(test)]
 #[path = "CVE-2021-38373.rs"]
 mod cve_2021_38373;
+
+/// CVE-2024-50624 (KMail < 6.2.0 kmail-account-wizard, CVSS 5.9, NVD /
+/// CIRCL) cleartext-autoconfig MITM regression (issue #124, table 5 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — protocol/trust boundaries):
+/// `ispdbservice.cpp` fetched the mail-server configuration (Mozilla
+/// autoconfig XML) over plaintext HTTP, so a man-in-the-middle could
+/// answer with an attacker-controlled IMAP/SMTP endpoint set.
+///
+/// meli has no autoconfig / ISPDB / autodiscover feature surface; its one
+/// 「network-delivered endpoint」 surface is JMAP session discovery — the
+/// `/.well-known/jmap` GET whose Session object supplies `apiUrl`,
+/// `uploadUrl`, `downloadUrl` and `eventSourceUrl` for all later
+/// authenticated traffic, with Basic/Bearer credentials mounted on the
+/// client itself. The corpus maps the attack there, and the recon exposed
+/// two real gaps, both fixed with this regression: `JmapServerConf::new`
+/// and `JmapType::validate_config` accepted a remote `http://`
+/// `server_url` (the discovery GET itself then carried credentials in the
+/// clear), and `JmapConnection::connect` consumed the four session URLs
+/// with no scheme check at all. Both now enforce `https` — plaintext
+/// `http` is tolerated only for loopback hosts (`localhost`, 127.0.0.0/8,
+/// `::1`), where traffic never leaves the machine, so the `melib-test`
+/// loopback mocks and local development keep working — and fail closed at
+/// startup-validation and session-parse time.
+///
+/// [`cve_2024_50624`] locks it in four layers (details in the module
+/// docs): Layer 1 reproduces the KMail `ispdbservice` over-adoption on the
+/// autoconfig XML corpus (vulnerable model adopts `attacker.example`
+/// plaintext endpoints; hardened model aborts); Layer 2 proves the
+/// configuration surface (no autoconfig vocabulary in `meli/src`/
+/// `melib/src`, ispdb XML cannot enter the TOML channel, the startup gate
+/// rejects remote `http`/unknown schemes while `https` and loopback pass,
+/// and the CVE-2009-3765 danger-flag rejection still holds); Layer 3 drives
+/// a real loopback JMAP handshake (forged remote-http session fails closed
+/// with zero follow-up bytes; loopback benign session still connects) plus
+/// the `validate_session_urls` matrix; Layer 4 locks the source ordering.
+///
+/// Conclusion: **a real gap was found and fixed, not a pure immunity
+/// proof** — meli lacks KMail's autoconfig feature (accounts come only
+/// from a local TOML file), but its JMAP transport URLs previously
+/// accepted remote plaintext HTTP.
+///
+/// [`cve_2024_50624`]: self::cve_2024_50624
+#[cfg(test)]
+#[path = "CVE-2024-50624.rs"]
+mod cve_2024_50624;
