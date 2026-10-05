@@ -50,6 +50,13 @@ use melib::{Error, Result};
 /// 末尾同样 trim 一次。nh3 自身不裁这些，留给消费者做后处理；meli 在
 /// sanitize 阶段直接处理，因为 sanitize 输出紧接着喂给 `html2text`
 /// 渲染，过早的不可见填充会让文本宽度错算并出现"幽灵"链接脚注。
+///
+/// 第二处与 nh3 parity 的**有意偏离**（CVE-2018-0950 / issue #101）：`href`
+/// 的 URL 校验前移到 trim 早退分支**之前**，且 [`is_safe_url`] 拒绝 `\`
+/// 开头的 UNC / 设备根路径与 `C:\…` 盘符路径。裸 UNC href 没有 WHATWG
+/// scheme，会被 `url_relative = PassThrough` 当作惰性相对引用原样保留，
+/// html2text 再把它渲染成可外联的脚注链接——正是 Office 在 RTF/OLE 预览
+/// 中自动解引用 `\\attacker\share` 的终端等价面。
 pub fn sanitize(input: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
@@ -91,6 +98,25 @@ pub fn sanitize(input: &str) -> String {
             // nothing changed: ammonia's contract is `None` = drop,
             // `Some` = keep (replace only if differs).
             let trimmed = value.trim_matches(trim_predicate);
+            // Re-validate every `href` we are about to write back, *before*
+            // the no-trim early return below. ammonia validated URL schemes
+            // on the original value in `clean_child`, but its `url_relative
+            // = PassThrough` policy keeps whatever `Url::parse` reports as
+            // `RelativeUrlWithoutBase` — including the Windows path shapes
+            // (`\\host\share`, `\Device\…`, `C:\…`) that are live
+            // dereference targets once a launcher or footnote consumer
+            // touches them (CVE-2018-0950 / issue #101). A WHATWG URL parser
+            // only strips C0 controls + ASCII space before scheme detection,
+            // so `Url::parse` of a Cf-padded value (e.g.
+            // `\u{200B}javascript:alert(1)`) also returns
+            // `RelativeUrlWithoutBase`; trimming the prefix would
+            // *activate* the hidden scheme into a live `javascript:` href,
+            // the exact regression golden case 5 exists to prevent.
+            // Validating the trimmed value covers both the untrimmed bypass
+            // and the trim-activation case; drop on doubt.
+            if attr == "href" && !is_safe_url(trimmed) {
+                return None;
+            }
             if trimmed.len() == value.len() {
                 return Some(Cow::Borrowed(value));
             }
@@ -98,20 +124,6 @@ pub fn sanitize(input: &str) -> String {
             // becomes `href=""` after trim and would render as a phantom
             // footnote by html2text. Drop the attribute instead.
             if trimmed.is_empty() {
-                return None;
-            }
-            // ammonia validated URL schemes on the *original* (pre-trim)
-            // value in `clean_child`, before this filter runs, and never
-            // re-checks what we write back. A WHATWG URL parser only
-            // strips C0 controls + ASCII space before scheme detection,
-            // so `Url::parse` of a Cf-padded value (e.g.
-            // `\u{200B}javascript:alert(1)`) returns
-            // `RelativeUrlWithoutBase` — the untrimmed value would be
-            // kept as inert relative text, but trimming the prefix
-            // *activates* the scheme into a live `javascript:` href, the
-            // exact regression golden case 5 exists to prevent.
-            // Re-validate; drop on doubt.
-            if attr == "href" && !is_safe_url(trimmed) {
                 return None;
             }
             Some(Cow::Owned(trimmed.to_owned()))
@@ -128,12 +140,31 @@ pub fn sanitize(input: &str) -> String {
 /// the original value. Returns `true` for URLs whose scheme parses as one
 /// of the configured allowlist (`http`/`https`/`mailto`) or for relative
 /// URLs (`RelativeUrlWithoutBase`, kept by `url_relative = PassThrough`).
+///
+/// The relative-URL arm is **narrower than nh3 parity on purpose**
+/// (CVE-2018-0950 / issue #101): a value with no WHATWG scheme can still be
+/// a live Windows/SMB dereference target, so bare UNC paths
+/// (`\\host\share`), device/root paths (`\Device\…`, `\\.\…`, `\?\…`) and
+/// drive-letter paths (`C:\…`) are rejected even though `Url::parse`
+/// reports them as `RelativeUrlWithoutBase`. Genuine relative references
+/// (`/path`, `#frag`, `//host`) are unaffected, and `C:/…` needs no special
+/// case — `Url::parse` treats `c` as a scheme, which the allowlist rejects.
 fn is_safe_url(value: &str) -> bool {
+    if value.starts_with('\\') || is_windows_drive_path(value) {
+        return false;
+    }
     match url::Url::parse(value) {
         Ok(u) => matches!(u.scheme(), "http" | "https" | "mailto"),
         Err(url::ParseError::RelativeUrlWithoutBase) => true,
         Err(_) => false,
     }
+}
+
+/// Whether `value` is a Windows drive-letter path with a literal backslash
+/// separator (`C:\…`): one ASCII letter, a colon, then `\`.
+fn is_windows_drive_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
 }
 
 /// Character predicate: matches ASCII whitespace, Unicode `White_Space`,
@@ -632,6 +663,71 @@ mod tests {
             out.contains(r#"href="/path?q=1""#),
             "relative href not trimmed: {out:?}"
         );
+    }
+
+    /// CVE-2018-0950 / issue #101: bare Windows path forms carry no WHATWG
+    /// scheme, so `Url::parse` reports `RelativeUrlWithoutBase` and the
+    /// `url_relative = PassThrough` policy preserved them. A `\\host\share`
+    /// UNC href (or a `\Device\…` root path) therefore survived `sanitize`
+    /// and reached html2text as a live link footnote — the terminal-side
+    /// mirror of the Office RTF/OLE remote-content dereference the CVE
+    /// describes. The defense is pushed into `sanitize`: every
+    /// Windows-path-shaped relative value is dropped, Cf-padded spellings
+    /// included (the trim would otherwise activate them).
+    #[test]
+    fn sanitize_drops_windows_path_hrefs() {
+        for (label, href) in [
+            ("bare_unc", r"\\attacker.example\share"),
+            ("quad_unc", r"\\\\attacker.example\\share\\payload.mht"),
+            (
+                "root_path",
+                r"\Device\HarddiskVolume1\Windows\System32\evil.dll",
+            ),
+            ("drive_backslash", r"C:\Windows\System32\evil.exe"),
+            ("drive_slash", r"C:/Windows/System32/evil.exe"),
+            ("cf_padded_unc", "\u{200B}\\\\attacker.example\\share"),
+            ("cf_padded_root", "\u{FEFF}\\Device\\HarddiskVolume1"),
+            ("cf_padded_drive", "\u{FEFF}C:\\Windows\\System32\\evil.exe"),
+        ] {
+            let out = sanitize(&format!("<a href=\"{href}\">link text</a>"));
+            assert!(
+                !out.contains("href"),
+                "{label}: Windows-path href survived sanitize: {out:?}"
+            );
+            assert!(
+                out.contains("link text"),
+                "{label}: anchor display text must survive: {out:?}"
+            );
+            assert!(
+                out.contains("rel=\"noopener noreferrer\""),
+                "{label}: the injected rel must survive: {out:?}"
+            );
+        }
+    }
+
+    /// The Windows-path ban is deliberately narrow: honest scheme URLs and
+    /// the non-Windows relative forms the existing corpus doctrine
+    /// protects (`/path`, `#frag`, `//host` protocol-relative) must all
+    /// keep passing through unchanged.
+    #[test]
+    fn sanitize_keeps_honest_and_non_windows_relative_hrefs() {
+        for (href, expected) in [
+            ("http://e.example/a", r#"href="http://e.example/a""#),
+            (
+                "https://e.example/a?q=1",
+                r#"href="https://e.example/a?q=1""#,
+            ),
+            ("mailto:x@y.z", r#"href="mailto:x@y.z""#),
+            ("/path?q=1", r#"href="/path?q=1""#),
+            ("#frag", r##"href="#frag""##),
+            ("//host.example/x", r#"href="//host.example/x""#),
+        ] {
+            let out = sanitize(&format!("<a href=\"{href}\">x</a>"));
+            assert!(
+                out.contains(expected),
+                "{href:?}: {expected} must survive sanitize: {out:?}"
+            );
+        }
     }
 
     /// Regression: Cf-category invisibles (bidi controls U+202A–U+202E /
