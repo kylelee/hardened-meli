@@ -1373,7 +1373,7 @@ impl ListingComponent {
     /// Propagate the keyboard-focus flag to the listing grid component:
     /// its Entry-state subpane ring renders focused while the grid (not
     /// the open view) holds the keyboard.
-    fn set_grid_has_keyboard(&mut self, value: bool) {
+    pub(crate) fn set_grid_has_keyboard(&mut self, value: bool) {
         match self {
             Compact(l) => l.set_grid_has_keyboard(value),
             Conversations(l) => l.set_grid_has_keyboard(value),
@@ -1385,7 +1385,7 @@ impl ListingComponent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ListingFocus {
+pub(crate) enum ListingFocus {
     Menu,
     MailList,
     View,
@@ -1479,7 +1479,7 @@ pub struct Listing {
     sidebar_divider_theme: ThemeAttribute,
     // State
     menu_visibility: bool,
-    focus: ListingFocus,
+    pub(crate) focus: ListingFocus,
     /// Cached `is_menu_visible()` from the previous draw: when the sidebar
     /// occlusion flips, every pane must repaint or stale pixels (the old
     /// sidebar/grid split) survive the layout shift.
@@ -2887,8 +2887,7 @@ impl Component for Listing {
                 {
                     // Right from layout1 switches the layout directly:
                     // open the cursor entry — a single mail → layout2, a
-                    // thread → layout3 — with the focus on the grid
-                    // (mirroring `open_mailbox` for the mailbox switch).
+                    // thread → layout3 — with the focus on the grid.
                     self.cursor_pos = self.menu_cursor_pos;
                     self.change_account(context, false);
                     self.focus = ListingFocus::MailList;
@@ -2905,22 +2904,6 @@ impl Component for Listing {
                         self.status_watch(),
                         &mut context.replies,
                     );
-                    return true;
-                }
-                UIEvent::Input(ref k)
-                    if shortcut!(k == shortcuts[Shortcuts::LISTING]["open_mailbox"])
-                        && self.menu_cursor_pos.menu == MenuEntryCursor::Status =>
-                {
-                    self.cursor_pos = self.menu_cursor_pos;
-                    self.change_account(context, false);
-                    self.set_dirty(true);
-                    self.focus = ListingFocus::MailList;
-                    self.component.set_grid_has_keyboard(true);
-                    context
-                        .replies
-                        .push_back(UIEvent::StatusEvent(StatusEvent::ScrollUpdate(
-                            ScrollUpdate::End(self.id),
-                        )));
                     return true;
                 }
                 UIEvent::Input(ref k)
@@ -2948,26 +2931,6 @@ impl Component for Listing {
                         return true;
                     }
                     return false;
-                }
-                UIEvent::Input(ref k)
-                    if shortcut!(k == shortcuts[Shortcuts::LISTING]["open_mailbox"]) =>
-                {
-                    self.cursor_pos = self.menu_cursor_pos;
-                    self.change_account(context, false);
-                    self.focus = ListingFocus::MailList;
-                    self.component.set_grid_has_keyboard(true);
-                    self.set_dirty(true);
-                    context
-                        .replies
-                        .push_back(UIEvent::StatusEvent(StatusEvent::ScrollUpdate(
-                            ScrollUpdate::End(self.id),
-                        )));
-                    self.push_status_watch(
-                        self.status(context),
-                        self.status_watch(),
-                        &mut context.replies,
-                    );
-                    return true;
                 }
                 UIEvent::Input(ref k)
                     if shortcut!(k == shortcuts[Shortcuts::LISTING]["refresh"]) =>
@@ -3472,9 +3435,6 @@ impl Component for Listing {
             self.component.shortcuts(context)
         });
         let mut config_map = context.settings.shortcuts.listing.key_values();
-        if self.focus != ListingFocus::Menu {
-            config_map.shift_remove("open_mailbox");
-        }
         let (account_hash, mailbox_hash) = self.component.coordinates();
         if mailbox_settings!(context has [account_hash][&mailbox_hash]) {
             for command in mailbox_settings!(
@@ -7259,6 +7219,40 @@ mod listing_menu_tests {
             ListingFocus::MailList,
             "the keyboard must leave the hidden sidebar"
         );
+    }
+
+    /// Regression for issue 92 — Enter is no longer bound in layout1's
+    /// sidebar; the old open-mailbox arm adopted the sidebar selection and
+    /// moved the keyboard to the mail list. The pane-chain step into the grid
+    /// is `focus_right`.
+    #[test]
+    fn enter_at_menu_focus_is_ignored() {
+        let mut ctx = mock_context();
+        let mut listing = pane_chain_setup(&mut ctx);
+        listing.focus_menu();
+        let cursor_pos = listing.cursor_pos;
+        let menu_cursor_pos = listing.menu_cursor_pos;
+
+        let mut event = UIEvent::Input(Key::Char('\n'));
+        assert!(
+            !listing.process_event(&mut event, &mut ctx),
+            "Enter must be left unconsumed at sidebar focus"
+        );
+        assert_eq!(
+            listing.focus,
+            ListingFocus::Menu,
+            "the keyboard must stay on the mailbox list"
+        );
+        assert_eq!(
+            listing.cursor_pos, cursor_pos,
+            "the mail cursor must not move"
+        );
+        assert_eq!(
+            listing.menu_cursor_pos, menu_cursor_pos,
+            "the sidebar cursor must not move"
+        );
+        assert!(listing.view.is_none(), "no entry may be opened");
+        assert!(listing.status.is_none(), "no account status may be adopted");
     }
 
     /// The command-palette `refresh` action reuses the F5 path: at mail-list
