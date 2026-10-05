@@ -3629,3 +3629,47 @@ mod cve_2024_42009;
 #[cfg(test)]
 #[path = "CVE-2024-42010.rs"]
 mod cve_2024_42010;
+
+/// CVE-2024-45516（Zimbra Collaboration (ZCS)：8.8.15 < Patch 47、
+/// 9.0.0 < Patch 43、10.0.x < 10.0.12、10.1.x < 10.1.4；CVSS v3.1 6.1；
+/// CWE-79）**Zimbra Classic UI 存储型 XSS** regression（Gitea issue #117），
+/// 调研报告「网页嵌入与 HTML/链接渲染」批次成员：Classic UI 对 HTML 内容清洗
+/// 不足，**畸形 `<img>` 标签内嵌 JavaScript** 仍以活原料形态存进邮件，受害者
+/// 只要查看这封特制邮件脚本就会在其会话里执行（无需额外交互），根因是事件
+/// 处理器/危险 URL scheme 原料在清洗后仍留在渲染文档里。
+///
+/// meli 等价面映射（终端客户端无 DOM/浏览器/JS 运行时，按 issue 要求做等价面
+/// 断言）：
+///
+/// 1. 内置 HTML 清理管线：`meli/src/mail/view/html_render.rs` 的 [`sanitize`]
+///    （ammonia 白名单单次解析 → 序列化）＋ [`render`]（sanitize → 嵌套上限 →
+///    html2text 纯文本），调用点 `meli/src/mail/view/filters.rs` 的
+///    `HtmlFilter::Builtin`。html2text **不执行脚本、不解析 URL scheme**，这是
+///    XSS 的第二道防线。可复现的等价物是清洗输出里的 **XSS 原料**：`img` 不在
+///    标签白名单（整元素连属性删除，实体编码无法复活），但白名单标签保留的
+///    属性值（`a[title]`/`a[href]`、`p[lang]`/`p[title]`）可原样携带
+///    `onerror=alert(1)` / `javascript:alert(1)`。
+/// 2. **本 issue 检出并修复该缺口**：生产改动给 [`sanitize`] 的
+///    `attribute_filter` 增加了「保留属性值解码后含裸 `onerror` 或
+///    `javascript:` 即整属性丢弃」的第五处 nh3 parity 有意偏离（`href` 在内，
+///    与 42009/42010 同判例：合法 `https:` URL 可把 `javascript:alert(1)` 藏进
+///    path/query 骗过 `is_safe_url`）。issue 原样的四条 `<img>` 载体本就死在
+///    标签白名单，但属性值走私形会在修复前把 XSS 原料原样带进输出。
+///
+/// [`cve_2024_45516`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// sanitize 平面＋独立白名单预言机＋不动点、五种嵌入上下文探测、每条语料单独
+/// 成信的端到端（多宽度 40/80/120）＋组合邮件、缺口回归与惰性文本观测（含
+/// 「可见链接对照」只作为 html2text 脚注文本出现、永不自动抓取）。
+///
+/// 结论：**检出并修复属性值 XSS 原料走私缺口，非纯免疫证明**——issue 原样的
+/// `<img>` 载体本就干净通过，但保留属性值可把 `onerror`/`javascript:` 原样带进
+/// 清洗输出，违反 issue 的「输出不含 `<img`/`onerror`/`javascript:`」断言；修复后
+/// 全部语料满足不变量。纯文本形（正文散文里的字面 token）是惰性转义文本，用
+/// 结构化预言机区分，不做会误报的裸子串匹配。
+///
+/// [`cve_2024_45516`]: self::cve_2024_45516
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2024-45516.rs"]
+mod cve_2024_45516;
