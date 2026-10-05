@@ -316,16 +316,24 @@ pub struct Recipient {
     pub status: Result<()>,
 }
 
+/// Affirmative success marker of the CLI backend wire contract: a
+/// `status` of exactly `"OK"` means the backend explicitly reported the
+/// (sub-)operation for this recipient as successful. Any other string is an
+/// error message, and an *absent* `status` is an unreported — hence failed —
+/// status; see [`Recipient`]'s `Deserialize` implementation and the
+/// CVE-2007-1265 regression in the `cve` crate (`cve/src/CVE-2007-1265.rs`).
+const RECIPIENT_STATUS_OK: &str = "OK";
+
 impl Serialize for Recipient {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let len = 1 + usize::from(self.status.is_err());
-        let mut map = serializer.serialize_map(Some(len))?;
+        let mut map = serializer.serialize_map(Some(2))?;
         map.serialize_entry("keyid", &self.keyid)?;
-        if let Err(ref err) = self.status {
-            map.serialize_entry("status", &err.to_string())?;
+        match &self.status {
+            Ok(()) => map.serialize_entry("status", RECIPIENT_STATUS_OK)?,
+            Err(ref err) => map.serialize_entry("status", &err.to_string())?,
         }
         map.end()
     }
@@ -340,7 +348,10 @@ impl<'de> Deserialize<'de> for Recipient {
         impl<'de> serde::de::Visitor<'de> for V {
             type Value = Recipient;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("struct with fields `keyid` and `status` if there's an error")
+                f.write_str(
+                    "struct with fields `keyid` and `status` (`\"OK\"` for success, an \
+                     error message otherwise)",
+                )
             }
 
             fn visit_map<V>(self, mut access: V) -> std::result::Result<Self::Value, V::Error>
@@ -362,7 +373,12 @@ impl<'de> Deserialize<'de> for Recipient {
                             return Err(serde::de::Error::duplicate_field("status"));
                         }
                         "status" => {
-                            status = Some(Err(Error::new(access.next_value::<String>()?)));
+                            let value = access.next_value::<String>()?;
+                            status = Some(if value == RECIPIENT_STATUS_OK {
+                                Ok(())
+                            } else {
+                                Err(Error::new(value))
+                            });
                         }
                         other => {
                             return Err(serde::de::Error::invalid_value(
@@ -376,7 +392,20 @@ impl<'de> Deserialize<'de> for Recipient {
                 let Some(keyid) = keyid else {
                     return Err(serde::de::Error::missing_field("keyid"));
                 };
-                let status = status.unwrap_or(Ok(()));
+                // CVE-2007-1265 (KMail ≤ 1.9.5): a status the backend never
+                // reported is not a success. The CLI backend's scripts
+                // translate GnuPG's machine-readable status output into this
+                // JSON contract, so a signature entry without an explicit
+                // `status` means the script could not (or did not) determine
+                // the verdict — the meli-side equivalent of KMail not reading
+                // `--status-fd` and presenting the mail as signed anyway.
+                // Fail closed: refuse to treat an unreported status as valid.
+                let status = status.unwrap_or_else(|| {
+                    Err(Error::new(
+                        "signature status was not reported by the PGP backend; refusing to \
+                         treat an unreported status as a valid signature",
+                    ))
+                });
                 Ok(Recipient { keyid, status })
             }
         }
