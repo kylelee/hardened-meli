@@ -2622,6 +2622,36 @@ mod cve_2010_0249;
 #[path = "CVE-2007-1268.rs"]
 mod cve_2007_1268;
 
+/// CVE-2007-1265（KMail ≤ 1.9.5；CVSS v2 7.8；NVD / CIRCL）**GnuPG 签名
+/// 状态误判** regression（Gitea issue #119，表 5 协议与加密信任边界，
+/// 与 mutt CVE-2007-1268 同族）：KMail 未正确使用 `--status-fd`，多部件
+/// OpenPGP 邮件中未签名部分的篡改无法辨别，「签名元数据为空/缺失」的
+/// 畸形签名被当作验签成功，可伪造签名邮件内容。
+///
+/// [`cve_2007_1265`] 的等价面断言分层锁定：L0——meli/melib 二进制不
+/// 解析任何 gpg 状态文本（`--status-fd`/`[GNUPG:]`/`GOODSIG` 字面量
+/// 扫描；文本解析只在 `contrib/` 外部示例脚本里，裁决以显式 JSON 状态
+/// 过界）；L1——拼接在已签名部分之后的未签名正文、走私进签名容器的
+/// 未覆盖第二部分、整个缺失的签名 part 与 armor 前后拼接的 unsigned
+/// 文本，全部在信任边界死亡或永远拿不到已验证标记；L3——真 gpgme
+/// 引擎端到端：真实签名 over 真实被签字节验证通过（控制组），篡改与
+/// 拼接一律 `BAD signature`，五种「元数据为空/缺失」畸形签名语料一律
+/// `Err`；L4——显示域隔离的 melib 层结构自检（孪生单测在 meli crate）。
+///
+/// **本 issue 暴露并修复的真实缺口（L2）**：CLI 后端 JSON 契约的签名
+/// 条目缺 `status` 字段时，`Recipient` 旧版反序列化把「未上报的状态」
+/// 默认成 `Ok(())`——脚本没有（或没能）判定的签名被展示成
+/// `good signature by …`，正是 KMail「`--status-fd` 没读到 = 验证通过」
+/// 的 fail-open 模式。修复后 wire 契约要求显式状态：`"status": "OK"`
+/// 表示显式成功，其它字符串是错误消息，缺失一律 `Err`（fail-closed），
+/// `contrib/pgp-cli-backends/gpg/gpg_verify.py` 示例脚本与
+/// CVE-2007-1268 语料同步收敛到显式契约。
+///
+/// [`cve_2007_1265`]: self::cve_2007_1265
+#[cfg(test)]
+#[path = "CVE-2007-1265.rs"]
+mod cve_2007_1265;
+
 /// CVE-2024-49393（mutt 1.14.0–2.2.12 / neomutt ≤ 2024-04-25；CVSS 6.5）**签名未
 /// 覆盖 To/Cc 收件人头** regression（issue #84，表 5 协议信任边界 of
 /// `SECURITY-CVE-RESEARCH.zh-CN.md`）：外层 RFC 5322 的 `To`/`Cc` 不在
