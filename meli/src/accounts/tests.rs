@@ -36,7 +36,7 @@ use crate::{
     command::actions::MailboxOperation,
     mail::listing::{CursorPos, ListingComponent, MenuEntryCursor, OfflineListing},
     types::UIEvent,
-    utilities::tests::{eprint_step_fn, eprintln_ok_fn},
+    utilities::tests::{env_lock_shared, eprint_step_fn, eprintln_ok_fn},
 };
 
 #[test]
@@ -1634,4 +1634,121 @@ fn listing_menu_step_crosses_account_boundaries() {
     assert!(!listing.menu_step_next(&mut cursor));
     assert_eq!(cursor.account, 1);
     assert_eq!(cursor.menu, MenuEntryCursor::Mailbox(1));
+}
+
+/// `Account::drop` persists `contacts` to a path derived from the
+/// process-global `XDG_DATA_HOME`; that write must be serialized on the
+/// shared env lock, otherwise a drop racing an env-locked test poisons the
+/// latter's transient sandbox (the `test_sqlite3_reindex` failure).
+///
+/// The mock account is renamed to a probe name unique to this test, so the
+/// `contacts` file it produces can be observed without rewriting
+/// `XDG_DATA_HOME` at all. Rewriting that variable here would clobber the
+/// value tests such as `seed_offline_imap_cache` read without holding the
+/// lock, which is a separate, pre-existing hazard this test must not
+/// aggravate.
+///
+/// Determinism comes from lock ordering, not from sleeps:
+///
+/// * thread B constructs the mock `Context` (which itself takes the env
+///   lock, re-entrantly) and resolves the exact probe path under that lock,
+///   then signals `ready`;
+/// * the main thread takes the env lock and signals `go`;
+/// * B's `drop` blocks on the env lock, so `dropped` cannot arrive within the
+///   timeout and the probe file cannot appear while the main thread holds the
+///   lock.
+///
+/// No deadlock: B waits for A to release; A never waits for B to finish
+/// before releasing (it only waits with a timeout and then drops its guard).
+#[test]
+fn account_drop_contacts_write_serialized_with_env_lock() {
+    /// Account name unique to this test, so the `contacts` path it produces
+    /// cannot be written by any other test.
+    const PROBE_ACCOUNT_NAME: &str = "account-drop-env-lock-probe";
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<PathBuf>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let (dropped_tx, dropped_rx) = std::sync::mpsc::channel::<()>();
+
+    let builder = std::thread::spawn(move || {
+        // `Context` is not `Send`, so it is built and dropped entirely on
+        // this thread. Construction happens before the main thread takes the
+        // lock, and `Context::new_mock` acquires the env lock itself.
+        let mut ctx = crate::golden::mock_context();
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        ctx.accounts[&account_hash].name = PROBE_ACCOUNT_NAME.into();
+        // Resolve the exact path `Account::drop` will write to while holding
+        // the env lock, so the environment cannot change underneath it.
+        let contacts_path = {
+            let _env = env_lock_shared();
+            xdg::BaseDirectories::with_profile("meli", PROBE_ACCOUNT_NAME)
+                .place_data_file("contacts")
+                .expect("probe contacts path must be resolvable")
+        };
+        // `place_data_file` creates the directory but not the file itself.
+        // Remove a stale probe file first: a previous run that panicked
+        // before its cleanup would otherwise fail this assertion.
+        let _ = std::fs::remove_file(&contacts_path);
+        assert!(!contacts_path.exists());
+        ready_tx.send(contacts_path).unwrap();
+        go_rx.recv().unwrap();
+        drop(ctx);
+        dropped_tx.send(()).unwrap();
+    });
+
+    let contacts_path = ready_rx.recv().unwrap();
+    // Never point the write at the host's real home: `mock_context` pins
+    // `XDG_DATA_HOME` to the process-wide shared test home.
+    assert!(
+        contacts_path.starts_with(crate::golden::shared_test_home().path()),
+        "probe contacts path escaped the shared test home: {}",
+        contacts_path.display()
+    );
+
+    let outer = env_lock_shared();
+    go_tx.send(()).unwrap();
+
+    let regressed = match dropped_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // Fixed behaviour: B is blocked on the env lock inside
+            // `Account::drop`, so the probe file cannot exist yet.
+            assert!(
+                !contacts_path.exists(),
+                "a thread holding the env lock must keep Account::drop from writing {}",
+                contacts_path.display()
+            );
+            drop(outer);
+            // `join` returning proves the blocked drop completed (it can
+            // only finish after the lock is released); where exactly the
+            // write lands depends on the process environment at wake-up
+            // time, which parallel tests may have pointed at another shared
+            // test home, so existence at the resolved path is not asserted.
+            builder.join().unwrap();
+            false
+        }
+        Ok(()) => {
+            // Regression: `Account::drop` did not block on the env lock, so
+            // it wrote the probe file while the main thread held it.
+            drop(outer);
+            builder.join().unwrap();
+            true
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            drop(outer);
+            panic!("the Context-dropping thread panicked before signalling completion");
+        }
+    };
+
+    // Clean up the probe directory (unique to this test) from the shared home.
+    if let Some(probe_dir) = contacts_path.parent() {
+        let _ = std::fs::remove_dir_all(probe_dir);
+    }
+
+    if regressed {
+        panic!(
+            "Account::drop was not serialized with the shared env lock: it wrote {} while the \
+             main thread held the lock",
+            contacts_path.display()
+        );
+    }
 }
