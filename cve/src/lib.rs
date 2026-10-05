@@ -3299,3 +3299,71 @@ mod cve_2002_2086;
 #[cfg(test)]
 #[path = "CVE-2002-1649.rs"]
 mod cve_2002_1649;
+/// CVE-2016-7966（KMail ≥ 5.3.0 的 QWebEngine 纯文本查看器；CVSS v3.0 7.3；
+/// NVD / CIRCL）纯文本 URL 自动链接的引号逃逸 regression（Gitea issue #111），
+/// 与同批的 CVE-2016-7967/7968 共享原语但锚点不同：KMail 把纯文本邮件转成
+/// HTML 再交给 QWebEngine 显示，并为 URL 自动生成 `<a href="…">`；恶意 URL
+/// 里的双引号 `"` 提前闭合 `href` 属性引号，于是
+/// `http://example.com/"><script>alert(1)</script>` 这类正文可把任意
+/// HTML/script 注入查看器。根因是「字符串拼接属性值 + 再交给 HTML/JS 引擎
+/// 解析」。
+///
+/// meli 等价面 mapped to 两处，且都没有 KMail 式再解析面：meli 是终端
+/// 客户端，**没有「纯文本转 HTML 再交给浏览器引擎」的功能面**（正文进
+/// `CellBuffer`，纯文本永不再被当 HTML 解析）——
+///
+/// 1. 内置 HTML 清理管线：`meli/src/mail/view/html_render.rs` 的
+///    [`sanitize`]（ammonia 白名单：`a` 只保留 href/title，事件属性全部剥离；
+///    `url_schemes` 仅 http/https/mailto；`attribute_filter` 对 href trim 后
+///    复检）＋ [`render`]（html2text → 终端纯文本），调用点是
+///    `meli/src/mail/view/filters.rs` 的 `HtmlFilter::Builtin`。ammonia 一次
+///    解析成 DOM、过滤、再转义序列化，引号被写成 `&quot;`，无法重组活属性。
+/// 2. 纯文本/链接管线：`meli/src/mail/view/types.rs` 的
+///    [`ViewOptions::convert`]（`ViewOptions::URL` 用 linkify 0.11 扫描链接）
+///    ＋ `meli/src/mail/view/envelope.rs` 的 [`url_scheme`] /
+///    [`is_default_launchable_scheme`]（仅 http/https/mailto 免确认
+///    `launch_url`，其余 scheme 弹确认框）。linkify 0.11 的 `find_url_end`
+///    把 `"`/`<`/`>`/反引号/控制字符视为「can never be part of an URL」，
+///    遇到即 `break`；故 `http://example.com/"><script>…` 提取出的链接值
+///    精确等于 `http://example.com/`，注入尾部留在纯文本里当字面文本，且
+///    链接只作为单个 argv 参数交给启动器，无 shell、无 HTML 再解析。
+///
+/// [`cve_2016_7966`] 以六个分层 `#[test]` 锁定：
+///
+/// 1. `sanitize_strips_every_quote_escape_and_event_handler`：每条 HTML 形
+///    语料经 `sanitize` 后 `<a>` 只保留 href/title（外加注入的 rel）、无活
+///    事件属性名、无 `<script`，且 `sanitize(sanitize(x)) == sanitize(x)`
+///    不动点；独立拷贝的 INERT_TAG_WHITELIST/INERT_ATTR_WHITELIST 预言机
+///    逐标签扫描。实体编码引号形的 `onmouseover`/`alert(` 是 href 值内部的
+///    惰性文本（非活属性），测试把该区别固化成断言。
+/// 2. `render_never_emits_live_event_attributes_or_markup`：每条语料经
+///    `render` 后无 `<script`、无任何标签形构造（故不可能携带活事件属性），
+///    URL 以字面文本/脚注形式出现。
+/// 3. `plain_text_pipeline_extracts_only_quote_free_links`：每条纯文本形
+///    语料跑真实 `ViewOptions::convert`，每个 Link 值不含 `"`/`<`/`>`；
+///    issue 原样行链接值精确等于 `http://example.com/`；把链接值插值进
+///    `href="{value}"` 后解析回来仍是唯一 href（引号逃逸的机械证明）；
+///    注入尾部保持字面文本；危险 scheme 不被提取。
+/// 4. `launch_gate_only_passes_http_https_mailto`：启动门只对
+///    http/https/mailto（大小写混写）免确认，其余 scheme/Windows 盘符/裸
+///    UNC/无 scheme/纯引号串一律拒绝，`url_scheme` 词法语义单独断言。
+/// 5. `multipart_attack_mail_is_defanged_end_to_end`：完整 RFC 822
+///    `multipart/alternative` 邮件经 `Envelope::from_bytes`/`Attachment`
+///    解析，text/plain 部件走 convert 链、text/html 部件走 sanitize＋render
+///    链，断言全部不变量且良性 https/mailto 锚存活。
+/// 6. `combined_corpus_mail_stays_inert`：全部语料交叉拼进一封邮件的两路
+///    正文再跑一遍，防组合差异化攻击。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——meli 没有
+/// 「纯文本→HTML→浏览器引擎」的再解析面，ammonia 转义序列化引号，linkify
+/// 提取的链接值永不含 `"`/`<`/`>`，链接只作为单个 argv 参数交给启动器。
+///
+/// [`cve_2016_7966`]: self::cve_2016_7966
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`ViewOptions::convert`]: meli::mail::view::ViewOptions::convert
+/// [`url_scheme`]: meli::mail::view::envelope::url_scheme
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+#[cfg(test)]
+#[path = "CVE-2016-7966.rs"]
+mod cve_2016_7966;
