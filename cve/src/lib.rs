@@ -3110,3 +3110,55 @@ mod cve_2009_0587;
 #[cfg(test)]
 #[path = "CVE-2000-0481.rs"]
 mod cve_2000_0481;
+
+/// CVE-2021-32055（mutt 1.11.0–<2.0.7 与 neomutt < 2020-11-27；CVSS 9.1，
+/// CWE-125 越界读取）序列集尾随逗号 OOB 读取 regression（issue #108，表 2
+/// 病毒/代码执行 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：仅当非默认
+/// `$imap_qresync` 打开时，服务器返回 `* VANISHED (EARLIER) 1,2,3,` 或
+/// `* SEARCH 1,2,` 这类**以逗号结尾**的序列集，mutt 的 `imap/util.c`
+/// 序列集解析器会把结尾空段之后的游标走出缓冲区，相邻内存被当作解析
+/// 结果读出（纯读取原语，末尾空段是武器）。
+///
+/// meli 等价面 mapped to 四层（安全 Rust 无 C 游标可越界）：
+///
+/// 1. `melib/src/imap/protocol_parser.rs` 的 `untagged_responses`——`* `
+///    之后强制 `digit1` 消息号，`VANISHED` 行在数字文法处确定性失败
+///    （nom `Digit` 错误）；`* 1,2,3, EXPUNGE` 在必需空格分隔符处失败；
+///    只有分隔正确的 `* 1 ,2,3, EXPUNGE` 才进入未知 tag 分支并被丢弃为
+///    `None`——永不被当作序列集解析。
+/// 2. `search_results` 字段校验——每个结果字段是单个 `ImapNum` token
+///    （`is_not(" \r\n")` + `usize::from_str`），逗号属于字段本身，故
+///    尾随逗号 / 空段 / 范围冒号全部确定性 `Err`；RFC 3501 空格分隔形
+///    `* SEARCH 1 2 3` 精确解析，空应答解析为空表。
+/// 3. `fetch_response` / `fetch_responses`——`UID` 后出现 `,` 落入未知
+///    token 分支、空 UID 字段失败 `UID::from_str`，绝不产生部分 UID；
+///    `raw_fetch_value = &input[..i]` 的 `i` 是 CVE-2020-9818 已夹紧的
+///    索引运算，切片必在输入缓冲内（本 CVE 的 CWE-125 面）。
+/// 4. imap-types 类型层（`melib/src/imap/mod.rs` 的 `pub extern crate
+///    imap_codec`）——`SequenceSet::from_str` 按 `,` 切分、逐段解析
+///    `Sequence`，尾随逗号产生的空段使 `SeqOrUid::from_str` 失败，
+///    `Vec1` 拒绝空集合：mutt 触发原形永远无法成为值；`0` / 前导零 /
+///    `4294967296` 被 `nz-number` 文法拒绝；
+///    `SequenceSet::try_from(Vec::<NonZeroU32>::new())` 返回 `Empty`，
+///    锁住 `set_flags` / `expunge` 命令构造处的 `.unwrap()` 站点。
+///
+/// [`cve_2021_32055`] 以六个分层 `#[test]` 锁定：VANISHED 未标记分发
+/// fail-closed、SEARCH 字段校验、FETCH 畸形 UID fail-closed、FETCH 合法
+/// 形态 exact 值与 `raw_fetch_value` 缓冲内断言、类型层空段/文法拒绝与
+/// 合法结构对照、以及全语料一次 `catch_unwind` + 两次独立运行指纹逐字节
+/// 一致（证明无 panic、无相邻内存影响）。两处如实记录的观察：(1)
+/// `* SEARCH 1,2,3` 是 `Err` 而非 issue 草稿预期的 `Ok([1,2,3])`——本读取
+/// 器的字段文法就是空格分隔的单个 `ImapNum`，逗号形更早 fail-closed，属于
+/// 防御加强而非削弱断言；(2) `+1` 因 Rust `NonZeroU32::from_str` 接受前导
+/// 正号而被 imap-types 接受为 `Value(1)`——上游文法宽松，非本 CVE 触发
+/// 原形（仍有良构单元素集合、无空段、无 OOB/panic/hang），且所有生产
+/// `SequenceSet` 调用点（`untagged.rs`、`fetch.rs`、`connection.rs`、
+/// `sync/mod.rs`、`mod.rs`）都从数值 / `NonZeroU32` / range 构造，从不解析
+/// 服务器字符串，故不是可达攻击面。结论：**免疫证明，未发现缺口，未触碰
+/// 生产代码**——安全 Rust 无缓冲可越界走，nom 解析器对空段与分隔符违规
+/// fail-closed，类型构造器拒绝空集合与越界数字，FETCH 原始切片可证在输入内。
+///
+/// [`cve_2021_32055`]: self::cve_2021_32055
+#[cfg(test)]
+#[path = "CVE-2021-32055.rs"]
+mod cve_2021_32055;
