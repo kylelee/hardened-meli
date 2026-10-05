@@ -4352,6 +4352,65 @@ exit 0
         );
     }
 
+    /// CVE-2017-9604 regression (issue #121): the `KMail` "Send Later" bug was a
+    /// second send path that did not run the composer plugin's sign/encrypt
+    /// actions. meli has no delayed queue, so the equivalence is that a send
+    /// whose crypto setup cannot even be built must fail closed *before* any
+    /// submission job exists: with encryption armed and an unresolvable
+    /// `encrypt-for-self` identity, `send_draft_async` returns `Err`
+    /// synchronously and `handle_send_setup_error` keeps the composer in
+    /// `ViewMode::Edit`. No `compose::submit` job may be spawned
+    /// (`StatusEvent::NewJob`), so there is no asynchronous lane that could
+    /// later deliver the message without the PGP actions.
+    #[cfg(feature = "gpgme")]
+    #[test]
+    fn send_setup_failure_never_spawns_a_submission_job() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        composer.pgp_state.encrypt_mail = Some(ActionFlag::True);
+        composer.update_form(&ctx);
+        // An unparseable `From` makes the `encrypt-for-self` identity
+        // unresolvable, so `send_draft_async` fails while building the
+        // crypto filter stack — the same real failure the sibling
+        // `send_setup_failure_with_encryption_armed_keeps_draft_out_of_drafts`
+        // test exercises.
+        if let Some(Field::Text(ref mut text_field)) =
+            composer.form.values_mut().get_mut(&HeaderName::FROM)
+        {
+            text_field.set_content("Unclosed Angle <victim@example.org".to_string());
+        } else {
+            panic!("the composer form must carry a From text field");
+        }
+        composer.start_send_confirmation(&mut ctx);
+        let dialog_id = match &composer.mode {
+            ViewMode::Send { widget } => widget.id(),
+            _ => panic!("start_send_confirmation must install the send dialog"),
+        };
+        let mut ev = UIEvent::FinishedUIDialog(dialog_id, Box::new(true));
+        assert!(
+            composer.process_event(&mut ev, &mut ctx),
+            "the send confirmation must be consumed"
+        );
+
+        let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+        assert!(
+            matches!(composer.mode, ViewMode::Edit),
+            "the failed send setup must leave the composer in edit mode"
+        );
+        assert!(
+            !replies.iter().any(|ev| matches!(
+                ev,
+                UIEvent::StatusEvent(StatusEvent::NewJob(_))
+            )),
+            "no submission job may be spawned when the crypto setup fails: {replies:?}"
+        );
+        assert!(
+            !replies_contain_saved_draft(&replies),
+            "the encryption-armed draft must not be stored in plaintext: {replies:?}"
+        );
+    }
+
     /// Without armed encryption there is no confidentiality to lose: a
     /// submission setup failure keeps the crash-safety draft copy in the
     /// Drafts mailbox exactly as before (behavior frozen).

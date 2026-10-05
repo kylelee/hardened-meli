@@ -96,6 +96,16 @@ mod mfsa_2005_11;
 #[path = "CVE-2005-2512.rs"]
 mod cve_2005_2512;
 
+/// The single per-crate lock serializing every test that rewrites the
+/// process-global `GNUPGHOME` (the workspace rule for environment-mutating
+/// tests). The crypto filters instantiate their own gpgme context, which
+/// resolves the scratch keyring through this environment variable; without a
+/// shared lock, two parallel tests would point each other at the wrong home
+/// and fail with "No secret key found". CVE-2014-8878, CVE-2017-9604,
+/// CVE-2021-29956 and CVE-2024-49395 all acquire it.
+#[cfg(test)]
+pub(crate) static GNUPGHOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// CVE-2006-1045 (Mozilla Thunderbird 1.5) tracking-pixel regression
 /// (issue #15): the "block remote images in HTML mail" preference was
 /// bypassed and externally linked resources loaded anyway. This corpus
@@ -845,6 +855,32 @@ mod cve_2001_0473;
 #[cfg(test)]
 #[path = "CVE-2014-8878.rs"]
 mod cve_2014_8878;
+
+/// CVE-2017-9604（KMail/messagelib < 5.5.2；CVSS v3 7.5，CWE-311）「Send
+/// Later」延时发送未执行 composer 插件签名/加密动作回归（issue #121）：用户
+/// 以为邮件已签名/加密，实际明文上线，网络嗅探者可读走。修复提交
+/// kmail@78c5552 / messagelib@c54706e。经全仓确认 meli/melib **没有**
+/// Send Later/发件箱/scheduler/延时发送设置；composer 只有
+/// `start_send_confirmation` 一个用户发送入口，确认后调用
+/// `send_draft_async`，后者在**同一函数体内**统一读取
+/// `pgp_state.sign_mail`/`encrypt_mail` 构建 `sign_filter`/`encrypt_filter`
+/// 过滤栈，唯一另一个调用点（list-unsubscribe mailto）同样把
+/// `GpgComposeState` 传进同一汇点——不存在「另一条发送路径忘记消费 PGP
+/// 标志」的分叉。唯一「延时」原语 JMAP `EmailSubmission.sendAt` 是服务端占用
+/// 字段（`#[serde(skip_serializing)]`）且提交发生在密文成型之后。三层断言：
+/// L1 攻击样本明文泄露形态 + `GpgComposeState::Default` 全 unarmed + 源码扫描
+/// 无独立延时队列原语/单一定义单汇点 + JMAP 提交对象不含 `sendAt`；L2 真实
+/// gpgme 端到端——armed 时 `sign_filter` 产出真实 `multipart/signed`、
+/// sign+encrypt 时 `encrypt_filter` 产出 `multipart/encrypted`，嗅探者视角外发
+/// 报文与所有部件解码字节都不含 SECRET 标记，解密后重新解析回原 mixed 树；
+/// L3 fail-closed：空钥路径分别以 `"No key was selected for encryption"` /
+/// `"No key was selected for signing"` 中止，绝不退回明文。结论：**未发现
+/// 缺口**，meli 对 CVE-2017-9604 的攻击原语免疫；composer 层完整 fail-closed
+/// 行为另由 `meli/src/mail/compose.rs` 的单测
+/// `send_setup_failure_never_spawns_a_submission_job` 锁定。
+#[cfg(test)]
+#[path = "CVE-2017-9604.rs"]
+mod cve_2017_9604;
 
 /// CVE-2014-9116 (mutt 1.5.23, CVSS v2 5.0) header-processing
 /// heap-overflow regression (issue #41, table 2 of
