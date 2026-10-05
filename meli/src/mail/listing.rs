@@ -3195,6 +3195,15 @@ impl Component for Listing {
                         }
                         _ => return false,
                     }
+                    // Layout1: like the Up/Down walk, the account jump
+                    // switches the mailbox right away — the grid follows
+                    // the highlighted account's default mailbox, the
+                    // focus stays on the mailbox list.
+                    if self.menu_cursor_pos != self.cursor_pos {
+                        self.cursor_pos = self.menu_cursor_pos;
+                        self.change_account(context, false);
+                        self.focus_menu();
+                    }
                     if self.show_menu_scrollbar != ShowMenuScrollbar::Never {
                         self.menu_scrollbar_show_timer.rearm();
                         self.show_menu_scrollbar = ShowMenuScrollbar::True;
@@ -4977,6 +4986,33 @@ mod listing_menu_tests {
         account_hash
     }
 
+    /// Register an `INBOX` mailbox entry on `account_hash` (built like
+    /// `register_two_mailboxes`) so an account jump lands on a real mailbox
+    /// instead of the status row.
+    fn register_account_inbox(context: &mut Context, account_hash: AccountHash) -> MailboxHash {
+        let mailbox_hash = MailboxHash::from_bytes(b"INBOX");
+        let account = context.accounts.get_mut(&account_hash).unwrap();
+        account.mailbox_entries.insert(
+            mailbox_hash,
+            MailboxEntry::new(
+                MailboxStatus::Available,
+                "INBOX".to_string(),
+                Box::new(TestMailbox {
+                    hash: mailbox_hash,
+                    name: "INBOX".to_string(),
+                    subscribed: true,
+                }),
+                FileMailboxConf::default(),
+            ),
+        );
+        build_mailboxes_order(
+            &mut account.tree,
+            &account.mailbox_entries,
+            &mut account.mailboxes_order,
+        );
+        mailbox_hash
+    }
+
     /// Register `name` both as a real maildir folder in the mock account's
     /// backend and as a sidebar mailbox entry. The backend hashes maildir
     /// folders by canonical filesystem path, so the sidebar entry must reuse
@@ -6683,6 +6719,57 @@ mod listing_menu_tests {
         // Back up to INBOX.
         assert!(pane_step(&mut listing, &mut ctx, Key::Up));
         assert_eq!(listing.component.coordinates().1, inbox_hash);
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+    }
+
+    /// Layout1: the account jump (`next_page`/`prev_page`, default
+    /// PageDown/PageUp — the same arm as `next_account`/`prev_account`)
+    /// switches the mail list right away, mirroring the Up/Down walk: the
+    /// grid follows the highlighted account's default mailbox (INBOX) and
+    /// the keyboard stays on the mailbox list.
+    #[test]
+    fn layout1_menu_page_keys_switch_account_grid() {
+        let mut ctx = mock_context();
+        let second_hash = register_second_account(&mut ctx);
+        let second_inbox_hash = register_account_inbox(&mut ctx, second_hash);
+        let (first_hash, inbox_hash, _archive_hash) = register_two_mailboxes(&mut ctx);
+        pin_pane_chain_keys(&mut ctx);
+        // Pin the page keys so a `MELI_CONFIG` template drift cannot
+        // change what the keys mean.
+        ctx.settings.shortcuts.listing.next_page = Key::PageDown.into();
+        ctx.settings.shortcuts.listing.prev_page = Key::PageUp.into();
+        let mut listing = make_drawn_listing(&mut ctx);
+
+        // Focus the mailbox list (Left from the grid).
+        assert!(pane_step(&mut listing, &mut ctx, Key::Left));
+        assert!(matches!(listing.focus, ListingFocus::Menu));
+
+        // PageDown jumps to the second account's default mailbox (INBOX):
+        // the grid must follow and the keyboard must stay on the sidebar.
+        assert!(pane_step(&mut listing, &mut ctx, Key::PageDown));
+        assert_eq!(listing.cursor_pos.account, 1);
+        assert!(matches!(
+            listing.menu_cursor_pos.menu,
+            MenuEntryCursor::Mailbox(0)
+        ));
+        assert_eq!(
+            listing.component.coordinates(),
+            (second_hash, second_inbox_hash),
+            "PageDown must switch the grid to the second account's INBOX"
+        );
+        assert!(
+            matches!(listing.focus, ListingFocus::Menu),
+            "the focus must stay on the mailbox list"
+        );
+
+        // PageUp back to the first account's INBOX.
+        assert!(pane_step(&mut listing, &mut ctx, Key::PageUp));
+        assert_eq!(listing.cursor_pos.account, 0);
+        assert_eq!(
+            listing.component.coordinates(),
+            (first_hash, inbox_hash),
+            "PageUp must switch the grid back to the first account's INBOX"
+        );
         assert!(matches!(listing.focus, ListingFocus::Menu));
     }
 
