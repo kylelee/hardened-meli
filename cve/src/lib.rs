@@ -3864,3 +3864,30 @@ mod cve_2016_3714;
 #[cfg(test)]
 #[path = "CVE-2020-15954.rs"]
 mod cve_2020_15954;
+
+/// CVE-2021-38373（KMail 19.12.3 / 5.13.3，CVSS 5.3，NVD / CIRCL）**STARTTLS 安全
+/// 升级被认证设置门控、未勾「服务器需要认证」时明文发送** regression（Gitea issue
+/// #123，表 5 协议信任边界 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：账户勾选 STARTTLS
+/// 却未勾认证时旧客户端不执行 STARTTLS，MITM 降级即可窃取凭据与邮件正文。
+/// meli 的 SMTP `new_connection` 把 STARTTLS 当作与认证**正交**的前置步骤：
+/// TCP→220 greeting→EHLO→250→STARTTLS→强制 220→`connector.connect`
+/// →`Connection::new_tls`，任一步失败 `?` 中止、绝不回退明文；`AUTH` 逻辑严格位于
+/// TLS 流建立之后；`SmtpSecurity::Auto` 按端口确定性收敛（465→Tls、587→StartTLS、
+/// 其余报错）；启动期 `SmtpServerConf::validate` 拒绝
+/// `danger_accept_invalid_certs=true`。
+///
+/// [`cve_2021_38373`] 分层锁定（详见模块内注释）：Layer 1 纯模型复刻 KMail 门控缺陷
+/// （勾 STARTTLS 未勾认证 → 明文 AUTH/邮件上线），对照加固模型同服务器会话中止；
+/// Layer 2 `SmtpServerConf::validate` 三 TLS 变体危险标志全 Err；Layer 3 七个真实
+/// loopback 敌意服务器场景（EHLO 不广告能力、`require_auth=false`、`SmtpAuth::None`、
+/// 伪造 220、错误成功码 250、`Auto@587`、`Auto@非常规端口`）断言 `new_connection`
+/// 全部 Err 且捕获字节无 AUTH/MAIL FROM、无哨兵明文与 base64；Layer 4 源码扫描锁定
+/// STARTTLS→220 顺序、认证判定晚于 `Connection::new_tls`、meli 启动期 validate 调用。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——meli 的安全升级与认证设置正交，
+/// 不存在「未勾认证即跳过 STARTTLS」的分支。
+///
+/// [`cve_2021_38373`]: self::cve_2021_38373
+#[cfg(test)]
+#[path = "CVE-2021-38373.rs"]
+mod cve_2021_38373;
