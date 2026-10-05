@@ -300,3 +300,57 @@ fn test_envelope_hash_batch_try_from_vec() {
     assert_eq!(multi.first, EnvelopeHash(1));
     assert_eq!(multi.rest, vec![EnvelopeHash(2), EnvelopeHash(3)]);
 }
+
+/// QQ Mail does not advertise the `\Trash` SPECIAL-USE attribute in its
+/// IMAP LIST responses, so the trash folder is only recognizable by name
+/// (issue #99). It names it "Deleted Messages" (or "Deleted Items"), and
+/// localized servers use "已删除"; [`SpecialUsageMailbox::detect_usage`]
+/// must map those to [`SpecialUsageMailbox::Trash`], otherwise pressing
+/// `D` on a message fails with "Could not send mail to trash".
+#[test]
+fn test_detect_usage_recognizes_trash_folder_names() {
+    use crate::backends::SpecialUsageMailbox::{self, *};
+
+    for name in [
+        "Trash",
+        "trash",
+        "TRASH",
+        "Deleted Messages",
+        "deleted messages",
+        "DELETED MESSAGES",
+        "Deleted Items",
+        "已删除",
+    ] {
+        assert_eq!(
+            SpecialUsageMailbox::detect_usage(name),
+            Some(Trash),
+            "{name:?} must be detected as Trash"
+        );
+    }
+}
+
+/// Detection stays an exact, whole-name match: no substring, prefix or
+/// whitespace-insensitive matching. Names that merely resemble a
+/// special-use mailbox remain [`SpecialUsageMailbox::Normal`], and the
+/// pre-existing inbox/sent mapping must not regress.
+#[test]
+fn test_detect_usage_is_exact_and_keeps_known_names() {
+    use crate::backends::SpecialUsageMailbox::{self, *};
+
+    assert_eq!(SpecialUsageMailbox::detect_usage("inbox"), Some(Inbox));
+    assert_eq!(SpecialUsageMailbox::detect_usage("sent"), Some(Sent));
+    assert_eq!(
+        SpecialUsageMailbox::detect_usage("random-folder"),
+        Some(Normal)
+    );
+    assert_eq!(
+        SpecialUsageMailbox::detect_usage("DeletedMessages"),
+        Some(Normal),
+        "the trash names require the separating space"
+    );
+    assert_eq!(
+        SpecialUsageMailbox::detect_usage("已删除的副本"),
+        Some(Normal),
+        "an exact match must not match a prefix"
+    );
+}
