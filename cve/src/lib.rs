@@ -3833,3 +3833,34 @@ mod cve_2024_45516;
 #[cfg(test)]
 #[path = "CVE-2016-3714.rs"]
 mod cve_2016_3714;
+
+/// CVE-2020-15954（KMail 19.12.3，CVSS 6.5，NVD / CIRCL）**POP3 账户启用 TLS
+/// 时 UI 按配置显示「已加密」、实际会话仍明文** regression（Gitea issue #122，
+/// 表 5 协议信任边界 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：MITM 可借此窃取
+/// 邮件正文与 `USER`/`PASS` 凭据。meli 无 POP3 后端，issue 指定以
+/// IMAP / SMTP / NNTP 等价面证明「安全状态只能来自真实 TLS 握手，绝不来自配置
+/// 开关」。
+///
+/// **meli 等价面映射（免疫证明）**：`Connection::Tls` 只能由
+/// `Connection::new_tls(native_tls::TlsStream<Connection>)` 构造，而全仓库
+/// `new_tls(` 调用恰 3 处（IMAP / NNTP / SMTP），每处都严格位于
+/// `connector.connect()` 成功之后、失败即 `?` 传播丢弃半开连接 → fail-closed；
+/// 三个协议的 `use_tls`/`SmtpSecurity` 都先进入真实握手，隐式 TLS 直连握手、
+/// STARTTLS 只认 tagged OK，`LOGIN`/`AUTH`/`AUTHINFO` 一律在 TLS 流建立之后；
+/// `meli/src`（UI）除 tests 外零处读取配置 TLS 标识符、状态栏无 `TLS` 字样，
+/// 不存在「按配置宣称已加密」的 UI 路径。
+///
+/// [`cve_2020_15954`] 分层锁定（详见模块内注释）：Layer 1 纯模型复刻 KMail
+/// 缺陷（指示器读配置、明文线泄凭据）；Layer 2 类型级断言裸 TCP / `Fd` /
+/// `Deflate` 都不是 `Tls`；Layer 3 九个真实 loopback 敌意服务器场景（IMAP /
+/// SMTP / NNTP × 隐式 TLS / STARTTLS 拒绝 / STARTTLS 伪造成功）断言客户端进入
+/// ClientHello、握手失败 Err、无登录/认证明文片段，并以唯一哨兵凭据断言其明文
+/// 与 base64 形态都不上线；Layer 4 源码扫描锁定构造点、卫语句与 UI 面。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——meli 的安全状态永远是
+/// 「实时 TLS 握手是否成功」的函数。
+///
+/// [`cve_2020_15954`]: self::cve_2020_15954
+#[cfg(test)]
+#[path = "CVE-2020-15954.rs"]
+mod cve_2020_15954;
