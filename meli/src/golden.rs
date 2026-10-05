@@ -2487,6 +2487,13 @@ fn statusbar_hints_follow_view_section() {
         !row2.contains(":Search)"),
         "contact-list view must drop the Search hint (no binding), got {row2:?}"
     );
+    // The non-listing focus hides the page keys: neither layout1's
+    // mailbox-group wording nor its grid page wording may leak into a
+    // view that has no listing below it.
+    assert!(
+        !row2.contains(":Switch Mailbox Up)") && !row2.contains(":Maillist Page Down)"),
+        "contact-list view must drop the layout1 page hints, got {row2:?}"
+    );
 }
 
 /// Wrap a fully driven `Listing` into `Tabbed` + `StatusBar` (the real
@@ -2540,6 +2547,14 @@ fn statusbar_hints_follow_layout_focus() {
                 "layout1 sidebar must keep {hint}, got {row:?}"
             );
         }
+        // The page keys switch to the previous/next mailbox group
+        // (account) from the sidebar; they must surface with the
+        // configured bindings and the group wording.
+        assert!(
+            row.contains("(<PageUp>:Switch Mailbox Up)")
+                && row.contains("(<PageDown>:Switch Mailbox Down)"),
+            "layout1 sidebar must advertise the mailbox-group page keys, got {row:?}"
+        );
         for absent in [
             ":Search)",
             ":Focus Left)",
@@ -2547,6 +2562,7 @@ fn statusbar_hints_follow_layout_focus() {
             ":Scroll Down)",
             ":Focus Right)",
             ":Maillist Up)",
+            ":Maillist Page Up)",
         ] {
             assert!(
                 !row.contains(absent),
@@ -2812,12 +2828,22 @@ fn statusbar_hints_labels_follow_layout_pane() {
             listing.draw(scratch.grid_mut(), area, &mut ctx);
         }
         let row = hints_row_for(&mut ctx, listing);
-        for hint in [":Maillist Up)", ":Maillist Down)", ":Open Mail)"] {
+        for hint in [
+            ":Maillist Up)",
+            ":Maillist Down)",
+            ":Maillist Page Up)",
+            ":Maillist Page Down)",
+            ":Open Mail)",
+        ] {
             assert!(
                 row.contains(hint),
                 "layout1 grid must show {hint}, got {row:?}"
             );
         }
+        assert!(
+            !row.contains(":Switch Mailbox Up)"),
+            "layout1 grid must not advertise the sidebar's mailbox-group wording, got {row:?}"
+        );
         for absent in [
             ":Folder Up)",
             ":Focus Maillist)",
@@ -2860,6 +2886,13 @@ fn statusbar_hints_labels_follow_layout_pane() {
             !row.contains(":Focus Threads)") && !row.contains(":Open Mail)"),
             "layout2 grid must not show layout3's Focus Threads nor layout1's Open Mail, got \
              {row:?}"
+        );
+        // Layout1's page-key hints are sidebar/grid-scoped: neither the
+        // mailbox-group wording nor the layout1 grid page wording may
+        // leak into the layout2 grid.
+        assert!(
+            !row.contains(":Switch Mailbox Up)") && !row.contains(":Maillist Page Up)"),
+            "layout2 grid must not show layout1's page hints, got {row:?}"
         );
     }
 
