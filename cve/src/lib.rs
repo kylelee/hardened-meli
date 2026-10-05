@@ -823,6 +823,29 @@ mod cve_2026_84639;
 #[path = "CVE-2001-0473.rs"]
 mod cve_2001_0473;
 
+/// CVE-2014-8878（KMail；CVSS 5.9）「自动加密」偏好未覆盖附件回归（issue #120）：
+/// KMail 启用「自动加密」后只加密正文，附件仍以明文上线，网络嗅探者无需密钥
+/// 即可读走附件。melib 侧的等价攻击面在发送路径：`Draft::finalise` 把正文与全部
+/// 附件组装成**同一棵** `multipart/mixed`，`send_draft_async`
+///（`meli/src/mail/compose.rs` 3220–3250 行）再把这整棵树交给
+/// `meli/src/mail/pgp.rs` 的 `encrypt_filter`——meli 没有「只加密正文」的分叉，
+/// 手动/自动加密一旦生效，正文与附件共享同一个 PGP/MIME 密文载荷，故对 CVE 的
+/// 直接原语免疫。语料是一次性 OpenPGP 密钥（ed25519 主钥 + cv25519 加密子钥）
+/// 与三个 SECRET 标记（正文 + 八位字节附件 + text/plain 附件）。三层断言：
+/// L1 无 gpg 的结构层锁定 finalise 产出的单一 3 部件 mixed 树；L2 真实 gpgme
+/// 端到端——(a) 嗅探者视角：外发报文原始字节与所有部件解码字节都不含任何标记、
+/// 顶层无原附件内容类型/文件名，(b) 还原视角：解密字节逐字节等于加密前的 mixed
+/// 树且两附件解码回原始字节；L3 fail-closed：无可用加密钥时报
+/// `"No key was selected for encryption"` 中止发送。另如实记录 meli 侧等价缺口
+/// `pgp.auto_encrypt` 从未被 composer 消费——已由并行任务修复（composer 首次
+/// draw 时播种 `encrypt_mail`），回归见 `meli/src/mail/compose.rs` 的
+/// `auto_encrypt_setting_arms_composer_encryption`、
+/// `auto_encrypt_defaults_leave_composer_unarmed`、
+/// `manual_encrypt_choice_is_not_overridden_by_default_setting` 三个单测。
+#[cfg(test)]
+#[path = "CVE-2014-8878.rs"]
+mod cve_2014_8878;
+
 /// CVE-2014-9116 (mutt 1.5.23, CVSS v2 5.0) header-processing
 /// heap-overflow regression (issue #41, table 2 of
 /// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): mutt's
