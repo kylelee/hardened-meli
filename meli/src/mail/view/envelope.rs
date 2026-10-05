@@ -1326,28 +1326,57 @@ impl Component for EnvelopeView {
                 let mut text = String::new();
                 self.body_text.clear();
                 if let Some(last) = self.filters.last() {
-                    let mut scan_stack = VecDeque::from([last]);
-                    let mut render_stack = VecDeque::new();
-                    while let Some(filter @ ViewFilter { body_text, .. }) = scan_stack.pop_front() {
+                    // CVE-2019-10732 (issue #104): the scan flattens the
+                    // filter tree in display order, carrying a per-node
+                    // `exclude_from_body_text` flag: content that an
+                    // auto-decryption job produced below the root filter —
+                    // an encrypted part hidden inside a multipart carrier —
+                    // still renders for reading, but never enters
+                    // `body_text`, the plain-text mirror the composer
+                    // quotes on reply. Quoting it back would hand the
+                    // sender a decryption oracle for any ciphertext they
+                    // possess that decrypts with the victim's key. The
+                    // root filter itself is exempt: replying to the
+                    // encrypted mail you just read keeps quoting its
+                    // decrypted body (standard MUA UX).
+                    let mut scan_stack: VecDeque<(&ViewFilter, bool)> =
+                        VecDeque::from([(last, false)]);
+                    let mut render_stack: VecDeque<(&ViewFilter, bool)> = VecDeque::new();
+                    let mut is_root = true;
+                    while let Some((
+                        filter @ ViewFilter {
+                            body_text,
+                            decrypt_origin,
+                            ..
+                        },
+                        exclude_parent,
+                    )) = scan_stack.pop_front()
+                    {
+                        let exclude_from_body_text =
+                            exclude_parent || (*decrypt_origin && !is_root);
+                        is_root = false;
                         if let ViewFilterContent::InlineAttachments { parts } = body_text {
                             for p in parts.iter().rev() {
-                                scan_stack.push_front(p);
+                                scan_stack.push_front((p, exclude_from_body_text));
                             }
                         }
-                        render_stack.push_back(filter);
+                        render_stack.push_back((filter, exclude_from_body_text));
                     }
                     let show_attachment_idx = render_stack.len() > 1;
 
                     let mut idx = 0;
-                    while let Some(ViewFilter {
-                        content_type,
-                        size,
-                        filter_invocation,
-                        body_text,
-                        notice,
-                        headers,
-                        ..
-                    }) = render_stack.pop_front()
+                    while let Some((
+                        ViewFilter {
+                            content_type,
+                            size,
+                            filter_invocation,
+                            body_text,
+                            notice,
+                            headers,
+                            ..
+                        },
+                        exclude_from_body_text,
+                    )) = render_stack.pop_front()
                     {
                         if show_attachment_idx {
                             if !text.is_empty() && !text.ends_with('\n') {
@@ -1397,7 +1426,9 @@ impl Component for EnvelopeView {
                                 let payload =
                                     self.options.convert(&mut self.links, &self.body, inner);
                                 text.push_str(&payload);
-                                self.body_text.push_str(&payload);
+                                if !exclude_from_body_text {
+                                    self.body_text.push_str(&payload);
+                                }
                             }
                             ViewFilterContent::Error { inner } => text.push_str(&inner.to_string()),
                             ViewFilterContent::Running { .. } => {
