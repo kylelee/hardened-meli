@@ -3936,3 +3936,41 @@ mod cve_2021_38373;
 #[cfg(test)]
 #[path = "CVE-2024-50624.rs"]
 mod cve_2024_50624;
+
+/// CVE-2018-12020（GnuPG < 2.2.8，SigSpoof 1；CVSS v3.0 7.5）**`--status-fd`
+/// 状态行伪造** regression（issue #125，表 5 协议与加密信任边界）：
+/// GnuPG 的 `mainproc.c` 把 OpenPGP literal data 包的**原始文件名**未经
+/// 清洗地写进 `--status-fd` 状态流，攻击者在文件名里注入
+/// `\n[GNUPG:] GOODSIG …\n[GNUPG:] VALIDSIG …` 即可让一切「以状态文本
+/// 判定验签结论」的客户端把一封只加密、未签名的邮件展示为「有效签名」
+/// （GnuPG 2.2.8 起 percent-escape 该文件名）。
+///
+/// 语料全部为真 gpg 2.4.9 产物：SigSpoof 原样载荷（对 victim 一次性
+/// cv25519 密钥只加密、literal 包文件名携带伪造 GOODSIG/VALIDSIG 行，
+/// `--list-packets` 可见原始 `\x0a` 字节）、真签名组合消息（signer
+/// 一次性 ed25519 密钥）与文件名投毒共存的最强位形、真 detached 签名
+/// 与篡改对照、`\n`/`\r`/CRLF/NUL/VT/FF/NEL/LS/PS 全部文件名分隔符变体、
+/// 现代 gpg 实测捕获的 percent-escape `PLAINTEXT` 状态行与 pre-2.2.8
+/// 脆弱形态逐行重建。
+///
+/// [`cve_2018_12020`] 分层锁定（详见模块文档）：L0——meli/melib 的
+/// Rust 源码不运行 gpg、不解析任何 `[GNUPG:]` 文本（逐源码扫描），裁决
+/// 只来自 gpgme 结构化字段或脚本 JSON；L1——验签入口
+/// [`extract_unverified_signature`] 的两条路（detached/cleartext）都不
+/// 处理 literal 包，PGP MESSAGE armor 唯一路由是 decrypt 而其元数据
+/// **结构上没有签名字段**，全部文件名变体以不透明字节旅行，伪造状态
+/// 文本翻不动 [`signatures_into_error`] 的结构化裁决；L2——本 issue
+/// 检出并修复 CLI 后端两个「以状态文本为裁决、无视 gpg 退出码」的真实
+/// 缺口（`gpg_verify.py`：退出码无视 + 非 GOODSIG 摘要被确认 OK +
+/// 失败流崩溃；`gpg_decrypt.py`：DECRYPTION_OKAY 文本即放行明文），
+/// 修复后 shim 复放的脆弱状态流（pre-2.2.8 原始文件名形态）在两个脚本
+/// 的输出里都没有任何签名落点/明文泄漏；L3——真 gpg + 真 gpgme：真验
+/// → good、篡改 → BAD、组合消息冒充签名文件 → fail-closed，SigSpoof
+/// 邮件解密时 `file_name` 以惰性数据形态抵达。
+///
+/// [`cve_2018_12020`]: self::cve_2018_12020
+/// [`extract_unverified_signature`]: meli::melib::email::pgp::extract_unverified_signature
+/// [`signatures_into_error`]: meli::mail::pgp::signatures_into_error
+#[cfg(test)]
+#[path = "CVE-2018-12020.rs"]
+mod cve_2018_12020;
