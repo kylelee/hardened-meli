@@ -57,6 +57,15 @@ use melib::{Error, Result};
 /// scheme，会被 `url_relative = PassThrough` 当作惰性相对引用原样保留，
 /// html2text 再把它渲染成可外联的脚注链接——正是 Office 在 RTF/OLE 预览
 /// 中自动解引用 `\\attacker\share` 的终端等价面。
+///
+/// 第三处与 nh3 parity 的**有意偏离**（CVE-2024-42009 / issue #115，反清洗
+/// mXSS）：保留下来的属性值只要解码后含标签起始 `<`，整个属性丢弃——`href`
+/// 也在内，因为带 scheme 的 URL 可以把 `</style><img src=1 onerror=alert(1)>`
+/// 塞进 path/query 骗过 [`is_safe_url`]，而字面 `<` 本就不是合法 URL 字符。
+/// html5ever 序列化时会把属性值里的 `<`/`>` 转义成 `&lt;`/`&gt;`，但解析树
+/// 里的属性值仍是字面标记串；Roundcube `message_body()` 正是把清洗后的字符串
+/// 交给第二次解析，让藏在属性值里的标记串复活。丢弃这类属性使 sanitize 输出
+/// 不再携带 `<img`/`onerror` 之类的二次解析原料。
 pub fn sanitize(input: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
@@ -115,6 +124,27 @@ pub fn sanitize(input: &str) -> String {
             // Validating the trimmed value covers both the untrimmed bypass
             // and the trim-activation case; drop on doubt.
             if attr == "href" && !is_safe_url(trimmed) {
+                return None;
+            }
+            // CVE-2024-42009 / issue #115 (desanitization mXSS): the
+            // Roundcube `message_body()` flow sanitized a string and then
+            // handed it to a *second parse*, where a markup string hidden
+            // in a retained attribute value came back alive. ammonia
+            // parses once and html5ever's serializer escapes `<`/`>` back
+            // to `&lt;`/`&gt;`, but the **decoded** attribute value is
+            // still a literal `<img src=1 onerror=alert(1)>` string that
+            // any downstream consumer re-parsing the attribute value
+            // receives as parser input — and the sanitized output itself
+            // still carries `onerror`/`<img` as text. Drop every retained
+            // attribute whose value contains a tag-open `<`, so the output
+            // holds no markup raw material for a second parse. This must
+            // cover `href` too: a scheme-prefixed URL such as
+            // `https://host/</style><img src=1 onerror=alert(1)>` passes
+            // [`is_safe_url`] (the `<` is parsed into the path/query), so
+            // the scheme re-check alone would let the payload through. A
+            // literal `<` is never valid in a URL anyway (it must be
+            // percent-encoded).
+            if trimmed.contains('<') {
                 return None;
             }
             if trimmed.len() == value.len() {
@@ -768,6 +798,59 @@ mod tests {
         assert!(
             out.contains(r#"href="https://e.example""#),
             "valid href should still pass through: {out:?}"
+        );
+    }
+
+    /// CVE-2024-42009 / issue #115 (desanitization mXSS): a retained
+    /// attribute value that decodes to a literal markup string
+    /// (`</style><img src=1 onerror=alert(1)>`) must be dropped whole, so
+    /// the serialized output carries no `onerror`/`<img`/`alert(` second-
+    /// parse raw material. `href` is covered too: a scheme-prefixed URL can
+    /// hide the markup in its path/query and still pass `is_safe_url`. The
+    /// guard must stay narrow — a benign value without a raw `<` survives,
+    /// and a lone `>` is not a tag-open.
+    #[test]
+    fn sanitize_drops_attribute_values_carrying_literal_markup() {
+        for (label, payload) in [
+            (
+                "p_title",
+                r#"<p title="</style><img src=1 onerror=alert(1)>">x</p>"#,
+            ),
+            (
+                "p_lang",
+                r#"<p lang="</style><img src=1 onerror=alert(1)>">x</p>"#,
+            ),
+            (
+                "a_title",
+                r#"<a href="https://e.example" title="</style><svg onload=alert(1)>">x</a>"#,
+            ),
+            (
+                "entity_title",
+                r#"<p title="&lt;img src=1 onerror=alert(1)&gt;">x</p>"#,
+            ),
+            (
+                "href_path",
+                r#"<a href="https://e.example/</style><img src=1 onerror=alert(1)>">x</a>"#,
+            ),
+        ] {
+            let out = sanitize(payload);
+            let lower = out.to_ascii_lowercase();
+            for needle in ["onerror", "<img", "alert("] {
+                assert!(
+                    !lower.contains(needle),
+                    "{label}: {needle:?} survived the attribute guard: {out:?}"
+                );
+            }
+        }
+        // A benign value with no raw `<` survives unchanged.
+        assert_eq!(
+            sanitize(r#"<p lang="en" title="hello">x</p>"#),
+            r#"<p lang="en" title="hello">x</p>"#
+        );
+        // A lone `>` is not a tag-open; the value survives, escaped.
+        assert_eq!(
+            sanitize(r#"<p title="a > b">x</p>"#),
+            r#"<p title="a &gt; b">x</p>"#
         );
     }
 
