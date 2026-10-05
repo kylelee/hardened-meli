@@ -3543,3 +3543,45 @@ mod cve_2016_7968;
 #[cfg(test)]
 #[path = "CVE-2022-29360.rs"]
 mod cve_2022_29360;
+
+/// CVE-2024-42009（Roundcube < 1.5.8、1.6.x < 1.6.8；CVSS v3.1 9.3；
+/// NVD / SonarSource）**反清洗（desanitization）mXSS** regression
+/// （Gitea issue #115），调研报告表 3「网页嵌入与 HTML/链接渲染」批次成员：
+/// Roundcube 的 `message_body()`（`program/actions/mail/show.php`）清洗邮件正文
+/// 后，又把清洗结果交给后续处理/再解析；藏在白名单属性值里的标记串在第二次
+/// 解析时因上下文切换变异成活标签，绕过清洗执行脚本并窃取/代发受害者邮件。
+/// 根因是「清洗一次、再解析一次」：序列化后的清洗输出被重新喂给 HTML 解析器，
+/// 两次解析的树形状不一致（mXSS）。
+///
+/// meli 等价面映射（终端客户端无 DOM/浏览器/JS 运行时，按 issue 要求做等价面
+/// 断言）：
+///
+/// 1. 内置 HTML 清理管线：`meli/src/mail/view/html_render.rs` 的 [`sanitize`]
+///    （ammonia 单次解析 → 序列化）＋ [`render`]（sanitize → 嵌套上限 →
+///    html2text 纯文本），调用点 `meli/src/mail/view/filters.rs` 的
+///    `HtmlFilter::Builtin`。meli 管线内**没有第二次解析**，可复现的等价物是
+///    清洗输出里的标记串原料：白名单标签（p/a）的 generic 属性（title/lang）
+///    或 href 可携带字面 `</style><img src=1 onerror=alert(1)>`；html5ever 把
+///    `<`/`>` 序列化成 `&lt;`/`&gt;`，但解析树里的属性值仍是字面标记串，输出里
+///    仍留 `onerror`/`alert(` 文本，任何「读回属性值再解析」的下游消费者都会
+///    拿到活的原料。
+/// 2. **本 issue 检出并修复该缺口**：生产改动给 [`sanitize`] 的
+///    `attribute_filter` 增加了「保留属性值解码后含标签起始 `<` 即整属性丢弃」
+///    的第三处 nh3 parity 有意偏离（`href` 在内，因带 scheme 的 URL 可把标记串
+///    塞进 path/query 骗过 `is_safe_url`）。
+///
+/// [`cve_2024_42009`] 以五个分层 `#[test]` 锁定（详见模块文档）：sanitize 平面
+/// （公告三条 ＋ 绕过全量）、独立白名单预言机＋不动点、五种嵌入上下文探测、
+/// 每条语料单独成信的端到端（多宽度）＋组合邮件、缺口回归与惰性文本观测。
+///
+/// 结论：**检出并修复属性值标记串走私缺口，非纯免疫证明**——三条公告原形在
+/// 修复前也已干净通过（noscript raw-text / math / svg 命名空间使载荷在单次解析
+/// 的树里死亡），但 generic 属性与 href 的属性值可把标记串带进清洗输出，违反
+/// issue 的「输出不含 `<img`/`onerror`」断言；修复后全部语料满足不变量。
+///
+/// [`cve_2024_42009`]: self::cve_2024_42009
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2024-42009.rs"]
+mod cve_2024_42009;
