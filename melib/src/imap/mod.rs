@@ -1949,7 +1949,19 @@ impl ImapType {
                 s.name.as_str(),
             )));
         }
+        // `danger_accept_invalid_certs` may be written as a TOML boolean
+        // (`true`) or a quoted string; `get_conf_val!` parses only strings, so
+        // coerce the raw value first and reject anything truthy. `get_conf_val!`
+        // is still called to consume the key and keep its documented `false`
+        // default for the string case.
+        let danger_accept_invalid_certs = s
+            .extra_conf_string("danger_accept_invalid_certs")
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
         get_conf_val!(s["danger_accept_invalid_certs"], false)?;
+        crate::conf::reject_danger_accept_invalid_certs(
+            danger_accept_invalid_certs,
+            &format!("IMAP account `{}`", s.name),
+        )?;
         get_conf_val!(s["trace"], false)?;
         #[cfg(feature = "sqlite3")]
         get_conf_val!(s["offline_cache"], true)?;
@@ -2240,5 +2252,73 @@ mod tests {
             MailboxHash::from_bytes(encode_utf7_imap("已发送.归档").as_bytes())
         );
         assert_ne!(wire_path, new_path);
+    }
+
+    /// `danger_accept_invalid_certs = true` disables TLS certificate and
+    /// hostname validation, so startup must be refused with the setting name
+    /// and the remediation (CVE-2009-3765 hardening). Absent / `false`, in
+    /// either the string or TOML boolean form, must keep working.
+    #[test]
+    fn test_conf_danger_accept_invalid_certs_is_rejected() {
+        let account_with = |extra: indexmap::IndexMap<String, serde_json::Value>| AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: "INBOX".to_string(),
+            format: "imap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra,
+        };
+        let base = || {
+            let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
+            for (k, v) in [
+                ("server_hostname", "localhost"),
+                ("server_username", "user"),
+                ("server_password", "password"),
+                ("use_tls", "false"),
+                ("use_starttls", "false"),
+                ("offline_cache", "false"),
+                ("use_connection_pool", "false"),
+            ] {
+                m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+            }
+            m
+        };
+
+        // Absent is accepted.
+        let mut account = account_with(base());
+        ImapType::validate_config(&mut account).unwrap();
+
+        // Explicit string / boolean `false` are accepted.
+        for value in [
+            serde_json::Value::String("false".to_string()),
+            serde_json::Value::Bool(false),
+        ] {
+            let mut extra = base();
+            extra.insert("danger_accept_invalid_certs".to_string(), value);
+            let mut account = account_with(extra);
+            ImapType::validate_config(&mut account).unwrap();
+        }
+
+        // String and TOML boolean `true` are both refused with the setting
+        // name, the CVE and the remediation in the message.
+        for value in [
+            serde_json::Value::String("true".to_string()),
+            serde_json::Value::Bool(true),
+        ] {
+            let mut extra = base();
+            extra.insert("danger_accept_invalid_certs".to_string(), value);
+            let mut account = account_with(extra);
+            let err = ImapType::validate_config(&mut account).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Configuration);
+            assert!(err.summary.contains("danger_accept_invalid_certs"), "{err}");
+            assert!(err.summary.contains("CVE-2009-3765"), "{err}");
+            assert!(err.summary.contains("set it to false"), "{err}");
+            assert!(err.summary.contains("trust store"), "{err}");
+        }
     }
 }

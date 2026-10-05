@@ -295,6 +295,31 @@ impl AccountSettings {
     }
 }
 
+/// Reject an enabled `danger_accept_invalid_certs` TLS setting.
+///
+/// `danger_accept_invalid_certs = true` makes the TLS clients skip both the
+/// certificate-chain and the hostname checks, so a certificate issued for a
+/// different server (or one with a crafted/NUL-truncated name) is accepted.
+/// That lets a man-in-the-middle attacker impersonate any TLS server; see
+/// [CVE-2009-3765](https://nvd.nist.gov/vuln/detail/CVE-2009-3765), where a
+/// missing/incorrect hostname check had exactly this effect. Because the
+/// setting has no safe use, meli refuses to start when it is enabled.
+///
+/// `context` names the account or configuration section the setting was read
+/// from, so the user knows where to fix it.
+pub fn reject_danger_accept_invalid_certs(enabled: bool, context: &str) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    Err(Error::new(format!(
+        "Configuration error ({context}): `danger_accept_invalid_certs` is set to true, which \
+         disables TLS certificate and hostname verification and allows man-in-the-middle attacks \
+         (CVE-2009-3765). Remove this setting or set it to false; to trust a self-signed \
+         certificate, add its CA certificate to the system trust store instead."
+    ))
+    .set_kind(ErrorKind::Configuration))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MailboxConf {

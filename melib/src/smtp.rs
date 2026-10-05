@@ -262,6 +262,34 @@ const fn default_timeout() -> u64 {
     60
 }
 
+impl SmtpServerConf {
+    /// Reject an enabled `danger_accept_invalid_certs` TLS setting for this
+    /// SMTP mailer.
+    ///
+    /// Any of the TLS-bearing [`SmtpSecurity`] variants may carry the flag;
+    /// when it is true meli refuses to start (see
+    /// [`crate::conf::reject_danger_accept_invalid_certs`], CVE-2009-3765).
+    /// [`SmtpSecurity::None`] performs no TLS and is therefore always accepted.
+    pub fn validate(&self) -> Result<()> {
+        let danger_accept_invalid_certs = match self.security {
+            SmtpSecurity::Auto {
+                danger_accept_invalid_certs,
+            }
+            | SmtpSecurity::Tls {
+                danger_accept_invalid_certs,
+            }
+            | SmtpSecurity::StartTLS {
+                danger_accept_invalid_certs,
+            } => danger_accept_invalid_certs,
+            SmtpSecurity::None => false,
+        };
+        crate::conf::reject_danger_accept_invalid_certs(
+            danger_accept_invalid_certs,
+            "SMTP mailer configuration (`send_mail`)",
+        )
+    }
+}
+
 //example: "SIZE 52428800", "8BITMIME", "PIPELINING", "CHUNKING", "PRDR",
 /// Configured SMTP extensions to use
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1455,8 +1483,7 @@ mod tests {
             assert_eq!(first.len(), 1024);
             let rest: &[u8] = b"\n250 done\r\n";
 
-            let (reader_sock, mut writer_sock) =
-                std::os::unix::net::UnixStream::pair().unwrap();
+            let (reader_sock, mut writer_sock) = std::os::unix::net::UnixStream::pair().unwrap();
             let conn = Connection::Fd {
                 inner: reader_sock.into(),
                 id: None,
@@ -1807,5 +1834,60 @@ security = { type = "tls" }
                 elapsed = started.elapsed()
             );
         });
+    }
+
+    /// `SmtpServerConf::validate` refuses every TLS-bearing `SmtpSecurity`
+    /// variant with `danger_accept_invalid_certs = true`, while the defaults
+    /// and `SmtpSecurity::None` are accepted (CVE-2009-3765 hardening).
+    #[test]
+    fn test_smtp_server_conf_validate_rejects_danger_accept_invalid_certs() {
+        let base = |security: SmtpSecurity| SmtpServerConf {
+            hostname: Secret::Value("smtp.example.com".into()),
+            port: 587,
+            envelope_from: String::new(),
+            auth: SmtpAuth::None,
+            security,
+            extensions: SmtpExtensionSupport::default(),
+            trace: false,
+            timeout: 60,
+        };
+
+        // `None` performs no TLS: always accepted.
+        base(SmtpSecurity::None).validate().unwrap();
+
+        // Every TLS variant keeps validation on by default / explicitly false.
+        for security in [
+            SmtpSecurity::default(),
+            SmtpSecurity::Auto {
+                danger_accept_invalid_certs: false,
+            },
+            SmtpSecurity::Tls {
+                danger_accept_invalid_certs: false,
+            },
+            SmtpSecurity::StartTLS {
+                danger_accept_invalid_certs: false,
+            },
+        ] {
+            base(security).validate().unwrap();
+        }
+
+        // Enabling the danger flag on any TLS variant is refused.
+        for security in [
+            SmtpSecurity::Auto {
+                danger_accept_invalid_certs: true,
+            },
+            SmtpSecurity::Tls {
+                danger_accept_invalid_certs: true,
+            },
+            SmtpSecurity::StartTLS {
+                danger_accept_invalid_certs: true,
+            },
+        ] {
+            let err = base(security).validate().unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Configuration);
+            assert!(err.summary.contains("danger_accept_invalid_certs"), "{err}");
+            assert!(err.summary.contains("CVE-2009-3765"), "{err}");
+            assert!(err.summary.contains("set it to false"), "{err}");
+        }
     }
 }

@@ -464,6 +464,16 @@ logging level.
 Do not validate
 .Em TLS
 certificates.
+Setting this to
+.Em true
+is rejected at startup: it disables certificate and hostname verification,
+enabling man-in-the-middle attacks (see
+.Sy CVE-2009-3765 Ns
+\&).
+Leave it unset or set it to
+.Em false
+instead; to trust a self-signed certificate, add its CA to the system trust
+store.
 .Pq Em false \" default value
 .It Ic offline_cache Ar boolean
 .Pq Em optional
@@ -754,6 +764,16 @@ logging level.
 Do not validate
 .Em TLS
 certificates.
+Setting this to
+.Em true
+is rejected at startup: it disables certificate and hostname verification,
+enabling man-in-the-middle attacks (see
+.Sy CVE-2009-3765 Ns
+\&).
+Leave it unset or set it to
+.Em false
+instead; to trust a self-signed certificate, add its CA to the system trust
+store.
 .Pq Em false \" default value
 .It Ic timeout Ar integer
 .Pq Em optional
@@ -854,6 +874,16 @@ The port to connect to
 Do not validate
 .Em TLS
 certificates.
+Setting this to
+.Em true
+is rejected at startup: it disables certificate and hostname verification,
+enabling man-in-the-middle attacks (see
+.Sy CVE-2009-3765 Ns
+\&).
+Leave it unset or set it to
+.Em false
+instead; to trust a self-signed certificate, add its CA to the system trust
+store.
 .Pq Em false \" default value
 .It Ic store_flags_locally Ar boolean
 .Pq Em optional
@@ -2714,6 +2744,16 @@ Accept invalid
 /
 .Em TLS
 certificates
+Setting this to
+.Em true
+is rejected at startup: it disables certificate and hostname verification,
+enabling man-in-the-middle attacks (see
+.Sy CVE-2009-3765 Ns
+\&).
+Leave it unset or set it to
+.Em false
+instead; to trust a self-signed certificate, add its CA to the system trust
+store.
 .Pq Em false \" default value
 .El
 .Ss SmtpExtensions
