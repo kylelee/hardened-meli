@@ -3068,3 +3068,45 @@ mod cve_2020_16947;
 #[cfg(test)]
 #[path = "CVE-2009-0587.rs"]
 mod cve_2009_0587;
+
+/// CVE-2000-0481（KMail < 1.0.29；CWE-120/121/122 缓冲区溢出家族）
+/// `Content-Disposition: attachment; filename="<超长名>"` 附件名固定大小
+/// 缓冲区溢出 regression（issue #107，表 2 病毒/代码执行 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：KMail 把附件名拷进固定大小缓冲，
+/// 64 KiB+ 的文件名越界写（DoS，可能代码执行）——名字的长度本身就是武器。
+/// meli 无任何固定大小文件名字节缓冲：MIME 参数值落在按到达长度分配的堆
+/// `String` 里，KMail 的原语没有可运行的代码。等价面 mapped to 三处：
+///
+/// 1. `melib/src/email/attachments.rs` 的 `Attachment::filename()`（解析见
+///    `melib/src/email/parser.rs` 的 `content_disposition` /
+///    `content_disposition_parameter`）；
+/// 2. `meli/src/mailcap.rs` 的 `expand_nametemplate` / `expand_args` /
+///    `quote_shell_word` / `encode_for_context`——文件名只作为 `%s` 临时文件
+///    hint，真正替换进命令的是生成的临时路径并按 shell 上下文 armor；
+/// 3. `meli/src/types/helpers.rs` 的 `File::create_temp_file`
+///    （`sanitize_filename` + `cap_filename_component_bytes`，
+///    `FILENAME_COMPONENT_MAX_BYTES = 192`）。
+///
+/// [`cve_2000_0481`] 分层锁定：(L1) 64 KiB / 1 MiB 名在 quoted / token /
+/// `Content-Type: name=` 三种拼写下经 `Mail::new` 构树、`filename()` 全长
+/// 字节保真、`catch_unwind` 不 panic、时间有界、两次独立解析确定一致，
+/// `Display` / `Debug` / `check_if_has_attachments_quick` 均不 panic，且
+/// `../`、`\`、引号、反引号、`$()` 与 RFC 2047 走私的 LF/CR/NUL 名全部
+/// 原样或按声明的折行规范化浮现；(L2) 同一超长名在普通默认栈工作线程
+/// （约 2 MiB）内解析并全长取回，证明名字在堆上存储、栈消耗不随名字长度
+/// 增长——KMail 固定缓冲溢出的等价面映射；(L3) 复用 CVE-2020-12641 的
+/// marker 端到端模式，`echo "%s"`、反引号、`$(...)`、单引号四种 shell
+/// 上下文与 `nametemplate=%s.html` 下，附件文件名携带 `$(:>marker)`、
+/// 反引号 `:>marker`、引号逃逸、`;|` 载荷时 marker 绝不出现、命令正常退出、
+/// `%s` 恰展开为单一实参（生成的 `<tmp>/meli/...` 临时路径）；(L4)
+/// `File::create_temp_file` 以 64 KiB 'A' hint 落盘时组件 ≤
+/// NAME_MAX(255) / `FILENAME_COMPONENT_MAX_BYTES`、平坦无穿越、位于
+/// `<tmp>/meli/`、权限 0o600 无执行位、内容保真。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——长度与字节两轴分别由
+/// CVE-2003-0376 的落盘组件上限（本 CVE 家族可用性面）与 CVE-2020-12641 的
+/// 上下文感知 shell armor 覆盖并在本 CVE 自身的纯长度与元字符形态上复锁；
+/// 安全 checked Rust 没有固定缓冲可溢出。
+#[cfg(test)]
+#[path = "CVE-2000-0481.rs"]
+mod cve_2000_0481;
