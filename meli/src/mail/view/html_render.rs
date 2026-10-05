@@ -66,6 +66,19 @@ use melib::{Error, Result};
 /// 里的属性值仍是字面标记串；Roundcube `message_body()` 正是把清洗后的字符串
 /// 交给第二次解析，让藏在属性值里的标记串复活。丢弃这类属性使 sanitize 输出
 /// 不再携带 `<img`/`onerror` 之类的二次解析原料。
+///
+/// 第四处与 nh3 parity 的**有意偏离**（CVE-2024-42010 / issue #116，CSS 清洗
+/// 绕过）：保留下来的属性值只要以 ASCII 大小写不敏感方式含 `@import`、`url(`、
+/// `expression(` 任一子串，整个属性丢弃。Roundcube `mod_css_styles` 的缺陷是
+/// CSS 指令原料在清洗后仍以活指令形态留在渲染邮件里，攻击者据此用 CSS 侧信道
+/// （`@import`/`url(...)` 的资源请求、属性选择器/动画的时间差）外传信息；清洗
+/// 顺序应为「先抽取活原料，再谈白名单」。meli 没有 CSS 引擎、html2text 也不
+/// 加载远程资源（第二道防线），但 issue 明确断言清洗输出不得含 `@import`/
+/// `url(`——下游任何读回属性值再消费的组件都会拿到活指令。`href` 一并丢弃，
+/// 与 42009 同判例：合法 `https:` URL 可把 `url(`/`@import` 塞进 path/query，
+/// [`is_safe_url`] 单独拦不住；URL 中裸 `url(`/`@import` 属病态形态，丢弃仅损失
+/// 脚注可见性。裸 `background` 不禁——它是普通英文词，含 `url(` 的 `background`
+/// 值已被本规则覆盖。实体编码形（`&#64;import`）经 html5ever 解码后同样命中。
 pub fn sanitize(input: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
@@ -147,6 +160,32 @@ pub fn sanitize(input: &str) -> String {
             if trimmed.contains('<') {
                 return None;
             }
+            // CVE-2024-42010 / issue #116 (CSS sanitization bypass): a
+            // retained value that carries CSS directive raw material is live
+            // fuel for the Roundcube `mod_css_styles` failure mode — a CSS
+            // side channel that exfiltrates data through `@import`/`url(...)`
+            // requests, attribute selectors and animation timing. meli has no
+            // CSS engine and html2text never fetches a remote resource (the
+            // second line of defense), but the issue asserts the sanitized
+            // output must not carry `@import`/`url(` at all, and any
+            // downstream consumer that re-reads the value would receive a
+            // live directive. Drop the whole attribute when the decoded
+            // value contains any of the directive tokens, ASCII
+            // case-insensitively. This must cover `href` too, by the same
+            // precedent as the `<` guard above: a legal `https:` URL can
+            // hide `url(`/`@import` in its path or query and still pass
+            // [`is_safe_url`]. Bare `background` is deliberately *not*
+            // banned — it is an ordinary English word, and a `background`
+            // value that actually carries a directive contains `url(`, which
+            // this rule already drops. Entity-encoded forms (`&#64;import`)
+            // are decoded by html5ever before reaching the filter, so they
+            // are covered as well.
+            if contains_ascii_ci(trimmed, "@import")
+                || contains_ascii_ci(trimmed, "url(")
+                || contains_ascii_ci(trimmed, "expression(")
+            {
+                return None;
+            }
             if trimmed.len() == value.len() {
                 return Some(Cow::Borrowed(value));
             }
@@ -195,6 +234,24 @@ fn is_safe_url(value: &str) -> bool {
 fn is_windows_drive_path(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}
+
+/// ASCII case-insensitive substring search with **no allocation** (CVE-2024-42010
+/// / issue #116). `needle` is always one of the lower-case ASCII directive
+/// tokens, so folding both sides with [`u8::eq_ignore_ascii_case`] is exact:
+/// bytes with the high bit set (all UTF-8 multibyte continuation/lead bytes)
+/// can never fold to an ASCII byte, so a multibyte sequence cannot produce a
+/// false positive. An empty needle never matches (and would make
+/// [`slice::windows`] panic).
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Character predicate: matches ASCII whitespace, Unicode `White_Space`,
@@ -851,6 +908,103 @@ mod tests {
         assert_eq!(
             sanitize(r#"<p title="a > b">x</p>"#),
             r#"<p title="a &gt; b">x</p>"#
+        );
+    }
+
+    /// CVE-2024-42010 / issue #116 (CSS side-channel smuggling): a retained
+    /// attribute value that carries CSS directive raw material (`@import`,
+    /// `url(`, `expression(`) is live fuel for any downstream consumer that
+    /// re-reads the value into a CSS engine (the Roundcube `mod_css_styles`
+    /// failure mode). meli has no CSS engine and html2text never fetches a
+    /// remote resource, but the issue asserts the sanitized output must not
+    /// carry `@import`/`url(` at all, so any kept attribute whose value
+    /// contains one of those tokens is dropped whole. `href` is covered too
+    /// — a legal `https:` URL can hide `url(`/`@import` in its path/query
+    /// and still pass `is_safe_url`. The guard stays narrow: plain
+    /// parenthesised prose, a lone `>`, and ordinary https/mailto links are
+    /// not directive raw material and survive.
+    #[test]
+    fn sanitize_drops_attribute_values_carrying_css_directive_tokens() {
+        // a[title] carrying the issue's `@import url(...)` shape is dropped
+        // whole; the anchor text and the injected `rel` survive.
+        assert_eq!(
+            sanitize(r#"<a title='@import url("https://e.example/leak")'>x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+        // href query carrying `url(` is dropped: `is_safe_url` alone lets a
+        // scheme-prefixed URL through no matter what its path/query holds.
+        assert_eq!(
+            sanitize(r#"<a href="https://e.example/x.css?q=url(1)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+
+        // Every directive token, every carrier, case-insensitively and
+        // after entity decoding by html5ever.
+        for (label, payload, expected) in [
+            (
+                "title_import",
+                r#"<p title="@import url(x)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_url",
+                r#"<p title="url(https://e.example/x)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_expression",
+                r#"<p title="expression(alert(1))">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_entity_import",
+                r#"<p title="&#64;import url(&#104;ttps://e.example/x)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_mixed_case",
+                r#"<p title="@IMPORT URL(x)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "href_path_import",
+                r#"<a href="https://e.example/@import">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "href_query_expression",
+                r#"<a href="https://e.example/?q=expression(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+        ] {
+            assert_eq!(sanitize(payload), expected, "{label}");
+        }
+
+        // Benign controls survive unchanged: a normal title, plain
+        // parenthesised prose, and a lone `>` are not CSS directive raw
+        // material.
+        assert_eq!(
+            sanitize(r#"<p title="hello (world)">x</p>"#),
+            r#"<p title="hello (world)">x</p>"#
+        );
+        assert_eq!(
+            sanitize(r#"<p title="a > b">x</p>"#),
+            r#"<p title="a &gt; b">x</p>"#
+        );
+        let benign = sanitize(
+            r#"<a href="https://e.example" title="docs">https</a> <a href="mailto:x@e.example">mail</a>"#,
+        );
+        assert!(
+            benign.contains(r#"href="https://e.example""#),
+            "benign https href dropped: {benign:?}"
+        );
+        assert!(
+            benign.contains(r#"title="docs""#),
+            "benign title dropped: {benign:?}"
+        );
+        assert!(
+            benign.contains(r#"href="mailto:x@e.example""#),
+            "benign mailto href dropped: {benign:?}"
         );
     }
 
