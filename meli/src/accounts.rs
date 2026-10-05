@@ -221,6 +221,23 @@ pub struct Account {
 
 impl Drop for Account {
     fn drop(&mut self) {
+        // The contacts file path below is derived from process-global
+        // environment variables (`XDG_DATA_HOME`, `HOME`, ...). In the unit
+        // test process, parallel tests flip those variables inside their own
+        // environment guards, so this drop-time write must be serialized on
+        // the shared env lock too; otherwise it lands in whichever transient
+        // sandbox another test currently points the variables at (observed as
+        // `sqlite3::tests::test_sqlite3_reindex` failing its assertion that
+        // `XDG_DATA_HOME` is empty, with a stray
+        // `meli/test/contacts` entry). `cfg(test)` keeps production builds
+        // byte-for-byte unaffected. `env_lock_shared` is re-entrant per
+        // thread, so callers already holding the guard on this thread (e.g.
+        // the pgp test that drops a mock `Context`) cannot deadlock. The
+        // guard is declared first so that, with locals dropped in reverse
+        // declaration order, it outlives the whole function body.
+        #[cfg(test)]
+        let _env = crate::utilities::tests::env_lock_shared();
+
         let data_dir = xdg::BaseDirectories::with_profile("meli", self.name.as_ref());
         {
             if let Ok(data) = data_dir.place_data_file("contacts") {
