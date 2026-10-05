@@ -84,6 +84,7 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 - 撰写器在发送启动失败时静默以明文持久化已武装加密的草稿（CVE-2008-4491 同类，issue #17）：当加密过滤器栈或发信管道同步失败（如已武装加密却无法从草稿 `From` 头解析 `encrypt-for-self` 身份）时，未发送的草稿恰在用户已武装加密之际以明文存入（可能是服务器侧的）Drafts 邮箱。该回退现在改为把草稿留在打开的撰写标签页并说明为何未保存副本；显式保存（`save-draft`、放弃对话框的保存）仍然允许，但会警告存储副本为明文而该邮件设置为加密；发送后的存储因加密过滤器先于序列化运行、保存的本来就是已加密的线上原文。回归测试位于 `meli/src/mail/compose.rs`（`send_setup_failure_with_encryption_armed_keeps_draft_out_of_drafts`、`explicit_save_draft_with_encryption_armed_warns_plaintext`，以及未武装加密时行为冻结的对照测试）。
 ### 修复（Fixed）
 
+- layout1 侧栏 PageDown/PageUp（及 `H`/`L`）只在账号间移动高亮（issue #91）：键盘在邮箱侧栏时，`listing.next_page`/`listing.prev_page` 与 `listing.next_account`/`listing.prev_account` 共用同一输入臂，只把 `menu_cursor_pos` 指向下一/上一账号的默认邮箱，却没有执行 Up/Down 行走时的接管逻辑，导致邮件网格仍列着原账号的文件夹（侧栏已显示新账号的 INBOX，网格却原地不动）。该臂现在套用与 Up/Down 行走相同的 `change_account` + `focus_menu` 接管（`cursor_pos = menu_cursor_pos`），网格立即跟随跳转，键盘留在邮箱列表。回归测试：`layout1_menu_page_keys_switch_account_grid`。
 - `melib::gpgme::Context::get_flag` 在刚关闭 `auto-key-retrieve` 后仍报告其为开启：libgpgme 对关闭的上下文 flag 返回空 C 字符串（并非 NULL 指针），而该 getter 只判空不判值。现已改为与 `"1"` 比较，并由 CVE-2008-3068 回归在真实 libgpgme 上运行锁定。
 - IMAP `set_flags` 忽略 `Flag::PASSED`（上游 `5151e75c`）：IMAP 协议无 PASSED 的线上表示，设置/取消它会落入「more than one flag bit」应用错误分支并让整条 `UID STORE` 失败；现为显式空操作。mock 服务器回归测试 `test_imap_set_flags_ignores_passed`（修复前验证为红，精确复现上游错误）。
 
