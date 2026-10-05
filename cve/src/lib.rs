@@ -214,6 +214,37 @@ mod cve_2017_17689;
 #[path = "CVE-2026-0818.rs"]
 mod cve_2026_0818;
 
+/// CVE-2018-0950 (Microsoft Office Word / RTF OLE preview on Windows,
+/// CVSS 6.5) remote-content information-disclosure regression (issue
+/// #101, table 3 of `SECURITY-CVE-RESEARCH.zh-CN.md` — web/HTML
+/// embedding): opening or previewing a mail whose RTF attachment
+/// embeds an OLE preview object
+/// (`\object\objemb{\*\objclass Word.Document.8}{\*\objdata …}`)
+/// pointed at `\\attacker.example\share` made Office render remote
+/// content and leak information (NTLM credentials / host info) with no
+/// click on the object. meli embeds no RTF/OLE previewer, so
+/// [`cve_2018_0950`] maps the issue's equivalent surfaces layer by
+/// layer: the `application/rtf` part parses as an opaque
+/// `ContentType::Other{tag:"application/rtf"}` attachment that only the
+/// explicit `open_mailcap` / `open_attachment` user action can
+/// materialize, the HTML mirror's `file:`/UNC/`<img src>`/`srcset`/CSS
+/// `background:url()`/`@import` family dies in `sanitize` in every
+/// embedding context, and the launch gate refuses the whole
+/// `file:`/`smb:`/UNC/drive-path family while honest
+/// http/https/mailto links stay usable. The recon exposed one real
+/// gap, fixed with this regression: a bare UNC `href` has no WHATWG
+/// scheme, so ammonia's `url_relative = PassThrough` kept it and the
+/// `attribute_filter` trim early-return skipped its `is_safe_url`
+/// re-validation — the sanitized output carried a live
+/// `\\host\share` href that html2text rendered as an outbound link
+/// footnote (the terminal mirror of Office's automatic dereference).
+/// The fix rejects every Windows-path-shaped relative value and
+/// validates `href` before the trim early-return, regression-locked in
+/// `meli/src/mail/view/html_render.rs` together with the corpus here.
+#[cfg(test)]
+#[path = "CVE-2018-0950.rs"]
+mod cve_2018_0950;
+
 /// CVE-2023-23397 (Microsoft Outlook on Windows, CVSS 9.8, CISA KEV,
 /// APT28) zero-click credential-theft regression (issue #21, table 2
 /// of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
