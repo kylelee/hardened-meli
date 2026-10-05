@@ -3604,7 +3604,7 @@ ZHVtbXk=\r\n\
     /// spawns backend jobs. Building the state directly, as
     /// `meli/src/mail/view/tests.rs` does, keeps the test synchronous and
     /// self-contained.
-    fn force_all_entries_loaded(view: &mut ThreadView, context: &mut Context) {
+    fn force_all_entries_loaded(view: &mut ThreadView, context: &Context) {
         let root_hash = Envelope::from_bytes(ROOT_MAIL_BYTES, None)
             .expect("could not parse root test envelope")
             .hash();
@@ -3651,7 +3651,7 @@ ZHVtbXk=\r\n\
     fn export_thread_summary_counts_failures_not_successes() {
         let mut ctx = mock_context();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
-        force_all_entries_loaded(&mut view, &mut ctx);
+        force_all_entries_loaded(&mut view, &ctx);
 
         let tempdir = tempfile::tempdir().expect("could not create tempdir");
         let out_dir = tempdir.path().join("export");
@@ -3706,7 +3706,7 @@ ZHVtbXk=\r\n\
     fn export_thread_summary_all_failures_reports_error() {
         let mut ctx = mock_context();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
-        force_all_entries_loaded(&mut view, &mut ctx);
+        force_all_entries_loaded(&mut view, &ctx);
 
         let tempdir = tempfile::tempdir().expect("could not create tempdir");
         let out_dir = tempdir.path().join("export");
@@ -3754,7 +3754,7 @@ ZHVtbXk=\r\n\
     fn export_thread_summary_partial_failure_reports_counts() {
         let mut ctx = mock_context();
         let mut view = make_two_mail_thread_view(&mut ctx, ThreadViewFocus::None);
-        force_all_entries_loaded(&mut view, &mut ctx);
+        force_all_entries_loaded(&mut view, &ctx);
 
         let tempdir = tempfile::tempdir().expect("could not create tempdir");
         let out_dir = tempdir.path().join("export");
