@@ -2930,3 +2930,35 @@ mod cve_2020_15917;
 #[cfg(test)]
 #[path = "OSC8-pager-hyperlink.rs"]
 mod osc8_pager_hyperlink_sanitization;
+
+/// CVE-2021-31855（KMail / Messagelib ≤ 5.17.0；CVSS 3.1 6.5，CWE-312
+/// 「Cleartext Storage of Sensitive Information」）**删除已解密邮件附件时把
+/// 明文正文回传服务器** regression（issue #103）。KMail 的
+/// `ViewerPrivate::deleteAttachment` 在查看远端（IMAP）存储、已解密的加密
+/// 邮件时，用户删除某个附件会让处理函数把**解密后的 session 明文正文**
+/// 重新组装并写回服务器；能读取服务端存储者因此拿到本应只存在于受害者
+/// 会话内的明文。
+///
+/// meli 的等价面只在 composer：从已存储邮件进入 composer 的唯一入口是
+/// view 的 `edit` 快捷键 → `Composer::edit` → [`Draft::edit`]，附件删除是
+/// `ComposerTabAction::RemoveAttachment` 的
+/// `self.draft.attachments_mut().remove(idx)`，回传是 [`Draft::finalise`] →
+/// `save_draft`/`save_special` → IMAP `APPEND`。对 `multipart/encrypted`，
+/// 解析层的 `body.text()` 为空、`body.attachments()` 是线上部件 raw 的克隆，
+/// 解析层从不解密；解密只发生在 view-filter 层并只构造显示用 `Attachment`，
+/// 绝不进入 `Draft`——所以删除附件后的序列化仍是原样密文。
+///
+/// [`cve_2021_31855`] 用 gpg 2.4.9 离线生成的真实 PGP/MIME 语料（cv25519
+/// 子钥，PKESK v3 + MDC 保护 SEIPD v1，CRC-24 与包形状在测试内重算；解密
+/// inner 实体是 `multipart/mixed`：含 SECRET 标记的 text/plain 正文 + 含
+/// 机密附件名标记的附件 part）分层锁定：L1 解析面 `text()`/`decode_rec()`
+/// 无明文、L2 `Draft::edit` 只装载线上密文 raw、L3 逐个 `remove(idx)` 及删空
+/// 变体的 `finalise()` 输出无任何明文标记且未删 armor 逐字保留、L4 源码扫描
+/// 证明写回面只承载调用方 bytes。结论：**免疫证明，未发现缺口，未触碰生产
+/// 代码**；CVE 的「删除附件 → 明文正文回传」原语在 meli 中不可表达。
+///
+/// [`Draft::edit`]: meli::melib::Draft::edit
+/// [`Draft::finalise`]: meli::melib::Draft::finalise
+#[cfg(test)]
+#[path = "CVE-2021-31855.rs"]
+mod cve_2021_31855;
