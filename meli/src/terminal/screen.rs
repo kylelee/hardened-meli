@@ -558,10 +558,26 @@ impl Screen<Tty> {
                     if current_uri.take().is_some() {
                         crate::terminal::Hyperlink::<str, str, str>::write_end(stdout).unwrap();
                     }
-                    crate::terminal::Hyperlink::with_id(uri, "", &*grid.hyperlinks_table[uri])
-                        .write_start(stdout)
-                        .unwrap();
-                    current_uri = Some(end);
+                    // The URL string here comes from untrusted mail-body
+                    // bytes (see `Pager::scan_links` / linkify), so
+                    // sanitize it before emitting OSC 8: a BEL or ST in
+                    // the URL would otherwise early-terminate the OSC 8
+                    // sequence and turn the trailing bytes (e.g.
+                    // `\x1b[2J`, OSC 52 clipboard write) into live
+                    // terminal directives. CVE-2024-37384 follow-up /
+                    // issue #97. When the sanitized URL is empty
+                    // (`write_start_sanitized` returns `false`), we
+                    // skip setting `current_uri` so the matching OSC 8
+                    // close is not emitted either — the URL was all
+                    // control bytes, so no OSC 8 should ever have
+                    // opened.
+                    let wrote =
+                        crate::terminal::Hyperlink::with_id(uri, "", &*grid.hyperlinks_table[uri])
+                            .write_start_sanitized(stdout)
+                            .unwrap();
+                    if wrote {
+                        current_uri = Some(end);
+                    }
                 } else if current_uri == Some(&(x, y)) {
                     current_uri = None;
                     crate::terminal::Hyperlink::<str, str, str>::write_end(stdout).unwrap();
@@ -2057,5 +2073,108 @@ mod tests {
                 "a control-only title must emit no OSC 2 sequence: {out:?}"
             );
         }
+    }
+
+    /// Pager-extracted URLs (mail body bytes via `linkify`) cannot smuggle
+    /// terminal directives into the OSC 8 payload. Issue #97 (follow-up to
+    /// CVE-2024-37384 / #74): a URL string carrying BEL or ST would
+    /// early-terminate OSC 8, turning the trailing bytes into live
+    /// terminal commands (`ESC[2J`, OSC 52, OSC 0, RIS, ...).
+    ///
+    /// Locks the in-crate contract on
+    /// [`crate::terminal::Hyperlink::write_start_sanitized`]: the
+    /// sanitized URL body contains no control byte; BEL/ST do not split
+    /// the wire sequence; a control-only URL emits no OSC 8 at all; the
+    /// honest URL is byte-identical.
+    #[test]
+    fn osc8_pager_url_cannot_break_out_of_osc8() {
+        // Same wire shape as `Hyperlink::with_id`: `\x1b]8;id=<uri>;<url>\x07`.
+        const OPENER: &[u8] = b"\x1b]8;";
+        // The corpus mirrors what an attacker could put inside an HTML
+        // mail body's URL: BEL truncating OSC 8 with a clear-screen
+        // tail, ST doing the same, C1 CSI, NUL/CR/LF, RIS, bare OSC 0,
+        // bare OSC 52, and the OSC 8 hijack family. `URL_HONEST` is the
+        // byte-identical honest-URL control case.
+        let corpus: &[&str] = &[
+            "https://victim.example/path\x07\x1b[2J\x1b[H\x1b]52;c;aGF4\x07\x1bc",
+            "https://victim.example/path\x1b\\\x1b[?1049h",
+            "https://victim.example/\u{9b}31m",
+            "https://victim.example/path\ntail",
+            "https://victim.example/path\ttail",
+            "https://victim.example/path\0tail",
+            "https://victim.example/path\x1bc",
+            "https://victim.example/path\x1b]0;pwned\x07",
+            "https://victim.example/path\x1bP1;2q\x1b\\",
+            "\x07\x1b[2J",
+            "\x1b\\",
+            // Pure control bytes (sanitize to empty) - must emit NO OSC 8.
+            "\x07\x1b",
+            "\u{1b}\u{07}",
+        ];
+        for url in corpus {
+            let mut out = Vec::<u8>::new();
+            let wrote = crate::terminal::Hyperlink::<str, str, u64>::with_id(&0u64, "", url)
+                .write_start_sanitized(&mut out)
+                .unwrap();
+            let expected_clean: String = url.chars().filter(|c| !c.is_control()).collect();
+            if expected_clean.is_empty() {
+                assert!(!wrote, "a control-only URL must emit no OSC 8: {out:?}");
+                assert!(
+                    out.is_empty(),
+                    "a control-only URL must not write to the sink: {out:?}"
+                );
+                continue;
+            }
+            assert!(wrote, "a non-empty cleaned URL must emit OSC 8: {out:?}");
+            assert!(
+                out.starts_with(OPENER),
+                "OSC 8 opener expected for {url:?}: {out:?}"
+            );
+            assert_eq!(
+                out.iter().filter(|&&b| b == 0x07).count(),
+                1,
+                "exactly one BEL terminator expected for {url:?}: {out:?}"
+            );
+            // Wire shape: \x1b]8;id=0;<body>\x07
+            let body_start = OPENER.len()
+                + out[OPENER.len()..]
+                    .iter()
+                    .position(|&b| b == b';')
+                    .expect("OSC 8 body starts after the second ';'")
+                + 1;
+            let body_end = out.len() - 1;
+            let body =
+                std::str::from_utf8(&out[body_start..body_end]).expect("OSC 8 body is valid UTF-8");
+            assert!(
+                body.chars().all(|c| !c.is_control()),
+                "no control byte may survive in the OSC 8 body for {url:?}: {body:?}"
+            );
+            assert_eq!(
+                body, expected_clean,
+                "the OSC 8 body must equal the URL with controls removed for {url:?}"
+            );
+        }
+
+        // Honest URL is byte-identical: `\x1b]8;id=0;https://victim.example/path\x07`.
+        let mut out = Vec::<u8>::new();
+        crate::terminal::Hyperlink::<str, str, u64>::with_id(
+            &0u64,
+            "",
+            "https://victim.example/path",
+        )
+        .write_start_sanitized(&mut out)
+        .unwrap();
+        assert_eq!(
+            out, b"\x1b]8;id=0;https://victim.example/path\x07",
+            "honest URL must be emitted byte-identical: {out:?}"
+        );
+
+        // Empty URL: sanitize yields empty, so no OSC 8 is emitted.
+        let mut out = Vec::<u8>::new();
+        let wrote = crate::terminal::Hyperlink::<str, str, u64>::with_id(&0u64, "", "")
+            .write_start_sanitized(&mut out)
+            .unwrap();
+        assert!(!wrote, "empty URL must emit no OSC 8: {out:?}");
+        assert!(out.is_empty(), "empty URL must not write: {out:?}");
     }
 }

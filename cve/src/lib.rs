@@ -2837,3 +2837,33 @@ mod cve_2009_3766;
 #[cfg(test)]
 #[path = "CVE-2020-15917.rs"]
 mod cve_2020_15917;
+
+/// Pager OSC 8 hyperlink URL sanitization regression (issue #97,
+/// follow-up to CVE-2024-37384 / issue #74): the pager renders text
+/// mail bodies and any URL it `linkify`-extracts becomes the OSC 8
+/// payload via `Screen::draw_horizontal_segment`. Previously the URL
+/// was interpolated **raw** into `\x1b]8;...;{url}\x07`, so a mail
+/// body URL containing BEL/ST would early-terminate the OSC 8
+/// sequence and turn the trailing bytes into live terminal commands
+/// (`ESC[2J`, OSC 52 clipboard write, RIS, ...). The fix mirrors the
+/// `window_title` fix one-for-one: route the URL through
+/// [`sanitize_osc_payload`] (strips all `char::is_control` - C0/DEL/C1)
+/// before interpolating it; when the sanitized URL is empty, emit no
+/// OSC 8 at all. The link **text** still renders - the pager uses the
+/// link text regardless - so the visual layout is unchanged; only the
+/// OSC 8 control sequence is sanitized.
+///
+/// [`osc8_pager_hyperlink_sanitization`] drives the corpus through
+/// the production `Hyperlink::write_start_sanitized` path and
+/// through the production `Screen::<Tty>::draw_horizontal_segment`
+/// emitter: every URL with control bytes produces an OSC 8 with a
+/// body that is the URL minus its control bytes (and exactly one BEL
+/// terminator); a control-only URL emits no OSC 8 at all; an honest
+/// URL is byte-identical to the unsanitized path. Fix in
+/// [`crate::cve_2024_37384`] (issue #74) for the configuration-side
+/// precedent.
+///
+/// [`sanitize_osc_payload`]: meli::terminal::sanitize_osc_payload
+#[cfg(test)]
+#[path = "OSC8-pager-hyperlink.rs"]
+mod osc8_pager_hyperlink_sanitization;
