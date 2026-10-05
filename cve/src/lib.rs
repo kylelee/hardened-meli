@@ -2962,3 +2962,20 @@ mod osc8_pager_hyperlink_sanitization;
 #[cfg(test)]
 #[path = "CVE-2021-31855.rs"]
 mod cve_2021_31855;
+
+/// CVE-2019-10732（KMail ≤ 5.2.3 解密预言机/回复泄露；issue #104）回归：
+/// [`cve_2019_10732`] 用嵌藏 PGP/MIME 密文的 `multipart/mixed` 载体（复用
+/// issue #103 的抛弃子钥语料充当「窃得的密文」）攻击 meli 的两个回复面：
+/// melib 的 [`Draft::new_reply`]→[`Attachment::decode_rec`]（曾把整个加密容器
+/// 的 wire 密文灌进引用，已修复为加密子树贡献空）与 meli UI 的
+/// `EnvelopeView::body_text` 回复引用（view-filter 曾把嵌藏加密部件**自动解密
+/// 出的明文**放进引用——CVE 的解密预言机原语在 meli 中可表达，已修复为
+/// decrypt-origin 子树渲染可读、拒入回复镜像；端到端回归在
+/// `meli/src/mail/view/tests.rs`）。断言引用与「不含密文的普通 multipart
+/// 邮件」逐字一致、无密文字节、无解密明文标记。
+///
+/// [`Draft::new_reply`]: meli::melib::Draft::new_reply
+/// [`Attachment::decode_rec`]: meli::melib::email::Attachment::decode_rec
+#[cfg(test)]
+#[path = "CVE-2019-10732.rs"]
+mod cve_2019_10732;

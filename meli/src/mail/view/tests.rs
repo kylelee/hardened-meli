@@ -3248,7 +3248,9 @@ fn save_whole_mail_to_dir_sanitizes_traversal_message_id() {
     );
     let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
     assert!(
-        replies.iter().any(|ev| matches!(ev, UIEvent::Notification { body, .. }
+        replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Notification { body, .. }
             if body.contains("Saved at"))),
         "a success notification must report the save, got {replies:?}"
     );
@@ -3270,7 +3272,10 @@ fn save_whole_mail_to_dir_sanitizes_traversal_message_id() {
 const STRUCTURAL_GAP_CORPUS: &[(&str, &[u8])] = &[
     ("SEPARATOR_ONLY_CRLF", b"\r\n\r\n"),
     ("SEPARATOR_ONLY_LF", b"\n\n"),
-    ("BODY_ONLY", b"no header block\r\nno separator\r\njust body bytes\r\n"),
+    (
+        "BODY_ONLY",
+        b"no header block\r\nno separator\r\njust body bytes\r\n",
+    ),
     // The issue's canonical attack shape: no From, no Message-ID, no
     // Content-Type, empty body.
     (
@@ -3418,7 +3423,10 @@ fn missing_structural_fields_mail_renders_degraded_in_envelope_view() {
         // block must degrade to a bounded render, not a crash.
         for (cols, rows) in [(8usize, 4usize), (2, 1)] {
             let mut screen = Screen::<Virtual>::new(theme_default);
-            assert!(screen.resize(cols, rows), "{name}: ({cols}x{rows}) must resize");
+            assert!(
+                screen.resize(cols, rows),
+                "{name}: ({cols}x{rows}) must resize"
+            );
             let area = screen.area();
             view.draw(screen.grid_mut(), area, &mut ctx);
         }
@@ -3715,7 +3723,10 @@ fn partial_signature_open_scopes_signed_marker_to_signed_part() {
         2,
         "the signed wrapper covers exactly the content part and the signature part"
     );
-    let AttachmentDisplay::InlineText { text: signed_text, .. } = &signed_display[0] else {
+    let AttachmentDisplay::InlineText {
+        text: signed_text, ..
+    } = &signed_display[0]
+    else {
         panic!(
             "the signed content part must render as inline text, got {:?}",
             signed_display[0]
@@ -3728,7 +3739,11 @@ fn partial_signature_open_scopes_signed_marker_to_signed_part() {
 
     // Sibling 1: the forged unsigned part — a plain node, outside any
     // `Signed*` wrapper: it can never inherit the verified marker.
-    let AttachmentDisplay::InlineText { text: tampered_text, .. } = &display[1] else {
+    let AttachmentDisplay::InlineText {
+        text: tampered_text,
+        ..
+    } = &display[1]
+    else {
         panic!(
             "the forged sibling must display as a plain inline text, got {:?}",
             display[1]
@@ -4113,4 +4128,251 @@ fn signature_notice_and_header_band_have_no_intersection() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// CVE-2019-10732 (issue #104): 解密预言机 / 回复泄露
+// ---------------------------------------------------------------------------
+
+/// CVE-2019-10732 的机密明文标记：只应存在于「被窃密文解密后的 inner 实体」
+/// 里，绝不允许进入回复引用（`EnvelopeView::body_text` 是 composer 回复引用
+/// 的唯一来源）。
+const CVE_2019_10732_SECRET: &str = "CVE-2019-10732-SECRET-PLAINTEXT-6B1K-9ZQ4";
+
+/// 假 CLI 解密后端返回的「解密后 inner 实体」（text/plain + 机密标记）。
+fn cve_2019_10732_decrypted_inner_entity() -> Vec<u8> {
+    format!(
+        "Content-Type: text/plain; charset=\"utf-8\"\r\n\r\nVictim,\r\n\r\nThe escrow \
+         release code is {CVE_2019_10732_SECRET}. Keep this channel encrypted.\r\n"
+    )
+    .into_bytes()
+}
+
+/// 真实形状的 `OpenPGP` armor（拦截所得密文的样子；内容本身不会被假后端解出，
+/// 假后端只按调用契约返回固定明文）。
+const CVE_2019_10732_STOLEN_ARMOR: &str = "-----BEGIN PGP MESSAGE-----
+
+hF4Dt0u51dIsTtUSAQdA/jcQNgLZ+FeQ83IcPek89mSkPGbAg4XYUpEEQLvSDXYw
+oJcqDlnRMUYqzA9FV4AJ6Bot0qzOoXw32idFPQH1AqZeeeXTl4g9BVcEzIOlRDeZ
+=mYvZ
+-----END PGP MESSAGE-----";
+
+/// 把明文字节编成 CLI 解密后端契约要求的 JSON（`data` 是字节值数组）。
+fn cve_2019_10732_fake_decrypt_json(plain: &[u8]) -> String {
+    let data = plain
+        .iter()
+        .map(|b| b.to_string())
+        .collect::<Vec<String>>()
+        .join(",");
+    format!("{{\"recipients\":[],\"file_name\":null,\"session_key\":null,\"is_mime\":true,\"data\":[{data}]}}")
+}
+
+/// 写一个假 CLI 解密脚本（忽略输入密文，固定返回 [`SECRET`] 明文），返回其
+/// 路径；`_guard` 必须存活到测试结束（持有临时目录）。
+fn cve_2019_10732_fake_decrypt_backend() -> (tempfile::TempDir, crate::conf::pgp::PGPBackendChoice)
+{
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir for the fake decrypt backend");
+    let script = dir.path().join("fake_decrypt.sh");
+    // JSON 只含双引号，单引号包裹即安全。
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s' '{}'\n",
+            cve_2019_10732_fake_decrypt_json(&cve_2019_10732_decrypted_inner_entity())
+        ),
+    )
+    .expect("write the fake decrypt script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod +x the fake decrypt script");
+    let cli = crate::conf::pgp::PGPBackendCLI {
+        decrypt_command: script.display().to_string(),
+        ..Default::default()
+    };
+    (dir, crate::conf::pgp::PGPBackendChoice::CLI(cli))
+}
+
+/// CVE-2019-10732 载体 A（issue 指定形状）：`multipart/mixed` 第一部件是
+/// 无害 text/plain，第二部件是被隐藏的 `multipart/encrypted`（PGP/MIME）。
+fn cve_2019_10732_carrier_a() -> Vec<u8> {
+    format!(
+        "From: Mallory <mallory@attacker.example>\r\n\
+         To: Victim <victim@example.org>\r\n\
+         Subject: lunch Friday?\r\n\
+         Date: Fri, 3 Oct 2026 10:00:00 +0200\r\n\
+         Message-ID: <bait-a-1@attacker.example>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"=_10732_outer\"\r\n\r\n\
+         --=_10732_outer\r\n\
+         Content-Type: text/plain; charset=\"utf-8\"\r\n\r\n\
+         Hey, 12:30 at the usual place?\r\n\
+         --=_10732_outer\r\n\
+         Content-Type: multipart/encrypted; \
+         protocol=\"application/pgp-encrypted\"; boundary=\"=_10732_inner\"\r\n\r\n\
+         --=_10732_inner\r\n\
+         Content-Type: application/pgp-encrypted\r\n\r\n\
+         Version: 1\r\n\
+         --=_10732_inner\r\n\
+         Content-Type: application/octet-stream; name=\"stolen.asc\"\r\n\
+         Content-Disposition: inline; filename=\"stolen.asc\"\r\n\
+         Content-Transfer-Encoding: 7bit\r\n\r\n\
+         {}\r\n\
+         --=_10732_inner--\r\n\
+         --=_10732_outer--\r\n",
+        CVE_2019_10732_STOLEN_ARMOR.replace('\n', "\r\n")
+    )
+    .into_bytes()
+}
+
+/// CVE-2019-10732 载体 B（KMail 原始内联变体）：`multipart/mixed` 的第二个
+/// inline text/plain 部件整个是一段 PGP armor（meli 的内联 armor 自动解密面）。
+fn cve_2019_10732_carrier_b() -> Vec<u8> {
+    format!(
+        "From: Mallory <mallory@attacker.example>\r\n\
+         To: Victim <victim@example.org>\r\n\
+         Subject: lunch Friday?\r\n\
+         Date: Fri, 3 Oct 2026 10:00:00 +0200\r\n\
+         Message-ID: <bait-b-1@attacker.example>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"=_10732_b\"\r\n\r\n\
+         --=_10732_b\r\n\
+         Content-Type: text/plain; charset=\"utf-8\"\r\n\r\n\
+         Hey, 12:30 at the usual place?\r\n\
+         --=_10732_b\r\n\
+         Content-Type: text/plain; charset=\"utf-8\"\r\n\
+         Content-Disposition: inline\r\n\r\n\
+         {}\r\n\
+         --=_10732_b--\r\n",
+        CVE_2019_10732_STOLEN_ARMOR.replace('\n', "\r\n")
+    )
+    .into_bytes()
+}
+
+/// 合法对照：真正的顶级 `multipart/encrypted` 邮件（发件人自己加密给受害者，
+/// 读什么引用什么是对称 UX，不属于本 CVE 的攻击面）。
+fn cve_2019_10732_legit_encrypted() -> Vec<u8> {
+    format!(
+        "From: Alexandra <cfo@example-capital.example>\r\n\
+         To: Victim <victim@example.org>\r\n\
+         Subject: Confidential: escrow\r\n\
+         Date: Fri, 3 Oct 2026 09:12:00 +0200\r\n\
+         Message-ID: <legit-enc-1@example-capital.example>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/encrypted; \
+         protocol=\"application/pgp-encrypted\"; boundary=\"=_10732_l\"\r\n\r\n\
+         --=_10732_l\r\n\
+         Content-Type: application/pgp-encrypted\r\n\r\n\
+         Version: 1\r\n\
+         --=_10732_l\r\n\
+         Content-Type: application/octet-stream; name=\"encrypted.asc\"\r\n\
+         Content-Disposition: inline; filename=\"encrypted.asc\"\r\n\
+         Content-Transfer-Encoding: 7bit\r\n\r\n\
+         {}\r\n\
+         --=_10732_l--\r\n",
+        CVE_2019_10732_STOLEN_ARMOR.replace('\n', "\r\n")
+    )
+    .into_bytes()
+}
+
+/// 构造带假解密后端的 `EnvelopeView` 并驱动所有异步 job（解密）到完成、重绘，
+/// 返回 `body_text`（回复引用的唯一来源）。
+fn cve_2019_10732_body_text_after_jobs(bytes: &[u8]) -> (String, EnvelopeView) {
+    let mut ctx = mock_context();
+    let (_guard, backend) = cve_2019_10732_fake_decrypt_backend();
+    let settings = ViewSettings {
+        pgp_backend: backend,
+        ..ViewSettings::default()
+    };
+    let mail = Mail::new(bytes.to_vec(), None).expect("the corpus mail must parse");
+    let mut view = EnvelopeView::new(
+        mail,
+        None,
+        None,
+        Some(settings),
+        ctx.main_loop_handler.clone(),
+    );
+    let theme_default = crate::conf::value(&ctx, "theme_default");
+    let mut screen = Screen::<Virtual>::new(theme_default);
+    assert!(screen.resize(80, 24));
+    {
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, &mut ctx);
+    }
+    // 像真实事件循环一样：收 JobFinished 线程事件，喂给视图，直到没有 Running
+    // 过滤器为止（有界等待）。
+    for _ in 0..64 {
+        if !view.filters.iter().any(cve_2019_10732_has_running_filter) {
+            break;
+        }
+        let mut event = match ctx
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("job executor thread event channel timed out")
+        {
+            crate::types::ThreadEvent::JobFinished(job_id) => {
+                UIEvent::StatusEvent(StatusEvent::JobFinished(job_id))
+            }
+            crate::types::ThreadEvent::UIEvent(ev) => ev,
+            _ => continue,
+        };
+        _ = view.process_event(&mut event, &mut ctx);
+        let area = screen.area();
+        view.draw(screen.grid_mut(), area, &mut ctx);
+    }
+    (view.body_text().to_string(), view)
+}
+
+/// 过滤器树里是否还有 `Running`（未完成）节点。
+fn cve_2019_10732_has_running_filter(f: &ViewFilter) -> bool {
+    match &f.body_text {
+        ViewFilterContent::Running { .. } => true,
+        ViewFilterContent::InlineAttachments { parts } => {
+            parts.iter().any(cve_2019_10732_has_running_filter)
+        }
+        _ => false,
+    }
+}
+
+/// CVE-2019-10732 载体 A：攻击者把窃得的密文藏进 multipart 邮件；受害者打开
+/// 即自动解密，随后回复——引用必须只含无害文本部件，机密明文绝不能进入
+/// `body_text`（回复引用来源），否则构成解密预言机。
+#[test]
+fn cve_2019_10732_reply_quote_excludes_embedded_decrypted_part_carrier_a() {
+    let (body_text, _view) = cve_2019_10732_body_text_after_jobs(&cve_2019_10732_carrier_a());
+    assert!(
+        body_text.contains("12:30 at the usual place?"),
+        "the harmless inline text part must be quoted: {body_text:?}"
+    );
+    assert!(
+        !body_text.contains(CVE_2019_10732_SECRET),
+        "CVE-2019-10732: auto-decrypted embedded plaintext leaked into the reply quote: \
+         {body_text:?}"
+    );
+}
+
+/// CVE-2019-10732 载体 B（内联 armor 变体）同上。
+#[test]
+fn cve_2019_10732_reply_quote_excludes_embedded_decrypted_part_carrier_b() {
+    let (body_text, _view) = cve_2019_10732_body_text_after_jobs(&cve_2019_10732_carrier_b());
+    assert!(
+        body_text.contains("12:30 at the usual place?"),
+        "the harmless inline text part must be quoted: {body_text:?}"
+    );
+    assert!(
+        !body_text.contains(CVE_2019_10732_SECRET),
+        "CVE-2019-10732: auto-decrypted inline-armor plaintext leaked into the reply quote: \
+         {body_text:?}"
+    );
+}
+
+/// 合法对照：顶级加密邮件的解密正文仍进入 `body_text`——受害者回复自己读到
+/// 的加密邮件是标准 MUA UX，修复不得破坏。
+#[test]
+fn cve_2019_10732_top_level_encrypted_mail_reply_quote_keeps_decrypted_body() {
+    let (body_text, _view) = cve_2019_10732_body_text_after_jobs(&cve_2019_10732_legit_encrypted());
+    assert!(
+        body_text.contains(CVE_2019_10732_SECRET),
+        "the root-level decrypted body must stay quotable (legit UX): {body_text:?}"
+    );
 }
