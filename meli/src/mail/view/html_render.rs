@@ -79,6 +79,20 @@ use melib::{Error, Result};
 /// [`is_safe_url`] 单独拦不住；URL 中裸 `url(`/`@import` 属病态形态，丢弃仅损失
 /// 脚注可见性。裸 `background` 不禁——它是普通英文词，含 `url(` 的 `background`
 /// 值已被本规则覆盖。实体编码形（`&#64;import`）经 html5ever 解码后同样命中。
+///
+/// 第五处与 nh3 parity 的**有意偏离**（CVE-2024-45516 / issue #117，Zimbra
+/// Classic UI 存储型 XSS）：保留下来的属性值只要以 ASCII 大小写不敏感方式含
+/// `onerror` 或 `javascript:` 任一子串，整个属性丢弃。Zimbra ZCS Classic UI 的
+/// 清洗器对畸形 `<img>` 内嵌的 JS 处理器/危险 scheme 原料抽取不净，存储型邮件
+/// 可在浏览器上下文里复活成活 `onerror=` / `javascript:` URL；meli 没有 DOM、
+/// 没有 JavaScript 运行时，但 issue 明确断言清洗输出不得含
+/// `<img`/`onerror`/`javascript:`，且下游任何读回属性值再消费的组件都会拿到活
+/// 原料。此处按**裸 token** 判定（不是 `onerror=`），与 #116 的裸 `url(` 同判例；
+/// `href` 一并丢弃，与 42009/42010 同判例：合法 `https:` URL 可把
+/// `javascript:alert(1)` 藏进 path/query 骗过 [`is_safe_url`]。实体编码形
+/// （`&#111;nerror`）经 html5ever 解码后进入 filter，与大小写形一并覆盖。如实
+/// 记录的代价：合法带 `javascript:` scheme 拼写的 URL、或含 `onerror` 字样的
+/// 普通标题会整属性丢弃，anchor 文本与注入的 `rel` 存活——仅损失脚注可见性。
 pub fn sanitize(input: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
@@ -184,6 +198,30 @@ pub fn sanitize(input: &str) -> String {
                 || contains_ascii_ci(trimmed, "url(")
                 || contains_ascii_ci(trimmed, "expression(")
             {
+                return None;
+            }
+            // CVE-2024-45516 / issue #117 (Zimbra Classic UI stored XSS): a
+            // malformed `<img>` whose embedded JavaScript handler survived
+            // Zimbra's sanitizer came back alive in a browser context, so a
+            // stored message executed script on read. meli has no DOM and no
+            // JavaScript runtime, but the issue asserts the sanitized output
+            // must not carry `<img`, `onerror` or `javascript:` at all, and
+            // any downstream consumer that re-reads a retained attribute
+            // value would receive live fuel. Drop the whole attribute when
+            // the decoded value contains the *bare* `onerror` token — not the
+            // `onerror=` assignment, following the same bare-token precedent
+            // as #116's `url(` — or the `javascript:` scheme prefix. This
+            // must cover `href` too, by the same precedent as the `<` and CSS
+            // guards above: a legal `https:` URL can hide
+            // `javascript:alert(1)` in its path or query and still pass
+            // [`is_safe_url`]. Entity-encoded forms (`&#111;nerror`) are
+            // decoded by html5ever before reaching the filter, so they are
+            // covered as well. Documented cost, recorded honestly: a URL
+            // whose text legitimately spells the `javascript:` scheme, or an
+            // ordinary title containing the word `onerror`, loses the whole
+            // attribute — only footnote visibility is lost, the anchor text
+            // and the injected `rel` survive.
+            if contains_ascii_ci(trimmed, "onerror") || contains_ascii_ci(trimmed, "javascript:") {
                 return None;
             }
             if trimmed.len() == value.len() {
@@ -1005,6 +1043,103 @@ mod tests {
         assert!(
             benign.contains(r#"href="mailto:x@e.example""#),
             "benign mailto href dropped: {benign:?}"
+        );
+    }
+
+    /// CVE-2024-45516 / issue #117 (Zimbra Classic UI stored XSS through a
+    /// malformed `<img>`): a retained attribute value carrying a JavaScript
+    /// handler token (`onerror`) or a `javascript:` scheme spelling is live
+    /// fuel for any downstream consumer that re-reads the value into a DOM
+    /// or a URL dispatcher (the Zimbra Classic UI sanitizer failure mode).
+    /// meli has no DOM and no JavaScript runtime, but the issue asserts the
+    /// sanitized output must not carry `<img`/`onerror`/`javascript:` at all,
+    /// so any kept attribute whose value contains one of those bare tokens is
+    /// dropped whole. `href` is covered too — a legal `https:` URL can hide
+    /// `javascript:alert(1)` in its path/query and still pass `is_safe_url`.
+    /// The guard stays narrow: ordinary titles, plain https/mailto links and
+    /// the MDN JavaScript documentation URL (which has no `javascript:`
+    /// colon) survive.
+    #[test]
+    fn sanitize_drops_attribute_values_carrying_xss_handler_tokens() {
+        // a[title] carrying the issue's `onerror=alert(1)` shape is dropped
+        // whole; the anchor text and the injected `rel` survive.
+        assert_eq!(
+            sanitize(r#"<a title="onerror=alert(1)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+        // href query carrying `javascript:` is dropped: `is_safe_url` alone
+        // lets a scheme-prefixed URL through no matter what its path/query
+        // holds.
+        assert_eq!(
+            sanitize(r#"<a href="https://h.example/?q=javascript:alert(1)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+
+        // Every guarded token, every carrier, case-insensitively and after
+        // entity decoding by html5ever.
+        for (label, payload, expected) in [
+            (
+                "title_onerror",
+                r#"<a title="onerror=alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "title_javascript",
+                r#"<a title="javascript:alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "p_lang_onerror",
+                r#"<p lang="onerror=alert(1)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "p_title_entity_onerror",
+                r#"<p title="&#111;nerror=alert(1)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_case_javascript",
+                r#"<a title="JavaScript:alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "href_path_javascript",
+                r#"<a href="https://h.example/javascript:alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+        ] {
+            assert_eq!(sanitize(payload), expected, "{label}");
+        }
+
+        // Benign controls survive unchanged: a normal title, an ordinary
+        // https/mailto link, and the MDN JavaScript documentation URL — which
+        // contains the word "JavaScript" but no `javascript:` scheme colon.
+        assert_eq!(
+            sanitize(r#"<p title="hello world">x</p>"#),
+            r#"<p title="hello world">x</p>"#
+        );
+        let benign = sanitize(
+            r#"<a href="https://ok.example/x" title="docs">https</a> <a href="mailto:x@ok.example">mail</a>"#,
+        );
+        assert!(
+            benign.contains(r#"href="https://ok.example/x""#),
+            "benign https href dropped: {benign:?}"
+        );
+        assert!(
+            benign.contains(r#"title="docs""#),
+            "benign title dropped: {benign:?}"
+        );
+        assert!(
+            benign.contains(r#"href="mailto:x@ok.example""#),
+            "benign mailto href dropped: {benign:?}"
+        );
+        let mdn = sanitize(
+            r#"<a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript">js docs</a>"#,
+        );
+        assert!(
+            mdn.contains(r#"href="https://developer.mozilla.org/en-US/docs/Web/JavaScript""#),
+            "MDN JavaScript documentation URL (no scheme colon) was dropped: {mdn:?}"
         );
     }
 
