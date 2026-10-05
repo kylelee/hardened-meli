@@ -3434,3 +3434,72 @@ mod cve_2016_7966;
 #[cfg(test)]
 #[path = "CVE-2016-7967.rs"]
 mod cve_2016_7967;
+/// CVE-2016-7968（KMail ≥ 5.3.0 的 QWebEngine 查看器；CVSS v3.0 6.5；
+/// NVD / CIRCL）HTML 邮件 JavaScript 执行 regression（Gitea issue #113），
+/// 与同批的 CVE-2016-7966/7967 共享原语但锚点不同：KMail 的 HTML 查看器
+/// 默认启用 JavaScript，并把不可信 HTML 邮件正文直接交给 QWebEngine 渲染
+/// 而不做脚本清洗，于是正文里的 `<script>`、内联事件属性（`<svg onload>`、
+/// `<body onload>`、`<img onerror>`）以及 `href="javascript:…"` 都在查看器里
+/// 执行；`<style>@import` 与 `background:url(...)` 还能无交互触发远程资源
+/// 加载/外传。根因是「把不可信邮件正文交给一个默认开 JS 的网页引擎」。
+///
+/// meli 等价面映射到两处，且都没有 QWebEngine/JS 运行时：meli 是终端
+/// 客户端，**没有 DOM、没有 JS 引擎**（正文进 `CellBuffer`，纯文本永不再被
+/// 当 HTML/JS 解析）——
+///
+/// 1. 内置 HTML 清理管线：`meli/src/mail/view/html_render.rs` 的
+///    [`sanitize`]（ammonia 白名单：`tags` 仅 a/b/blockquote/br/code/em/
+///    h1..h6/hr/i/li/ol/p/pre/strong/table/td/th/tr/ul；`a` 只保留 href/title，
+///    事件属性全部剥离；`url_schemes` 仅 http/https/mailto；
+///    `clean_content_tags` 默认含 `script`/`style`，连内容一起删；
+///    `attribute_filter` 对 href trim 后经 `is_safe_url` 复检）＋ [`render`]
+///    （sanitize → `cap_nesting_depth` → `html2text::config::plain()`，输出
+///    终端纯文本），调用点是 `meli/src/mail/view/filters.rs` 的
+///    `HtmlFilter::Builtin`。脚本/样式元素连内容删除、svg/body/img/iframe/link
+///    整体剥离、`javascript:`/`vbscript:`/`data:` 的 href 全部清空。
+/// 2. 纯文本/链接管线：`meli/src/mail/view/types.rs` 的
+///    [`ViewOptions::convert`]（`ViewOptions::URL` 用 linkify 0.11 扫描链接）
+///    ＋ `meli/src/mail/view/envelope.rs` 的 [`url_scheme`] /
+///    [`is_default_launchable_scheme`]：仅 http/https/mailto 免确认
+///    `launch_url`，其余 scheme 一律弹确认框；链接值只作为单个 argv 参数交给
+///    启动器，无 shell、无 HTML 再解析。
+///
+/// [`cve_2016_7968`] 以五个分层 `#[test]` 锁定：
+///
+/// 1. `sanitize_removes_script_style_and_event_handlers`：公告原形六条逐一
+///    断言——script/style 连内容删除、svg/body/img 整元素删除、
+///    `javascript:` href 被清但文本 `x` 存活；每条结构形语料经 `sanitize`
+///    后无 `<script`/`<svg`/`<style`/`@import`、无活事件属性、无危险 scheme
+///    的活 href，且 `sanitize(sanitize(x)) == sanitize(x)` 不动点；独立拷贝的
+///    INERT_TAG_WHITELIST/INERT_ATTR_WHITELIST 预言机逐标签扫描；良性
+///    https/mailto href 原样存活。
+/// 2. `render_never_emits_live_markup_or_script_execution`：每条结构形语料经
+///    `render` 后不含 `alert(1)`、无 `<script`、无任何标签形构造、无活事件
+///    属性、无 `@import`；纯文本形只是字面终端文本；实体编码形的字面
+///    `<script>…` 字符串被固化为「惰性文本而非活标签」。
+/// 3. `plain_text_pipeline_never_defaults_script_scheme`：每条纯文本形语料跑
+///    真实 `ViewOptions::convert`，每个 Link 值不含 `"`/`<`/`>`、href 插值
+///    机械不可逃逸、`javascript:`/`vbscript:`/`data:` 纯文本行不被提取为链接
+///    且永不 `is_default_launchable_scheme`；良性 https/mailto 仍被提取并
+///    放行；启动门大小写语义单独断言。
+/// 4. `multipart_attack_mail_is_defanged_end_to_end`：完整 RFC 822
+///    `multipart/alternative` 邮件经 `Envelope::from_bytes`/`Attachment`
+///    解析，text/plain 部件走 convert 链、text/html 部件走 sanitize＋render
+///    链（多宽度 40/80/120），断言全部不变量且良性 https/mailto 锚存活。
+/// 5. `combined_corpus_mail_stays_inert`：全部语料交叉拼进一封邮件的两路正文
+///    再跑一遍，防组合差异化攻击。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——meli 没有默认开 JS 的
+/// 网页引擎可执行正文脚本，ammonia 把脚本/样式元素连内容删除、非白名单元素
+/// 整体剥离、事件属性与危险 scheme 的 href 全部清空，html2text 只产生终端
+/// 纯文本，纯文本链里 `javascript:`/`vbscript:`/`data:` 永远通不过启动门。
+///
+/// [`cve_2016_7968`]: self::cve_2016_7968
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`ViewOptions::convert`]: meli::mail::view::ViewOptions::convert
+/// [`url_scheme`]: meli::mail::view::envelope::url_scheme
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+#[cfg(test)]
+#[path = "CVE-2016-7968.rs"]
+mod cve_2016_7968;
