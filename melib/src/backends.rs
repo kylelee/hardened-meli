@@ -726,7 +726,11 @@ impl SpecialUsageMailbox {
             Some(Self::Junk)
         } else if name.eq_ignore_ascii_case("sent") {
             Some(Self::Sent)
-        } else if name.eq_ignore_ascii_case("trash") {
+        } else if name.eq_ignore_ascii_case("trash")
+            || name.eq_ignore_ascii_case("deleted messages")
+            || name.eq_ignore_ascii_case("deleted items")
+            || name.eq_ignore_ascii_case("已删除")
+        {
             Some(Self::Trash)
         } else {
             Some(Self::Normal)
