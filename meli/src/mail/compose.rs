@@ -1226,6 +1226,23 @@ impl Component for Composer {
                     Some(*account_settings!(context[self.account_hash].pgp.auto_sign));
             }
             #[cfg(feature = "gpgme")]
+            if self.pgp_state.encrypt_mail.is_none()
+                && account_settings!(context[self.account_hash].pgp.auto_encrypt).is_true()
+            {
+                // CVE-2014-8878 (issue #120): KMail parsed its "auto
+                // encrypt" preference but silently ignored it, sending
+                // plaintext. Seed the composer's encryption state from
+                // `pgp.auto_encrypt` so the setting actually arms
+                // encryption; if no key can be resolved, `encrypt_filter`
+                // fails closed with "No key was selected for encryption"
+                // and aborts the send. The `is_none` guard keeps an
+                // explicit user choice, and seeding only when the setting
+                // is true leaves the default `None` state untouched.
+                self.pgp_state.encrypt_mail = Some(*account_settings!(
+                    context[self.account_hash].pgp.auto_encrypt
+                ));
+            }
+            #[cfg(feature = "gpgme")]
             {
                 self.pgp_state.encrypt_for_self =
                     *account_settings!(context[self.account_hash].pgp.encrypt_for_self);
@@ -4357,6 +4374,88 @@ exit 0
         assert!(
             !replies_contain_notification_titled(&replies, "Draft not stored"),
             "no encryption was armed, so no draft-not-stored notice belongs in the replies"
+        );
+    }
+
+    /// CVE-2014-8878 regression (issue #120): enabling `pgp.auto_encrypt`
+    /// must arm the composer's encryption state on first draw. `KMail`'s
+    /// equivalent "auto encrypt" preference was parsed but silently
+    /// ignored, so messages went out in plaintext; without this seeding
+    /// meli's setting had exactly the same effect.
+    #[cfg(feature = "gpgme")]
+    #[test]
+    fn auto_encrypt_setting_arms_composer_encryption() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        // No per-account override, so the global setting is the one the
+        // `account_settings!` macro falls back to.
+        ctx.settings.pgp.auto_encrypt = true.into();
+        let mut composer = realized_composer(&mut ctx);
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+
+        assert_eq!(
+            composer.pgp_state.encrypt_mail,
+            Some(ActionFlag::True),
+            "auto_encrypt must arm the composer's encryption state"
+        );
+        // The signing seeding is untouched: signing still defaults off.
+        assert_eq!(
+            composer.pgp_state.sign_mail,
+            Some(ActionFlag::False),
+            "auto_sign must keep its default false"
+        );
+    }
+
+    /// CVE-2014-8878 boundary (issue #120): with the default
+    /// `auto_encrypt = false` the composer's encryption state stays
+    /// unseeded, so the existing behavior is unchanged.
+    #[cfg(feature = "gpgme")]
+    #[test]
+    fn auto_encrypt_defaults_leave_composer_unarmed() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+
+        assert!(
+            composer.pgp_state.encrypt_mail.is_none(),
+            "the default auto_encrypt must not arm encryption"
+        );
+    }
+
+    /// CVE-2014-8878 boundary (issue #120): the seeding is guarded by
+    /// `is_none()`, so an explicit user choice made before the first draw
+    /// (e.g. the `encrypt` shortcut) is never overwritten by the default
+    /// setting.
+    #[cfg(feature = "gpgme")]
+    #[test]
+    fn manual_encrypt_choice_is_not_overridden_by_default_setting() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut ctx = Context::new_mock(&tempdir);
+        let mut composer = realized_composer(&mut ctx);
+        composer.pgp_state.encrypt_mail = Some(ActionFlag::True);
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        assert_eq!(
+            composer.pgp_state.encrypt_mail,
+            Some(ActionFlag::True),
+            "an explicit user choice must survive the first draw"
+        );
+
+        // The same holds for an explicit "off" choice: a later draw must
+        // not re-seed the state the user set.
+        composer.pgp_state.encrypt_mail = Some(ActionFlag::False);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        assert_eq!(
+            composer.pgp_state.encrypt_mail,
+            Some(ActionFlag::False),
+            "a user-disabled encryption must not be re-armed by a later draw"
         );
     }
 
