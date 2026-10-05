@@ -2186,6 +2186,38 @@ mod cve_2025_48700;
 #[path = "CVE-2026-73572.rs"]
 mod cve_2026_73572;
 
+/// CVE-2021-29956（Mozilla Thunderbird 78.8.1–78.10.1；CVSS 4.3，CWE-312）**导入
+/// 的 OpenPGP 私钥在未设置主密码时明文写入本地 keystore** regression（issue
+/// #102）。Thunderbird 把用户导入的私钥存进自有 `key4.db`/secring 式 keystore，
+/// 无 primary password 时不加口令保护，任何能读本地文件的攻击者扫描其
+/// profile/数据目录即可原样窃取；投递形态是一封携带
+/// `-----BEGIN PGP PRIVATE KEY BLOCK-----` 的「请导入新私钥」邮件。
+///
+/// meli 等价面映射：meli **没有私有 keystore**——唯一导入 API 是
+/// [`Context::import_key`]（gpgme `gpgme_op_import`），私钥直接进 GnuPG 自己的
+/// `GNUPGHOME/private-keys-v1.d/`，由 gpg-agent 掌管口令保护域；meli 生产代码
+/// 没有任何 `import_key` 调用点（调用点只在 `#[cfg(test)]` 测试里），没有把
+/// `application/pgp-keys` 解释成导入动作的分发（它落 `ContentType::Other` 不透明
+/// 载荷），gpgme bindings 无 `gpgme_op_export`，[`Key`] 仅有
+/// `secret(&self) -> bool` 布尔访问器、绝不返回字节。
+///
+/// [`cve_2021_29956`] 分层锁定为**免疫证明，未发现缺口，无需改动生产代码**：
+/// L1 用 `Envelope::from_bytes` + 附件树解析攻击邮件（内联 armor + 真实
+/// `application/pgp-keys` 附件），证明私钥字节只以不透明附件/正文形式可达；L2
+/// 源码扫描证明无导入入口、无导出 API、Key 只有布尔句柄；L3 用真 gpgme 把攻击
+/// 邮件里提取的私钥经唯一导入 API 导入，再递归扫描 scratch `XDG_CONFIG_HOME`/
+/// `XDG_DATA_HOME`/`HOME`/cwd `log`/`<tmp>/meli` 证明私钥特征字节全空，阳性对照
+/// 证明同一 needle 只落在 scratch `GNUPGHOME` 的 gpg-agent 域；L3d 证明 gpgme I/O
+/// 回调只记录事件、不 dump 数据缓冲。草稿面依 CVE-2008-4491 的策略面记录（正文
+/// armor 只能经用户显式动作进入草稿，属用户内容）。
+///
+/// [`Context::import_key`]: meli::melib::gpgme::Context::import_key
+/// [`Key`]: meli::melib::gpgme::Key
+/// [`cve_2021_29956`]: self::cve_2021_29956
+#[cfg(test)]
+#[path = "CVE-2021-29956.rs"]
+mod cve_2021_29956;
+
 /// CVE-2021-30858（WebKit；NVD 未分配 CVSS 分数；Apple 2021-09-13 紧急修复
 /// iOS 14.8 / iPadOS 14.8 / Safari 14.1.2 等，WebKitGTK 同步收录 WSA-2021-0020；
 /// Apple 确认在野利用，匿名研究者报告）**use-after-free → 任意代码执行**
