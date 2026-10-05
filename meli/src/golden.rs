@@ -63,7 +63,8 @@ use crate::{
     conf,
     contacts::list::ContactList,
     mail::listing::{
-        CompactListing, ConversationsListing, Listing, ListingTrait, PlainListing, ThreadListing,
+        CompactListing, ConversationsListing, Listing, ListingFocus, ListingTrait, PlainListing,
+        ThreadListing,
     },
     mail::view::{ThreadView, ThreadViewFocus},
     mail::Composer,
@@ -670,17 +671,13 @@ fn insert_thread_mails(context: &Context, mailbox_hash: MailboxHash) {
 }
 
 /// Hand the keyboard from the launch-time sidebar focus to the mail list
-/// grid without opening an entry. At `Menu` focus the `open_mailbox`
-/// shortcut only adopts the sidebar-selected mailbox and moves the focus
-/// to the grid; the entry is opened by the separate `open_entry` shortcut
-/// once the grid owns the keyboard.
+/// grid. No key performs this transition anymore (the sidebar's
+/// open-mailbox shortcut is gone; the pane-chain step `focus_right` also
+/// opens the cursor entry), so the tests place the grid focus directly.
 fn focus_mail_list_grid(listing: &mut Listing, context: &mut Context) {
-    context.settings.shortcuts.listing.open_mailbox = Key::Char('\n').into();
-    let mut event = UIEvent::Input(Key::Char('\n'));
-    assert!(
-        listing.process_event(&mut event, context),
-        "open_mailbox must move the focus from the sidebar to the grid"
-    );
+    listing.focus = ListingFocus::MailList;
+    listing.component.set_grid_has_keyboard(true);
+    listing.set_dirty(true);
     pump_replies(listing, context);
 }
 
@@ -690,9 +687,8 @@ fn focus_mail_list_grid(listing: &mut Listing, context: &mut Context) {
 /// redraw.
 ///
 /// A fresh `Listing` now starts with the keyboard on the visible sidebar,
-/// so the grid focus is established first — otherwise the `open_entry`
-/// key would be consumed by the sidebar's `open_mailbox` arm and only
-/// switch mailboxes.
+/// so the grid focus is established first (directly) and then the pinned
+/// `open_entry` shortcut is driven.
 fn open_entry_under_cursor(
     listing: &mut Listing,
     context: &mut Context,
@@ -1194,8 +1190,8 @@ fn golden_shortcuts_help_overlay() {
 
     let mut listing = Listing::new(&mut ctx);
     // The help overlay lists the focused pane's shortcuts; a fresh listing
-    // now starts on the sidebar, whose `open_mailbox` binding would change
-    // the rendered text. Keep the original grid-focused capture.
+    // now starts on the sidebar, whose shortcut list differs from the grid's.
+    // Keep the original grid-focused capture.
     focus_mail_list_grid(&mut listing, &mut ctx);
     let mut tabbed = Tabbed::new(
         vec![Box::new(listing), Box::new(ContactList::new(&ctx))],
