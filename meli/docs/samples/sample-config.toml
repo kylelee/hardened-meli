@@ -207,6 +207,8 @@
 ##format = "jmap"
 ##send_mail = 'server_submission'
 ##server_url="http://localhost:8080"
+## Remote servers must use `https://`; plaintext `http` is only allowed for
+## loopback hosts such as localhost or 127.0.0.1 (CVE-2024-50624 hardening).
 ##server_username="user@hostname.local"
 ##server_password="changeme"
 ##listing.index_style = "Conversations"
