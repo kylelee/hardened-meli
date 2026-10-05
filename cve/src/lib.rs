@@ -3503,3 +3503,43 @@ mod cve_2016_7967;
 #[cfg(test)]
 #[path = "CVE-2016-7968.rs"]
 mod cve_2016_7968;
+
+/// CVE-2022-29360（RainLoop ≤ 1.6.0 webmail；CVSS v3.1 5.4；NVD / CIRCL）
+/// 邮件正文 XSS regression（Gitea issue #114），调研报告表 3「网页嵌入与
+/// HTML/链接渲染」批次成员：Email Viewer 渲染特制邮件时清洗不足，注入脚本
+/// 在收件人会话中执行——白名单漏放事件属性（`<p onclick>`）、`data:`/
+/// `javascript:` scheme 的 URL（base64 `<script>alert(1)</script>` 载荷）与
+/// `form`/`input`/`marquee` 这类可交互/自动触发元素。
+///
+/// meli 等价面映射（终端客户端无 webmail/浏览器/JS 运行时，按 issue 要求做
+/// 等价面免疫证明）：
+///
+/// 1. 内置 HTML 清理管线：`meli/src/mail/view/html_render.rs` 的
+///    [`sanitize`]（ammonia 白名单）＋ [`render`]（sanitize → 嵌套上限 →
+///    html2text 纯文本），调用点 `meli/src/mail/view/filters.rs` 的
+///    `HtmlFilter::Builtin`。`p`/`a` 在标签白名单内但事件属性全被剥离；
+///    `data:`/`javascript:`/`vbscript:` 及其大小写/零宽填充/实体编码变体
+///    的 href 全部清空（base64 载荷随属性删除）；`form`/`input`/`marquee`
+///    等非白名单元素整元素删除（含 `action`/`formaction`/`autofocus`/
+///    `onfocus`，`isindex` 解析期模板展开产物同样死）。
+/// 2. 纯文本/链接管线：`ViewOptions::convert`（linkify 0.11，`data:` 行
+///    不被提取）＋ [`url_scheme`] / [`is_default_launchable_scheme`] 启动门：
+///    仅 http/https/mailto 免确认，其余 scheme 一律弹用户确认框。
+///
+/// [`cve_2022_29360`] 以五个分层 `#[test]` 锁定（详见模块文档）：sanitize
+/// 平面（公告四条黄金等值 ＋ 预言机不动点）、render 纯文本不变量（无
+/// `alert(`/`PHNjcmlwdD`）、纯文本管线＋启动门、端到端邮件、组合文档。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——meli 没有可执行正文
+/// 脚本的网页渲染上下文；非白名单元素整体剥离、事件属性与危险 scheme 的
+/// href 全部清空，html2text 只产生终端纯文本，纯文本链里 `data:`/
+/// `javascript:` 永远通不过 [`is_default_launchable_scheme`]。
+///
+/// [`cve_2022_29360`]: self::cve_2022_29360
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`url_scheme`]: meli::mail::view::envelope::url_scheme
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+#[cfg(test)]
+#[path = "CVE-2022-29360.rs"]
+mod cve_2022_29360;
