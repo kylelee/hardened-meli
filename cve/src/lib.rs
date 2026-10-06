@@ -5940,3 +5940,55 @@ mod cve_2016_10727;
 #[cfg(test)]
 #[path = "CVE-2020-28896.rs"]
 mod cve_2020_28896;
+
+/// CVE-2020-15047（Trojitá < 0.8，`MSA/SMTP.cpp`，CVSS 3.1 5.9，NVD / CWE-295；
+/// issue #176，表 5 协议/加密信任边界 of `SECURITY-CVE-RESEARCH.zh-CN.md`）
+/// **发信 SMTP 连接忽略全部证书校验错误** regression：Trojitá 的 SMTP 代码自
+/// 2009 年（commit 0083eea5ed）挂着一个 FIXME，把连接的全部 TLS 错误静默忽略，
+/// 中间人换一张自签证书即可冒充发信服务器收取用户名/密码与外发邮件内容
+///（KDE bug 423453：IMAP 侧换证书会告警，SMTP 侧不会；修复 commit 77ddd5d44f
+/// 《SMTP: Do not ignore TLS errors》）。
+///
+/// **meli 等价面映射（issue #176 侦察结论）**：`melib/src/smtp.rs`
+/// `SmtpConnection::new_connection` 用默认 `TlsConnector::builder()`（全链 +
+/// 主机名校验），唯一放宽分支被 `danger_accept_invalid_certs` 门控——而该开关
+/// 被 `SmtpServerConf::validate`→`conf::reject_danger_accept_invalid_certs`
+///（CVE-2009-3765 加固）在启动阶段拒绝（`ErrorKind::Configuration`），
+/// `meli/src/conf.rs` 两处 `smtp_conf.validate()` 覆盖启动与 `smtp-shell` 全部
+/// 入口；握手失败经 `From<native_tls::Error>`/`From<HandshakeError>` 映射为
+/// `ErrorKind::Network(NetworkErrorKind::InvalidTLSConnection)` 中止连接，
+/// `AUTH LOGIN/PLAIN/XOAUTH2` 严格晚于 `Connection::new_tls`，`smtp.rs` 全文
+/// 无 FIXME/TODO，无 `danger_accept_invalid_hostnames`。
+///
+/// [`cve_2020_15047`] 分层锁定（详见模块内注释）：L0 真实 openssl 证书语料
+///（受信根 + 中间 CA + 正确叶 + 四张攻击叶：自签/主机名不匹配/过期/链不完整，
+/// 只内嵌证书 PEM 绝不内嵌私钥）与逐字 `openssl verify` 转录（四类攻击各自
+/// 命中 error 18/62/10/20）；L1 从 DER 事实推导三维判定（链/名/有效期），复刻
+/// Trojitá「忽略全部 TLS 错误照常 AUTH」的 FIXME 分支证明四类攻击全部泄露哨兵
+/// 凭据，meli 语义四类全拒仅正确叶放行；L2 真实决策面——`SmtpServerConf::
+/// validate` 对三个 TLS 变体危险开关一律 `ErrorKind::Configuration` 拒绝、
+/// `FileSettings::validate_string`（二进制启动同一入口）对 `tls`/`starttls`
+/// 的 `send_mail` 危险配置拒绝启动；L3 四个真实 loopback 敌意服务器场景
+///（隐式 TLS 端口被明文 SMTP 招牌应答 / 垃圾字节 / 沉默断连 / STARTTLS 的
+/// ClientHello 之后继续说明文行）断言客户端确实发出 ClientHello、`new_connection`
+/// 以 `InvalidTLSConnection` fail-closed、明文 `EHLO`/`AUTH`/`MAIL FROM` 与
+/// 哨兵凭据（明文及 base64 甲）零出门；L4 源码锚点锁定 builder→门控分支→
+/// `connector.connect(&_path, socket)` 形状、AUTH 晚于 TLS 流、两处启动校验、
+/// TLS 错误映射与全仓无主机名旁路。
+///
+/// 与近亲划界：CVE-2009-3765（issue #88，mutt）是名字**比较**缺陷，其建立的
+/// `danger_accept_invalid_certs` 启动拒绝正是封死本 CVE 决策面的门（本文件
+/// L2/L4 从 SMTP-CVE 角度有意复锁）；CVE-2021-29969（issue #173）是握手前
+/// **响应注入**（缓冲生命周期）；CVE-2016-10727（evolution-data-server）是
+/// STARTTLS 被拒后的明文回退决策；CVE-2020-15954（issue #122）是 TLS 模式
+/// 分类；CVE-2020-28896（issue #175）是非法 IMAP greeting。marker 域名
+/// `trojita15047.example` 与兄弟文件逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——合法配置宇宙里唯一的
+/// 校验放宽开关在启动即被拒，默认连接器全链+主机名校验，任何握手失败都在
+/// 第一个凭据字节出门之前以 `InvalidTLSConnection` fail-closed。
+///
+/// [`cve_2020_15047`]: self::cve_2020_15047
+#[cfg(test)]
+#[path = "CVE-2020-15047.rs"]
+mod cve_2020_15047;
