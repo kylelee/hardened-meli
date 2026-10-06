@@ -3974,3 +3974,33 @@ mod cve_2024_50624;
 #[cfg(test)]
 #[path = "CVE-2018-12020.rs"]
 mod cve_2018_12020;
+
+/// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
+/// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
+/// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
+/// 限制 `<meta http-equiv="refresh" content="0;url=http://attacker/">` 值的
+/// 处理，KMail **即使设置了「禁用 HTML 邮件访问远程服务器」**仍会打开/抓取
+/// 远程网页，攻击者据此获知收件人的阅读行为、阅读时刻与出口 IP（KDE 修复
+/// commit `34765909cdf8e55402a8567b48fb288839c61612`）。
+///
+/// 语料内嵌全部攻击形态：四个 REFRESH 变体（基本 / 延时 https 带收件人标识
+/// / 大小写+无引号 / 完整 `html`-`head` 骨架）、issue 点名的图片与 CSS 形态
+/// （`<img src>`、`<a>` 包裹 `<img>`、内联 CSS `background:url()`、
+/// `@import url()`、`<video poster>`）以及 REFRESH 与像素的组合。
+///
+/// [`cve_2018_19516`] 分层锁定（详见模块文档）：T1 逐向量断言 `sanitize`
+/// 输出不含 `meta`/`img`/`src`/`url(`/`@import`/`http-equiv`/`refresh`/
+/// 攻击者主机，且为惰性白名单固定点；T2 证明 table/blockquote/pre/html/
+/// head/body/注释等任何嵌入上下文都放松不了剥离；T3 完整 RFC 822 邮件经
+/// `Envelope::from_bytes` + `render()` 后渲染文本不含 `attacker.example`；
+/// T4 强制 plain 变体逐字惰性显示（可见但不可导航，与 KMail 的抓取/跳转
+/// 截然不同）；T5 是 L0 源码扫描——`meli/src/mail/view.rs` 与
+/// `meli/src/mail/view/` 子树内不存在 `TcpStream`/`UdpSocket`/`reqwest`/
+/// `ureq`/`isahc`/`hyper::`/`"curl"`/`"wget"`/`Client::new` 等网络客户端
+/// 原语，也不存在 `http-equiv`/`http_equiv`（REFRESH 处理器不存在的存在性
+/// 证明）。结论：**结构性免疫，未发现真实缺口**，无需修改生产代码。
+///
+/// [`cve_2018_19516`]: self::cve_2018_19516
+#[cfg(test)]
+#[path = "CVE-2018-19516.rs"]
+mod cve_2018_19516;
