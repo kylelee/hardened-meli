@@ -4336,6 +4336,61 @@ mod cve_2018_14356;
 #[path = "CVE-2018-14357.rs"]
 mod cve_2018_14357;
 
+/// CVE-2018-14358（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8
+/// CRITICAL；CWE-121 栈缓冲区溢出）**恶意 IMAP 服务器在 FETCH 响应里返回超大
+/// 的 `RFC822.SIZE` 数值字段，mutt `imap/command.c` 用定长栈缓冲 +
+/// `sscanf`/`atoi` 式数值解析把越界长度写穿栈** 攻击模拟回归（issue #152，
+/// 表 2 病毒/代码执行）。家族描述见 `SECURITY-CVE-RESEARCH.zh-CN.md` 表 2
+/// 第 91 行：mutt/neomutt 2018-07 一次性披露的 15 漏洞之一，同表逐字列出
+/// 「RFC822.SIZE 栈溢出（14358）」，与 14350（INTERNALDATE 栈溢出）并列为
+/// FETCH 响应数值字段 → 定长缓冲溢出子类。
+///
+/// meli 对应面（issue #152 指定）：解析层
+/// `melib/src/imap/protocol_parser.rs::fetch_response`（L685-979）对 FETCH
+/// items 的数值分派——`UID `、`FLAGS (`、`MODSEQ (`、`BODY[] {`/`RFC822 {`
+/// literal、`ENVELOPE (`、`BODYSTRUCTURE `、
+/// `BODY[HEADER.FIELDS (REFERENCES)] `、闭合 `)\r\n`；**`RFC822.SIZE` 不在
+/// 任何已处理分支内**，token 走到 L959 的 else、落到 L964 的
+/// `Got unexpected token while parsing UID FETCH response` 类型化 `Err`。
+/// 与 14358 的「附带长度声明」形态最近的合法分支是 L846 的
+/// `BODY[] {`/`RFC822 {`：它用
+/// `length_data(delimited(tag("{"), map_res(digit1, |s|
+/// usize::from_str(...)), tag("}\r\n")))` 解析 `{N}`，N 超 `usize` / 超剩余
+/// 输入均 fail-closed 且不预分配。meli 也从不请求 `RFC822.SIZE`：FETCH 请求
+/// 项由 `melib/src/imap/email.rs::common_attributes`（L36-58）与
+/// `common_attributes_light`（L66-86）固定为 Uid/Flags/Envelope/BodyExt
+/// REFERENCES/BodyStructure，调用点 `sync/mod.rs:334`、`untagged.rs:267,410`、
+/// `watch.rs:593,601`、`fetch.rs:719,721`、`operations.rs:62` 全经
+/// `CommandBody::fetch`。MSN 用 `saturating_*` 饱和、UID/MODSEQ/literal
+/// 全走 Rust `FromStr` checked 解析，无 `sscanf`/`strtol`/`atoi`。
+///
+/// 语料内嵌 issue 点名的
+/// `* 1 FETCH (RFC822.SIZE 99999999999999999999)`、`RFC822.SIZE -1`、
+/// 无数字、≥1 万位/≥10 万位超长纯数字、定长缓冲宽度 ±1（0/1/2、
+/// 255/256/257、511/512/513、65535/65536/65537）、`usize` 临界
+/// （18446744073709551615 与 +1）、前导零/加号/空格/制表/NUL/CTL、
+/// 与 UID/FLAGS/ENVELOPE/BODY[] literal 混排、`RFC822 {N}`/
+/// `BODY[] {N}` 超声明与纯截断形态。
+///
+/// [`cve_2018_14358`] 分五层锁定（详见模块文档）：L0 规范 FETCH 基线与多响应
+/// 流；L1 全部畸形 `RFC822.SIZE` 经 `fetch_response`/`fetch_responses`/
+/// `untagged_responses` 干净类型化 `Err` 且 `catch_unwind` 无 panic；L2 数值
+/// 有界（MSN 饱和、UID 超范围 `Err`、MODSEQ 超范围 `None`、literal `{N}`
+/// 超 `usize`/超输入均 `Err` 不预分配、宽度 ±1 精确）；L3 用 `std::fs` 递归
+/// 扫描 `melib/src/imap/` 证明无 C 式定长栈缓冲数值解析、FETCH 请求项不含
+/// `Rfc822Size`，且 unknown-token else、`RFC822 {` literal 分支、
+/// `saturating_*`、`usize::from_str`、单点 `raw_fetch_value` 全在位；L4
+/// `raw_fetch_value` 切片在全部语料下不越界。与 CVE-2018-14350（INTERNALDATE
+/// 数值面）、CVE-2018-14356（空 UID）、CVE-2020-9818（截断响应切片钳制）
+/// 划界，标记 `14358` 语料逐字隔离。结论：**结构性免疫，未发现内存安全缺口，
+/// 未修改生产代码**；「合法服务器主动附送未被请求的 `RFC822.SIZE` 被整条拒绝」
+/// 属互操作提示、不在本 CVE 内存安全范围内。
+///
+/// [`cve_2018_14358`]: self::cve_2018_14358
+#[cfg(test)]
+#[path = "CVE-2018-14358.rs"]
+mod cve_2018_14358;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
