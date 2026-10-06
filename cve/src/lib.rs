@@ -5285,3 +5285,61 @@ mod cve_2001_1088;
 #[cfg(test)]
 #[path = "CVE-2020-11880.rs"]
 mod cve_2020_11880;
+
+/// CVE-2020-35730（Roundcube Webmail < 1.2.13、1.3.x < 1.3.16、
+/// 1.4.x < 1.4.10；CVSS v3.1 6.1；CWE-79）**邮件正文存储型 XSS** regression
+/// （Gitea issue #162），调研报告表 3「网页嵌入与 HTML/链接渲染」批次成员：
+/// Roundcube 对邮件正文 HTML 清洗不足，`svg`/`iframe`/`math`/`style`/`img`/
+/// `script` 等危险元素与 `onload`/`onerror` 事件、`data:`/`javascript:` scheme
+/// 在清洗后仍以活形态留在渲染文档里，受害者只需**查看**邮件即触发脚本执行；
+/// Recorded Future 报告其被 UNC1151（与白俄罗斯相关的 APT）用于鱼叉攻击乌克兰
+/// 国家机构，并与 SQL 注入 CVE-2021-44026 组合窃取数据库。缺陷根因是「先白名单、
+/// 后抽取」：事件处理器、危险 scheme 与危险元素原料未被一并抽走。
+///
+/// meli 等价面映射（终端客户端无 DOM/浏览器/JS 运行时，按 issue 要求做等价面
+/// 断言）：
+///
+/// 1. 内置 HTML 清理管线：`meli/src/mail/view/html_render.rs` 的 [`sanitize`]
+///    （ammonia 白名单单次解析 → 序列化）＋ [`render`]（sanitize → 嵌套上限 →
+///    html2text 纯文本），调用点 `meli/src/mail/view/filters.rs` 的
+///    `HtmlFilter::Builtin`。html2text **不执行脚本、不解析 URL scheme、不解析
+///    SVG/MathML 命名空间**，这是 XSS 的第二道防线。可复现的等价物是清洗输出
+///    里的 **XSS 原料**：`svg`/`iframe`/`math`/`style`/`img`/`script` 均不在
+///    标签白名单（整元素连属性删除，实体编码无法复活），但白名单标签保留的
+///    属性值（`a[title]`/`a[href]`、`p[lang]`/`p[title]`）可原样携带
+///    `onload=alert(1)`、`srcdoc=…`、`data:text/html,…`。
+/// 2. **本 issue 检出并修复该缺口**：生产改动给 [`sanitize`] 的
+///    `attribute_filter` 增加了「保留属性值解码后含裸 `onload`/`srcdoc`/`data:`
+///    即整属性丢弃」的第六处 nh3 parity 有意偏离（`href` 在内，与
+///    42009/42010/45516 同判例：合法 `https:` URL 可把
+///    `data:text/html,…`/`onload=alert(1)` 藏进 path/query 骗过 `is_safe_url`）。
+///    issue 原样的四条元素载体本就死在标签白名单，但属性值走私形会在修复前把
+///    `onload`/`srcdoc`/`data:` 原样带进输出。
+///
+/// [`cve_2020_35730`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// sanitize 平面＋独立白名单预言机＋不动点、五种嵌入上下文探测、每条语料单独
+/// 成信的端到端（多宽度 40/80/120）＋组合邮件、缺口回归与惰性文本观测（含
+/// 「可见链接对照」只作为 html2text 脚注文本出现、永不自动抓取）。
+///
+/// 与近亲划界：[`cve_2024_42009`]（issue #115）、[`cve_2024_42010`]（issue #116）
+/// 与 [`cve_2024_45516`]（issue #117）同是 Roundcube/Zimbra **正文清洗** XSS
+/// 家族——42009 锁属性值标记串（标签起始 `<`）、42010 锁 CSS 指令原料、45516 锁
+/// `onerror`/`javascript:`；本文件锁 **`svg`/`iframe`/`math`/`srcdoc`/`data:`
+/// 家族与裸 `onload` token 面**，正是 45516 同族守卫的缺口补全。语料 marker
+/// `rc35730.example` 与近亲逐字隔离。
+///
+/// 结论：**检出并修复属性值 XSS 原料走私缺口，非纯免疫证明**——issue 原样的
+/// 四条元素载体本就干净通过，但保留属性值可把 `onload`/`srcdoc`/`data:` 原样
+/// 带进清洗输出，违反 issue 的「输出不含 `onload`/`data:`」断言；修复后全部
+/// 语料满足不变量。纯文本形（正文散文里的字面 token）是惰性转义文本，用结构化
+/// 预言机区分，不做会误报的裸子串匹配。
+///
+/// [`cve_2020_35730`]: self::cve_2020_35730
+/// [`cve_2024_42009`]: self::cve_2024_42009
+/// [`cve_2024_42010`]: self::cve_2024_42010
+/// [`cve_2024_45516`]: self::cve_2024_45516
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2020-35730.rs"]
+mod cve_2020_35730;
