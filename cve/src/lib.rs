@@ -4228,3 +4228,18 @@ mod cve_2023_35619;
 #[cfg(test)]
 #[path = "CVE-2000-0567.rs"]
 mod cve_2000_0567;
+
+/// CVE-2001-0145（Microsoft Outlook 98/2000、Outlook Express 5.x；CVSS v2
+/// 7.5，缓冲区溢出 → RCE）vCard 生日（BDAY）字段溢出回归（issue #136，表 2
+/// of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution）：畸形/超长
+/// BDAY 触发 Outlook 固定长度拷贝溢出、任意代码执行。meli 是 Safe Rust，
+/// BDAY 值以自有 `String` 原样保存、`bday()` 走 `get_only` exactly-one 规
+/// 则、生产端 `timestamp_from_string` strptime 失败即 `None` 兜底——四层锁
+/// 定（L1 `parse_component`/`read_component`/`Vcard::build` 对 64 KiB–1 MiB
+/// BDAY 形状不 panic/有界/确定/无放大；L2 `bday()` 语义与 `property.rs`
+/// 转义往返；L3 `with_bday`→`write_component` 折行往返；L4
+/// `CardDeserializer`→`Card` 生产路径拒绝语义）结论为 **免疫证明，未发现
+/// 缺口，未改动生产代码**。
+#[cfg(test)]
+#[path = "CVE-2001-0145.rs"]
+mod cve_2001_0145;
