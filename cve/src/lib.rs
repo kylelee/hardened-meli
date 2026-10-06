@@ -5548,3 +5548,58 @@ mod cve_2023_5631;
 #[cfg(test)]
 #[path = "CVE-2024-27443.rs"]
 mod cve_2024_27443;
+
+/// CVE-2025-27915（Zimbra Collaboration Suite 9.0/10.0/10.1 的 Classic UI；
+/// CVSS v3.1 5.4；CWE-79 存储型 XSS；StrikeReady 披露，2025-01 针对巴西军方的
+/// 零日攻击，后列入 CISA KEV）**ICS 附件存储型 XSS** regression（Gitea issue
+/// #167），调研报告表 3「网页嵌入与 HTML/链接渲染」批次成员、Zimbra 在野利用
+/// 群成员：攻击者把 `<details open ontoggle=eval(atob(…))>` 注入 ICS 日历邀请的
+/// `DESCRIPTION`/`SUMMARY`/`ATTENDEE;CN` 字段；HTML5 规定 `ontoggle` 事件在
+/// `open` 属性出现时**无需交互**自动触发，Base64 混淆脚本在已认证的 Classic UI
+/// 会话里窃取登录凭据并建立邮件转发规则。
+///
+/// meli 等价面映射（终端客户端无 webmail/浏览器/JS 运行时/DOM，按 issue #167
+/// 要求按等价面断言）：
+///
+/// 1. vobject 解析面：`melib/src/utils/vobject/icalendar.rs::ICalendar::build`
+///    与 `events()` 消费 `DESCRIPTION`/`SUMMARY`/`ATTENDEE` 时，载荷只是属性
+///    原始文本 `String`；`parser.rs::parse_component` 只做 RFC 5545 折行重组，
+///    不做任何 HTML 解析，递归深度由 `MAX_COMPONENT_NESTING_DEPTH = 64` 封顶。
+/// 2. UI 显示面：`text/calendar` 映射为 `Text::Other { tag: b"calendar" }`，
+///    `is_html()`/`is_text_html()` 均 `false`，只作为不透明文本被查看。
+/// 3. HTML 管线面：`meli/src/mail/view/html_render.rs` 的 [`sanitize`] →
+///    [`render`] 是唯一的 HTML 消费通路，由 `filters.rs::new_html` 在
+///    `att.is_html()` 为真时调用；ICS 字段不进入此管线。
+/// 4. 属性值走私面：`details` 不在标签白名单、`ontoggle` 不在属性白名单，元素
+///    形整元素死亡；但白名单标签保留属性值（`a[title]`/`a[href]`）可原样携带
+///    `ontoggle`/`eval(`/`atob(` 原料进入清洗输出——**本 issue 检出并修复**的缺口。
+///
+/// [`cve_2025_27915`] 以六个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// vobject 解析面（字段只是惰性文本 ＋ 深嵌套干净报错）、HTML 管线面
+/// （sanitize＋render＋白名单预言机）、属性值走私缺口回归、端到端
+/// `multipart/mixed` 日历邀请 ＋ `text/html` 镜像、结构锚点 ＋ 良性对照存活。
+///
+/// 与近亲划界：[`cve_2024_27443`]（issue #166）锁邮件头
+/// `X-Zimbra-Calendar-Intended-For` 派生面；[`cve_2024_45516`]（issue #117）锁
+/// `onerror`/`javascript:` 属性值走私；[`cve_2020_35730`]（issue #162）锁
+/// `onload`/`srcdoc`/`data:` 属性值走私；[`cve_2023_5631`]（issue #164）锁
+/// SVG/MathML 文档类与 HTML5 交互元素（`<details open ontoggle>`）载体。本文件
+/// 锁 **ICS 字段携带面 + vobject 解析路径 + `ontoggle`/`eval(`/`atob(` 属性值
+/// 走私**；语料 marker `zcs27915.example` 与近亲逐字隔离。
+///
+/// 结论：**检出并修复属性值走私缺口，非纯免疫证明**——issue 原样的元素形死在
+/// 标签白名单，但保留属性值可把 `ontoggle`/`eval(`/`atob(` 带进清洗输出（`href`
+/// 的 path/query 亦然），违反 issue 的「sanitize 输出不含 `ontoggle`」断言；第八类
+/// `attribute_filter` 丢弃检查修复后全部语料满足不变量，且因无 DOM/JS 运行时，
+/// XSS 无触发点。
+///
+/// [`cve_2025_27915`]: self::cve_2025_27915
+/// [`cve_2024_27443`]: self::cve_2024_27443
+/// [`cve_2024_45516`]: self::cve_2024_45516
+/// [`cve_2020_35730`]: self::cve_2020_35730
+/// [`cve_2023_5631`]: self::cve_2023_5631
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2025-27915.rs"]
+mod cve_2025_27915;
