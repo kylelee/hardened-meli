@@ -5655,3 +5655,59 @@ mod cve_2025_27915;
 #[cfg(test)]
 #[path = "CVE-2025-30349.rs"]
 mod cve_2025_30349;
+
+/// CVE-2021-44026（Roundcube Webmail < 1.3.17、1.4.x < 1.4.12；CVSS v3.1 9.8
+/// CRITICAL；CWE-89 SQL 注入；Recorded Future 报告在野利用）**`search` /
+/// `search_params` 参数 SQL 注入**攻击模拟回归（Gitea issue #169），调研报告
+/// 表 3「网页嵌入与 HTML/链接渲染」批次成员、与 [`cve_2020_35730`] 在野组合
+/// 窃取数据库的同批 CVE：Roundcube 搜索参数在拼接 SQL 前未参数化，可注入
+/// `DROP`/`DELETE`/`UNION SELECT` 等语句。
+///
+/// meli 是终端邮件客户端，无 webmail、无 HTTP 搜索端点、无远程 SQL 执行面；
+/// issue #169 要求按「等价面免疫证明」断言：**任何以服务端/用户数据为输入的
+/// SQL 是否全部走 rusqlite 参数绑定**。目标面两处：
+///
+/// 1. `melib/src/imap/sync/sqlite3_cache.rs`（IMAP 同步缓存全部 SQL）：
+///    `envelopes`/`mailbox`/`msn_cache`/`invalid_envelopes`/`mailbox_list`
+///    五表 DML 全为带 `?N` 的字面量 + `sqlite3::params![]`；服务端可控的
+///    mailbox 名（`MailboxHash` 整数哈希）、`SelectResponse.flags.1` 标签
+///    （`\0` join 成 BLOB）、`FETCH` 的 subject/message-id/from（`Envelope`
+///    JSON BLOB）、`UID`/`UIDVALIDITY`/`modseq`（类型化整数）都只作为绑定
+///    数据。全文件唯一 `format!` 拼 SQL 是 `migrate()` 里
+///    `ALTER TABLE mailbox ADD COLUMN {column}`，`column` 迭代自硬编码
+///    `const STATUS_COLUMNS: [&str; 3]`。
+/// 2. `meli/src/sqlite3.rs`（UI 侧 sqlite 搜索索引，[`query_to_sql`] 即
+///    Roundcube `search_params` 的等价物）：六个 LIKE 分支都经
+///    [`escape_double_quote`]（只把 `"` 翻倍成 `""`）再包进双引号字符串；
+///    `Flags(v)` 只映射硬编码 flag 名、未知 tag `continue` 跳过；
+///    `sort_field`/`sort_order` 只来自枚举 `match` 的硬编码字面量；
+///    INSERT/DELETE/UPDATE 全 `?N` + `params![]`。关键差别：Roundcube 的
+///    `search_params` 是**远程请求参数**，meli 的 [`query_to_sql`] 输入是
+///    **本地搜索框检索词**（无网络、无脚本运行时，见 [`cve_2020_35730`]）。
+///
+/// [`cve_2021_44026`] 分六层锁定（详见模块文档）：语料结构自检、真实
+/// `Sqlite3Cache`（自管临时目录）对敌意邮箱名/tag/subject 逐轮攻击后
+/// `sqlite_master`/`PRAGMA table_info`/行数不变且载荷原样读回、`ToSql for
+/// Envelope` 的 JSON BLOB 与 `typeof(...)` 整数/`blob` 存储类证明、镜像
+/// `envelopes` 表上 `query_to_sql` 与参数化预言机
+/// `LIKE '%' || ?1 || '%'` 命中集合逐条一致（`' OR 1=1--` 不命中全表）、
+/// `include_str!` 钉住全部绑定锚点与唯一 `format!` 站点、良性对照全链路存活。
+///
+/// 与近亲划界：[`cve_2020_35730`]（issue #162）锁 Roundcube 邮件正文
+/// `onload`/`srcdoc`/`data:` XSS；[`cve_2023_43770`]（issue #163）锁
+/// `text/plain` 链接引用 XSS；本文件锁 **`search`/`search_params` 的 SQL 注入
+/// 等价面（本地 SQLite 搜索索引 + IMAP 同步缓存）**，语料 marker
+/// `rc44026.example` 与兄弟逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——两个目标面全部以
+/// 服务端/用户数据为输入的 SQL 都走参数绑定，唯一字符串拼 SQL 只用硬编码常量
+/// 列名，且 meli 无 webmail/远程 SQL 面。
+///
+/// [`cve_2021_44026`]: self::cve_2021_44026
+/// [`cve_2020_35730`]: self::cve_2020_35730
+/// [`cve_2023_43770`]: self::cve_2023_43770
+/// [`query_to_sql`]: meli::sqlite3::query_to_sql
+/// [`escape_double_quote`]: meli::melib::search::escape_double_quote
+#[cfg(test)]
+#[path = "CVE-2021-44026.rs"]
+mod cve_2021_44026;
