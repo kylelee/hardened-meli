@@ -21,7 +21,7 @@
 
 //! Convert [`crate::search::Query`] into IMAP search criteria.
 
-use std::collections::VecDeque;
+use std::{borrow::Cow, collections::VecDeque};
 
 use crate::{
     search::*,
@@ -110,7 +110,7 @@ macro_rules! space_pad {
 
 /// Marker used internally to remember where a literal's octets belong in the
 /// serialized command. It is a Unicode private-use code point: ASCII values go
-/// through [`escape_double_quote`] (so they only contain ASCII) and non-ASCII
+/// through [`escape_imap_quoted`] (so they only contain ASCII) and non-ASCII
 /// values are emitted as literals, hence the marker can only originate here.
 const LITERAL_MARKER_START: char = '\u{E000}';
 const LITERAL_MARKER_END: char = '\u{E001}';
@@ -123,6 +123,47 @@ enum LiteralPolicy {
     Literal,
     /// Every value stays inline in a quoted string, 8-bit octets included.
     Quoted,
+}
+
+/// Escape `value` for use inside an RFC 3501 quoted string.
+///
+/// RFC 3501 §9 defines a quoted string as `quoted = DQUOTE *QUOTED-CHAR
+/// DQUOTE` with `QUOTED-CHAR = <any TEXT-CHAR except quoted-specials> / "\"
+/// quoted-specials` and `quoted-specials = DQUOTE / "\"`. Inside a quoted
+/// string exactly two octets take a single-backslash escape: `\"` for a
+/// double quote and `\\` for a backslash. Both are bare elsewhere; doubling a
+/// quote (`""`) is *not* a legal escape.
+///
+/// This is the escaping primitive whose absence caused the off-by-one stack
+/// overflow of [CVE-2018-14352] (mutt < 1.10.1, neomutt < 2018-07-16;
+/// `imap/util.c::imap_quote_string`): the C code reserved a fixed-size stack
+/// buffer but paid no space for each `"`/`\` it escaped, so an adversarial
+/// value ran one byte past the buffer. meli builds a heap [`String`] and
+/// reserves the exact worst case up front — `2 * value.len()`, one extra byte
+/// for every input byte that will be escaped — so no escape pair can outgrow
+/// the allocation, including the issue corpus that ends in a backslash.
+///
+/// Returns [`Cow::Borrowed`] when there is nothing to escape, otherwise a
+/// [`Cow::Owned`] rendering produced in a single pass.
+///
+/// [CVE-2018-14352]: https://nvd.nist.gov/vuln/detail/CVE-2018-14352
+#[inline]
+pub fn escape_imap_quoted(value: &str) -> Cow<'_, str> {
+    if !value.contains(['"', '\\']) {
+        return Cow::Borrowed(value);
+    }
+    // Worst case: every input byte is a `"` or `\` and doubles. One
+    // allocation, exact for the whole scan — the CVE's reserved-buffer
+    // arithmetic done right.
+    let mut out = String::with_capacity(value.len() * 2);
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Append a string-valued search condition.
@@ -148,7 +189,7 @@ fn push_search_value(
 ) {
     if (value.is_ascii() && !value.contains(['\r', '\n'])) || policy == LiteralPolicy::Quoted {
         s.push('"');
-        s.extend(escape_double_quote(value).chars());
+        s.extend(escape_imap_quoted(value).chars());
         s.push('"');
     } else {
         s.push('{');
@@ -671,10 +712,12 @@ mod tests {
 
     #[test]
     fn test_imap_query_ascii_embedded_quote_escaped() {
+        // RFC 3501 §9: inside a quoted string only the single-backslash
+        // escapes `\"` and `\\` are legal; a doubled `""` is not.
         let query = Query::Subject("a\"b".to_string());
         assert_eq!(
             query.to_imap_search_segments(),
-            vec![ImapSearchSegment::Text(r#"SUBJECT "a""b""#.to_string())]
+            vec![ImapSearchSegment::Text(r#"SUBJECT "a\"b""#.to_string())]
         );
     }
 
@@ -926,7 +969,7 @@ mod tests {
     }
 
     fn query_segments_ascii_quote() -> Vec<ImapSearchSegment> {
-        vec![ImapSearchSegment::Text(r#"SUBJECT "a""b""#.to_string())]
+        vec![ImapSearchSegment::Text(r#"SUBJECT "a\"b""#.to_string())]
     }
 
     #[test]
