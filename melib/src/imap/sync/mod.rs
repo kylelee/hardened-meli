@@ -1182,9 +1182,17 @@ impl ImapConnection {
             };
             max_live_uid = max_live_uid.max(uid);
             live_msn.insert(uid, f.message_sequence_number);
-            if let Some(env) = f.envelope.as_ref() {
-                live.push((EnvelopeIdentity::of(env), uid));
-            }
+            let Some(env) = f.envelope.as_ref() else {
+                // Without the `ENVELOPE` data item the live message has no
+                // identity, so any cached envelope could be mis-planned as
+                // `Removed` and dropped from the cache. Abort the recovery
+                // instead of guessing.
+                return Err(Error::new(format!(
+                    "IMAP server error: UID FETCH reply for mailbox {mailbox_path} is missing                      the ENVELOPE data item of UID {uid} (RFC 3501 6.4.8 violation)."
+                ))
+                .set_kind(ErrorKind::ProtocolError));
+            };
+            live.push((EnvelopeIdentity::of(env), uid));
         }
 
         // Snapshot the cached envelopes of this mailbox before touching any
@@ -1294,15 +1302,20 @@ impl ImapConnection {
 
         // Rebuild the message-sequence-number index from the FETCH reply
         // order and persist it: the old index still refers to the stale UIDs.
+        // The in-memory map is keyed by 0-based sequence number, matching
+        // every other writer (`load_msn_index`'s `enumerate()` restore,
+        // `insert_envelopes`' `msn - 1` insert and the `Expunge` handler's
+        // `remove(n - 1)`); `store_msn_index` expects the slice element `i`
+        // to hold the UID of 1-based MSN `i + 1`.
         let mut msn_index: BTreeMap<MessageSequenceNumber, UID> = BTreeMap::new();
         for (uid, msn) in &live_msn {
-            msn_index.insert(*msn, *uid);
+            msn_index.insert(msn.saturating_sub(1), *uid);
         }
         let msn_index_vec: Vec<Option<UID>> = {
             let max_msn = msn_index.keys().next_back().copied().unwrap_or(0);
-            let mut v = vec![None; max_msn];
+            let mut v = vec![None; max_msn.saturating_add(1)];
             for (msn, uid) in &msn_index {
-                if let Some(slot) = v.get_mut(msn.saturating_sub(1)) {
+                if let Some(slot) = v.get_mut(*msn) {
                     *slot = Some(*uid);
                 }
             }
