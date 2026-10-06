@@ -1115,6 +1115,35 @@ mod cve_2023_4875;
 #[path = "CVE-2003-0376.rs"]
 mod cve_2003_0376;
 
+/// CVE-2003-0300 (Sylpheed 0.8.11, CVSS v2 5.0, CWE-190) IMAP literal
+/// integer signedness/overflow regression (issue #138, table 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
+/// malicious IMAP server answered with a huge literal size declaration
+/// (`{18446744073709551615}`, `{4294967295}`, `{-1}` …); the client
+/// parsed the declared octet count into a signed/narrow integer, so the
+/// sign error or overflow crashed the client. NVD records the same
+/// class against Outlook Express, mutt and others; Sylpheed 0.8.11 is
+/// the named client, and the row is the Sylpheed twin of Eudora's
+/// CVE-2003-0302 below. [`cve_2003_0300`] locks the equivalent surface
+/// the issue prescribes (`melib/src/imap/protocol_parser.rs`:
+/// [`literal`], the string/astring token grammar, the ENVELOPE field
+/// parsers' literal guard, the `fetch_response()` carriers and the line
+/// splitter's saturating skip) on the issue's verbatim corpus —
+/// `{18446744073709551615}` (usize::MAX at the declaration position),
+/// `{4294967295}` (the 32-bit boundary), `{-1}` (the sign spelling),
+/// `{99999999999999999999}` (twenty digits past usize::MAX) and `{123`
+/// (unterminated) — with the honest `{3}`/`{0}` literals still
+/// round-tripping as the carriers. The result is **immune, no gap
+/// found**: `usize::from_str` plus nom's checked `length_data` refuse
+/// the values before any arithmetic on the declared size, and the one
+/// arithmetic site (the line splitter's continuation skip) saturates
+/// via issue #27's `saturating_add` — a declared number never wraps,
+/// never panics and never steers the cursor back into the buffer; no
+/// production code needed changing.
+#[cfg(test)]
+#[path = "CVE-2003-0300.rs"]
+mod cve_2003_0300;
+
 /// CVE-2003-0302 (Eudora 5.2.1, no CVSS score assigned) IMAP
 /// literal integer-overflow regression (issue #46, table 2 of
 /// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution): a
