@@ -4004,6 +4004,33 @@ mod cve_2024_50624;
 #[path = "CVE-2018-12020.rs"]
 mod cve_2018_12020;
 
+/// CVE-2018-14349（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8，
+/// CWE-120）**恶意 IMAP 服务器无消息文本 NO 响应堆溢出** regression（issue
+/// #143，表 2 病毒/代码执行；mutt/neomutt 2018-07 一次性披露 15 漏洞之
+/// 一）：`imap/command.c` 在 NO 响应缺少消息文本时把错误长度带入响应文本
+/// 缓冲，恶意服务器一条畸形 NO 即可在客户端堆上越界 → 崩溃乃至 RCE。
+///
+/// 语料内嵌 issue 逐字四条（`* NO <64KiB+ 文本>`、`* NO`、
+/// `A1 NO [ALERT] <超长>`、`* NO [<超长 code>]`）加定长缓冲边界 ±1、
+/// Dovecot `secs).` 计时后缀、非法 UTF-8/NUL、`{3}\r\n` 声明形状、
+/// 4 MiB 级超长与经典响应码边界。
+///
+/// [`cve_2018_14349`] 分层锁定（详见模块文档）：解析层逐条 `catch_unwind`
+/// 断言 `No(..)`/干净 `Err` 与逐字节存活；分帧层断言畸形 NO 不破坏
+/// `split_rn` 的逐行一致性；连接循环层断言 `untagged_responses` 对 `* NO`
+/// 全部 `Err`、`RequiredResponses::check` 的 NO 分支可预测，并在本地
+/// hostile IMAP server 上驱动真实 `ImapConnection::read_response` 验证
+/// untagged NO 原样保留、tagged NO 错误文本逐字、期望 NO 成功、缺文本 NO
+/// 结构良好；响应上限层锚定 `MAX_SERVER_RESPONSE_SIZE`/`IO_BUF_SIZE` 并用
+/// 永不结束的 NO 洪流验证 64 MiB 处 `ProtocolViolation`。与
+/// CVE-2001-0473（同一 mutt IMAP 响应面的格式串面）划界：本文件只锁内存
+/// 安全与分帧一致。结论：**免疫证明，未发现缺口，无需修改生产代码**。
+///
+/// [`cve_2018_14349`]: self::cve_2018_14349
+#[cfg(test)]
+#[path = "CVE-2018-14349.rs"]
+mod cve_2018_14349;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
