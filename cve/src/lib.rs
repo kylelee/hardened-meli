@@ -5388,3 +5388,50 @@ mod cve_2020_35730;
 #[cfg(test)]
 #[path = "CVE-2023-43770.rs"]
 mod cve_2023_43770;
+
+/// CVE-2023-5631（Roundcube Webmail 1.4.x < 1.4.15、1.5.x < 1.5.5、1.6.x
+/// < 1.6.4；CVSS v3.1 6.1；CWE-79；CISA KEV 在野利用）**SVG 文档存储型 XSS
+/// 零日** regression（Gitea issue #164），调研报告表 3「网页嵌入与 HTML/
+/// 链接渲染」批次成员、Roundcube 在野利用群成员：Roundcube 的 `rcube_washtml.php`
+/// 清洗器对邮件内构造的 SVG 文档清洗不足，攻击者在一封普通邮件里放入 SVG 文档
+/// 载体（`<svg><animate onbegin=alert(1) attributeName=x dur=1s>`、
+/// `<svg><set attributeName=onmouseover to=alert(1)>`、
+/// `<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>`）以及
+/// HTML5 的 `<details open ontoggle=alert(1)>`「无需交互」载体——后者是 HTML5
+/// 规范里 `ontoggle` 事件在 `open` 属性出现时自动触发的特殊语义，使受害者
+/// **仅查看**邮件即执行脚本。ESET 2023-10 披露 Winter Vivern（与白俄罗斯
+/// 相关的 APT）以该零日攻击欧洲政府实体与智库，2024-02 被 CISA 列入 KEV
+/// 并责令美国联邦机构修复。
+///
+/// meli 是终端客户端（无 DOM、浏览器、JS 运行时、SVG 渲染器），等价面按
+/// issue #164 要求分层映射：邮件 HTML 唯一的消费通路是 [`sanitize`]
+/// （ammonia 白名单：html5ever 恰好一次解析 → 过滤树 → 带转义再序列化）→
+/// [`render`]（sanitize → `cap_nesting_depth` → `html2text::config::plain()`）。
+/// [`cve_2023_5631`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// sanitize 平面＋独立白名单预言机＋不动点、嵌入上下文探测、端到端（每条语料
+/// 单独成信＋组合信）、缺口回归＋惰性观测＋良性对照存活。
+///
+/// 与近亲划界：[`cve_2020_35730`]（issue #162）锁 Roundcube **HTML 正文**的
+/// `svg`/`iframe`/`math`/`srcdoc`/`data:` 家族与裸 `onload` token；本文件锁
+/// **SVG 文档类**——`<svg>`/`<animate>`/`<set>`/`<animateTransform>`/
+/// `<animateMotion>`/`<discard>`/`<mpath>`/`<use>`/`<image>`/`<foreignObject>`/
+/// `<a xlink:href>`/`<script>`/SMIL 动画属性，以及 MathML 集成点
+/// `<math>`/`<mtext>`/`<mglyph>`/`<annotation-xml>`/`<mo>`/`<mi>`/`<mn>`/
+/// `<ms>` 与跨命名空间拼接的 `<table><mglyph><style><img>`，加上 HTML5
+/// 「无需交互」`<details open ontoggle=…>` 载体（issue #164 显式断言
+/// `open`/`ontoggle` 触发条件因元素不在白名单而无法成立）。语料 marker
+/// `rc5631.example` 与近亲逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**——issue 原样链路在 meli 的
+/// 等价面上逐条落空（SVG/MathML 元素家族不在白名单整元素连属性删除、HTML5
+/// 交互家族不在白名单触发条件不成立、SMIL 动画属性随元素销毁、事件属性不在
+/// `tag_attributes` 白名单、启动门拦下 `javascript:`/`data:`/`file:`、html2text
+/// 脚注如实展示真实目标），meli 终端管线没有 DOM/JS 运行时，XSS 无触发点。
+///
+/// [`cve_2023_5631`]: self::cve_2023_5631
+/// [`cve_2020_35730`]: self::cve_2020_35730
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2023-5631.rs"]
+mod cve_2023_5631;
