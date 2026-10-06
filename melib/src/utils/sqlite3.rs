@@ -56,6 +56,18 @@ pub struct DatabaseDescription {
     pub version: u32,
 }
 
+/// Characters that may never appear in a [`DatabaseDescription`] component
+/// that becomes part of a filesystem path.
+///
+/// Both `/` and `\` are directory separators on Windows, while
+/// [`std::path::MAIN_SEPARATOR_STR`] is only `\`; a `/`-carrying identifier
+/// could therefore still escape the configured `directory` through
+/// [`PathBuf::join`] there. An interior NUL byte can never form a valid path
+/// on any platform. Rejecting the whole set unconditionally keeps
+/// [`DatabaseDescription::db_path`] fail-closed regardless of the host
+/// separator (CVE-2018-14362 defense in depth, issue #156).
+const FORBIDDEN_PATH_CHARS: [char; 3] = ['/', '\\', '\0'];
+
 impl DatabaseDescription {
     /// Returns whether the computed database path for this description exist.
     pub fn exists(&self) -> Result<bool> {
@@ -75,15 +87,14 @@ impl DatabaseDescription {
             ("identifier", self.identifier.as_deref().unwrap_or_default()),
             ("application_prefix", self.application_prefix),
         ] {
-            if field_value.contains(std::path::MAIN_SEPARATOR_STR) {
+            if field_value.contains(FORBIDDEN_PATH_CHARS) {
                 return Err(Error::new(format!(
-                    "Database description for `{}{}{}` field {} cannot contain current platform's \
-                     path separator {}. Got: {}.",
+                    "Database description for `{}{}{}` field {} cannot contain path separators \
+                     (`/`, `\\`) or NUL. Got: {}.",
                     self.identifier.as_deref().unwrap_or_default(),
                     if self.identifier.is_none() { "" } else { ":" },
                     self.name,
                     field_name,
-                    std::path::MAIN_SEPARATOR_STR,
                     field_value,
                 ))
                 .set_kind(ErrorKind::ValueError));
@@ -234,6 +245,98 @@ impl FromSql for Envelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CVE-2018-14362 (issue #156): `db_path` is the one place a
+    /// `DatabaseDescription` string becomes a filesystem path, so every
+    /// path separator (`/` and `\` on every platform) and NUL must be
+    /// rejected unconditionally, with no file created.
+    #[test]
+    fn test_db_path_rejects_path_separators_and_nul() {
+        fn desc(
+            name: &'static str,
+            identifier: Option<Cow<'static, str>>,
+            application_prefix: &'static str,
+            directory: &Path,
+        ) -> DatabaseDescription {
+            DatabaseDescription {
+                name,
+                identifier,
+                application_prefix,
+                directory: Some(directory.to_path_buf().into()),
+                init_script: None,
+                version: 1,
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let legal = desc(
+            "header_cache.db",
+            Some("cve-14362".into()),
+            "meli",
+            dir.path(),
+        );
+        assert_eq!(
+            legal.db_path().unwrap(),
+            dir.path().join("cve-14362_header_cache.db"),
+            "honest descriptions must still compute their path"
+        );
+
+        let cases = [
+            ("name", desc("../evil", None, "meli", dir.path())),
+            ("name", desc("a/b", None, "meli", dir.path())),
+            ("name", desc("a\\b", None, "meli", dir.path())),
+            ("name", desc("a\0b", None, "meli", dir.path())),
+            (
+                "identifier",
+                desc(
+                    "header_cache.db",
+                    Some("../evil".into()),
+                    "meli",
+                    dir.path(),
+                ),
+            ),
+            (
+                "identifier",
+                desc("header_cache.db", Some("a/b".into()), "meli", dir.path()),
+            ),
+            (
+                "identifier",
+                desc("header_cache.db", Some("a\\b".into()), "meli", dir.path()),
+            ),
+            (
+                "identifier",
+                desc("header_cache.db", Some("a\0b".into()), "meli", dir.path()),
+            ),
+            (
+                "application_prefix",
+                desc("header_cache.db", None, "../evil", dir.path()),
+            ),
+            (
+                "application_prefix",
+                desc("header_cache.db", None, "a/b", dir.path()),
+            ),
+            (
+                "application_prefix",
+                desc("header_cache.db", None, "a\\b", dir.path()),
+            ),
+            (
+                "application_prefix",
+                desc("header_cache.db", None, "a\0b", dir.path()),
+            ),
+        ];
+        for (field, d) in cases {
+            let err = d
+                .db_path()
+                .expect_err(&format!("{field}: injected description must be rejected"));
+            assert_eq!(err.kind, ErrorKind::ValueError, "{field}: wrong error kind");
+        }
+
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "rejected descriptions must not create any file"
+        );
+    }
 
     #[test]
     fn test_open_or_create_db_runs_init_script_exactly_once() {

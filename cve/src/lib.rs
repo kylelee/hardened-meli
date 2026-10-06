@@ -4967,3 +4967,51 @@ mod cve_2008_1108;
 #[cfg(test)]
 #[path = "CVE-2018-14361.rs"]
 mod cve_2018_14361;
+
+/// CVE-2018-14362（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8
+/// CRITICAL）**恶意 POP3/IMAP 服务器用 mailbox 名/UID 里的危险字符污染头
+/// 缓存键或缓存文件路径**攻击模拟回归（issue #156，表 2 病毒/代码执行）：
+/// mutt 的 `pop.c` 未禁止 UID 中的危险字符，攻击者可借其注入恶意的头缓存
+/// 路径。**meli 无 POP3 后端**——`melib/src/` 全目录递归扫描不含任何
+/// `pop3`/`POP3`/`Pop3Type` 痕迹，`backends.rs` 只注册 maildir/mbox/imap/
+/// notmuch/jmap/smtp；issue #156 指定的等价面是「服务器控制的 mailbox 名/
+/// 消息标识 → 头缓存键或文件系统路径」链。
+///
+/// [`cve_2018_14362`] 分六层锁定（详见模块文档）：L0 合法 mailbox 名/UID 经
+/// [`generate_envelope_hash`] 得确定可复现的整数哈希（并与生产
+/// `DefaultHasher` 公式逐条重算比对），真实 `Sqlite3Cache`（自管临时目录）
+/// 合法往返；L1 攻击语料（`../`、`..\`、纯 `..`、`..%2e%2e`/`%2e%2e%2f`/
+/// 大小写编码、`/`、`\`、NUL、CR/LF 混合、空串、64 KiB/1 MiB、SQL 元字符、
+/// Unicode 同形分隔符 U+2044/U+2215/U+FF0F、`..;/`、深链、盘符/UNC）全部经
+/// `generate_envelope_hash` 不 panic、同输入同输出、输出为十进制整数（类型
+/// 层面不可能携带路径字节），语料不塌缩；L2 真实
+/// `ImapType::ingest_mailbox_list_line` + [`list_mailbox_result`] 喂 IMAP
+/// literal 形式 `* LIST` 行，恶意名只作为 `ImapMailbox.imap_path`/`name`
+/// 数据存活、畸形行 fail-closed；L3 真实 `Sqlite3Cache` 对恶意 mailbox 名
+/// 派生的 hash 做恶意 subject/message-id 的 insert/find/update/
+/// save+load 往返，邮箱名三字段逐字节往返，递归遍历临时目录断言恰一个
+/// `.db`、无子目录、无路径逃逸子串、DB 路径不因内容变化；L4
+/// `DatabaseDescription` 的 `name`/`identifier`/`application_prefix` 注入
+/// `/`、`\`、NUL 全部 `Err(ValueError)` 且无文件落盘；L5 `include_str!`
+/// 钉住 `h.write(mailbox_path.as_bytes())`（整数哈希化）、
+/// `sqlite3::params![]` 绑定、`db_path` 的 `FORBIDDEN_PATH_CHARS` 校验行、
+/// `CachedImapMailbox` 名字仅为 `String` 数据字段，并扫描
+/// `melib/src/imap/` 证明无 mailbox 名 join 进路径、扫描 `melib/src/`
+/// 证明 POP3 缺位。与 14349–14361 家族（IMAP NO/INTERNALDATE/STATUS/
+/// `imap_quote_string`/命令注入/空 UID/SIZE/base64、NNTP `GROUP`/`OVER`）及
+/// CVE-2020-16094（LIST 层级深度）划界，标记 `14362` 语料逐字隔离。
+///
+/// 结论分两半：直接 CVE 面**免疫**（无 POP3、哈希为整数、SQL 全参数绑定、
+/// 邮箱名仅为数据）；L4 另暴露一个**真实跨平台防御纵深缺口并随本回归修复**
+/// ——原 `db_path` 只按 `MAIN_SEPARATOR_STR` 校验，Windows 上 `/` 仍可逃出
+/// 配置目录、NUL 完全未校验；现无条件拒绝 `/`、`\`、NUL，回归见
+/// `melib/src/utils/sqlite3.rs::tests::
+/// test_db_path_rejects_path_separators_and_nul`。生产代码改动仅限
+/// `melib/src/utils/sqlite3.rs`。
+///
+/// [`cve_2018_14362`]: self::cve_2018_14362
+/// [`generate_envelope_hash`]: meli::melib::imap::generate_envelope_hash
+/// [`list_mailbox_result`]: meli::melib::imap::list_mailbox_result
+#[cfg(test)]
+#[path = "CVE-2018-14362.rs"]
+mod cve_2018_14362;
