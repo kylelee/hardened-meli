@@ -111,6 +111,23 @@ use melib::{Error, Result};
 /// 后进入 filter，与大小写形一并覆盖。如实记录的代价：字面拼出 `data:` scheme
 /// （含 `metadata:` 这类普通单词）或含裸 `onload`/`srcdoc` 字样的 URL/标题会整
 /// 属性丢弃，anchor 文本与注入的 `rel` 存活——仅损失脚注可见性。
+///
+/// 第七处与 nh3 parity 的**有意偏离**（CVE-2025-27915 / issue #167，Zimbra
+/// Classic UI ICS 存储型 XSS，在野利用并列入 CISA KEV，2025-01 零日攻击巴西
+/// 军方，StrikeReady 披露）：ICS 附件的 `DESCRIPTION`/`SUMMARY`/`ATTENDEE;CN`
+/// 字段携带 `<details open ontoggle=eval(atob(…))>`，`ontoggle` 在 `open` 属性
+/// 出现时自动触发，Base64 混淆脚本窃取登录凭据并建立转发规则。meli 没有 DOM、
+/// 没有 JavaScript 运行时，但 issue 明确断言清洗输出不得携带该原料；第五处只
+/// 拦了 `onerror`/`javascript:`、第六处只拦了 `onload`/`srcdoc`/`data:`，遗漏了
+/// 同族的 HTML5 自动触发事件 token `ontoggle` 与 Base64 解码原语 `eval(`/
+/// `atob(`。本处在现有「标签起始 `<`」「CSS 指令原料」「`onerror`/
+/// `javascript:`」「`onload`/`srcdoc`/`data:`」检查之后追加：保留属性值只要以
+/// ASCII 大小写不敏感方式含裸 `ontoggle`、`eval(` 或 `atob(` 任一子串，整个
+/// 属性丢弃。`href` 一并丢弃，与 42009/42010/45516/35730 同判例：合法 `https:`
+/// URL 可把原料藏进 path/query 骗过 [`is_safe_url`]。实体编码形经 html5ever
+/// 解码后进入 filter，与大小写形一并覆盖。如实记录的代价：URL/标题字面含这些
+/// token（例如普通单词里拼出 `eval(`）会整属性丢弃，anchor 文本与注入的 `rel`
+/// 存活——仅损失脚注/提示可见性，不损失安全。
 pub fn sanitize(input: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
@@ -270,6 +287,25 @@ pub fn sanitize(input: &str) -> String {
             if contains_ascii_ci(trimmed, "onload")
                 || contains_ascii_ci(trimmed, "srcdoc")
                 || contains_ascii_ci(trimmed, "data:")
+            {
+                return None;
+            }
+            // CVE-2025-27915 / issue #167（Zimbra Classic UI ICS 存储型 XSS，在野
+            // 利用并列入 CISA KEV，2025-01 零日攻击巴西军方）：ICS 附件的
+            // `DESCRIPTION`/`SUMMARY`/`ATTENDEE;CN` 字段携带
+            // `<details open ontoggle=eval(atob(…))>`，`ontoggle` 在 `open` 属性
+            // 出现时自动触发，Base64 混淆脚本窃取登录凭据并建立转发规则。meli
+            // 没有 DOM、没有 JavaScript 运行时，但 issue 断言清洗输出不得携带该
+            // 原料；同 #117 的 `onerror`、#162 的 `onload` 判例，此处按**裸
+            // token**判定：保留属性值只要（ASCII 大小写不敏感地）含 `ontoggle`、
+            // `eval(` 或 `atob(` 任一子串就整属性丢弃。`href` 一并丢弃——合法
+            // `https:` URL 可把原料藏进 path/query 骗过 [`is_safe_url`]；实体编码
+            // 形经 html5ever 解码后进入 filter，同样覆盖。如实记录的代价：URL/
+            // 标题字面含这些 token 只损失脚注/提示可见性，锚文本与注入的 `rel`
+            // 存活。
+            if contains_ascii_ci(trimmed, "ontoggle")
+                || contains_ascii_ci(trimmed, "eval(")
+                || contains_ascii_ci(trimmed, "atob(")
             {
                 return None;
             }
@@ -1313,6 +1349,130 @@ mod tests {
         assert_eq!(
             sanitize(r#"<p title="metadata: about the notice">x</p>"#),
             "<p>x</p>"
+        );
+    }
+
+    /// CVE-2025-27915 / issue #167 (Zimbra Classic UI ICS stored XSS,
+    /// exploited in the wild and added to CISA KEV; the January 2025 zero-day
+    /// against the Brazilian military): an ICS `DESCRIPTION`/`SUMMARY`/
+    /// `ATTENDEE;CN` payload such as
+    /// `<details open ontoggle=eval(atob(…))>` carried a Base64-obfuscated
+    /// script that stole credentials and planted forwarding rules. The
+    /// `details` element itself is not in the tag allowlist, but a retained
+    /// attribute value could smuggle the `ontoggle` handler token or the
+    /// `eval(`/`atob(` decoding primitives into the sanitized output — the
+    /// #117 guard only covered `onerror`/`javascript:` and the #162 guard only
+    /// covered `onload`/`srcdoc`/`data:`. Any retained attribute whose value
+    /// contains one of the bare `ontoggle`/`eval(`/`atob(` tokens is now
+    /// dropped whole; `href` is covered too — a legal `https:` URL can hide
+    /// the raw material in its path/query and still pass `is_safe_url`.
+    /// Entity-encoded forms are decoded by html5ever before reaching the
+    /// filter, so they are covered as well. The guard stays narrow: ordinary
+    /// titles, plain https/mailto links and the MDN `<details>` documentation
+    /// URL (no `ontoggle=` spelling) survive.
+    #[test]
+    fn sanitize_drops_attribute_values_carrying_zimbra_ics_xss_tokens() {
+        // a[title] carrying the bare `ontoggle` handler token is dropped
+        // whole; the benign https href, the anchor text and the injected
+        // `rel` survive.
+        assert_eq!(
+            sanitize(r#"<a href="https://e.example/ok" title="ontoggle=alert(1)">x</a>"#),
+            r#"<a href="https://e.example/ok" rel="noopener noreferrer">x</a>"#
+        );
+        // a[title] carrying the Base64 decoding primitives is dropped whole.
+        assert_eq!(
+            sanitize(r#"<a title="eval(atob('YWxlcnQoZG9jdW1lbnQuY29va2llKQ=='))">y</a>"#),
+            r#"<a rel="noopener noreferrer">y</a>"#
+        );
+        // p[title] carrying the literal `<details …>` element is caught by
+        // the existing tag-open `<` guard.
+        assert_eq!(
+            sanitize(r#"<p title="<details open ontoggle=alert(1)>">z</p>"#),
+            "<p>z</p>"
+        );
+        // href query/path carrying the raw material: `is_safe_url` alone lets
+        // a scheme-prefixed URL through no matter what it holds.
+        assert_eq!(
+            sanitize(r#"<a href="https://e.example/?q=ontoggle=alert(1)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+        assert_eq!(
+            sanitize(r#"<a href="https://e.example/eval(atob('YWxlcnQ='))">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+
+        // Every guarded token, every carrier, case-insensitively and after
+        // entity decoding by html5ever.
+        for (label, payload, expected) in [
+            (
+                "title_ontoggle",
+                r#"<a title="ontoggle=alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "title_eval_atob",
+                r#"<a title="eval(atob('YWxlcnQ='))">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "p_title_atob",
+                r#"<p title="atob('YWxlcnQ=')">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "p_lang_ontoggle",
+                r#"<p lang="ontoggle=alert(1)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_mixed_case_ontoggle",
+                r#"<p title="OnToGgLe=alert(1)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_entity_details",
+                r#"<a title="&#60;details open ontoggle=alert(1)&#62;">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "href_path_ontoggle",
+                r#"<a href="https://e.example/ontoggle=alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+        ] {
+            assert_eq!(sanitize(payload), expected, "{label}");
+        }
+
+        // Benign controls survive unchanged: a normal title, ordinary
+        // https/mailto links, and the MDN `<details>` documentation URL —
+        // which contains the word `details` but no `ontoggle` spelling.
+        assert_eq!(
+            sanitize(r#"<p title="hello world">x</p>"#),
+            r#"<p title="hello world">x</p>"#
+        );
+        let benign = sanitize(
+            r#"<a href="https://ok.example/x" title="docs">https</a> <a href="mailto:x@ok.example">mail</a>"#,
+        );
+        assert!(
+            benign.contains(r#"href="https://ok.example/x""#),
+            "benign https href dropped: {benign:?}"
+        );
+        assert!(
+            benign.contains(r#"title="docs""#),
+            "benign title dropped: {benign:?}"
+        );
+        assert!(
+            benign.contains(r#"href="mailto:x@ok.example""#),
+            "benign mailto href dropped: {benign:?}"
+        );
+        let mdn = sanitize(
+            r#"<a href="https://developer.mozilla.org/en-US/docs/Web/HTML/Element/details">details docs</a>"#,
+        );
+        assert!(
+            mdn.contains(
+                r#"href="https://developer.mozilla.org/en-US/docs/Web/HTML/Element/details""#
+            ),
+            "MDN details documentation URL (no ontoggle spelling) was dropped: {mdn:?}"
         );
     }
 
