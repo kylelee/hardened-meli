@@ -93,6 +93,24 @@ use melib::{Error, Result};
 /// （`&#111;nerror`）经 html5ever 解码后进入 filter，与大小写形一并覆盖。如实
 /// 记录的代价：合法带 `javascript:` scheme 拼写的 URL、或含 `onerror` 字样的
 /// 普通标题会整属性丢弃，anchor 文本与注入的 `rel` 存活——仅损失脚注可见性。
+///
+/// 第六处与 nh3 parity 的**有意偏离**（CVE-2020-35730 / issue #162，Roundcube
+/// Webmail 邮件正文存储型 XSS，UNC1151 在野利用）：Roundcube 对正文 HTML 清洗
+/// 不足，`svg`/`iframe`/`math`/`style`/`img`/`script` 等危险元素与
+/// `onload`/`onerror` 事件、`data:`/`javascript:` scheme 在清洗后仍以活形态留在
+/// 渲染文档里，受害者只需**查看**邮件即触发脚本（Recorded Future 报告其被
+/// UNC1151 用于鱼叉攻击乌克兰国家机构，并与 SQL 注入 CVE-2021-44026 组合窃取
+/// 数据库）。meli 没有 DOM、没有 JavaScript 运行时，但 issue 明确断言清洗输出
+/// 不得含这些元素的活原料；第五处只拦了 `onerror`/`javascript:`，遗漏了同族的
+/// 裸 `onload` 事件 token、`srcdoc` 载体与 `data:` scheme。本处在现有「标签起始
+/// `<`」「CSS 指令原料」「`onerror`/`javascript:`」检查之后追加：保留属性值只要
+/// 以 ASCII 大小写不敏感方式含裸 `onload`、`srcdoc` 或 `data:` 任一子串，整个
+/// 属性丢弃。`href` 一并丢弃，与 42009/42010/45516 同判例：合法 `https:` URL
+/// 可把 `data:text/html,…`/`onload=alert(1)` 藏进 path/query 骗过
+/// [`is_safe_url`]。实体编码形（`&#111;nload`、`&#100;ata:`）经 html5ever 解码
+/// 后进入 filter，与大小写形一并覆盖。如实记录的代价：字面拼出 `data:` scheme
+/// （含 `metadata:` 这类普通单词）或含裸 `onload`/`srcdoc` 字样的 URL/标题会整
+/// 属性丢弃，anchor 文本与注入的 `rel` 存活——仅损失脚注可见性。
 pub fn sanitize(input: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
@@ -222,6 +240,37 @@ pub fn sanitize(input: &str) -> String {
             // attribute — only footnote visibility is lost, the anchor text
             // and the injected `rel` survive.
             if contains_ascii_ci(trimmed, "onerror") || contains_ascii_ci(trimmed, "javascript:") {
+                return None;
+            }
+            // CVE-2020-35730 / issue #162 (Roundcube Webmail stored
+            // message-body XSS, exploited in the wild by UNC1151): the
+            // message body's HTML was not cleaned thoroughly enough, so
+            // `svg`/`iframe`/`math`/`style`/`img`/`script` elements and
+            // `onload`/`onerror` handlers plus `data:`/`javascript:` schemes
+            // stayed alive in the rendered document; merely *viewing* the
+            // message executed script. meli has no DOM and no JavaScript
+            // runtime, but the issue asserts the sanitized output must not
+            // carry the raw material of those carriers either, and the #117
+            // guard above missed the sibling bare `onload` handler token,
+            // the `srcdoc` carrier and the `data:` scheme. Drop the whole
+            // attribute when the decoded value contains any of `onload`,
+            // `srcdoc` or `data:`, ASCII case-insensitively. This must cover
+            // `href` too, by the same precedent as the `<`, CSS and
+            // `onerror`/`javascript:` guards above: a legal `https:` URL can
+            // hide `data:text/html,…`/`onload=alert(1)` in its path or query
+            // and still pass [`is_safe_url`]. Entity-encoded forms
+            // (`&#111;nload`, `&#100;ata:`) are decoded by html5ever before
+            // reaching the filter, so they are covered as well. Documented
+            // cost, recorded honestly: a URL whose text legitimately spells
+            // the `data:` scheme (including ordinary words such as
+            // `metadata:`), or an ordinary title containing the bare words
+            // `onload`/`srcdoc`, loses the whole attribute — only footnote
+            // visibility is lost, the anchor text and the injected `rel`
+            // survive.
+            if contains_ascii_ci(trimmed, "onload")
+                || contains_ascii_ci(trimmed, "srcdoc")
+                || contains_ascii_ci(trimmed, "data:")
+            {
                 return None;
             }
             if trimmed.len() == value.len() {
@@ -1140,6 +1189,130 @@ mod tests {
         assert!(
             mdn.contains(r#"href="https://developer.mozilla.org/en-US/docs/Web/JavaScript""#),
             "MDN JavaScript documentation URL (no scheme colon) was dropped: {mdn:?}"
+        );
+    }
+
+    /// CVE-2020-35730 / issue #162 (Roundcube Webmail stored message-body
+    /// XSS, exploited in the wild by UNC1151 against Ukrainian state
+    /// bodies): dangerous elements (`svg`/`iframe`/`math`/`style`/`img`/
+    /// `script`) and `onload`/`onerror` handlers plus `data:`/`javascript:`
+    /// schemes stayed alive in the rendered body, so *viewing* the message
+    /// ran script. meli has no DOM and no JavaScript runtime, but the issue
+    /// asserts the sanitized output must not carry the raw material either,
+    /// and the #117 guard missed the sibling bare `onload` handler token,
+    /// the `srcdoc` carrier and the `data:` scheme. Any retained attribute
+    /// whose value contains one of those bare tokens is now dropped whole;
+    /// `href` is covered too — a legal `https:` URL can hide
+    /// `data:text/html,…`/`onload=alert(1)` in its path/query and still
+    /// pass `is_safe_url`. The guard stays narrow: ordinary titles, plain
+    /// https/mailto links and the MDN SVG documentation URL (no `data:`
+    /// spelling) survive. Documented cost: a title legitimately spelling
+    /// `data:` (including the ordinary word `metadata:`) loses the
+    /// attribute; only footnote/tooltip visibility is lost.
+    #[test]
+    fn sanitize_drops_attribute_values_carrying_roundcube_body_xss_tokens() {
+        // a[title]/p[lang] carrying the bare `onload` handler token is
+        // dropped whole; the anchor text and the injected `rel` survive.
+        assert_eq!(
+            sanitize(r#"<a title="onload=alert(1)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+        assert_eq!(sanitize(r#"<p lang="onload=alert(1)">x</p>"#), "<p>x</p>");
+        // p[title] carrying the `srcdoc` carrier or the `data:` scheme.
+        assert_eq!(sanitize(r#"<p title="srcdoc=alert(1)">x</p>"#), "<p>x</p>");
+        assert_eq!(
+            sanitize(r#"<p title="data:text/html,alert(1)">x</p>"#),
+            "<p>x</p>"
+        );
+        // href query/path carrying `data:`/`onload`: `is_safe_url` alone
+        // lets a scheme-prefixed URL through no matter what it holds.
+        assert_eq!(
+            sanitize(r#"<a href="https://h.example/?q=data:text/html,alert(1)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+        assert_eq!(
+            sanitize(r#"<a href="https://h.example/onload=alert(1)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#
+        );
+
+        // Every guarded token, case-insensitively and after entity decoding
+        // by html5ever.
+        for (label, payload, expected) in [
+            (
+                "title_onload",
+                r#"<a title="onload=alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "lang_onload",
+                r#"<p lang="onload=alert(1)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_srcdoc",
+                r#"<p title="srcdoc=alert(1)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_data_scheme",
+                r#"<p title="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "title_entity_onload",
+                r#"<a title="&#111;nload=alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+            (
+                "title_mixed_case_onload",
+                r#"<p title="OnLoad=alert(1)">x</p>"#,
+                "<p>x</p>",
+            ),
+            (
+                "href_path_data_scheme",
+                r#"<a href="https://h.example/data:text/html,alert(1)">x</a>"#,
+                r#"<a rel="noopener noreferrer">x</a>"#,
+            ),
+        ] {
+            assert_eq!(sanitize(payload), expected, "{label}");
+        }
+
+        // Benign controls survive unchanged: a normal title, ordinary
+        // https/mailto links, and the MDN SVG documentation URL — which
+        // contains the word "SVG" and an `https:` colon, but no `data:`
+        // scheme spelling and no `onload`/`srcdoc` word.
+        assert_eq!(
+            sanitize(r#"<p title="hello world">x</p>"#),
+            r#"<p title="hello world">x</p>"#
+        );
+        let benign = sanitize(
+            r#"<a href="https://ok.example/x" title="docs">https</a> <a href="mailto:x@ok.example">mail</a>"#,
+        );
+        assert!(
+            benign.contains(r#"href="https://ok.example/x""#),
+            "benign https href dropped: {benign:?}"
+        );
+        assert!(
+            benign.contains(r#"title="docs""#),
+            "benign title dropped: {benign:?}"
+        );
+        assert!(
+            benign.contains(r#"href="mailto:x@ok.example""#),
+            "benign mailto href dropped: {benign:?}"
+        );
+        let mdn =
+            sanitize(r#"<a href="https://developer.mozilla.org/en-US/docs/Web/SVG">svg docs</a>"#);
+        assert!(
+            mdn.contains(r#"href="https://developer.mozilla.org/en-US/docs/Web/SVG""#),
+            "MDN SVG documentation URL was dropped: {mdn:?}"
+        );
+
+        // Documented cost: a title legitimately spelling the `data:` scheme
+        // is dropped; only the attribute (tooltip/footnote visibility) is
+        // lost, the text survives.
+        assert_eq!(
+            sanitize(r#"<p title="metadata: about the notice">x</p>"#),
+            "<p>x</p>"
         );
     }
 
