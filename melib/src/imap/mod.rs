@@ -85,6 +85,65 @@ pub type UID = ImapNum;
 pub type UIDVALIDITY = UID;
 pub type MessageSequenceNumber = ImapNum;
 
+/// Whether an IMAP command failed because the server reports that the
+/// requested UID / message does not exist in the currently selected view.
+///
+/// Tencent exmail (imap.exmail.qq.com, Coremail) silently reassigns the
+/// UIDs of an entire virtual folder (`Sent Messages`, `Deleted Messages`,
+/// `Junk`, `Drafts`) while keeping `UIDVALIDITY` unchanged, so a previously
+/// cached UID becomes stale and `UID MOVE`/`COPY` fails with `NO [ALERT]
+/// 100001 Mails not exist!` (issue #180). Such failures are recoverable by
+/// re-deriving the UIDs from the message identity (see
+/// [`ImapConnection::recover_renumbered_uids`]); unrelated failures (quota,
+/// authentication, transient server errors) must not trigger the identity
+/// re-mapping.
+pub(crate) fn is_missing_messages_error(err: &Error) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    ["not exist", "no such message", "nonexistent"]
+        .iter()
+        .any(|needle| text.contains(needle))
+}
+
+/// Move (`has_move`) or copy (+ optionally mark `\Deleted`) `uids` to
+/// `destination` on the connection selected on `source`.
+///
+/// Shared by the first attempt and the post-recovery retry of
+/// [`ImapType::copy_messages`] so both paths send the exact same commands.
+async fn copy_or_move_uids(
+    conn: &mut ImapConnection,
+    uids: &[UID],
+    destination: &str,
+    has_move: bool,
+    move_: bool,
+) -> Result<()> {
+    let mut response = Vec::with_capacity(8 * 1024);
+    if has_move {
+        conn.send_command(CommandBody::r#move(uids, destination, true)?)
+            .await?;
+        conn.read_response(&mut response, RequiredResponses::empty())
+            .await?;
+    } else {
+        conn.send_command(CommandBody::copy(uids, destination, true)?)
+            .await?;
+        conn.read_response(&mut response, RequiredResponses::empty())
+            .await?;
+        // [ref:TODO]: check for COPYUID [RFC4315 - UIDPLUS]
+        if move_ {
+            conn.send_command(CommandBody::store(
+                uids,
+                StoreType::Add,
+                StoreResponse::Answer,
+                vec![ImapCodecFlag::Deleted],
+                true,
+            )?)
+            .await?;
+            conn.read_response(&mut response, RequiredResponses::empty())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 pub static SUPPORTED_CAPABILITIES: &[&str] = &[
     "AUTH=ANONYMOUS",
     "AUTH=PLAIN",
@@ -748,28 +807,40 @@ impl MailBackend for ImapType {
             let mut response = Vec::with_capacity(8 * 1024);
             conn.select_mailbox(source_mailbox_hash, &mut response, false)
                 .await?;
-            if has_move {
-                conn.send_command(CommandBody::r#move(uids.as_slice(), dest_path, true)?)
+            if let Err(err) =
+                copy_or_move_uids(&mut conn, uids.as_slice(), &dest_path, has_move, move_).await
+            {
+                if !is_missing_messages_error(&err) {
+                    return Err(err);
+                }
+                // Tencent exmail reassigns the UIDs of its virtual folders
+                // while keeping `UIDVALIDITY` unchanged, so the cached UID is
+                // stale and the server answers `NO ... Mails not exist!`
+                // (issue #180). Re-derive the UIDs by message identity and
+                // retry the command exactly once.
+                tracing::warn!(
+                    "IMAP: UID assignment of mailbox {} changed on the server without a \
+                     UIDVALIDITY change (issue #180); re-mapping {} cached envelope(s) by \
+                     message identity and retrying once",
+                    source_mailbox_hash,
+                    env_hashes.len()
+                );
+                let fresh_uids = conn
+                    .recover_renumbered_uids(source_mailbox_hash, &env_hashes)
                     .await?;
-                conn.read_response(&mut response, RequiredResponses::empty())
-                    .await?;
-            } else {
-                conn.send_command(CommandBody::copy(uids.as_slice(), dest_path, true)?)
-                    .await?;
-                conn.read_response(&mut response, RequiredResponses::empty())
-                    .await?;
-                // [ref:TODO]: check for COPYUID [RFC4315 - UIDPLUS]
-                if move_ {
-                    conn.send_command(CommandBody::store(
-                        uids.as_slice(),
-                        StoreType::Add,
-                        StoreResponse::Answer,
-                        vec![ImapCodecFlag::Deleted],
-                        true,
-                    )?)
-                    .await?;
-                    conn.read_response(&mut response, RequiredResponses::empty())
-                        .await?;
+                if fresh_uids.is_empty() {
+                    // None of the requested messages exist on the server
+                    // anymore. The recovery emitted a `Remove` event per
+                    // envelope, so the UI rows disappear and there is nothing
+                    // left to move.
+                    return Ok(());
+                }
+                if let Err(retry_err) =
+                    copy_or_move_uids(&mut conn, &fresh_uids, &dest_path, has_move, move_).await
+                {
+                    return Err(err.set_summary(format!(
+                        "Retrying after UID renumbering recovery failed: {retry_err}"
+                    )));
                 }
             }
             Ok(())
@@ -2319,6 +2390,46 @@ mod tests {
             assert!(err.summary.contains("CVE-2009-3765"), "{err}");
             assert!(err.summary.contains("set it to false"), "{err}");
             assert!(err.summary.contains("trust store"), "{err}");
+        }
+    }
+
+    /// The server-reported "message does not exist" failures that must
+    /// trigger the identity re-mapping recovery (issue #180). The first is
+    /// the exact Tencent exmail alert from the issue; the others are the
+    /// case-insensitive aliases other servers use.
+    #[test]
+    fn is_missing_messages_error_matches_server_missing_message_alerts() {
+        for text in [
+            "[ALERT] 100001 Mails not exist!",
+            "10001 box not exists",
+            "No such message",
+            "NO SUCH MESSAGE",
+            "The requested UID does not exist in the selected mailbox",
+            "Mailbox is nonexistent",
+        ] {
+            assert!(
+                is_missing_messages_error(&Error::new(text)),
+                "{text:?} must be treated as a missing-message error"
+            );
+        }
+    }
+
+    /// Unrelated failures (quota, authentication, transient server errors,
+    /// local cache errors) must not trigger the UID re-mapping, or every
+    /// recoverable failure would silently rewrite the cache.
+    #[test]
+    fn is_missing_messages_error_ignores_unrelated_failures() {
+        for text in [
+            "over quota",
+            "authentication failed",
+            "try again later",
+            "Mailbox is not in cache",
+            "Connection timed out after 60 seconds",
+        ] {
+            assert!(
+                !is_missing_messages_error(&Error::new(text)),
+                "{text:?} must not be treated as a missing-message error"
+            );
         }
     }
 }

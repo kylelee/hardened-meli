@@ -54,6 +54,101 @@ fn status_unchanged(
         && (status.messages, status.unseen, status.uidnext) == cached_status
 }
 
+/// Identity of a mail independent of its IMAP `UID` assignment.
+///
+/// Tencent exmail reassigns the UIDs of a virtual folder without changing
+/// `UIDVALIDITY` (issue #180), so the only stable handle the client can use
+/// to re-associate a cached envelope with its server message is the message
+/// content itself. `Message-ID` is preferred; a mail without one falls back
+/// to `(subject, date, first From address)`.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum EnvelopeIdentity {
+    MessageId(Vec<u8>),
+    Fallback {
+        subject: Vec<u8>,
+        date: u64,
+        from: Vec<u8>,
+    },
+}
+
+impl EnvelopeIdentity {
+    /// Derive the identity of `env`.
+    pub(crate) fn of(env: &Envelope) -> Self {
+        if !env.message_id().is_empty() {
+            return Self::MessageId(env.message_id().as_str().as_bytes().to_vec());
+        }
+        Self::Fallback {
+            subject: env.subject().as_bytes().to_vec(),
+            date: env.date(),
+            from: env
+                .from()
+                .first()
+                .map(|a| a.get_email().as_bytes().to_vec())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// What to do with one cached envelope after re-deriving the live UIDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum UidRemap {
+    /// The identity was found on the server under the same UID.
+    Unchanged { env_hash: EnvelopeHash, uid: UID },
+    /// The identity was found on the server under a new UID.
+    Remapped {
+        env_hash: EnvelopeHash,
+        uid: UID,
+        new_uid: UID,
+    },
+    /// The identity is absent from the live view.
+    Removed { env_hash: EnvelopeHash, uid: UID },
+}
+
+/// Plan the UID re-mapping of a mailbox from the live
+/// `UID FETCH 1:* (UID ENVELOPE)` reply (`live`, in reply order) and a
+/// snapshot of the cached envelopes (`cached`).
+///
+/// A duplicate identity in `live` is bogus (a `Message-ID` is unique per
+/// RFC 5322 §3.6.4) but not fatal: the first occurrence wins and a warning
+/// is logged, mirroring the "first wins" policy of the recovery caller.
+pub(crate) fn plan_uid_remap(
+    live: &[(EnvelopeIdentity, UID)],
+    cached: &[(EnvelopeHash, UID, EnvelopeIdentity)],
+) -> Vec<UidRemap> {
+    let mut live_index: HashMap<EnvelopeIdentity, UID> = HashMap::with_capacity(live.len());
+    for (identity, uid) in live {
+        match live_index.entry(identity.clone()) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(*uid);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                tracing::warn!(
+                    "IMAP UID renumbering recovery: duplicate live message identity \
+                     {identity:?}; the first UID wins"
+                );
+            }
+        }
+    }
+    cached
+        .iter()
+        .map(|(env_hash, uid, identity)| match live_index.get(identity) {
+            Some(&new_uid) if new_uid == *uid => UidRemap::Unchanged {
+                env_hash: *env_hash,
+                uid: *uid,
+            },
+            Some(&new_uid) => UidRemap::Remapped {
+                env_hash: *env_hash,
+                uid: *uid,
+                new_uid,
+            },
+            None => UidRemap::Removed {
+                env_hash: *env_hash,
+                uid: *uid,
+            },
+        })
+        .collect()
+}
+
 impl ImapConnection {
     pub async fn resync(&mut self, mailbox_hash: MailboxHash) -> Result<Option<Vec<Envelope>>> {
         if matches!(self.sync_policy, SyncPolicy::None) {
@@ -1014,6 +1109,256 @@ impl ImapConnection {
             mailbox_hash
         );
         self.resync_condstore(mailbox_hash).await
+    }
+
+    /// Re-derive the UIDs of the cached envelopes of `mailbox_hash` after the
+    /// server silently reassigned them while keeping `UIDVALIDITY` unchanged
+    /// (Tencent exmail virtual folders; issue #180).
+    ///
+    /// The live view is enumerated with `UID FETCH 1:* (UID ENVELOPE)` and
+    /// every cached envelope of the mailbox is re-associated by
+    /// [`EnvelopeIdentity`]: an identity that moved to a new UID gets a new
+    /// `EnvelopeHash` (`generate_envelope_hash(path, new_uid)`), the stale
+    /// in-memory and persisted indexes are swapped, and the UI receives
+    /// `Remove`/`Create` refresh events. An identity that is absent from the
+    /// live view is dropped from the cache with a `Remove` event.
+    ///
+    /// Returns the fresh UIDs of the requested `env_hashes` that still exist
+    /// on the server, in input order. An empty result means none of the
+    /// requested messages exist anymore.
+    pub async fn recover_renumbered_uids(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        env_hashes: &EnvelopeHashBatch,
+    ) -> Result<Vec<UID>> {
+        let mailbox_path = {
+            let mailboxes = self.uid_store.mailboxes.lock().await;
+            mailboxes
+                .get(&mailbox_hash)
+                .ok_or_else(|| Error::new("Mailbox not found"))?
+                .imap_path()
+                .to_string()
+        };
+        let mut response = Vec::with_capacity(8 * 1024);
+        // Force a fresh `SELECT`: the whole point of the recovery is that the
+        // cached UID assignment is stale, so any memoized view must be
+        // dropped.
+        let select_response = self
+            .select_mailbox(mailbox_hash, &mut response, true)
+            .await?;
+        // Enumerate the live view. `UID FETCH 1:* (UID ENVELOPE)` returns
+        // every message in message-sequence order and, unlike a `SEARCH`,
+        // carries the identity data needed to re-associate the UIDs.
+        self.send_command(CommandBody::fetch(
+            1..,
+            MacroOrMessageDataItemNames::MessageDataItemNames(vec![
+                MessageDataItemName::Uid,
+                MessageDataItemName::Envelope,
+            ]),
+            true,
+        )?)
+        .await?;
+        self.read_response(
+            &mut response,
+            RequiredResponses::FETCH_UID | RequiredResponses::FETCH_ENVELOPE,
+        )
+        .await?;
+        let (_, live_fetches, _) = protocol_parser::fetch_responses(&response)?;
+
+        let mut live: Vec<(EnvelopeIdentity, UID)> = Vec::with_capacity(live_fetches.len());
+        let mut live_msn: BTreeMap<UID, MessageSequenceNumber> = BTreeMap::new();
+        let mut max_live_uid: UID = 0;
+        for f in &live_fetches {
+            // RFC 3501 §6.4.8: a reply to a `UID FETCH` command must contain
+            // the UID data item. Without it the live message cannot be
+            // associated with an identity, so surface a protocol error
+            // instead of silently dropping it.
+            let Some(uid) = f.uid else {
+                return Err(Error::new(format!(
+                    "IMAP server error: UID FETCH reply for mailbox {mailbox_path} is missing \
+                     the UID data item (RFC 3501 6.4.8 violation)."
+                ))
+                .set_kind(ErrorKind::ProtocolError));
+            };
+            max_live_uid = max_live_uid.max(uid);
+            live_msn.insert(uid, f.message_sequence_number);
+            if let Some(env) = f.envelope.as_ref() {
+                live.push((EnvelopeIdentity::of(env), uid));
+            }
+        }
+
+        // Snapshot the cached envelopes of this mailbox before touching any
+        // state. Identities are enough to plan; the old `Envelope` (with its
+        // flags and tags) is looked up lazily when a re-map needs to preserve
+        // it.
+        let cached: Vec<(EnvelopeHash, UID, EnvelopeIdentity)> = {
+            let env_lck = self.uid_store.envelopes.lock().unwrap();
+            env_lck
+                .iter()
+                .filter(|(_, cenv)| cenv.mailbox_hash == mailbox_hash)
+                .map(|(hash, cenv)| (*hash, cenv.uid, EnvelopeIdentity::of(&cenv.inner)))
+                .collect()
+        };
+
+        let plan = plan_uid_remap(&live, &cached);
+
+        let requested: BTreeSet<EnvelopeHash> = env_hashes.to_set();
+        let mut fresh_by_hash: HashMap<EnvelopeHash, UID> = HashMap::new();
+        let mut remove_events: Vec<(UID, RefreshEvent)> = Vec::new();
+        let mut created: Vec<FetchResponse<'static>> = Vec::new();
+        for action in plan {
+            match action {
+                UidRemap::Unchanged { env_hash, uid } => {
+                    if requested.contains(&env_hash) {
+                        fresh_by_hash.insert(env_hash, uid);
+                    }
+                }
+                UidRemap::Remapped {
+                    env_hash,
+                    uid,
+                    new_uid,
+                } => {
+                    let Some((mut old_inner, old_modseq)) = ({
+                        let env_lck = self.uid_store.envelopes.lock().unwrap();
+                        env_lck
+                            .get(&env_hash)
+                            .map(|cenv| (cenv.inner.clone(), cenv.modsequence))
+                    }) else {
+                        continue;
+                    };
+                    let new_hash = generate_envelope_hash(&mailbox_path, &new_uid);
+                    old_inner.set_hash(new_hash);
+                    // Persist the removal first: `ImapCache::update`'s Remove
+                    // branch deletes the `envelopes` row and clears
+                    // `hash_index`; its Create branch is a no-op, so the new
+                    // row is written with `insert_envelopes` below.
+                    remove_events.push((
+                        uid,
+                        RefreshEvent {
+                            mailbox_hash,
+                            account_hash: self.uid_store.account_hash,
+                            kind: RefreshEventKind::Remove(env_hash),
+                        },
+                    ));
+                    created.push(FetchResponse {
+                        uid: Some(new_uid),
+                        message_sequence_number: live_msn.get(&new_uid).copied().unwrap_or(1),
+                        modseq: old_modseq,
+                        flags: None,
+                        body: None,
+                        references: None,
+                        envelope: Some(old_inner),
+                        bodystructure: false,
+                        raw_fetch_value: &[],
+                    });
+                    // `insert_envelopes` adds the new in-memory entries but
+                    // never removes the old ones, so the stale indexes are
+                    // dropped here explicitly.
+                    self.uid_store.hash_index.lock().unwrap().remove(&env_hash);
+                    self.uid_store
+                        .uid_index
+                        .lock()
+                        .unwrap()
+                        .remove(&(mailbox_hash, uid));
+                    self.uid_store.envelopes.lock().unwrap().remove(&env_hash);
+                    if requested.contains(&env_hash) {
+                        fresh_by_hash.insert(env_hash, new_uid);
+                    }
+                }
+                UidRemap::Removed { env_hash, uid } => {
+                    remove_events.push((
+                        uid,
+                        RefreshEvent {
+                            mailbox_hash,
+                            account_hash: self.uid_store.account_hash,
+                            kind: RefreshEventKind::Remove(env_hash),
+                        },
+                    ));
+                    self.uid_store.hash_index.lock().unwrap().remove(&env_hash);
+                    self.uid_store
+                        .uid_index
+                        .lock()
+                        .unwrap()
+                        .remove(&(mailbox_hash, uid));
+                    self.uid_store.envelopes.lock().unwrap().remove(&env_hash);
+                }
+            }
+        }
+
+        if !remove_events.is_empty() {
+            self.uid_store.update(mailbox_hash, &remove_events)?;
+        }
+        if !created.is_empty() {
+            self.uid_store.insert_envelopes(mailbox_hash, &created)?;
+        }
+
+        // Rebuild the message-sequence-number index from the FETCH reply
+        // order and persist it: the old index still refers to the stale UIDs.
+        let mut msn_index: BTreeMap<MessageSequenceNumber, UID> = BTreeMap::new();
+        for (uid, msn) in &live_msn {
+            msn_index.insert(*msn, *uid);
+        }
+        let msn_index_vec: Vec<Option<UID>> = {
+            let max_msn = msn_index.keys().next_back().copied().unwrap_or(0);
+            let mut v = vec![None; max_msn];
+            for (msn, uid) in &msn_index {
+                if let Some(slot) = v.get_mut(msn.saturating_sub(1)) {
+                    *slot = Some(*uid);
+                }
+            }
+            v
+        };
+        self.uid_store
+            .msn_index
+            .lock()
+            .unwrap()
+            .insert(mailbox_hash, msn_index);
+        if let Err(err) = self.uid_store.store_msn_index(
+            mailbox_hash,
+            select_response.uidvalidity,
+            &msn_index_vec,
+        ) {
+            tracing::warn!(
+                "IMAP UID renumbering recovery: could not store msn_index of mailbox \
+                 {mailbox_path}: {err}"
+            );
+        }
+
+        // After a full `UID FETCH 1:*` every UID at or below the live maximum
+        // has been enumerated, so the incremental-resync baseline is the live
+        // maximum (RFC 4549 §4.3).
+        self.uid_store
+            .lastseenuid
+            .lock()
+            .unwrap()
+            .insert(mailbox_hash, max_live_uid);
+        if let Err(err) = self
+            .uid_store
+            .update_mailbox(mailbox_hash, &select_response)
+        {
+            tracing::warn!(
+                "IMAP UID renumbering recovery: could not update mailbox {mailbox_path} \
+                 counters: {err}"
+            );
+        }
+
+        for (_uid, ev) in remove_events {
+            self.add_refresh_event(ev);
+        }
+        for f in &created {
+            if let Some(env) = f.envelope.as_ref() {
+                self.add_refresh_event(RefreshEvent {
+                    mailbox_hash,
+                    account_hash: self.uid_store.account_hash,
+                    kind: RefreshEventKind::Create(Box::new(env.clone())),
+                });
+            }
+        }
+
+        Ok(env_hashes
+            .iter()
+            .filter_map(|hash| fresh_by_hash.get(&hash).copied())
+            .collect())
     }
 
     pub async fn init_mailbox(&mut self, mailbox_hash: MailboxHash) -> Result<SelectResponse> {

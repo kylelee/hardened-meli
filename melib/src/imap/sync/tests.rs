@@ -1772,3 +1772,154 @@ fn test_imap_sync_status_response_item_order() {
     )
     .unwrap_err();
 }
+
+/// `Message-ID` is the preferred identity: two envelopes with the same
+/// `Message-ID` but different subjects compare equal, and the identity is
+/// the `MessageId` variant.
+#[test]
+fn test_imap_envelope_identity_prefers_message_id() {
+    use super::*;
+
+    let mut a = Envelope::default();
+    a.set_message_id(b"<a@example.com>");
+    a.set_subject(b"subject a".to_vec());
+    let mut b = Envelope::default();
+    b.set_message_id(b"<a@example.com>");
+    b.set_subject(b"subject b".to_vec());
+
+    assert_eq!(EnvelopeIdentity::of(&a), EnvelopeIdentity::of(&b));
+    // `MessageID::new` strips the RFC 5322 angle brackets, so the stored
+    // identity is the bare `msg-id`.
+    assert!(matches!(
+        EnvelopeIdentity::of(&a),
+        EnvelopeIdentity::MessageId(id) if id == b"a@example.com"
+    ));
+}
+
+/// Without a `Message-ID` the identity is `(subject, date, first From
+/// address)`: any of the three changing changes the identity, while an
+/// identical triple is stable.
+#[test]
+fn test_imap_envelope_identity_falls_back_without_message_id() {
+    use super::*;
+
+    let address = || SmallVec::from_vec(vec![Address::new(Some("A"), "a@example.com")]);
+    let mut base = Envelope::default();
+    base.set_subject(b"hello".to_vec());
+    base.set_datetime(1_700_000_000);
+    base.set_from(address());
+
+    assert_eq!(
+        EnvelopeIdentity::of(&base),
+        EnvelopeIdentity::of(&base.clone())
+    );
+
+    let mut other_subject = base.clone();
+    other_subject.set_subject(b"hello!".to_vec());
+    assert_ne!(
+        EnvelopeIdentity::of(&base),
+        EnvelopeIdentity::of(&other_subject)
+    );
+
+    let mut other_date = base.clone();
+    other_date.set_datetime(1_700_000_001);
+    assert_ne!(
+        EnvelopeIdentity::of(&base),
+        EnvelopeIdentity::of(&other_date)
+    );
+
+    let mut other_from = base.clone();
+    other_from.set_from(SmallVec::from_vec(vec![Address::new(
+        Some("B"),
+        "b@example.com",
+    )]));
+    assert_ne!(
+        EnvelopeIdentity::of(&base),
+        EnvelopeIdentity::of(&other_from)
+    );
+}
+
+/// The planning function classifies every cached envelope: identity on the
+/// same UID is unchanged, identity on a new UID is remapped, an identity
+/// absent from the live view is removed.
+#[test]
+fn test_imap_plan_uid_remap_classifies_every_cached_envelope() {
+    use super::*;
+
+    let id = |s: &str| EnvelopeIdentity::MessageId(s.as_bytes().to_vec());
+    let live = vec![(id("a"), 5), (id("b"), 9)];
+    let cached = vec![
+        (EnvelopeHash(1), 5, id("a")),
+        (EnvelopeHash(2), 2, id("b")),
+        (EnvelopeHash(3), 3, id("c")),
+    ];
+
+    let plan = plan_uid_remap(&live, &cached);
+    assert_eq!(
+        plan,
+        vec![
+            UidRemap::Unchanged {
+                env_hash: EnvelopeHash(1),
+                uid: 5
+            },
+            UidRemap::Remapped {
+                env_hash: EnvelopeHash(2),
+                uid: 2,
+                new_uid: 9
+            },
+            UidRemap::Removed {
+                env_hash: EnvelopeHash(3),
+                uid: 3
+            },
+        ]
+    );
+}
+
+/// A duplicate identity in the live reply is bogus but must be resolved
+/// deterministically: the first occurrence wins (and a warning is logged).
+#[test]
+fn test_imap_plan_uid_remap_duplicate_identity_first_wins() {
+    use super::*;
+
+    let id = |s: &str| EnvelopeIdentity::MessageId(s.as_bytes().to_vec());
+    let live = vec![(id("dup"), 7), (id("dup"), 11)];
+    let cached = vec![(EnvelopeHash(1), 3, id("dup"))];
+
+    let plan = plan_uid_remap(&live, &cached);
+    assert_eq!(
+        plan,
+        vec![UidRemap::Remapped {
+            env_hash: EnvelopeHash(1),
+            uid: 3,
+            new_uid: 7
+        }]
+    );
+}
+
+/// The fallback identity participates in the plan exactly like a
+/// `Message-ID`: a mail without one is still re-associated after a UID
+/// renumbering.
+#[test]
+fn test_imap_plan_uid_remap_matches_fallback_identity() {
+    use super::*;
+
+    fn fallback(subject: &str, date: u64, from: &str) -> EnvelopeIdentity {
+        EnvelopeIdentity::Fallback {
+            subject: subject.as_bytes().to_vec(),
+            date,
+            from: from.as_bytes().to_vec(),
+        }
+    }
+
+    let live = vec![(fallback("subj", 42, "a@example.com"), 100)];
+    let cached = vec![(EnvelopeHash(7), 1, fallback("subj", 42, "a@example.com"))];
+
+    assert_eq!(
+        plan_uid_remap(&live, &cached),
+        vec![UidRemap::Remapped {
+            env_hash: EnvelopeHash(7),
+            uid: 1,
+            new_uid: 100
+        }]
+    );
+}
