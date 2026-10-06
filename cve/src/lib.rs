@@ -4373,3 +4373,30 @@ mod cve_2005_0667;
 #[cfg(test)]
 #[path = "CVE-2005-2549.rs"]
 mod cve_2005_2549;
+
+/// CVE-2005-2550（Evolution 1.4 / 1.5–2.3.6.1，CVSS v2 7.5，CWE-134 格式串）
+/// 攻击模拟回归（issue #141，表 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// virus / code execution，2026-10-05 外部 KIMI 调研增补行）：Evolution 解析
+/// 远程 vCard 数据、远程 LDAP 联系人、任务列表/日历条目时触发多重格式串漏
+/// 洞——任务列表条目（`VTODO`）与日历条目（`VEVENT`）的
+/// `SUMMARY`/`DESCRIPTION`、vCard `FN`/`NOTE` 含 `%n`/`%s`/`%99999999x`
+/// → DoS/可能 RCE。meli 是 Safe Rust，`format!`/`write!` 的格式模板必须是
+/// 编译期字面量、攻击者值只能作参数值，无 printf 族 FFI、无 `unsafe`，且
+/// meli 无 LDAP 客户端、无任务列表子系统（`VTODO` 全仓无生产消费者，
+/// `events()` 以 `Err(&Component)` 原样上浮、数据不丢）——故按等价面做免疫
+/// 证明。[`cve_2005_2550`] 多层锁定：L1 `VTODO`/`VEVENT`/vCard 灌入
+/// `%n`/`%s`/`%99999999x`/混合与 64 KiB+ 重复 `%99999999x`，过
+/// `ICalendar::build`/`Vcard::build`/`parse_component`/`read_component`，
+/// 不 panic、有界、确定、无放大、值逐字存活；L2 `VTODO` 经 `events()` 以
+/// `Err(&Component)` 上浮、组件名与字段逐字、混合日历顺序稳定、双
+/// `SUMMARY` 不可灌水不丢数据；L3 手工 `VTODO` Component 与
+/// `EventBuilder`/`VcardBuilder` 经 `write_component` 折行往返逐字节相等；
+/// L4 `CardDeserializer` 对 `FN`/`NOTE` 逐字、`Card::to_vcard_string` FN
+/// 往返、畸形/截断输入干净 `Err`。另以源码级锚点证明 vobject/contacts 解析
+/// 路径无 printf 族 sink。结论为 **免疫证明，未发现缺口，未改动生产代码**；
+/// 与 CVE-2005-2549（vCard 四字段+VEVENT 三字段面，`%n%n%n` 形态载荷）正
+/// 交，本语料以任务列表（`VTODO`）为焦点、载荷为 issue 原文单发形态，标记
+/// `2550` 逐字隔离。
+#[cfg(test)]
+#[path = "CVE-2005-2550.rs"]
+mod cve_2005_2550;
