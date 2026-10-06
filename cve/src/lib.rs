@@ -4190,3 +4190,25 @@ mod cve_2023_35636;
 #[cfg(test)]
 #[path = "CVE-2023-36763.rs"]
 mod cve_2023_36763;
+
+/// CVE-2023-35619（Outlook for Mac；CVSS 3.1 5.3，CWE-451 UI 误导）UI 欺骗
+/// 回归（issue #134，表 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — 2026-10-05
+/// 外部 KIMI 调研增补行）：MSRC 未公开根因，`UI:R` 是唯一硬约束——受害者
+/// 看着被欺骗的界面做出错误动作。按 issue 指定等价面（头部显示真实性）
+/// 模拟，结论为 **暴露缺口 2 处并修复，第 3 面免疫证明**：(A) 显示名
+/// Unicode Format（Cf）不可见字符（U+202E bidi 覆盖、U+2066-2069 孤立、
+/// U+200B-200F 零宽/方向标记、U+FEFF、U+00AD 等）原样穿透
+/// `sanitize_display_name`（原契约只清 ASCII C0）直达 From/To/Reply-To
+/// 显示名——已扩展为 `Cc`（除 `HTAB`）+ `Cf` 全家族剥离
+/// （`melib::email::strip_spoofing_invisibles`，存储边界一次性中和，裸
+/// UTF-8 与 RFC2047 编码字两条路径同判）；(B) `Reply-To`/`Mail-Reply-To`/
+/// `Sender` 与 `From` 分叉时头部带不显示，而 `Composer::reply_to` 的实际
+/// 回复目标是 `Mail-Reply-To > Reply-To > From`——已由
+/// `address_faces_disagreeing_with_from` 把不一致面画在 `From` 正下方
+/// （渲染由孪生单测 `meli/src/mail/view/tests.rs` 锁定）；链接脚注真实性
+/// （显示 host ≠ href host 时两 host 并排可见、所见即所提取即所启动）为
+/// 免疫证明——锚文本伪装家族的 IDNA/scheme 门禁已由 CVE-2021-37746 等兄
+/// 弟语料先行锁定。
+#[cfg(test)]
+#[path = "CVE-2023-35619.rs"]
+mod cve_2023_35619;
