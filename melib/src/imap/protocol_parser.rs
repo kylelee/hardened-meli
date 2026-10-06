@@ -548,7 +548,13 @@ pub fn list_mailbox_result(input: &[u8]) -> IResult<&[u8], ImapMailbox> {
     let (input, _) = tag(&b") "[..]).parse(input)?;
     let (input, separator) =
         delimited(tag(&b"\""[..]), take(1_u32), tag(&b"\""[..])).parse(input)?;
-    let (input, _) = take(1_u32).parse(input)?;
+    // CVE-2018-14357 hardening: RFC 3501 mailbox-list makes the SP between the
+    // delimiter and the mailbox name mandatory. The previous `take(1_u32)`
+    // consumed whatever byte followed the closing delimiter quote, so a
+    // malformed `* LSUB (\HasNoChildren) "."INBOX` silently ate the name's
+    // first byte and parsed as `NBOX` instead of failing. Require the literal
+    // SP so a hostile LSUB/LIST field fails closed.
+    let (input, _) = tag(&b" "[..]).parse(input)?;
     let (input, path) = mailbox_token(input)?;
     // CVE-2020-16094 (Claws Mail ≤ 3.17.6, CWE-674): a malicious server
     // rebuilds an unbounded directory tree by stacking the hierarchy
