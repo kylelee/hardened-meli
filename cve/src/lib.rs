@@ -4400,3 +4400,33 @@ mod cve_2005_2549;
 #[cfg(test)]
 #[path = "CVE-2005-2550.rs"]
 mod cve_2005_2550;
+
+/// CVE-2008-1108（Evolution 2.22.1 及更早版本；CVSS v2 7.6，CWE-119；NVD
+/// 2008-06-04，Secunia Research 2008-22 / BID 29527）**iCalendar 附件长时区
+/// 字符串缓冲区溢出 → 任意代码执行**攻击模拟回归（issue #142，表 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 病毒/代码执行，2026-10-05 外部 KIMI
+/// 调研增补行）：ITip Formatter 插件禁用时，附件中超长时区字符串被拷入定
+/// 长栈缓冲，溢出 → RCE。meli 不链接 Evolution/libecal，无 ITip 体系；issue
+/// 指定的等价面是 `melib/src/utils/vobject/` iCalendar 解析栈
+/// （`ICalendar::build`/`EventBuilder`/`parser.rs`/`component.rs`）与邮件搭
+/// 载层。[`cve_2008_1108`] 多层锁定：L0 完整 RFC 5322 邮件搭载 RFC 5545 折
+/// 行 64 KiB `TZID` 的 `text/calendar; method=REQUEST` 附件，逐字抵达解析
+/// 边界；L1 64 KiB–4 MiB 四档 `TZID`（未折行 + 折行）过 `ICalendar::build`，
+/// 不 panic、有界、`Ok`、属性与 `DTSTART;TZID` 参数两落点逐字节精确、无放
+/// 大；L2 经典定长缓冲尺寸 ±1 边界扫描逐字节往返；L3
+/// `TZOFFSETFROM`/`TZOFFSETTO`/`TZNAME`/`X-LIC-LOCATION` 家族与多字节
+/// UTF-8 长值；L4 `ATTENDEE;CN=<64 KiB>` 等长参数逐字存活；L5 畸形结构
+/// （未闭合/错配 END/裸属性）与 65 层嵌套 → 干净 `Err`、64 层 `Ok`；L6
+/// `EventBuilder` 64 KiB 值与 `DTSTART;TZID` 参数经公共 API 读回 +
+/// `write_component` 75 字节折行序列化重解析逐字节相等；L7 源码锚点证明
+/// vobject 全目录无 `unsafe`、值字段为堆 `String`、递归有
+/// `MAX_COMPONENT_NESTING_DEPTH` 封顶、`icalendar.rs` 不建模 `TZID`、查看
+/// 路径不引用 vobject。结论为 **免疫证明，未发现缺口，未改动生产代码**；
+/// 与 CVE-2023-35636（ICS 查看路径不可达 + URL 解引用）、CVE-2009-0587
+/// （vCard 巨型 base64 PHOTO/KEY）、CVE-2005-2549/2550（vCard/任务列表格式
+/// 串）、CVE-2001-0145（BDAY 定长缓冲）正交，本语料以时区字符串
+/// （`TZID`/`TZOFFSET*`/`TZNAME`/`ATTENDEE` 参数）为焦点，标记 `1108`
+/// 逐字隔离。
+#[cfg(test)]
+#[path = "CVE-2008-1108.rs"]
+mod cve_2008_1108;
