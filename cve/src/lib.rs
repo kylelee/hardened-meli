@@ -4144,6 +4144,47 @@ mod cve_2018_14351;
 #[path = "CVE-2018-14352.rs"]
 mod cve_2018_14352;
 
+/// CVE-2018-14353（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8，
+/// NVD 记为 integer underflow，实质 CWE-191 无符号下溢 → CWE-787 越界写）
+/// **mutt `imap/util.c::imap_quote_string` 用 `size_t dlen` 维护定长栈
+/// 缓冲剩余空间，进入先 `dlen -= 2`、循环里每个 `"`/`\` 转义再递减；预算
+/// 中途耗尽或 `dlen < 2` 时无符号余量回绕成 `SIZE_MAX`，`while (*s && dlen)`
+/// 永真 → 无界越界写 → 内存破坏乃至 RCE** regression（issue #147，表 2
+/// 病毒/代码执行；mutt/neomutt 2018-07 一次性披露 15 漏洞之一）。
+///
+/// meli 对应面是 `melib/src/imap/search.rs::escape_imap_quoted` /
+/// `push_search_value` / `LiteralPolicy` / `to_imap_search_segments(_quoted)` /
+/// `search_send_steps(_non_sync)` / `non_sync_literal_text` 与
+/// `melib/src/imap/connection.rs` 的发送路径；`melib/src/search.rs::escape_double_quote`
+/// 是近似映射（真实调用方为 `meli/src/sqlite3.rs` 的 SQLite `LIKE` 语义，
+/// `"`→`""` 翻倍对 SQL 正确，与 IMAP `\"` 互不相干）。内存安全免疫：Rust
+/// 堆 `String` 无定长缓冲、无「剩余空间」可变无符号量，`escape_imap_quoted`
+/// 以 `with_capacity(value.len() * 2)` 一次性最坏预留，`{n}` 直接取
+/// `value.len()` 字节长度。
+///
+/// 语料内嵌空值（零长度剩余空间）、单字节 `"`、仅以 `\` 结尾的值、≥1 万字节
+/// 非 ASCII（CJK/emoji 混合）literal 路径、Quoted 回退路径与定长缓冲边界 ±1
+/// （0/1/2、255/256/257 … 65535/65536/65537）。
+///
+/// [`cve_2018_14353`] 分层锁定（详见模块文档）：转义计费层断言
+/// `escaped.len() == value.len() + count('"') + count('\\')` 且 ≤ `2×`、
+/// 空值 `Cow::Borrowed("")`、确定性、`catch_unwind` 全语料无 panic、有界时间；
+/// RFC 往返层用自实现 RFC 3501 §9 `QUOTED-CHAR` 解析器逐字节还原；线上字节层
+/// 断言 literal `{n}`/`{n+}` 计数 == `octets.len()`、`non_sync_literal_text`
+/// 只改写真正尾随计数（`{`/`{}`/`{a}`/quoted 内部 `{3}` 不改）、text 段无
+/// CR/LF 且无 NUL、`search_send_steps` 步骤流可重放、Quoted 回退对 CR/LF
+/// 返回 None fail-closed；源码锚点层用 `include_str!` 断言
+/// `push_search_value` 无 `dlen`/`-=` 式余量算术、`escape_imap_quoted` 的
+/// `with_capacity(value.len() * 2)` 仍在、`escape_double_quote` 仍只做 `""`
+/// 翻倍。与 CVE-2018-14352（同一函数的 off-by-one 面）及 CVE-2025-49113
+/// （CR/LF→literal 面）划界。结论：**内存安全免疫，未发现缺口，无需修改
+/// 生产代码**。
+///
+/// [`cve_2018_14353`]: self::cve_2018_14353
+#[cfg(test)]
+#[path = "CVE-2018-14353.rs"]
+mod cve_2018_14353;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
