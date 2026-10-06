@@ -388,6 +388,40 @@ fn test_imap_resync_quickskip_poisoned_cache() {
     });
 }
 
+/// Failing-first regression for issue #179: Tencent exmail's
+/// (imap.exmail.qq.com) virtual Junk/quarantine folder answers `SELECT
+/// "Junk"` with `* 0 EXISTS` while `STATUS "Junk"` still reports
+/// `MESSAGES 1`. `resync_basic`'s inference-based deletion reconciliation
+/// used to treat every cached envelope missing from the empty selected
+/// view as expunged, deleting the whole cached Junk folder and emitting
+/// `Remove` events -- so the folder listed empty forever while its counter
+/// read `[1 messages]`. A resync whose `STATUS` MESSAGES exceeds the
+/// selected view's `EXISTS` must skip that reconciliation. See
+/// `tests::run_imap_resync_status_view_disagreement_keeps_cache`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_resync_status_view_disagreement_keeps_cache() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_resync_status_view_disagreement_keeps_cache();
+    });
+}
+
+/// Contrast regression for issue #179: a real expunge, where both the
+/// `STATUS` counters and the selected view decrease together, must still
+/// reconcile -- the cache rows are dropped and one `Remove` event is
+/// emitted per expunged envelope. Guards that the virtual-Junk skip does
+/// not disable ordinary deletion. See
+/// `tests::run_imap_resync_real_expunge_still_reconciles`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_resync_real_expunge_still_reconciles() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_resync_real_expunge_still_reconciles();
+    });
+}
+
 /// Failing-first regression for the "poisoned cache" intermediate
 /// state: a persisted mailbox skeleton with matching STATUS counters
 /// and an empty `envelopes` table must not short-circuit the initial
@@ -835,6 +869,18 @@ pub mod server {
         /// fired (a counter, not a flag, so one drop does not disarm a
         /// later connection's normal answer).
         pub fetch_drop_connection_count: usize,
+        /// When `Some((messages, unseen, uidnext))`, the mock emulates
+        /// Tencent exmail's (imap.exmail.qq.com) virtual Junk/quarantine
+        /// folder: `STATUS INBOX (MESSAGES ..)` replies report these
+        /// counters (the quarantine truth) while the selected view
+        /// (`SELECT`/`EXAMINE` `* n EXISTS`, and every
+        /// `FETCH`/`UID FETCH`/`SEARCH` over the selected mailbox)
+        /// naturally reflects the (possibly empty) `envelopes` map --
+        /// reproducing the two-view disagreement of issue #179. The
+        /// override's `uidnext` is used as the reply's `UIDNEXT`;
+        /// `UIDVALIDITY` still comes from the live `uidvalidity`. `None`
+        /// (the default) keeps the historical live-count reply.
+        pub status_override: Option<(usize, usize, UID)>,
     }
 
     impl Default for ServerState {
@@ -872,6 +918,7 @@ pub mod server {
                 fetch_drop_connection_on_nth: None,
                 fetch_envelope_fetches: 0,
                 fetch_drop_connection_count: 0,
+                status_override: None,
             }
         }
     }
@@ -2288,20 +2335,33 @@ pub mod server {
                             if status.starts_with("STATUS INBOX (MESSAGES")
                                 && status.ends_with(")\r\n") =>
                         {
-                            let (messages, unseen, uidnext, uidvalidity) = status_snapshot
-                                .unwrap_or_else(|| {
-                                    let state_lck = state.lock().unwrap();
-                                    (
-                                        state_lck.envelopes.len(),
-                                        state_lck
-                                            .envelopes
-                                            .values()
-                                            .filter(|env| !env.is_seen())
-                                            .count(),
-                                        state_lck.next_uid,
-                                        state_lck.uidvalidity,
-                                    )
-                                });
+                            let (messages, unseen, uidnext, uidvalidity) = {
+                                // The exmail virtual-Junk override takes
+                                // priority over the RFC 4549 stale-STATUS
+                                // snapshot and the live counters: STATUS
+                                // reports the quarantine truth while the
+                                // selected view stays empty (issue #179).
+                                let override_values = state.lock().unwrap().status_override;
+                                match override_values {
+                                    Some((messages, unseen, uidnext)) => {
+                                        let uidvalidity = state.lock().unwrap().uidvalidity;
+                                        (messages, unseen, uidnext, uidvalidity)
+                                    }
+                                    None => status_snapshot.unwrap_or_else(|| {
+                                        let state_lck = state.lock().unwrap();
+                                        (
+                                            state_lck.envelopes.len(),
+                                            state_lck
+                                                .envelopes
+                                                .values()
+                                                .filter(|env| !env.is_seen())
+                                                .count(),
+                                            state_lck.next_uid,
+                                            state_lck.uidvalidity,
+                                        )
+                                    }),
+                                }
+                            };
                             tcp_stream
                                 .write_all(
                                     // The item order matches what melib's
@@ -6688,6 +6748,32 @@ hello world 3.
         ret
     }
 
+    /// Envelope hashes of every `Remove` refresh event received so far
+    /// through the backend event consumer, flattening `RefreshBatch`
+    /// events.
+    fn queue_remove_events(
+        backend_event_queue: &Arc<Mutex<std::collections::VecDeque<(AccountHash, BackendEvent)>>>,
+    ) -> Vec<EnvelopeHash> {
+        let queue_lck = backend_event_queue.lock().unwrap();
+        let mut ret = vec![];
+        for (_, event) in queue_lck.iter() {
+            match event {
+                BackendEvent::Refresh(RefreshEvent {
+                    kind: RefreshEventKind::Remove(env_hash),
+                    ..
+                }) => ret.push(*env_hash),
+                BackendEvent::RefreshBatch(events) => {
+                    ret.extend(events.iter().filter_map(|event| match &event.kind {
+                        RefreshEventKind::Remove(env_hash) => Some(*env_hash),
+                        _ => None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        ret
+    }
+
     /// Bounded watchdog deadline for the watch tests below, in the same
     /// named-constant style as `DONE_RESPONSE_TIMEOUT` in
     /// `melib/src/imap/watch.rs`.
@@ -7656,6 +7742,332 @@ hello poisoned revealed {i}.
         loops_handle.join().unwrap();
     }
 
+    /// Failing-first regression for issue #179: Tencent exmail's
+    /// (imap.exmail.qq.com) virtual Junk/quarantine folder reports two
+    /// contradictory server views. The selected view
+    /// (`SELECT`/`EXAMINE` `* 0 EXISTS`, empty `UID SEARCH`/`UID FETCH`
+    /// replies) is empty while `STATUS INBOX (MESSAGES 1 ..)` still
+    /// reports the quarantined mail. `resync_basic`'s Step 4 infers an
+    /// expunge from "cached envelope absent from the FLAGS reply"; with an
+    /// empty selected view every cached envelope is "absent", so the
+    /// reconciliation deleted the whole cached Junk folder and emitted a
+    /// `Remove` per mail, leaving the listing permanently empty while its
+    /// counter still read `[1 messages]`. The fix skips the deletion
+    /// reconciliation whenever `STATUS` MESSAGES exceeds the selected
+    /// view's `EXISTS`. See
+    /// `tests::run_imap_resync_status_view_disagreement_keeps_cache`.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_resync_status_view_disagreement_keeps_cache() {
+        use melib::imap::sync::cache::ImapCache as _;
+
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for i in 0..2 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2001 00:00:0{i} +0000
+Cc:
+Subject: exmail junk seed {i}
+Message-ID: <exmailjunk{i}@example.com>
+Content-Type: text/plain
+
+hello exmail junk {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                true,
+            );
+
+        // The mailbox is warm: the initial fetch caches the 2 seeds.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "warm fetch must load the 2 seeded mails; got {}",
+                                seed_envs.len()
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // Reproduce exmail's virtual quarantine: the selected view becomes
+        // empty (`EXISTS = 0`, no `SEARCH`/`FETCH` result), but `STATUS`
+        // keeps reporting the quarantined mail.
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.envelopes.clear();
+            state_lck.next_uid = 3;
+            // `uidvalidity` is unchanged (1).
+            state_lck.status_override = Some((1, 1, 3));
+        }
+
+        // Baseline (2,2,3) differs from the overridden STATUS (1,1,3), so
+        // the RFC 4549 quick-skip is disabled and the full resync runs.
+        {
+            let mut uid_store = Arc::clone(&imap.uid_store);
+            uid_store
+                .record_status(inbox_hash, Some(2), Some(2), Some(3))
+                .unwrap();
+        }
+
+        // The real F5 / watch path resyncs on a connection that does not
+        // hold the mailbox selection; otherwise the quick-skip arm's NOOP
+        // branch would observe the change and run the full resync anyway,
+        // masking the bug.
+        block_on(async {
+            let mut conn = imap.connection.lock().await.unwrap();
+            conn.unselect().await.unwrap();
+        });
+
+        // Manual refresh (the same path the 3-minute poll / F5 uses).
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // Core assertion (RED before the fix): the two server views
+        // disagree, so the deletion reconciliation must not run. The
+        // cached Junk envelopes survive and no Remove event is emitted.
+        {
+            let mut uid_store = Arc::clone(&imap.uid_store);
+            assert!(
+                uid_store.has_envelopes(inbox_hash).unwrap(),
+                "resync deleted the cached Junk envelopes although STATUS still reports \
+                 quarantined mail; full queue: {:?}",
+                backend_event_queue.lock().unwrap()
+            );
+        }
+        let remove_events = queue_remove_events(&backend_event_queue);
+        assert!(
+            remove_events.is_empty(),
+            "resync emitted Remove events for the virtual Junk folder while STATUS and the \
+             selected view disagreed: {remove_events:?}; full queue: {:?}",
+            backend_event_queue.lock().unwrap()
+        );
+
+        // The user-visible symptom fix: the listing must still serve the
+        // cached Junk mail instead of being permanently empty.
+        {
+            let imap = &mut imap;
+            let envs = std::thread::scope(|scope| {
+                scope
+                    .spawn(move || block_on(fetch_all_envs(imap, inbox_hash)))
+                    .join()
+                    .unwrap()
+            });
+            assert!(
+                !envs.is_empty(),
+                "the Junk listing is empty after the refresh; the cached envelopes were lost"
+            );
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Contrast regression for issue #179: the virtual-Junk guard must not
+    /// disable real expunge reconciliation. With no `status_override`,
+    /// `STATUS` agrees with the selected view (`MESSAGES 0`, `EXISTS 0`),
+    /// so both cached mails really are gone from the server and the
+    /// deletion reconciliation must still drop the cache rows and emit one
+    /// `Remove` event per expunged envelope. The two server views
+    /// decreasing together is the real-expunge witness. See
+    /// `tests::run_imap_resync_real_expunge_still_reconciles`.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_resync_real_expunge_still_reconciles() {
+        use melib::imap::sync::cache::ImapCache as _;
+
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for i in 0..2 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"jing jing\" <jj@example.com>
+To: \"me\" <myself@example.com>
+Date: Thu, 01 Jan 2001 00:00:0{i} +0000
+Cc:
+Subject: exmail expunge seed {i}
+Message-ID: <exmailexpunge{i}@example.com>
+Content-Type: text/plain
+
+hello exmail expunge {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                true,
+            );
+
+        // The mailbox is warm: the initial fetch caches the 2 seeds.
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "warm fetch must load the 2 seeded mails; got {}",
+                                seed_envs.len()
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // A real expunge: both server views decrease together. No
+        // `status_override`, so STATUS reports the live (empty) counters.
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.envelopes.clear();
+            state_lck.next_uid = 3;
+        }
+
+        // Baseline (2,2,3) differs from the live STATUS (0,0,3), so the
+        // full resync runs.
+        {
+            let mut uid_store = Arc::clone(&imap.uid_store);
+            uid_store
+                .record_status(inbox_hash, Some(2), Some(2), Some(3))
+                .unwrap();
+        }
+
+        block_on(async {
+            let mut conn = imap.connection.lock().await.unwrap();
+            conn.unselect().await.unwrap();
+        });
+
+        // Manual refresh (the same path the 3-minute poll / F5 uses).
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            imap.refresh(inbox_hash).unwrap().await.unwrap();
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // A real expunge must still reconcile: the cache is dropped and one
+        // Remove event is emitted per expunged envelope.
+        {
+            let mut uid_store = Arc::clone(&imap.uid_store);
+            assert!(
+                !uid_store.has_envelopes(inbox_hash).unwrap(),
+                "real expunge did not drop the cached envelopes; full queue: {:?}",
+                backend_event_queue.lock().unwrap()
+            );
+        }
+        let remove_events = queue_remove_events(&backend_event_queue);
+        assert_eq!(
+            remove_events.len(),
+            2,
+            "real expunge must emit one Remove event per expunged envelope; got \
+             {remove_events:?}; full queue: {:?}",
+            backend_event_queue.lock().unwrap()
+        );
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
     /// Test that the IMAP account option `imap_id_name` customizes the
     /// client name reported in the RFC 2971 `ID` command sent during the
     /// connection handshake. A non-empty custom value must appear in the
@@ -8335,6 +8747,7 @@ hello new world b.
             fetch_drop_connection_on_nth: None,
             fetch_envelope_fetches: 0,
             fetch_drop_connection_count: 0,
+            status_override: None,
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
