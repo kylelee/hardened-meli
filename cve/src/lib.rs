@@ -4916,3 +4916,54 @@ mod cve_2005_2550;
 #[cfg(test)]
 #[path = "CVE-2008-1108.rs"]
 mod cve_2008_1108;
+
+/// CVE-2018-14361（neomutt < 2018-07-16、mutt 侧经发行版补丁；CVSS v3.1 9.8
+/// CRITICAL，CWE-824 访问未初始化指针）**恶意 NNTP 服务器对 `OVER`（`XOVER`）
+/// 命令返回畸形或超长的 overview 响应行，mutt/neomutt 在 messages data 内存
+/// 分配失败后继续使用未初始化指针 → 任意写**攻击模拟回归（issue #155，表 2
+/// 病毒/代码执行）。NVD 口径：*"An issue was discovered in NeoMutt before
+/// 2018-07-16. nntp.c proceeds even if memory allocation fails for messages
+/// data."*（修复提交 neomutt `9e927affe3a021175f354af5fa01d22657c20585`）。
+///
+/// 攻击面核实：meli 的 OVER 行解析全在 `melib/src/nntp/`——
+/// `protocol_parser.rs::over_article` 先以 `is_not("\t")` 取文章号并要求
+/// `is_ascii_digit`，字段间恰 7 个 `tag("\t")`、结尾 `tag("\r\n")`，最后
+/// `usize::from_str(num)` 受检转换（溢出即 `Err`）；subject/message-id/
+/// references 经 `Envelope::set_*` 落入堆 `String`，无定长缓冲、无分配失败后
+/// 的裸指针续用（Rust 分配失败即 abort）；`connection.rs::read_lines` 以
+/// `enforce_response_size_limit(ret.len())?` 封顶 64 MiB，`224`/`423` 期望码
+/// 由 `command_to_replycodes("OVER")` 给出；`mod.rs` 的 `fetch_envs`/refresh
+/// 以 `over_article(l)?` fail-closed；全目录无 `unsafe`、无 C 定长缓冲原语、
+/// 无 `MaybeUninit`/`from_utf8_unchecked(`/`set_len(`。
+///
+/// [`cve_2018_14361`] 分五层锁定（详见模块文档）：L0 合法
+/// `224 …` 多行响应经真实 `NntpStream::read_lines`（`is_multiline=true`、
+/// `expected=command_to_replycodes("OVER")`）逐字节保留、`.` 终止行被剥离，
+/// `over_article` 对合法行逐字段（subject/from/date/message-id/references）
+/// 精确落入 Envelope；L1 攻击语料（缺 tab 七位置、无 CRLF、裸 LF、空文章号、
+/// `\t` 开头、非数字/带符号/十六进制、溢出数字、合法数值边界、经典定长缓冲
+/// ±1、10+ tab 多余字段、NUL、64 KiB–1 MiB subject/message-id/references、
+/// 超长 `:bytes`/`:lines`）逐条 `catch_unwind` 不 panic，Ok 形态 uid 精确、
+/// Err 形态干净，并以 `split_rn().skip(1)` + `?` 相同表达式钉死 fail-closed
+/// 消费语义，另以 read_lines 子集钉住无效 UTF-8 的 U+FFFD 降级与分层；
+/// L2 永不发 `.` 终止行的 `224` 多行响应在生产 64 MiB 上限处
+/// `ProtocolViolation`，`ret.len()` 有界、写入量 > cap、watchdog 内完成；
+/// L3 `include_str!` 钉住 `is_ascii_digit`、`usize::from_str(num)`、恰 7 个
+/// `tag("\t")`、`tag("\r\n")`、`enforce_response_size_limit(ret.len())?;`、
+/// 增量扫描游标、`OVER → &["224 ", "423 "]`、`over_article(l)?`，递归扫
+/// `melib/src/nntp/` 证明无 `unsafe`/C 原语/未初始化指针原语；L4 struct
+/// literal 构造真实 `NntpConnection`（注入 `Connection::Fd` +
+/// `UnixStream::pair()`）先发 `OVER 1-2` 再读，合法行解析、畸形行消费层
+/// fail-closed、`423` 单行空集、非期望码读取层 fail-closed。与 CVE-2018-14349
+/// （IMAP NO 文本）、14350（INTERNALDATE）、14351（STATUS literal）、
+/// 14352/14353（imap_quote_string）、14354/14357（命令注入）、14356（空 UID）、
+/// 14358（RFC822.SIZE）、14359（base64）、14360（NNTP GROUP 首行）划界，标记
+/// `14361` 语料逐字隔离。结论：**免疫证明，未发现缺口，未改动生产代码**——
+/// Rust 无「分配失败后使用未初始化指针」路径，Safe Rust 分配失败即 abort，
+/// `over_article` 受检解析 + 64 MiB 封顶 + 消费点 fail-closed 结构性免疫
+/// CWE-824。
+///
+/// [`cve_2018_14361`]: self::cve_2018_14361
+#[cfg(test)]
+#[path = "CVE-2018-14361.rs"]
+mod cve_2018_14361;
