@@ -4096,3 +4096,32 @@ mod cve_2019_10740;
 #[cfg(test)]
 #[path = "CVE-2019-10741.rs"]
 mod cve_2019_10741;
+
+/// CVE-2024-38173（Microsoft Outlook 2016 / Office 2019 / Office LTSC 2021 /
+/// Microsoft 365 Apps for Enterprise，Windows；CVSS 3.1 6.7，CWE-73）外部
+/// 文件引用 RCE 回归（issue #131，表 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` —
+/// virus / code execution）：2024-08 补丁日公告，MSRC 只描述为「Microsoft
+/// Outlook 远程代码执行漏洞」，原语是「外部文件引用控制不当」——攻击者发送含
+/// `file://`、Windows UNC `\\attacker\share`、`search-ms:`、`ms-msdt:`、
+/// `mhtml:` 等外部文件引用的邮件，诱导受害者点击后由系统处理器解析并执行。
+/// 这些协议全部是 Windows 专属功能面，meli 没有 MAPI store、Protected View、
+/// COM/URL moniker、Windows shell/协议处理器注册表，也没有任何
+/// `ms-msdt`/`search-ms`/`mhtml` 解析器或 SMB/NTLM 客户端，字面站点不可能
+/// 存在；按 issue 指定的等价面映射到 **scheme 启动门**
+///（[`is_default_launchable_scheme`] / `go_to_url` 确认门）、**mailcap 附件
+/// 打开面**（本 CVE 新增轴：`MailcapEntry::execute` 无匹配即 Err，绝无
+/// `xdg-open` 静默兜底；`%s` 临时路径按 shell 上下文引用）以及渲染 / 头部派生
+/// 发射点（URL 模式 linkify 提取 + ammonia sanitize 白名单、
+/// `List-Unsubscribe` / `List-Archive`）。语料是一封真实 `multipart/alternative`
+/// 攻击邮件（两条 alternative 逐字携带整个引用家族，头部携带 issue 指定的
+/// `List-Archive`/`List-Unsubscribe` 负载），逐层断言结局为**免疫证明，未发现
+/// 缺口，未改动生产代码**；交互级接线由仓内孪生单测
+/// `meli/src/mail/view/tests.rs::go_to_url_non_default_scheme_requires_confirmation`、
+/// `list_unsubscribe_skips_non_launchable_url_options`、
+/// `list_archive_non_launchable_scheme_is_refused`、
+/// `list_archive_https_still_launches` 锁定。
+///
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+#[cfg(test)]
+#[path = "CVE-2024-38173.rs"]
+mod cve_2024_38173;
