@@ -5343,3 +5343,48 @@ mod cve_2020_11880;
 #[cfg(test)]
 #[path = "CVE-2020-35730.rs"]
 mod cve_2020_35730;
+
+/// CVE-2023-43770（Roundcube Webmail 1.4.x < 1.4.14、1.5.x < 1.5.4、
+/// 1.6.x < 1.6.3；CVSS v3.1 6.1；CWE-79；CISA KEV 在野利用）**`text/plain`
+/// 邮件链接引用处理存储型 XSS** regression（Gitea issue #163），调研报告表 3
+/// 「网页嵌入与 HTML/链接渲染」批次成员、Roundcube 在野利用群成员：
+/// Roundcube 对 `text/plain` 正文做链接化 / 引用渲染时，负责字符串替换的
+/// `rcube_string_replacer.php` 机制使显示文本与真实目标分叉、或让清洗后的片段
+/// 在后续组装里复活成活标记，受害者只需查看邮件即执行脚本；CISA 于 2024-02
+/// 将其列入 KEV 并责令联邦机构修复，根因与 [`cve_2020_35730`] 同族
+/// （「先白名单、后抽取」）。
+///
+/// meli 是终端客户端（无 DOM、浏览器与 JS 运行时），等价面按 issue 要求分层
+/// 映射：`text/plain` 正文原样显示、linkify 只在展示过的同一段字节上提取；
+/// `text/html` 正文经 [`sanitize`]（ammonia 白名单）→ [`render`]
+/// （html2text 纯文本）。三层等价断言：sanitize 输出的 `javascript:` 原料
+/// （零宽前缀 / 大小写混写 / 实体编码 / tab-newline 内嵌形）被 trim ＋
+/// [`is_safe_url`] 复核整属性剔除；协议相对 `//host`、`file:`/`data:`/UNC 与
+/// 未知 scheme 的 `List-Unsubscribe` 目标由
+/// [`is_default_launchable_scheme`] 确认门拦下（只放行 http/https/mailto）；
+/// render 的 html2text 脚注逐字节展示真实 `href`，锚文本与目标分叉必然并现，
+/// 不存在「显示 trusted、实际 attacker 而无提示」的形态。
+///
+/// [`cve_2023_43770`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// sanitize 平面＋独立白名单预言机＋不动点、render 显示真实目标、text/plain＋
+/// text/html 端到端（多宽度 40/80/120）＋组合邮件、启动门与畸形引号回归。
+///
+/// 与近亲划界：[`cve_2020_35730`]（issue #162）锁 Roundcube **HTML 正文**的
+/// 危险元素/`onload`/`srcdoc`/`data:` 属性走私；本文件锁 **`text/plain`
+/// 链接引用处理**面——`javascript:` 的零宽/实体/空白突变与其在显示-目标分叉
+/// 上的等价物。语料 marker `rc43770.example` 与近亲逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**——issue 原样链路在 meli 的
+/// 等价面上逐条落空（sanitize 剔除 scheme 原料、确认门拦下相对/危险 scheme、
+/// 脚注如实展示真实目标），且 meli 没有「先清洗、后字符串替换二次组装」的
+/// `rcube_string_replacer.php` 面。
+///
+/// [`cve_2023_43770`]: self::cve_2023_43770
+/// [`cve_2020_35730`]: self::cve_2020_35730
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+/// [`is_safe_url`]: meli::mail::view::html_render::is_safe_url
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+#[cfg(test)]
+#[path = "CVE-2023-43770.rs"]
+mod cve_2023_43770;
