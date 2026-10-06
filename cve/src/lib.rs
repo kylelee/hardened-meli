@@ -4235,6 +4235,57 @@ mod cve_2018_14353;
 #[path = "CVE-2018-14354.rs"]
 mod cve_2018_14354;
 
+/// CVE-2018-14356（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8
+/// CRITICAL；NVD 原文 *"If an IMAP server returns a null UID in a COPY
+/// response or in a UID FETCH response, mutt dereferences a null pointer."*
+/// ——同一根因的两个变体：POP3 与 IMAP。家族描述见
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` 表 2 第 91 行：mutt/neomutt 2018-07
+/// 一次性披露的 15 个漏洞之一，**「POP 空 UID 空指针」**）**恶意 POP/IMAP
+/// 服务器在 `UID FETCH` 响应里把 `UID` 项的数值为空（`UID ` 之后没有数字），
+/// mutt 把 `atoi()` 的零返回误作有效 UID 继续使用同一封邮件的下标；当后续
+/// 路径假定该 UID 必然有非空副本（去重缓存键、SMIME / PGP 会话句柄）即
+/// 解引用空指针** 攻击模拟回归（issue #150，表 2 病毒/代码执行）。
+///
+/// meli 对应面（issue #150 指定）：meli 无 POP3 后端
+/// （`melib/src/backends.rs` 只注册 `maildir`/`mbox`/`imap`/`notmuch`/
+/// `jmap`/`smtp`，`UID` 类型唯一定义在 `melib/src/imap/mod.rs`），故等价面
+/// 映射为两条「POP 协议响应把服务器控制字节化为对端 UID 假设的字段」：
+/// `melib/src/imap/protocol_parser.rs::fetch_response`/`uid_fetch_flags_response`
+/// 对 `UID ` 之后无数字的 `* 1 FETCH (UID )CRLF` 等变体 fail-closed（mutt
+/// `atoi("")` 返回 0 而 meli 用 `take_while + from_str` 阻断），以及
+/// `melib/src/email/parser.rs` 的 `mail`/`header`/`headers`/`headers_raw`
+/// 对空输入强契约 `Err`（`many1` + 显式 `input.is_empty()` 短路），构成
+/// 「空指针解引用免疫」的双层防线。
+///
+/// 语料内嵌 issue 点名全部攻击形态：空响应 `CRLF`、「`* 1 FETCH (UID )CRLF`」、
+/// 多空格/截断/空 literal/`()` 空状态响应等 POP 类空响应，以及 ≥1 KiB NUL/
+/// 空格/混合 4 KiB 长语料防 panic 与有界时间。
+///
+/// [`cve_2018_14356`] 分四层锁定（详见模块文档）：a 源树 POP3 客户端缺位证
+/// 明：扫描 `melib/src/` 全部 `.rs` 文件不含 `pop3`/`POP3`/`Pop3Type`/
+/// `b"+OK "`/`b"-ERR "`/`port: 110`/`pop3_session`/`mutt/pop.c`/`pop_lib`
+/// 任一 POP3 痕迹，`backends.rs` 不注册 POP3，`UID` 类型唯一定义在
+/// `melib/src/imap/mod.rs::UID = ImapNum = usize`；b `UID FETCH` 空 UID 解
+/// 析：issue 点名「`* 1 FETCH (UID )CRLF`」、多空格、截断、空 literal、混合
+/// FLAGS+UID、`()`/`M1 `/NUL 等空响应经 `fetch_response`/`uid_fetch_flags_response`
+/// 全部 `catch_unwind` 无 panic 且 `is_err()`，不 panic 是关键——C 端
+/// `atoi("")` 静默返 0，meli 必须显式 `Err`；c `mail`/`header`/`headers`/
+/// `headers_raw` 空输入契约：`mail(b"")`/`headers(b"")`/`header(b"")`/
+/// `headers_raw(b"")` 全部 `Result::is_err()` 且不 panic，4 KiB NUL/SP 与
+/// 纯 LF/纯 CRLF 对照证明契约在 RFC 5322 §3.6.8 字段规约之内无歧义；
+/// d `UID = usize`/`Option<UID>` 类型锚点：`UID::from_str("")` 经
+/// `std::num::FromStr` 必返回 `Err(ParseIntError)`（非 0 sentinel），`uid`
+/// 字段为 `Option<UID>` 而非 `UID`，`UidStore` 用 `HashMap` 无零值
+/// sentinel。与 CVE-2018-14349/14350/14351/14352/14353/14354（同一
+/// mutt/neomutt 2018-07 一次性披露家族，分别锁 NO/INTERNALDATE/STATUS
+/// literal/`imap_quote_string` 内存破坏/订阅命令执行面）正交，本语料以
+/// 「POP 空 UID」为焦点，标记 `14356` 逐字隔离。
+///
+/// [`cve_2018_14356`]: self::cve_2018_14356
+#[cfg(test)]
+#[path = "CVE-2018-14356.rs"]
+mod cve_2018_14356;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
