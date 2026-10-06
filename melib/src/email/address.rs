@@ -98,24 +98,66 @@ pub enum Address {
     Group(GroupAddress),
 }
 
-/// Strip `C0` control characters (including `CR`/`LF`) from a display name.
+/// Character predicate for [`sanitize_display_name`] and
+/// [`strip_spoofing_invisibles`]: every `Cc` control except `HTAB`, plus
+/// the Format-category (`Cf`) invisibles used as padding/spoof markers in
+/// spam and Trojan-Source-style reordering attacks (soft hyphen, Arabic
+/// letter mark, zero-width spaces/joiners/marks, bidi overrides and
+/// isolates, invisible mathematical operators, `BOM`/`ZWNBSP`).
+///
+/// The `Cf` set mirrors the Format half of `trim_predicate` in
+/// `meli/src/mail/view/html_render.rs`; keep the two lists in sync.
+///
+/// `HTAB` is exempt: it is valid folding whitespace inside a phrase and
+/// stripping it would glue words together.
+fn is_spoofing_invisible_char(c: char) -> bool {
+    (c.is_control() && c != '\t')
+        || matches!(
+            c,
+            '\u{00AD}' // SOFT HYPHEN
+            | '\u{061C}' // ARABIC LETTER MARK
+            | '\u{180E}' // MONGOLIAN VOWEL SEPARATOR (Cf zero-width)
+            | '\u{200B}'..='\u{200F}' // ZWSP / ZWNJ / ZWJ / LRM / RLM
+            | '\u{202A}'..='\u{202E}' // LRE / RLE / PDF / LRO / RLO (bidi overrides)
+            | '\u{2060}' // WORD JOINER
+            | '\u{2061}'..='\u{2064}' // FUNCTION APPLICATION / INVISIBLE TIMES/SEP/PLUS
+            | '\u{2066}'..='\u{2069}' // LRI / RLI / FSI / PDI (bidi isolates)
+            | '\u{FEFF}' // ZERO WIDTH NO-BREAK SPACE / BOM
+        )
+}
+
+/// Strip characters that can only serve display spoofing.
+///
+/// Control characters cover `CR`/`LF` header injection (CWE-93) and the
+/// `Cc` set at large; invisible Format-category characters cover the
+/// `U+202E`-style bidi reordering and zero-width padding of rendered names
+/// (the UI-spoofing face of CVE-2023-35619).
+///
+/// This is the storage-boundary scrub [`Address`] display names go through
+/// ([`sanitize_display_name`]); it is also fit for raw header values that
+/// have no `Address` form yet (e.g. header rows the envelope view prints
+/// verbatim). See [`is_spoofing_invisible_char`] for the exact set and the
+/// `HTAB` exemption.
+pub fn strip_spoofing_invisibles(s: &str) -> Cow<'_, str> {
+    if s.chars().any(is_spoofing_invisible_char) {
+        s.replace(is_spoofing_invisible_char, "").into()
+    } else {
+        s.into()
+    }
+}
+
+/// Strip control and invisible Format-category characters from a display
+/// name.
 ///
 /// Display names are display data: control characters in them cannot be
 /// rendered legitimately, but if they survive into a header value (e.g. a
 /// decoded `RFC2047` encoded word containing `CRLF`) they enable header
-/// injection (CWE-93). Scrubbing them at the storage boundary (the
+/// injection (CWE-93); bidi overrides and other `Cf` invisibles reorder or
+/// pad the rendered name to impersonate another identity (the UI-spoofing
+/// face of CVE-2023-35619). Scrubbing them at the storage boundary (the
 /// constructors below) means every consumer gets a sanitized value.
-///
-/// `HTAB` is exempt: it is valid folding whitespace inside a phrase and
-/// stripping it would glue words together.
 fn sanitize_display_name(display_name: &str) -> Cow<'_, str> {
-    if display_name.bytes().any(|b| b < 0x20 && b != b'\t') {
-        display_name
-            .replace(|c: char| c < '\u{20}' && c != '\t', "")
-            .into()
-    } else {
-        display_name.into()
-    }
+    strip_spoofing_invisibles(display_name)
 }
 
 impl Address {

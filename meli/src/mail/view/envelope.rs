@@ -964,6 +964,67 @@ impl EnvelopeView {
     }
 }
 
+/// Header rows surfacing `Sender`/`Mail-Reply-To`/`Reply-To` values that
+/// disagree with the `From` addresses — the UI-spoofing face of
+/// CVE-2023-35619 (Microsoft Outlook for Mac spoofing).
+///
+/// `From` is the identity the header band displays, but a reply is
+/// addressed to `Mail-Reply-To`/`Reply-To` before `From`
+/// (`Composer::reply_to`), and `Sender` identifies the actual submitter
+/// (RFC 5322 §3.6.1). A spoofed mail plays the two faces against each
+/// other (`From: "PayPal" <billing@paypal.example>` with
+/// `Reply-To: attacker@evil.example`) so the visible identity and the
+/// destination a reply reaches differ; surfacing every disagreeing face
+/// directly under `From` makes the divergence part of the rendered header
+/// band instead of a hidden redirect.
+///
+/// A face disagrees when its parsed address specs differ from `From`'s, or
+/// when it cannot be parsed at all (an unparseable value can never be
+/// proven equal). Values are re-parsed through `Address` so their display
+/// names get the same invisible-character scrubbing as `From` (`Address`
+/// constructors scrub via `strip_spoofing_invisibles`); unparseable values
+/// are scrubbed directly. Faces already shown via `show_extra_headers`
+/// are skipped to avoid double rows.
+fn address_faces_disagreeing_with_from(
+    envelope: &Mail,
+    show_extra_headers: &[HeaderName],
+) -> Vec<(HeaderName, String)> {
+    let from_specs: HashSet<&str> = envelope
+        .from()
+        .iter()
+        .map(melib::email::Address::get_email)
+        .collect();
+    let mut rows = Vec::new();
+    for name in [
+        HeaderName::SENDER,
+        HeaderName::MAIL_REPLY_TO,
+        HeaderName::REPLY_TO,
+    ] {
+        if show_extra_headers.contains(&name) {
+            continue;
+        }
+        let Some(raw) = envelope.other_headers().get(&name) else {
+            continue;
+        };
+        let parsed = melib::email::Address::list_try_from(raw).ok();
+        let agrees_with_from = parsed.as_ref().is_some_and(|list| {
+            list.iter()
+                .map(melib::email::Address::get_email)
+                .collect::<HashSet<&str>>()
+                == from_specs
+        });
+        if agrees_with_from {
+            continue;
+        }
+        let value = match &parsed {
+            Some(list) => melib::email::Address::display_slice(list, None),
+            None => melib::email::strip_spoofing_invisibles(raw).into_owned(),
+        };
+        rows.push((name, value));
+    }
+    rows
+}
+
 impl Component for EnvelopeView {
     fn draw(&mut self, grid: &mut CellBuffer, area: Area, context: &mut Context) {
         #[cfg(debug_assertions)]
@@ -1074,13 +1135,38 @@ impl Component for EnvelopeView {
                         self.view_settings
                             .format_date_value(envelope.timestamp, envelope.date_as_str())
                     ),
-                    (HeaderName::FROM, envelope.field_from_to_string()),
-                    (HeaderName::TO, envelope.field_to_to_string()),
+                    // The address rows also scrub at the draw site: when an
+                    // address list fails to parse, the `field_*_to_string`
+                    // fallbacks display the raw header value, which never
+                    // went through the `Address` storage boundary.
+                    (
+                        HeaderName::FROM,
+                        melib::email::strip_spoofing_invisibles(&envelope.field_from_to_string())
+                    ),
                 );
+                // CVE-2023-35619 (UI spoofing): replies are addressed to
+                // `Mail-Reply-To`/`Reply-To` before `From`, and `Sender`
+                // identifies the actual submitter — surface every face
+                // disagreeing with `From` directly under it so the
+                // displayed identity and the reply destination can never
+                // silently diverge.
+                for (name, value) in address_faces_disagreeing_with_from(
+                    envelope,
+                    &self.view_settings.show_extra_headers,
+                ) {
+                    print_header!((name, value));
+                }
+                print_header!((
+                    HeaderName::TO,
+                    melib::email::strip_spoofing_invisibles(&envelope.field_to_to_string())
+                ));
                 if envelope.other_headers().contains_key(HeaderName::CC)
                     && !envelope.other_headers()[HeaderName::CC].is_empty()
                 {
-                    print_header!((HeaderName::CC, envelope.field_cc_to_string()));
+                    print_header!((
+                        HeaderName::CC,
+                        melib::email::strip_spoofing_invisibles(&envelope.field_cc_to_string())
+                    ));
                 }
                 print_header!(
                     (HeaderName::SUBJECT, envelope.subject()),

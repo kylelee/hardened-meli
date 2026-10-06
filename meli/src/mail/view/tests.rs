@@ -4655,3 +4655,154 @@ fn cve_2023_36763_carrier_display_tree_keeps_external_body_inert() {
         "parsing and drawing the carrier must not emit Fork/ProcessRequest: {replies:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CVE-2023-35619（UI spoofing, issue #134）孪生单测：头部带分叉行渲染
+// ---------------------------------------------------------------------------
+
+/// CVE-2023-35619 语料（与 `cve/src/CVE-2023-35619.rs` 同一攻击家族的仓内
+/// 副本）：`From` 显示名携带 U+202E（RLO 视觉重排欺骗），`Reply-To`/
+/// `Sender` 与 `From` 地址集完全分叉——显示身份与回复落点/实际提交者
+/// 静默不一致，构成 UI 欺骗（`UI:R`）等价面。
+fn cve_2023_35619_spoof_mail_bytes() -> Vec<u8> {
+    "From: \"PayPa\u{202E}l Support\" <attacker@evil35619.example>\r\n\
+Sender: \"PayPal Support\u{2066}\" <relay@bounce35619.example>\r\n\
+Reply-To: \"PayPal Billing\" <billing@evil35619.example>\r\n\
+To: \"Victim\" <victim@victim.example>\r\n\
+Subject: Account verification required\r\n\
+Date: Tue, 12 Dec 2023 09:00:00 +0000\r\n\
+Message-ID: <spoof-35619-twin@evil35619.example>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Your account was limited. Reply to confirm your identity.\r\n"
+        .to_string()
+        .into_bytes()
+}
+
+/// 对照语料：`Reply-To`/`Sender` 与 `From` 地址一致（合法常见形态）——
+/// 一致的面不得产生新行，否则诚实邮件获得永久噪声。
+fn cve_2023_35619_honest_mail_bytes() -> Vec<u8> {
+    "From: \"PayPal Support\" <service@honest35619.example>\r\n\
+Sender: \"PayPal Support\" <service@honest35619.example>\r\n\
+Reply-To: \"PayPal Support\" <service@honest35619.example>\r\n\
+To: \"Victim\" <victim@victim.example>\r\n\
+Subject: Your statement\r\n\
+Date: Tue, 12 Dec 2023 09:00:00 +0000\r\n\
+Message-ID: <honest-35619-twin@honest35619.example>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Honest sender, agreeing faces.\r\n"
+        .to_string()
+        .into_bytes()
+}
+
+/// 把一封邮件画进虚拟屏并收集全部可见文本。
+fn cve_2023_35619_draw_text(bytes: Vec<u8>) -> String {
+    let mut ctx = mock_context();
+    let theme_default = crate::conf::value(&ctx, "theme_default");
+    let mail = Mail::new(bytes, None).expect("twin mail must parse");
+    let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+    _ = view.process_event(&mut UIEvent::Resize, &mut ctx);
+    let mut screen = Screen::<Virtual>::new(theme_default);
+    assert!(screen.resize(100, 30), "screen must resize");
+    let area = screen.area();
+    view.draw(screen.grid_mut(), area, &mut ctx);
+    let grid = screen.grid();
+    (0..grid.rows())
+        .flat_map(|y| (0..grid.cols()).map(move |x| grid[(x, y)].ch()))
+        .collect()
+}
+
+/// CVE-2023-35619 twin（缺口 B 修复的渲染级锁定）：`EnvelopeView` 的头部带
+/// 必须把与 `From` 分叉的 `Sender`/`Reply-To` 画成 `From` 正下方的可见行
+/// ——回复实际落点（`Composer::reply_to` 的 `Mail-Reply-To > Reply-To >
+/// From`）不再是隐藏重定向；同时 `From` 显示名的 U+202E/U+2066 已在
+/// `Address` 存储边界中和（缺口 A 的渲染级锁定），诚实拼写可见、控制符
+/// 绝不进入 cell。
+#[test]
+fn cve_2023_35619_reply_face_mismatch_rows_render() {
+    let text = cve_2023_35619_draw_text(cve_2023_35619_spoof_mail_bytes());
+
+    // 分叉面成为可见的头部行。
+    assert!(
+        text.contains("Sender:"),
+        "the diverging Sender face must render as a header row: {text:?}"
+    );
+    assert!(
+        text.contains("relay@bounce35619.example"),
+        "the Sender face address must be visible: {text:?}"
+    );
+    assert!(
+        text.contains("Reply-To:"),
+        "the diverging Reply-To face must render as a header row: {text:?}"
+    );
+    assert!(
+        text.contains("billing@evil35619.example"),
+        "the Reply-To face address must be visible: {text:?}"
+    );
+    // From 行显示名已中和：诚实拼写在场，bidi/不可见控制符绝不出现。
+    assert!(
+        text.contains("PayPal Support"),
+        "the scrubbed From display name must render honestly: {text:?}"
+    );
+    assert!(
+        !text.contains('\u{202E}') && !text.contains('\u{2066}'),
+        "bidi control characters must never reach a rendered cell: {text:?}"
+    );
+    // From 的攻击地址保持可见（中和只杀不可见字符，不隐藏可见事实）。
+    assert!(
+        text.contains("attacker@evil35619.example"),
+        "the honest From address must stay visible: {text:?}"
+    );
+}
+
+/// CVE-2023-35619 twin（无噪声回归）：`Reply-To`/`Sender` 与 `From` 地址
+/// 一致的诚实邮件不得产生新行——标注只属于真实分叉。
+#[test]
+fn cve_2023_35619_agreeing_reply_faces_add_no_rows() {
+    let text = cve_2023_35619_draw_text(cve_2023_35619_honest_mail_bytes());
+
+    assert!(
+        !text.contains("Reply-To:") && !text.contains("Sender:"),
+        "agreeing faces must not add rows to the header band: {text:?}"
+    );
+    assert!(
+        text.contains("service@honest35619.example"),
+        "the honest From row must render: {text:?}"
+    );
+}
+
+/// CVE-2023-35619 twin（缺口 A 的回退路径）：`From` 头畸形（引号串未闭合、
+/// 无收尾 `>`，地址列表解析失败）时 `field_from_to_string` 回退显示原始头
+/// 值——该串未经 `Address` 存储边界，绘制点必须同样剥离 U+202E，畸形输入
+/// 不得复活显示欺骗。
+#[test]
+fn cve_2023_35619_malformed_from_fallback_is_scrubbed_at_draw() {
+    let bytes = "From: \"PayPa\u{202E}l Support <attacker@evil35619.example\r\n\
+To: \"Victim\" <victim@victim.example>\r\n\
+Subject: Malformed from\r\n\
+Date: Tue, 12 Dec 2023 09:00:03 +0000\r\n\
+Message-ID: <malformed-35619-twin@evil35619.example>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Malformed From fallback.\r\n"
+        .to_string()
+        .into_bytes();
+    let text = cve_2023_35619_draw_text(bytes);
+
+    assert!(
+        !text.contains('\u{202E}'),
+        "the malformed-From fallback row must be scrubbed at the draw site: {text:?}"
+    );
+    assert!(
+        text.contains("From:"),
+        "the From row must still render degraded: {text:?}"
+    );
+    assert!(
+        text.contains("attacker@evil35619.example"),
+        "the visible address bytes must survive scrubbing: {text:?}"
+    );
+}
