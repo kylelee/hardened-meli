@@ -133,13 +133,20 @@ enum LiteralPolicy {
 /// private-use marker recording their position. Under
 /// [`LiteralPolicy::Quoted`] every value takes the inline quoted form
 /// regardless of its octets.
+///
+/// Under [`LiteralPolicy::Literal`] an ASCII value that carries `CR`/`LF`
+/// also takes the literal form: RFC 3501 quoted strings are `TEXT-CHAR`
+/// runs and `TEXT-CHAR` excludes `CR` and `LF`, so an inline `CR`/`LF`
+/// would terminate the command line early and leave everything after it
+/// to be parsed as a new command line (CWE-93 command injection).
+/// Literals are the only wire form those octets may take.
 fn push_search_value(
     s: &mut String,
     value: &str,
     literals: &mut Vec<Vec<u8>>,
     policy: LiteralPolicy,
 ) {
-    if value.is_ascii() || policy == LiteralPolicy::Quoted {
+    if (value.is_ascii() && !value.contains(['\r', '\n'])) || policy == LiteralPolicy::Quoted {
         s.push('"');
         s.extend(escape_double_quote(value).chars());
         s.push('"');
@@ -152,6 +159,22 @@ fn push_search_value(
         s.push(LITERAL_MARKER_END);
         literals.push(value.as_bytes().to_vec());
     }
+}
+
+/// Whether `keyword` is a valid IMAP `keyword`, i.e. an RFC 3501 `atom`.
+///
+/// `atom-char` is any `CHAR` (`%x01-0x7F`) except the `CTL`s (which include
+/// `CR`/`LF`), `SP` and the atom-specials `(`, `)`, `{`, `%`, `*`, `"`, `\`
+/// and `]`. A `KEYWORD` search key takes an `atom` — not an `astring` — so
+/// there is no quoting or literal form to fall back on: an invalid keyword
+/// has no wire form at all and must not be serialized (its bytes would
+/// either terminate the command line early or break the search expression).
+fn is_valid_imap_keyword(keyword: &str) -> bool {
+    !keyword.is_empty()
+        && keyword.bytes().all(|byte| {
+            (0x21..=0x7e).contains(&byte)
+                && !matches!(byte, b'(' | b')' | b'{' | b'%' | b'*' | b'"' | b'\\' | b']')
+        })
 }
 
 /// Turn serialized search segments into the ordered wire actions needed to
@@ -339,9 +362,22 @@ impl Query {
                                 s.push_str("UNANSWERED ");
                             }
                             keyword => {
-                                s.push_str("KEYWORD ");
-                                s.push_str(keyword);
-                                s.push(' ');
+                                // `KEYWORD` takes an RFC 3501 `atom`; a
+                                // keyword with no valid wire form (CR/LF,
+                                // other CTLs, atom-specials) is skipped with
+                                // a warning instead of injected raw into the
+                                // command line — the query then simply
+                                // matches more, never less.
+                                if is_valid_imap_keyword(keyword) {
+                                    s.push_str("KEYWORD ");
+                                    s.push_str(keyword);
+                                    s.push(' ');
+                                } else {
+                                    tracing::warn!(
+                                        "Skipping search flag with no valid IMAP wire form: \
+                                         {keyword:?}"
+                                    );
+                                }
                             }
                         }
                     }
@@ -640,6 +676,102 @@ mod tests {
             query.to_imap_search_segments(),
             vec![ImapSearchSegment::Text(r#"SUBJECT "a""b""#.to_string())]
         );
+    }
+
+    /// CVE-2025-49113 regression (issue #137): an ASCII value carrying
+    /// CR/LF must travel as a literal — RFC 3501 quoted strings cannot
+    /// contain CR/LF, and inlining them would terminate the command line
+    /// early, leaving the remainder to be parsed as a new command line.
+    #[test]
+    fn test_imap_query_ascii_crlf_value_travels_as_literal() {
+        assert_eq!(
+            Query::Subject("a\r\nb".to_string()).to_imap_search_segments(),
+            vec![
+                ImapSearchSegment::Text("SUBJECT {4}".to_string()),
+                ImapSearchSegment::Literal(b"a\r\nb".to_vec()),
+            ]
+        );
+        assert_eq!(
+            Query::From("a\rb".to_string()).to_imap_search_segments(),
+            vec![
+                ImapSearchSegment::Text("FROM {3}".to_string()),
+                ImapSearchSegment::Literal(b"a\rb".to_vec()),
+            ]
+        );
+        assert_eq!(
+            Query::To("a\nb".to_string()).to_imap_search_segments(),
+            vec![
+                ImapSearchSegment::Text("TO {3}".to_string()),
+                ImapSearchSegment::Literal(b"a\nb".to_vec()),
+            ]
+        );
+    }
+
+    /// CVE-2025-49113 regression (issue #137): the CRLF-carrying value is
+    /// framed as a literal on the wire in both the synchronizing and the
+    /// RFC 7888 non-synchronizing form, and the only CR/LF bytes outside
+    /// the literal octets are the line terminators the steps themselves
+    /// append.
+    #[test]
+    fn test_imap_search_send_steps_crlf_literal_framing() {
+        let segments = Query::Subject("a\r\nINJECTED".to_string()).to_imap_search_segments();
+        let steps = search_send_steps(&segments);
+        assert_eq!(
+            steps.first(),
+            Some(&ImapSearchSendStep::Write(b"SUBJECT {11}\r\n".to_vec()))
+        );
+        let steps = search_send_steps_non_sync(&segments);
+        assert_eq!(
+            steps.first(),
+            Some(&ImapSearchSendStep::Write(b"SUBJECT {11+}\r\n".to_vec()))
+        );
+        // The invariant itself: no CR/LF may ride inside a *text* segment —
+        // the injected octets appear only inside the literal segment's raw
+        // data, where the server reads exactly `{n}` octets and never parses
+        // them as command lines.
+        for segment in &segments {
+            if let ImapSearchSegment::Text(text) = segment {
+                assert!(
+                    !text.contains('\r') && !text.contains('\n'),
+                    "no stray CR/LF may ride inside a text segment: {text:?}"
+                );
+            }
+        }
+    }
+
+    /// CVE-2025-49113 regression (issue #137): `KEYWORD` takes an RFC 3501
+    /// `atom`; a keyword with no valid wire form (CR/LF, atom-specials,
+    /// non-ASCII) is skipped with a warning instead of being pushed raw
+    /// into the command line, while honest keywords keep serializing.
+    #[test]
+    fn test_imap_query_flags_keyword_atom_whitelist() {
+        assert_eq!(
+            Query::Flags(vec!["$Label1".to_string(), "draft".to_string()])
+                .to_imap_search_segments(),
+            vec![ImapSearchSegment::Text("KEYWORD $Label1 DRAFT".to_string())]
+        );
+        for invalid in [
+            "a\r\nb", "a\rb", "a\nb", "", "a b", "a%b", "a*b", "a\"b", "a\\b", "a]b", "a{b", "a(b",
+            "a)b", "a\u{7f}b", "中",
+        ] {
+            let segments = Query::Flags(vec![invalid.to_string()]).to_imap_search_segments();
+            for segment in &segments {
+                if let ImapSearchSegment::Text(text) = segment {
+                    assert!(
+                        !text.contains("KEYWORD"),
+                        "invalid keyword {invalid:?} serialized"
+                    );
+                }
+            }
+            let flattened = segments
+                .iter()
+                .filter_map(|segment| segment.as_text())
+                .collect::<String>();
+            assert!(
+                !flattened.contains('\r') && !flattened.contains('\n'),
+                "invalid keyword {invalid:?} leaked control bytes: {flattened:?}"
+            );
+        }
     }
 
     #[test]
