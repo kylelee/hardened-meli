@@ -4067,6 +4067,45 @@ mod cve_2018_14349;
 #[path = "CVE-2018-14350.rs"]
 mod cve_2018_14350;
 
+/// CVE-2018-14351（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8，
+/// NVD 记 CWE-20，实质 CWE-787 相对写/CWE-120 家族）**恶意 IMAP 服务器把
+/// STATUS 响应的 mailbox 名编码成 literal `{N}` 并用攻击者声明的计数做相对
+/// 写** regression（issue #145，表 2 病毒/代码执行；mutt/neomutt 2018-07
+/// 一次性披露 15 漏洞之一）：`imap/command.c::cmd_parse_status` 直接
+/// `mailbox = idata->buf; s = mailbox + litlen; *s = '\0';`，把声明的
+/// `{litlen}` 当作相对偏移写终止符而不校验缓冲实际长度，恶意服务器声明一个
+/// 超过实际缓冲的计数即可内存破坏 → 崩溃乃至 RCE。
+///
+/// 语料内嵌 issue 逐字声明计数（`* STATUS {999999999} (MESSAGES 1)`、
+/// `{4294967295}`、usize 溢出 `{99999999999999999999999}`、
+/// `{18446744073709551615}`）加 64KiB+/4 MiB 超长 mailbox atom（含/不含
+/// ` (`、含/不含 CRLF）、literal 计数不符（`{5}` 后仅 2 字节、`{0}`、
+/// literal 数据含 ` (`、`{3}\r\n` 声明跨行）、计数器溢出（>u64、1 MiB 连
+/// `9`、前导 +/空格/十六进制）与畸形（缺 `)`、缺 CRLF、截断 EOF、嵌套括号、
+/// `* STATUS ` 后为空）。
+///
+/// [`cve_2018_14351`] 分层锁定（详见模块文档）：解析层逐条 `catch_unwind`
+/// 断言干净 `Err` 或 `mailbox=None` 降级与逐字节一致；定长缓冲边界 ±1 ×
+/// mailbox 长度/literal 计数 × 有/无 CRLF 用十六进制标尺证明成功路径逐字节
+/// 精确、错误摘要一致；原语层验证 `literal` 单点 `length_data` 限定切片
+/// （短缺/溢出/缺 `}\r\n` 干净失败）、`mailbox_token` 的 INBOX 大小写不敏感；
+/// 计数器层断言溢出整体 `Err`、合法 max-usize 原样落入结构体、
+/// `ingest_mailbox_list_line` 只对已知 mailbox 应用计数器；流级断言多行
+/// LIST-STATUS 经 `split_rn` 行完整、整回复喂 `status_response` 后 tagged 行
+/// 仍可解析；源码锚点层证明 `take_until(" (")` + `.ok()`、无
+/// `unwrap()`/`expect()`、`untagged_responses` 无 STATUS 分派臂、消费方
+/// `Ok`/`contains_key` 门控与 64 MiB 上限；真连接层在本地 hostile IMAP
+/// server 上驱动真实 `ImapConnection::read_response` 验证 `* STATUS {huge}`
+/// 行逐字节保留 + 生产 `status_response` 干净降级、永不发 tagged 完成的
+/// STATUS 洪流在 64 MiB 上限 `ProtocolViolation`。与 CVE-2018-14349（NO
+/// 响应面）、CVE-2018-14350（INTERNALDATE 面）、CVE-2026-70329（通用 literal
+/// 声明/分帧环绕面）划界。结论：**免疫证明，未发现缺口，无需修改生产代码**。
+///
+/// [`cve_2018_14351`]: self::cve_2018_14351
+#[cfg(test)]
+#[path = "CVE-2018-14351.rs"]
+mod cve_2018_14351;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
