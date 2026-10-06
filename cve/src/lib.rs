@@ -5499,3 +5499,52 @@ mod cve_2023_43770;
 #[cfg(test)]
 #[path = "CVE-2023-5631.rs"]
 mod cve_2023_5631;
+
+/// CVE-2024-27443（Zimbra Collaboration Suite 9.0.0 ≤ P38、10.0 ≤ 10.0.6 的
+/// Classic UI；CVSS v3.1 6.1；CWE-79；ESET "Operation RoundPress" 归因
+/// Sednit/APT28、2025-05-19 列入 CISA KEV）**日历邀请邮件头 XSS** regression
+/// （Gitea issue #166），调研报告表 3「网页嵌入与 HTML/链接渲染」批次成员、
+/// Zimbra 在野利用群成员：Classic UI 把邮件头 `X-Zimbra-Calendar-Intended-For`
+/// 的值未经清洗直接拼进服务端生成的 HTML 页面（webmail 的 DOM 上下文）；受害者
+/// 打开带 ICS 日历邀请附件（`text/calendar`）的邮件即在已认证会话内执行注入的
+/// `<img onerror>`/`<script>`/`<svg onload>`，攻击者据此窃取会话/Cookie 并以
+/// 受害者身份代发邮件。
+///
+/// meli 等价面映射（终端客户端无 webmail/浏览器/JS 运行时/DOM，按 issue #166
+/// 要求做「免疫证明」断言）：
+///
+/// 1. 头解析面：`melib/src/email/parser.rs::mail()` 把非标准头名归为
+///    `HeaderName` 的 `Repr::Custom`（大小写不敏感），
+///    `melib/src/email.rs::populate_headers` 把每个头经 `phrase()` 解码后插入
+///    `Envelope::other_headers`（`HeaderMap<HeaderName, String>`）——头值在 meli
+///    里就是一段惰性 UTF-8 字符串。
+/// 2. UI 显示面：`meli/src/mail/view/envelope.rs` 用 `grid.write_string` 把
+///    `other_headers` 值绘制进终端字符网格，没有 HTML/DOM 上下文，也从不调用
+///    [`sanitize`]/[`render`]。
+/// 3. HTML 管线面：`meli/src/mail/view/html_render.rs` 的 [`sanitize`] →
+///    [`render`] 是唯一的 HTML 消费通路，由 `filters.rs::new_html` 在
+///    `att.is_html()` 为真时调用；头值不是附件字节，不在此管线内。
+/// 4. ICS 附件面：`text/calendar` 映射为 `Text::Other { tag: b"calendar" }`，
+///    `is_html()`/`is_text_html()` 均 `false`，只作为不透明文本被查看。
+/// 5. 会话/代发滥用面：无 webmail + 无浏览器 + 无 JS 运行时 + 无 DOM，无会话可窃。
+///
+/// [`cve_2024_27443`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// 头解析面（`other_headers` 惰性字符串）、HTML 管线面（sanitize＋render 断言）、
+/// 端到端 `multipart/mixed` 日历邀请、免疫证明／源码结构断言面 ＋ 良性对照存活。
+///
+/// 与近亲划界：[`cve_2024_45516`]（issue #117）锁 Zimbra Classic UI **HTML 正文**
+/// 的 `<img>` 属性值走私缺口；本文件锁**邮件头 `X-Zimbra-Calendar-Intended-For`
+/// 派生面**——头值经 `HeaderName::Custom` 归类落 `other_headers`，消费面是终端
+/// 字符网格而不是 HTML 解析器。Zimbra 族其余成员与 Roundcube 在野利用群各自锁定
+/// 不同的正文/附件解析差异面；语料 marker `zcs27443.example` 与近亲逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**——头值与 ICS 附件都到不了
+/// HTML 管线，公告原样三条载荷即使被直接投给 `sanitize` 也在白名单阶段整体死亡。
+///
+/// [`cve_2024_27443`]: self::cve_2024_27443
+/// [`cve_2024_45516`]: self::cve_2024_45516
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2024-27443.rs"]
+mod cve_2024_27443;
