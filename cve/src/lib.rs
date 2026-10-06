@@ -5711,3 +5711,40 @@ mod cve_2025_30349;
 #[cfg(test)]
 #[path = "CVE-2021-44026.rs"]
 mod cve_2021_44026;
+
+/// CVE-2021-30761（WebKit；iOS Safari，含 Apple Mail 的 HTML 渲染；CVSS 3.1
+/// 8.8；CWE-119；Apple 确认在野利用，2021-11 列入 CISA KEV）**面向 HTML
+/// 解析器的内存破坏 / 畸形语料免疫证明**（Gitea issue #170），调研报告表 4
+/// 「邮件可达的浏览器引擎」：处理恶意网页内容触发 WebKit 内存损坏并执行代码；
+/// CISA 注明影响一切使用 WebKit 的 HTML 解析器。meli 不含 WebKit、不含任何
+/// C/C++ HTML 解析器，唯一 HTML 显示管线是 `meli/src/mail/view/html_render.rs`
+/// 的 [`render`]（lossy UTF-8 → 10 MiB 输入截断 → [`sanitize`]（ammonia /
+/// html5ever，纯 safe Rust）→ 256 层深度截断 → html2text 纯文本）。
+///
+/// [`cve_2021_30761`] 以 issue 点名的五类畸形语料（超深 `<table><tr><td>` 嵌套、
+/// MiB 级标签名 / 属性名 / 属性值 / 上万小属性、未闭合标签 / 注释 / DOCTYPE /
+/// CDATA、非法 UTF-8 字节、`<a>` 引号状态混淆），加畸形实体（`&#xFFFFFFFF;` /
+/// `&#xD800;` / `&#x110000;` / 长链 `&amp;amp;…`）与 script 载荷骑乘，分四层
+/// 锁定（详见模块文档）：L1 全部 `Ok` 不 panic、sanitize 后无 `<script`、
+/// render 无 `<script` / `alert(` / `onerror=`、上限之内不误伤；L2 字节 / 深度 /
+/// 双上限截断提示各恰好一次、输出 KiB 级有界；L3 非法 UTF-8 在标签名 / 属性 /
+/// 文本处均安全、引号吞噬不逃逸、畸形实体不 panic、恰好上限边界不误伤；
+/// L4 base64 `multipart/mixed` 端到端邮件。
+///
+/// 与近亲划界：[`cve_1999_1016`]（issue #64）同样攻击 [`render`]，但锁的是
+/// **资源面上限契约**（巨型表单字段字面免疫、10 MiB 字节上限、256 层深度上限、
+/// 上限边界与 CJK 字符边界）；本文件锁的是**内存破坏 / 畸形解析语料面**（WebKit
+/// 越界类在 Rust 管线里的等价观测：panic / abort / 挂死 / 上限失效 / 脚本逃逸），
+/// 边界契约重心不重复。语料 marker `webkit30761.example` 与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——Rust safe 边界把
+/// WebKit 的越界读写类排除在语言之外，剩余可用性面由 [`cve_1999_1016`] 落地的
+/// 两条上限封死。
+///
+/// [`cve_2021_30761`]: self::cve_2021_30761
+/// [`cve_1999_1016`]: self::cve_1999_1016
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2021-30761.rs"]
+mod cve_2021_30761;
