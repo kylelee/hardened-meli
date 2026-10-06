@@ -166,6 +166,11 @@ impl ImapConnection {
         // (unlike `SELECT`, servers such as Coremail often omit it there);
         // keep it for the cache-completeness check below.
         let status_uidnext = parsed_status.as_ref().and_then(|s| s.uidnext);
+        // Capture the `STATUS`-reported MESSAGES before `parsed_status` is
+        // consumed by the quick-check match below. Step 4 needs it to decide
+        // whether the selected view may be trusted as an expunge witness
+        // (issue #179, Tencent exmail virtual Junk mailbox).
+        let status_messages = parsed_status.as_ref().and_then(|s| s.messages);
         let cached_status = self.uid_store.cached_status(mailbox_hash)?;
         // The recorded STATUS counters describe the server, not the cache:
         // only trust the quick-skip when the persisted envelope count
@@ -497,7 +502,45 @@ impl ImapConnection {
             counters.total.insert_set(new_envelopes_hash_set);
         }
         // Step 4. Remove events
-        {
+        //
+        // Reconciliation by inference: an envelope present in the cache but
+        // absent from the `UID FETCH 1:lastseenuid (FLAGS)` reply of Step
+        // 2ii is assumed to have been expunged on the server. That inference
+        // is only sound while the selected view is a faithful witness of the
+        // mailbox contents.
+        //
+        // Tencent exmail (imap.exmail.qq.com) exposes its Junk mailbox as a
+        // virtual quarantine folder whose two server views contradict each
+        // other (real trace): `SELECT`/`EXAMINE "Junk"` answers `* 0 EXISTS`
+        // (and every `FETCH`/`UID FETCH`/`SEARCH` over the selected view is
+        // empty), while `STATUS "Junk"` still reports `MESSAGES 1 ... UIDNEXT
+        // 3` -- the real quarantine content count. When `STATUS` reports more
+        // messages than the selected view's `EXISTS`, the empty/partial view
+        // is not a trustworthy expunge witness: every cached envelope is
+        // missing from the FLAGS reply, so the difference below would delete
+        // all of them and emit a Remove event per mail, leaving the folder
+        // permanently empty in the listing while its counter still shows
+        // `[1 messages]` (issue #179). Skip the whole reconciliation in that
+        // case; when the selected view recovers, both views agree and a real
+        // expunge -- whose two counters decrease together -- is reconciled
+        // normally on a later resync.
+        //
+        // Benign race: a real expunge that lands between the `STATUS` and the
+        // `SELECT` can make `STATUS` MESSAGES exceed the freshly selected
+        // `EXISTS` by exactly the expunged count, so this guard stays
+        // conservative for one extra resync cycle. The next resync records
+        // the lower baseline and reconciles then; the safe direction is to
+        // never delete mail on a disagreement.
+        if let Some(status_messages) = status_messages.filter(|m| *m > select_response.exists) {
+            tracing::trace!(
+                "resync_basic: server-side inconsistency between STATUS and the selected view \
+                 for mailbox {mailbox_path} (STATUS MESSAGES {status_messages} > selected view \
+                 EXISTS {}); the selected view is not a trustworthy expunge witness while the \
+                 two server views disagree (e.g. Tencent exmail's virtual Junk quarantine \
+                 folder), deferring Remove reconciliation to the next resync",
+                select_response.exists
+            );
+        } else {
             let mut env_lck = self.uid_store.envelopes.lock().unwrap();
             let mut counters = counters.lock().unwrap();
             for env_hash in env_lck
