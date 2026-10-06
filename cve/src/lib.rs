@@ -4340,3 +4340,36 @@ mod cve_2025_49113;
 #[cfg(test)]
 #[path = "CVE-2005-0667.rs"]
 mod cve_2005_0667;
+
+/// CVE-2005-2549（Evolution 1.4 / 1.5–2.3.6.1，CVSS v2 7.5，CWE-134 格式串）
+/// 多重格式串攻击模拟回归（issue #140，表 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution）：Evolution 解析
+/// 远程 vCard 数据、远程 LDAP 联系人、任务列表/日历条目时把攻击者可控字符串
+/// 当作 C `printf` 家族函数的格式模板（vCard `FN`/`NOTE`/`ORG`/`TEL`，
+/// iCalendar `SUMMARY`/`DESCRIPTION`/`LOCATION` 含 `%n%n%n`/`%s%s%s`/
+/// `%99999999x`）→ DoS/可能 RCE。meli 是 Safe Rust，`format!`/`write!` 的格式
+/// 模板必须是编译期字面量、攻击者值只能作参数值，且 meli 无 LDAP 客户端、无
+/// 任务列表/日历提醒子系统，`ICalendar` 仅存在于
+/// `melib/src/utils/vobject/icalendar.rs`、邮件查看路径不可达（映射结论见
+/// CVE-2023-35636）——故按等价面做免疫证明。攻击面为
+/// `melib/src/utils/vobject/{vcard,icalendar,component,property}.rs` 与生产
+/// 消费端 `melib/src/contacts/vcard.rs` 的 `CardDeserializer`→
+/// `TryInto<Card>`、`melib/src/contacts/card.rs` 的 `Card::to_vcard_string`。
+/// [`cve_2005_2549`] 四层锁定：L1 完整 vCard/iCalendar 灌入 `%n%n%n`/
+/// `%s%s%s`/`%99999999x`/`%p %p %p`/`%%…`/`%9999999$n`/混合形态与运行时构造
+/// 的 64 KiB+ 重复 `%99999999x`，过 `Vcard::build`/`ICalendar::build`/
+/// `parse_component`/`read_component`，断言不 panic、有界、确定、无放大且
+/// 值完整存活；L2 `fullname()`/`note()`/`org()`/`tel()` 与事件
+/// `summary()`/`description()`/`location()` 逐字节等于攻击字面值、`%` 既不
+/// 扩展也不消失、`%99999999x` 输出长度 == 输入长度（无 1e8 宽度扩展）；
+/// L3 `VcardBuilder`/`EventBuilder` 构造 → `write_component` 折行 → 重新
+/// build 后逐字节相等；L4 `CardDeserializer`/`Card::to_vcard_string` 对
+/// `FN`/`NOTE`/`ORG`/`TEL` 逐字保留、`N` 按契约跳过、畸形行干净 `Err`。另
+/// 以源码级锚点证明 vobject/contacts 解析路径无 printf 族 FFI、无 `unsafe`。
+/// 结论为 **免疫证明，未发现缺口，未改动生产代码**；与 CVE-2001-0145
+/// （BDAY 固定缓冲溢出）、CVE-2006-2386（vobject 通用畸形结构）、
+/// CVE-2009-0587（PHOTO/KEY base64 巨值）、CVE-2023-35636（ICS 不可抵达）、
+/// CVE-2001-0473（mutt IMAP 协议响应格式串）正交，标记 `2549` 逐字隔离。
+#[cfg(test)]
+#[path = "CVE-2005-2549.rs"]
+mod cve_2005_2549;
