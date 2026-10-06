@@ -5015,3 +5015,55 @@ mod cve_2018_14361;
 #[cfg(test)]
 #[path = "CVE-2018-14362.rs"]
 mod cve_2018_14362;
+
+/// CVE-2018-14363（mutt/neomutt < 2018-07-16；CVSS v3.1 7.5 HIGH；CWE-22
+/// 路径穿越）**恶意 NNTP 服务器在 newsgroup 名里携带 `/`，mutt 的
+/// `newsrc.c`/头缓存把组名直接拼进文件路径 → 头缓存目录穿越**攻击模拟回归
+/// （issue #157，表 2 病毒/代码执行）。攻击语料家族：`../../` 相对穿越、
+/// 绝对路径、UNC 风格（`\\server\share`）。
+///
+/// **meli 没有 newsrc 文件持久化**——`melib/src/` 全目录递归扫描不含任何
+/// `newsrc` 痕迹，NNTP 状态只有 `nntp_store.db` 的 flags 表；服务器可控的
+/// 组名在 [`cve_2018_14363`] 锁定的摄入层只变成整数
+/// `MailboxHash::from_bytes(s[0].as_bytes())` 与
+/// `NntpMailbox.nntp_path: String` 数据字段，从不进入 `PathBuf`/`Path::new`/
+/// `File::`。唯一的 描述串→文件路径 站点是
+/// `DatabaseDescription::db_path`，已由 issue #156 加固为无条件拒绝 `/`、`\`、
+/// NUL（详见 [`cve_2018_14362`]）。
+///
+/// [`cve_2018_14363`] 分六层锁定（详见模块文档）：L0 合法 newsgroup 名经
+/// `MailboxHash::from_bytes` 得确定可复现的整数哈希（并与生产
+/// `DefaultHasher::write(bytes)` 公式逐条重算比对），真实 `Sqlite3Cache`
+/// （自管临时目录）合法往返；L1 攻击语料（`../../meli`、`../../../etc/passwd`、
+/// `/etc/cron.d/evil`、`C:\Users\pwn\evil`、UNC `\\attacker\share\pwned`、
+/// 纯 `..`、`..\\..\\`、`./`、20 层 `../` 深链、NUL、CR/LF、`%2e%2e%2f`/
+/// `..%2f` 百分号形态、Unicode 同形分隔符 U+2044/U+2215/U+FF0F、64 KiB/1 MiB
+/// 长名、SQL 元字符 `'); DROP TABLE article;--`）全部经 `MailboxHash::from_bytes`
+/// 与 `generate_envelope_hash` 不 panic、同输入同输出、输出为纯十进制整数
+/// （类型层面不可能携带路径字节），语料不塌缩；L2 按 `nntp_mailboxes` 的真实
+/// `split_whitespace` 4 字段解析逻辑喂敌意行，组名只作为 `String` 数据存活、
+/// 畸形行 fail-closed；L3 真实 `Sqlite3Cache` 对敌意组名派生的 hash 做
+/// insert/find/update/save+load 往返，data_dir 外哨兵文件的
+/// 内容与 mtime 未变，递归遍历断言恰一个 `.db`、无子目录、无路径逃逸子串、
+/// canonicalize 后 DB 仍在 data_dir 内；L4 `DatabaseDescription` 的
+/// `name`/`identifier`/`application_prefix` 注入 `/`、`\`（UNC/盘符）、NUL
+/// 全部 `Err(ValueError)` 且无文件落盘；L5 `include_str!` 钉住
+/// `MailboxHash::from_bytes(s[0].as_bytes())`、`nntp_path: s[0].to_string()`、
+/// `nntp_store.db`、`sqlite3::params![]`、`FORBIDDEN_PATH_CHARS` 校验行与
+/// `directory.join(name`，并递归扫 `melib/src/nntp/` 证明无 nntp_path join 进
+/// 路径、扫描 `melib/src/` 证明无 newsrc 持久化。与 [`cve_2018_14362`]
+/// （UID/消息标识 → 缓存键面）划界：本回归锁 newsgroup/mailbox 名里的路径
+/// 分隔符 → 文件路径面，语料与 marker 逐字隔离；与
+/// [`cve_2018_14360`]/[`cve_2018_14361`]（NNTP 响应解析面）及 14349–14359
+/// （IMAP/POP3 解析与命令构造面）互不相交。
+///
+/// 结论：**直接 CVE 面免疫，未发现缺口，未改动生产代码**——无 newsrc、
+/// 组名只变整数哈希与 String 数据、唯一路径站点无条件拒绝分隔符与 NUL。
+///
+/// [`cve_2018_14360`]: self::cve_2018_14360
+/// [`cve_2018_14361`]: self::cve_2018_14361
+/// [`cve_2018_14362`]: self::cve_2018_14362
+/// [`cve_2018_14363`]: self::cve_2018_14363
+#[cfg(test)]
+#[path = "CVE-2018-14363.rs"]
+mod cve_2018_14363;
