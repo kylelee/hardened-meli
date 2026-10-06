@@ -5891,3 +5891,52 @@ mod cve_2021_29969;
 #[cfg(test)]
 #[path = "CVE-2016-10727.rs"]
 mod cve_2016_10727;
+
+/// CVE-2020-28896（mutt < 2.0.2、neomutt < 2020-11-20，CVSS 5.3，RHBZ #1900826；
+/// issue #175，表 5 协议信任边界 of `SECURITY-CVE-RESEARCH.zh-CN.md`）**非法 IMAP
+/// greeting 后继续明文认证** regression：服务器初始响应非法时，mutt 未正确关闭
+/// 连接，代码继续在同一条未加密连接上认证，`$ssl_force_tls` 被绕过，凭据暴露给
+/// 中间人。
+///
+/// **meli 等价面映射（侦察结论，预期免疫证明）**：
+/// `melib/src/imap/connection.rs::ImapStream::new_connection`（约 L425-951）是一条
+/// 直线——(1) `use_tls` 先建立 TLS（STARTTLS 只认 `M1 OK`、3 秒墙钟 fail-closed；
+/// 隐式 TLS 明文垃圾 → `InvalidTLSConnection`）；(2) 发 `M1 CAPABILITY` 并
+/// `read_response`（`* BYE` 早退 `Disconnected`、EOF 交给解析、尺寸上限）；
+/// (3) `split_rn().find(b"* CAPABILITY")` 与 `protocol_parser::capabilities` 解析
+/// 失败 → `ProtocolError "could not parse CAPABILITY response"`、缺 `IMAP4rev1` →
+/// `ProtocolNotSupported`；(4) 只有全部通过才进入认证 match，`CommandBody::Login`
+/// 与 `CommandBody::authenticate` 的偏移都晚于能力解析错误。任何 Err 都经
+/// `ImapConnection::connect` 的 `new_stream?`（L1263）向外传播并 drop 连接，无
+/// 「greeting 非法仍明文认证」的分支。
+///
+/// [`cve_2020_28896`] 分层锁定（详见模块内注释）：L1 纯模型复刻 mutt「greeting
+/// 非法只记日志、继续 LOGIN」缺陷，喂 `* BAD`、截断、超长、NUL、`* BYE` 语料断言
+/// 哨兵凭据真的明文出门，对照 fail-closed 参照模型零出门；L2 按真实算法复刻
+/// `* BYE`/`* CAPABILITY`/`capabilities`/`IMAP4rev1` 决策序列并把语料喂真实
+/// `meli::melib::imap::capabilities` 解析器；L3 七个 loopback 敌意服务器场景
+///（S1 明文非法 greeting、S2 `* BYE`、S3 截断超时、S4a 超长、S4b NUL、S5 STARTTLS
+/// 墙钟、S6 隐式 TLS 垃圾）以 `completes_within` 看门狗断言 `new_connection` 全
+/// Err、错误语义命中、无 `LOGIN`/`AUTHENTICATE`/哨兵（明文及 base64）、客户端关闭
+/// 连接；L4 源码扫描锁定认证晚于能力解析错误、`* BYE` 早退、尺寸上限、TLS 先于
+/// 认证且无明文回退、`new_stream?` 传播。
+///
+/// 与近亲划界：CVE-2016-10727（evolution-data-server）聚焦 STARTTLS 被拒/不可用
+/// 后的认证决策面；CVE-2021-29969（issue #173，Thunderbird）是握手前响应注入；
+/// CVE-2020-15917（Claws Mail）是 TLS 升级后的后缀注入；CVE-2020-15954（issue
+/// #122，KMail）是 TLS 模式分类 / 无降级命题。本文件聚焦「非法 greeting / 首响应
+/// → 连接关闭并中止，而非继续认证」。marker 域名 `mutt28896.example` 与兄弟文件
+/// 逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未触碰生产代码**——任何非法 greeting /
+/// 首响应或 TLS 失败都在发送凭据之前 fail-closed，连接随 `new_connection` 的 Err
+/// 关闭。
+///
+/// [`cve_2020_28896`]: self::cve_2020_28896
+/// [`cve_2016_10727`]: self::cve_2016_10727
+/// [`cve_2021_29969`]: self::cve_2021_29969
+/// [`cve_2020_15917`]: self::cve_2020_15917
+/// [`cve_2020_15954`]: self::cve_2020_15954
+#[cfg(test)]
+#[path = "CVE-2020-28896.rs"]
+mod cve_2020_28896;
