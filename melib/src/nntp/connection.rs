@@ -325,7 +325,18 @@ impl NntpStream {
         let mut buf: Vec<u8> = vec![0; Connection::IO_BUF_SIZE];
         ret.clear();
         let mut last_line_idx: usize = 0;
-        loop {
+        // How far into `ret` the search for the next `\r\n` separator has
+        // already gone without finding one (past the lines already consumed).
+        // The scan resumes one byte earlier — a `\r` at `searched - 1` may
+        // have met its `\n` in the newest chunk — so a separator split across
+        // read chunks is still found, while the accumulated prefix is never
+        // rescanned: a hostile server that keeps sending a reply line with no
+        // CRLF terminator (the CVE-2018-14360 corpus shape) must not turn
+        // every 64 KiB read into a rescan of the whole reply accumulated so
+        // far — the quadratic separator rescan (CWE-407) closed here, mirroring
+        // the SMTP `read_lines` fix.
+        let mut searched: usize = 0;
+        'read_loop: loop {
             match self.stream.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(b) => {
@@ -349,28 +360,34 @@ impl NntpStream {
                             return Err(Error::new(format!("Unexpected reply code: {ret}")));
                         }
                     }
-                    if let Some(mut pos) = ret[last_line_idx..].rfind("\r\n") {
+                    while let Some(sep) = {
+                        let from = searched.saturating_sub(1).max(last_line_idx);
+                        ret[from..].find("\r\n").map(|pos| from + pos)
+                    } {
                         if !is_multiline {
-                            break;
+                            break 'read_loop;
                         }
                         if !matches!(
                             expected_reply_code.iter().position(|r| ret.starts_with(r)),
                             Some(0) | None
                         ) {
-                            break;
+                            break 'read_loop;
                         }
-                        if let Some(pos) = ret.find("\r\n.\r\n") {
-                            ret.replace_range(pos + "\r\n".len()..pos + "\r\n.\r\n".len(), "");
-                            break;
+                        // The line `ret[last_line_idx..sep]` is complete. RFC
+                        // 3977 §6.1.1: in a multiline response a line
+                        // containing only a single dot terminates the block;
+                        // strip the dot line and finish.
+                        if &ret[last_line_idx..sep] == "." {
+                            ret.replace_range(last_line_idx..sep + "\r\n".len(), "");
+                            break 'read_loop;
                         }
-                        if let Some(prev_line) =
-                            ret[last_line_idx..pos + last_line_idx].rfind("\r\n")
-                        {
-                            last_line_idx += prev_line + "\r\n".len();
-                            pos -= prev_line + "\r\n".len();
-                        }
-                        last_line_idx += pos + "\r\n".len();
+                        last_line_idx = sep + "\r\n".len();
+                        searched = last_line_idx;
                     }
+                    // The tail holds no further separator (bar a possible `\r`
+                    // byte at the very end): remember how far the scan reached
+                    // so the next chunk is scanned incrementally.
+                    searched = ret.len();
                 }
                 Err(err) => {
                     return Err(Error::from(err));
@@ -658,6 +675,158 @@ mod tests {
                 cap + Connection::IO_BUF_SIZE
             );
         });
+    }
+
+    /// Regression for the CVE-2018-14360 corpus shape (issue #154): a
+    /// single-line `GROUP` reply whose line never terminates — no CRLF at
+    /// all, the hostile server's overlong single line — must hit the server
+    /// response size cap and error out instead of accumulating unboundedly.
+    /// Unlike [`test_nntp_read_lines_response_size_cap`], whose server sends
+    /// well-formed lines inside a multiline response, this server never sends
+    /// a single separator byte.
+    #[test]
+    fn test_nntp_read_lines_unterminated_line_size_cap() {
+        cap_test_utils::assert_completes_within(10, || {
+            let cap = max_server_response_size();
+            // No CRLF anywhere in the chunk: the line never terminates.
+            let (stream, writer) = cap_test_utils::malicious_server(
+                b"211 99999999999999999999999999999999",
+                cap.saturating_mul(2),
+            );
+            let mut nntp_stream = NntpStream {
+                stream,
+                extension_use: NntpExtensionUse::default(),
+                current_mailbox: MailboxSelection::None,
+                supports_submission: false,
+            };
+            let mut ret = String::new();
+            let res = smol::block_on(nntp_stream.read_lines(&mut ret, false, &["211 "]));
+            drop(nntp_stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+                ),
+                "unexpected error: {err:?}"
+            );
+            assert!(ret.len() > cap);
+            assert!(
+                ret.len() <= cap + Connection::IO_BUF_SIZE,
+                "accumulation must stay bounded: {} > {}",
+                ret.len(),
+                cap + Connection::IO_BUF_SIZE
+            );
+        });
+    }
+
+    /// Regression for the incremental separator scan of
+    /// [`NntpStream::read_lines`]: a `\r\n` pair split across two reads —
+    /// the `\r` is the last byte of one write, the `\n` the first byte of
+    /// the next — must still terminate the line. The scan cursor resumes one
+    /// byte early exactly for this shape; resuming at the cursor itself
+    /// would drop every line whose separator straddles a read boundary.
+    #[test]
+    fn test_nntp_read_lines_crlf_split_across_reads_is_found() {
+        use std::{io::Write as _, os::unix::net::UnixStream, thread, time::Duration};
+
+        let (client_sock, server_sock) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            let mut server = server_sock;
+            let _ = server.write_all(b"211 3000234 3000182 3000233 alt.test\r");
+            thread::sleep(Duration::from_millis(50));
+            let _ = server.write_all(b"\n");
+            let _ = server.shutdown(std::net::Shutdown::Write);
+        });
+        let mut nntp_stream = NntpStream {
+            stream: smol::Async::new(Connection::Fd {
+                inner: client_sock.into(),
+                id: None,
+                trace: false,
+            })
+            .unwrap(),
+            extension_use: NntpExtensionUse::default(),
+            current_mailbox: MailboxSelection::None,
+            supports_submission: false,
+        };
+        let mut ret = String::new();
+        let res =
+            smol::block_on(nntp_stream.read_lines(&mut ret, false, command_to_replycodes("GROUP")));
+        drop(nntp_stream);
+        let _ = writer.join();
+        assert_eq!(res.unwrap(), 211);
+        assert_eq!(ret, "211 3000234 3000182 3000233 alt.test\r\n");
+    }
+
+    /// Regression for the multiline terminator of
+    /// [`NntpStream::read_lines`]: the RFC 3977 terminating dot line must be
+    /// stripped from the retained reply both when it arrives in one chunk
+    /// with the data and when it straddles a read boundary, while every data
+    /// line is preserved byte-for-byte.
+    #[test]
+    fn test_nntp_read_lines_multiline_terminator_is_stripped() {
+        use std::{io::Write as _, os::unix::net::UnixStream, thread, time::Duration};
+
+        fn nntp_stream_over_sock(sock: UnixStream) -> NntpStream {
+            NntpStream {
+                stream: smol::Async::new(Connection::Fd {
+                    inner: sock.into(),
+                    id: None,
+                    trace: false,
+                })
+                .unwrap(),
+                extension_use: NntpExtensionUse::default(),
+                current_mailbox: MailboxSelection::None,
+                supports_submission: false,
+            }
+        }
+
+        // (a) Terminator in the same chunk as the data lines.
+        let (client_sock, server_sock) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            let mut server = server_sock;
+            let _ = server.write_all(b"101 Capability list:\r\nVERSION 2\r\nREADER\r\n.\r\n");
+            let _ = server.shutdown(std::net::Shutdown::Write);
+        });
+        let mut nntp_stream = nntp_stream_over_sock(client_sock);
+        let mut ret = String::new();
+        let res = smol::block_on(nntp_stream.read_lines(
+            &mut ret,
+            true,
+            command_to_replycodes("CAPABILITIES"),
+        ));
+        drop(nntp_stream);
+        let _ = writer.join();
+        assert_eq!(res.unwrap(), 101);
+        assert_eq!(
+            ret, "101 Capability list:\r\nVERSION 2\r\nREADER\r\n",
+            "the dot terminator line must be stripped, data lines kept"
+        );
+
+        // (b) The terminator's dot line arrives in a separate read.
+        let (client_sock, server_sock) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            let mut server = server_sock;
+            let _ = server.write_all(b"101 Capability list:\r\nVERSION 2\r\nREADER");
+            thread::sleep(Duration::from_millis(50));
+            let _ = server.write_all(b"\r\n.\r\n");
+            let _ = server.shutdown(std::net::Shutdown::Write);
+        });
+        let mut nntp_stream = nntp_stream_over_sock(client_sock);
+        let mut ret = String::new();
+        let res = smol::block_on(nntp_stream.read_lines(
+            &mut ret,
+            true,
+            command_to_replycodes("CAPABILITIES"),
+        ));
+        drop(nntp_stream);
+        let _ = writer.join();
+        assert_eq!(res.unwrap(), 101);
+        assert_eq!(
+            ret, "101 Capability list:\r\nVERSION 2\r\nREADER\r\n",
+            "a split terminator must still be stripped"
+        );
     }
 
     /// C6 regression: server bytes used to be pushed into the `String` via
