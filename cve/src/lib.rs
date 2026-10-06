@@ -4391,6 +4391,57 @@ mod cve_2018_14357;
 #[path = "CVE-2018-14358.rs"]
 mod cve_2018_14358;
 
+/// CVE-2018-14359（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8
+/// CRITICAL；CWE-121 栈缓冲区溢出）**恶意 IMAP/POP3/NNTP 服务器投递带
+/// `Content-Transfer-Encoding: base64` 的邮件附件，mutt 在 base64 解码时把
+/// 解码边界算错、用定长栈缓冲越界写穿栈 → 客户端崩溃乃至远程代码执行**
+/// 攻击模拟回归（issue #153，表 2 病毒/代码执行）。家族描述见
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` 表 2 第 91 行：mutt/neomutt 2018-07
+/// 一次性披露 15 漏洞之一，同表逐字列出「base64 解码栈溢出（14359）」，
+/// 与 14358（RFC822.SIZE 栈溢出）并列为「服务端可控字节串 → 定长缓冲
+/// 解码/解析溢出」子类。
+///
+/// meli 对应面（issue #153 指定）：`melib/src/email/attachments.rs::
+/// decode_helper`（L1211-1249）的 base64 分支（L1220）——
+/// `ContentTransferEncoding::Base64 => match data_encoding::BASE64_MIME
+/// .decode(self.body()) { Ok(v) => v, _ => self.body().to_vec() }`：成功取
+/// `data_encoding` 按需增长的堆 `Vec<u8>`，失败原样回退原始 body；没有
+/// `[u8; N]`、没有手写索引、没有 `unsafe`。`Attachment::decode` 与
+/// `Attachment::decode_rec`（文本类型）都落到这条分支；整封邮件经
+/// `Mail::new` → `Mail::body()` → `parser::attachments::attachment` 后
+/// base64 字节仍只进这条分支。`BASE64_MIME` 非 canonical：只忽略 CR/LF，
+/// 长度非 4 倍数、非法字符、错位 `=` 与末组尾随位非零均为 `Err`。
+///
+/// 语料内嵌 issue 点名的全部畸形补位（`=`、`A=`、`AA=A`、`AAAA=`、
+/// `A===`、`====`、`=AAA`、padding 后接更多数据）、非 base64 字符
+/// （`!@#$%^&*()`、内嵌空格/制表/NUL/高位字节）、空与纯空白 body、长度
+/// `%4==1`（`A`、`AAAAA`）、超长截断形态，以及 64KiB/1MiB 单行无换行
+/// valid/truncated 两档与 multipart/mixed、text/plain + base64、非 ASCII
+/// 头部 + base64 body 三种整封邮件形态。
+///
+/// [`cve_2018_14359`] 分五层锁定（详见模块文档）：L0 合法 base64（含 CRLF
+/// 软换行规范 MIME 形态）经生产 `BASE64_MIME.encode` 发射、`AttachmentBuilder`
+/// 反向解析后逐字节还原；L1 全部畸形语料经 `decode`/`decode_rec` 原样回退
+/// （非文本/ASCII 文本逐字节等于 body）且 `catch_unwind` 无 panic；L2 所有
+/// `Ok` 输出 ≤ `ceil(输入 × 3/4) + 1`、畸形回退 == body、64KiB/1MiB 档实际
+/// 运行不 panic/OOM；L3 用 `include_str!` 钉住 `attachments.rs` 的
+/// `BASE64_MIME.decode` 调用点、`Ok(v) => v` 与 `_ => self.body().to_vec()`
+/// 回退分支，并用 `std::fs` 递归扫描 `melib/src/email/` 证明 base64 解码只经
+/// `data_encoding`（堆分配），无 C 定长缓冲原语、无 `unsafe`、无 `[u8; `、
+/// 无手写解码表；L4 整封 multipart/mixed、text/plain + base64、非 ASCII
+/// 头部 + base64 body 经 `Mail::new` 解析后 decode/decode_rec 不 panic 且
+/// fail-closed 语义成立。与 CVE-2018-14349（NO 响应文本）、14350
+/// （INTERNALDATE）、14358（RFC822.SIZE）输入面，14351（STATUS literal）、
+/// 14352/14353（imap_quote_string 差一/整数下移）构造面，14354/14357
+/// （imap_subscribe/LSUB 命令注入）与 14356（空 UID 空指针）划界，标记
+/// `14359` 语料逐字隔离。结论：**结构性免疫，未发现内存安全缺口，未修改
+/// 生产代码**。
+///
+/// [`cve_2018_14359`]: self::cve_2018_14359
+#[cfg(test)]
+#[path = "CVE-2018-14359.rs"]
+mod cve_2018_14359;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
