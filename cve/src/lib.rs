@@ -4106,6 +4106,44 @@ mod cve_2018_14350;
 #[path = "CVE-2018-14351.rs"]
 mod cve_2018_14351;
 
+/// CVE-2018-14352（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8，
+/// NVD 记为 off-by-one 栈溢出，实质 CWE-787 相对写/CWE-121 栈缓冲溢出）
+/// **mutt `imap/util.c::imap_quote_string` 把 `"`/`\` 反斜杠转义进定长栈
+/// 缓冲时未给每个转义对预留空间 → 差一栈溢出 → 内存破坏乃至 RCE**
+/// regression（issue #146，表 2 病毒/代码执行；mutt/neomutt 2018-07 一次性
+/// 披露 15 漏洞之一）。
+///
+/// meli 对应面是 `melib/src/imap/search.rs::push_search_value` 的 quoted
+/// 分支与 `melib/src/search.rs::escape_double_quote`。内存安全免疫：Rust 堆
+/// `String` 无定长缓冲，新转义函数以 `String::with_capacity(value.len() * 2)`
+/// 按最坏情况一次性预留。真实缺口在 RFC 3501 §9 的 quoted-specials 必须用单
+/// 反斜杠转义 `\"`/`\\`：修复前 `escape_double_quote` 把 `"` 翻倍成非法的
+/// `""`，且完全不转义 `\`，值尾 `\` 会吞掉 meli 自己的闭合引号、破坏命令
+/// 结构。
+///
+/// 语料内嵌 1 万字节 `"`/`\` 语料（交替/全引号/全反斜杠/伪随机位图、均以
+/// `\` 结尾）+ CR/LF literal 变体 + 混合 CJK + 定长缓冲边界 ±1
+/// （255/256/257 … 65535/65536/65537）+ 空串。
+///
+/// [`cve_2018_14352`] 分层锁定（详见模块文档）：转义计费层断言
+/// `escaped.len() == value.len() + count('"') + count('\\')` 且 ≤ `2×`、
+/// 确定性、`catch_unwind` 无 panic、有界时间；RFC 往返层用自实现 RFC 3501
+/// quoted-string 解析器逐字节还原原值，并证明只有 `\"`/`\\` 是合法转义；
+/// 线上字节层断言
+/// `search_send_steps`/`search_send_steps_non_sync` 的 literal `{n}` 计数精确、
+/// text 段无 CR/LF、值尾 `\` AND `FROM "x"` 的整条命令可完整重放（修复前
+/// 此断言失败）；源码锚点层用 `include_str!` 断言 `push_search_value` 使用
+/// `escape_imap_quoted`、新函数同时转义 `\` 与 `"` 且 `with_capacity` 预留
+/// 2×，并断言 `meli/src/sqlite3.rs` 仍引用 `escape_double_quote`（SQL LIKE
+/// 语义不受影响）。与 CVE-2025-49113（CR/LF→literal 面）及
+/// CVE-2018-14349/14350/14351（服务器响应解析面）划界。结论：**内存安全免疫；
+/// 发现并修复一处 RFC 3501 quoted-specials 语义缺口**。
+///
+/// [`cve_2018_14352`]: self::cve_2018_14352
+#[cfg(test)]
+#[path = "CVE-2018-14352.rs"]
+mod cve_2018_14352;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
