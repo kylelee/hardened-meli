@@ -3662,6 +3662,70 @@ mod cve_2016_7968;
 #[path = "CVE-2022-29360.rs"]
 mod cve_2022_29360;
 
+/// CVE-2024-42008（Roundcube Webmail < 1.5.8、1.6.x < 1.6.8；CVSS v3.1 9.3；
+/// CWE-79；SonarSource 披露、CISA KEV 在列）**附件 Content-Type 存储型 XSS**
+/// regression（Gitea issue #165），调研报告表 3「网页嵌入与 HTML/链接渲染」
+/// 批次成员：
+/// `program/actions/mail/get.php` 的 `rcmail_action_mail_get->run()` 处理附件
+/// 视图请求不当——用户打开「查看附件」视图后，恶意附件以危险 `Content-Type`
+/// （`text/html` / `application/xhtml+xml` / `image/svg+xml`）下发，浏览器上下
+/// 文解析并执行其中的脚本；攻击者把 `<script>alert(document.cookie)</script>`
+/// 或 `<svg/onload=alert(1)>` 放进附件，配 `Content-Disposition: inline;
+/// filename="safe.txt"` 伪装成无害文件扩展名，借已认证上下文窃取并代发受害者
+/// 邮件（Roundcube 的发送组件可代发）。
+///
+/// meli 等价面映射（终端客户端无 webmail/浏览器/JS 运行时/DOM，按 issue 要求做
+/// 「免疫证明」断言）：
+///
+/// 1. 附件视图路径：`meli/src/mail/view/filters.rs::new_attachment_with_depth`
+///   的 `ContentType::Other | ContentType::OctetStream` + `inline` 分支**原样按
+///   UTF-8 文本**渲染附件字节（不进入 `sanitize`+`render`）——这是对
+///   `Content-Type: application/xhtml+xml` / `image/svg+xml` 这类未列入
+///   `ContentType` 枚举的标签的攻击面，附件字节只能作为不透明文本被查看；扩展
+///   名伪装（`filename="safe.txt"`）只影响保存对话框而不影响渲染决策。
+/// 2. 附件主路径：`att.is_html()` 命中 `ContentType::Text{kind: Html}` 的附件
+///   走 [`sanitize`] → [`render`]，与正文 `text/html` 完全等价——攻击在 sanitize
+///   已彻底死亡。与 [`cve_2024_42009`] / [`cve_2024_42010`] / [`cve_2024_45516`] /
+///   [`cve_2020_35730`] / [`cve_2023_43770`] / [`cve_2023_5631`]（issues #115/#116/
+///   #117/#162/#163/#164）已锁定的「正文 `text/html` 清洗」族同判例。
+/// 3. 外部查看器触发面：`MailcapEntry::execute` 在整个生产树里**只有一处**
+///   调用点（`meli/src/mail/view/envelope.rs`），同时被 `open_mailcap` 快捷键
+///   与 `open_attachment(lidx)` 显式附件编号双重门禁包裹；`%s` 展开把附件字节
+///   **落成临时文件**、只把上下文编码后的文件路径替换进命令串——附件字节永不
+///   进入 shell 命令行。该结构以源码断言固定（CVE-2023-23397 / CVE-2024-21413
+///   已修齐同样的 launcher 门禁，issues #21/#22）。
+/// 4. 公告原样的代发/会话滥用：meli 是终端客户端，没有 webmail + 没有浏览器 +
+///   没有 JS 运行时 + 没有 DOM，没有「会话」可窃取，附件视图不执行任何脚本。
+///
+/// [`cve_2024_42008`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// 附件视图 sanitize+render 面、附件视图 `ContentType::Other` 原样文本面、
+/// 端到端（每条语料单独成信 ＋ 组合信）、代发/会话滥用面 ＋ 外部查看器面 ＋
+/// 公告原样语料精确锁定 ＋ 惰性观测 ＋ 良性对照存活。
+///
+/// 与近亲划界：[`cve_2024_42009`]（issue #115）/[`cve_2024_42010`]（issue #116）/
+/// [`cve_2024_45516`]（issue #117）同是 Roundcube/Zimbra **正文 HTML 清洗** XSS
+/// 家族，但都锁**正文**面；本文件锁的是 **`Content-Type`/`Content-Disposition`/
+/// `filename` 派生面**——`att.is_html()` / `att.content_type.is_text_html()` /
+/// `filters.rs::new_html` (`HtmlFilter::Builtin` → `html_render::render`) 三条
+/// HTML 消费通路的二级 trigger。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**——meli 没有浏览器+ 没有 JS
+/// 运行时+ 没有 DOM+ 没有 webmail 会话，附件 `Content-Type` / `Content-
+/// Disposition` / `filename` 派生面与公告原样攻击面在 meli 的等价面上逐条落空。
+///
+/// [`cve_2024_42008`]: self::cve_2024_42008
+/// [`cve_2024_42009`]: self::cve_2024_42009
+/// [`cve_2024_42010`]: self::cve_2024_42010
+/// [`cve_2024_45516`]: self::cve_2024_45516
+/// [`cve_2020_35730`]: self::cve_2020_35730
+/// [`cve_2023_43770`]: self::cve_2023_43770
+/// [`cve_2023_5631`]: self::cve_2023_5631
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2024-42008.rs"]
+mod cve_2024_42008;
+
 /// CVE-2024-42009（Roundcube < 1.5.8、1.6.x < 1.6.8；CVSS v3.1 9.3；
 /// NVD / SonarSource）**反清洗（desanitization）mXSS** regression
 /// （Gitea issue #115），调研报告表 3「网页嵌入与 HTML/链接渲染」批次成员：
