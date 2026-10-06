@@ -4243,3 +4243,33 @@ mod cve_2000_0567;
 #[cfg(test)]
 #[path = "CVE-2001-0145.rs"]
 mod cve_2001_0145;
+
+/// CVE-2025-49113（Roundcube < 1.5.10、1.6.x < 1.6.11 webmail；CVSS 9.9，
+/// 在野利用，2026-02-20 列入 CISA KEV）认证后反序列化 RCE 回归（issue
+/// #137，表 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code
+/// execution）：未校验的 `_from` 参数流入 PHP `unserialize()`，认证用户提交
+/// 序列化对象图（`O:8:"stdClass":…`、`__PHP_Incomplete_Class` 载体）即服务端
+/// 执行代码，补丁发布 48 小时内被武器化。meli 无 PHP 运行时、无 webmail
+/// 服务端、无任何对象反序列化器，字面链条不存在；按 issue 指定等价面（认
+/// 证用户可控字符串参数流向强能力 sink）映射到配置查询
+/// （`conf.rs`/`conf/` 的 `listing.filter: Option<Query>`）、命令解析器
+/// （`command/parser.rs` 的 `search`/`select`/`filter`/`pipe` 参数）与 IMAP
+/// 搜索序列化器（`melib/src/imap/search.rs`，`Query` 变成协议流字节的地
+/// 方）。语料提交 PHP 序列化载荷、shell 元字符（反引号、`;`、`$()`、`|`）
+/// 与未注册 scheme URL 攻击全部三面，四层锁定结论为 **暴露一处真实缺口并
+/// 修复（CWE-93：含 CR/LF 的搜索值与 flag 关键字原样进入 IMAP 命令文本，
+/// 提前终结命令行 → 命令注入；`listing.filter` 配置串可携带 `\r\n` 转义经
+/// `quoted_string` 语法抵达）**：修复后 CR/LF 值走 RFC 3501 literal（`Quoted`
+/// 重试策略保持既有「无引号形态」契约）、flag 关键字必须为合法 atom 否则
+/// 警告跳过，回归同文件 melib 单测
+/// （`test_imap_query_ascii_crlf_value_travels_as_literal`、
+/// `test_imap_search_send_steps_crlf_literal_framing`、
+/// `test_imap_query_flags_keyword_atom_whitelist`）与 [`cve_2025_49113`]
+/// 分层锁定；反序列化/exec 等价面为结构性免疫证明（源码级 sink 不存在证
+/// 明 + 配置/命令参数全部类型化解析或 `Err`、绝不进入 `Command::new` 参
+/// 数）。
+///
+/// [`cve_2025_49113`]: self::cve_2025_49113
+#[cfg(test)]
+#[path = "CVE-2025-49113.rs"]
+mod cve_2025_49113;
