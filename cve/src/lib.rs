@@ -4469,9 +4469,9 @@ mod cve_2018_14359;
 /// 返回码恰为 211、hash 只由客户端 path 决定，Err 形态错误信息明确，并以相同
 /// 表达式钉死 `fetch_envs` 的 token 计数/受检 parse/饱和消费语义；L2 永不结束
 /// 的 CRLF-free `211` 行在生产 64 MiB 上限处 `ProtocolViolation`，`ret.len()`
-/// 有界、写入量 > cap、watchdog 预算内完成（debug 实测约 40 秒：未终止单行
-/// 每个 chunk 重扫累积缓冲，时间二次方但内存始终有界）；L3 `include_str!`
-/// 钉住堆 String、上限调用
+/// 有界、写入量 > cap、30 秒 watchdog 内完成（预算即二次方绊网：修复前未终
+/// 止单行每个 chunk 重扫累积缓冲，debug 泵满 64 MiB 约 40 秒）；L3 `include_str!`
+/// 钉住堆 String、上限调用、增量扫描游标
 /// 点、`split_whitespace().next().map(str::parse)`、GROUP 期望码与
 /// `format!("GROUP {path}")`，递归扫 `melib/src/nntp/` 证明无 `unsafe`、无
 /// `sscanf(`/`strcpy(`/`strcat(`/`strtol(`/`sprintf(`；L4 struct literal 构造
@@ -4480,8 +4480,10 @@ mod cve_2018_14359;
 /// （IMAP NO 文本）、14350（INTERNALDATE）、14351（STATUS literal）、
 /// 14352/14353（imap_quote_string）、14354/14357（命令注入）、14356（空 UID）、
 /// 14358（RFC822.SIZE）、14359（base64）划界，标记 `14360` 语料逐字隔离。
-/// 结论：**结构性免疫（GROUP 首行以堆 String 解析、数值字段受检 parse、
-/// 64 MiB 封顶、无定长栈缓冲、无 unsafe），未发现缺口，未修改生产代码**。
+/// 结论：**CWE-121 栈溢出面结构性免疫（GROUP 首行以堆 String 解析、数值
+/// 字段受检 parse、64 MiB 封顶、无定长栈缓冲、无 unsafe）；暴露并修复一处
+/// CWE-407 可用性缺口——未终止单行的分隔符二次方重扫描，`read_lines` 改
+/// `searched` 游标增量扫描（同 SMTP issue #48 修法），修复与回归一并交付**。
 ///
 /// [`cve_2018_14360`]: self::cve_2018_14360
 #[cfg(test)]
