@@ -4068,6 +4068,24 @@ mod cve_2024_50624;
 #[path = "CVE-2018-12020.rs"]
 mod cve_2018_12020;
 
+/// CVE-2018-12019（Enigmail < 2.0.7，SigSpoof 2；CVSS v3.0 7.5）**多签名
+/// 混淆** regression（issue #172，表 5 协议与加密信任边界）：攻击者在
+/// 有效签名旁拼接伪造签名（真 gpg 产物语料，「先真后伪」「先伪后真」
+/// 两种顺序 + cleartext 形），客户端必须收集并呈现**全部**签名、任一
+/// `Err` status 整体 fail-closed。[`cve_2018_12019`] 逐层锁定：L0——
+/// 汇点 [`signatures_into_error`] 聚合呈现全部签名、任一 BAD 整体
+/// `BAD signature`（顺序无关）；L1——路由整体转交拼接签名文件（无
+/// Rust 层截断）、三部件走私结构性拒绝；L2——CLI 脚本检出并修复
+/// 「只报第一条签名」的真实缺口（NEWSIG 逐段聚合）与 cleartext 单
+/// 文件调用形态崩溃；L3——真 gpg/真 gpgme：全有效双签名聚合确认、
+/// 混合两序 fail-closed。
+///
+/// [`cve_2018_12019`]: self::cve_2018_12019
+/// [`signatures_into_error`]: meli::mail::pgp::signatures_into_error
+#[cfg(test)]
+#[path = "CVE-2018-12019.rs"]
+mod cve_2018_12019;
+
 /// CVE-2018-14349（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8，
 /// CWE-120）**恶意 IMAP 服务器无消息文本 NO 响应堆溢出** regression（issue
 /// #143，表 2 病毒/代码执行；mutt/neomutt 2018-07 一次性披露 15 漏洞之
