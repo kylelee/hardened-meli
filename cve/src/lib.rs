@@ -4025,3 +4025,26 @@ mod cve_2018_19516;
 #[cfg(test)]
 #[path = "CVE-2019-10734.rs"]
 mod cve_2019_10734;
+
+/// CVE-2019-10735（Claws Mail 3.14.1 解密预言机/回复泄露，CVSS 4.3；同族五连
+/// 之一，参考 MITRE / KDE bugs #404697；issue #128）同族攻击模拟回归：
+/// [`cve_2019_10735`] 把 issue #103 的抛弃子钥密文（受害者子钥可解）包装进
+/// `multipart/mixed` 载体——第一部件一句无害说明的 text/plain 并以多个空行把
+/// 后续部件推出可视区，第二部件 RFC 3156 `multipart/encrypted`（`Version: 1`
+/// 控制 part + octet-stream 密文）——以及整段 PGP armor 的 inline text/plain
+/// 变体，攻击 meli 的回复引用面；对照邮件与载体 A 头部及无害文本部件逐字节
+/// 相同。
+///
+/// Claws Mail 无独立功能面，按 meli 回复引用等价面做免疫证明：melib
+/// [`Draft::new_reply`]→[`Attachment::decode_rec`] 只引用无害文本、与「不含
+/// 密文的普通 multipart 邮件」逐字节一致，加密子树空贡献、无密文字节、无解密
+/// 明文标记；L4 源码扫描证明免疫锚点仍在位——即 issue #104 为同族 KMail 变体
+/// CVE-2019-10732 落地的两处修复（melib `MultipartType::Encrypted` 空贡献 +
+/// meli UI `ViewFilter::decrypt_origin` 排除）与其端到端回归名。结论：
+/// **免疫证明，未发现新缺口，未触碰生产代码**。
+///
+/// [`Draft::new_reply`]: meli::melib::Draft::new_reply
+/// [`Attachment::decode_rec`]: meli::melib::email::Attachment::decode_rec
+#[cfg(test)]
+#[path = "CVE-2019-10735.rs"]
+mod cve_2019_10735;
