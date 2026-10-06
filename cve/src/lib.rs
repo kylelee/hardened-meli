@@ -5844,3 +5844,50 @@ mod cve_2021_30860;
 #[cfg(test)]
 #[path = "CVE-2021-29969.rs"]
 mod cve_2021_29969;
+
+/// CVE-2016-10727（evolution-data-server < 3.21.2，`camel-imapx-server.c`，
+/// CVSS 9.8，NVD / CWE-345；表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）**STARTTLS 降级明文认证** regression：
+/// 客户端希望使用 STARTTLS 而服务器不支持/拒绝（SMTP `454`/`502`，IMAP
+/// `NO`/`BAD`，NNTP 能力表不广告 STARTTLS 或对 STARTTLS 回非 `382`）或沉默
+/// 不应答时，旧代码没有中止会话，而是继续在同一条明文 TCP 连接上提交
+/// `LOGIN`/`AUTH`/`AUTHINFO` 凭据，网络嗅探即得口令。
+///
+/// **meli 等价面映射（侦察结论，预期免疫证明）**：三处 STARTTLS 升级路径全部
+/// fail-closed。IMAP / ManageSieve（`melib/src/imap/connection.rs` L457-533）在
+/// 块内局部 `response` 缓冲里只认 `M1 OK`（ManageSieve 只认 `OK `），`M1 NO`/
+/// `M1 BAD` 永不匹配 → 3 秒墙钟 `!broken` →
+/// `Could not initiate STARTTLS negotiation`；每读超时也直接 Err。SMTP
+///（`melib/src/smtp.rs` L429-448）无条件写 `STARTTLS\r\n` 后
+/// `read_lines(..., Some((ReplyCode::_220, &[])), ...)` 期望恰 `220`，
+/// `454`/`502`/`250` 全 Err，沉默超时 Err；`AUTH` 严格在
+/// `Connection::new_tls` 之后。NNTP（`melib/src/nntp/connection.rs` L97-146）
+/// 能力表缺 `STARTTLS` → `NotSupported` Err，非 `382 ` → Err；`AUTHINFO` 在
+/// 升级块之后。三处均无 STARTTLS 失败回退明文的代码路径。
+///
+/// [`cve_2016_10727`] 分层锁定（详见模块内注释）：L1 纯模型复刻 evolution
+/// camel-imapx「拒绝即忽略、继续明文认证」缺陷，喂 `NO`/`BAD`/不可用/沉默语料
+/// 断言三协议哨兵凭据真的明文出门，对照 fail-closed 参照模型零出门；L2 按
+/// `connection.rs`/`smtp.rs`/`nntp/connection.rs` 真实算法复刻协商读循环、期望码
+/// 判定与能力表门控，拒绝语料全 Failed、正例 Upgraded 且 `carried_over` 恒空；
+/// L3 八个真实 loopback 敌意服务器场景（IMAP `NO`/`BAD`/沉默，SMTP 缺能力+`502`/
+/// `454`/沉默，NNTP 缺 STARTTLS/`502`）以 `completes_within` 看门狗断言
+/// `new_connection` 全 Err、错误语义命中、无 `LOGIN`/`AUTH`/`AUTHINFO`/`MAIL FROM`
+/// 明文片段与哨兵（明文及 base64）、无降级重连；L4 源码扫描锁定 `if !broken`
+/// fail-closed、SMTP `STARTTLS→220` 顺序与 AUTH 晚于 `Connection::new_tls`、NNTP
+/// 能力门与 `382 ` 校验、三处无明文回退。
+///
+/// 与近亲划界：CVE-2021-38373（issue #123，KMail）是「认证开关门控 STARTTLS」
+/// 的正交性错误，仅 SMTP、`454`；CVE-2021-29969（issue #173，Thunderbird）是
+/// 握手前响应注入，非降级；CVE-2020-15954（issue #122，KMail）是 TLS 模式分类 /
+/// 无降级命题。本文件聚焦「STARTTLS 被拒/不可用后客户端是否仍明文认证」的决策
+/// 面，三协议全覆盖。marker 域名 `evolution10727.example` 与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未触碰生产代码**——三处升级路径都把
+/// 「协商成功」当作继续会话的必要条件，任何拒绝/沉默/能力缺失都在发送凭据之前
+/// fail-closed。
+///
+/// [`cve_2016_10727`]: self::cve_2016_10727
+#[cfg(test)]
+#[path = "CVE-2016-10727.rs"]
+mod cve_2016_10727;
