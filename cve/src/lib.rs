@@ -5187,3 +5187,50 @@ mod cve_2000_0621;
 #[cfg(test)]
 #[path = "CVE-2001-0999.rs"]
 mod cve_2001_0999;
+
+/// CVE-2001-1088（Microsoft Outlook ≤ 8.5 / Outlook Express ≤ 5；CVSS v2 7.5）
+/// 「Reply-To 回复劫持 + 回复即静默写通讯簿」攻击模拟回归（issue #160）：
+/// 开启「自动把回复对象加入通讯簿」时，Outlook 不提示 `Reply-To` 与 `From`
+/// 不一致，回复被静默劫持到攻击者地址，且攻击者地址被静默写进通讯簿。
+/// 攻击样例：`From: ceo@victim1088.example` + `Reply-To: attacker@evil1088.example`
+/// （正文「请回复确认」诱导）、不同域名变体、多个 `Reply-To` 头（malformed）、
+/// `Mail-Reply-To`/`Mail-Followup-To` 优先级面。
+///
+/// meli 等价面：回复落点由 `meli/src/mail/compose.rs::Composer::reply_to`
+/// L440-499 推导——reply-to-author 链 `Mail-Reply-To > Reply-To > From`，
+/// reply-all 链 `Mail-Followup-To > Reply-To > From` 再并入原 `To`、剔除自身
+/// 身份、`Cc = field_cc_to_string()`。**攻击者地址成为回复落点是正确的邮件
+/// 语义**，CVE 的缺陷是该落点被藏起来；meli 通过 CVE-2023-35619 修复的
+/// `EnvelopeView::draw` 头带（`address_faces_disagreeing_with_from`，
+/// envelope.rs L988/L1153）把与 `From` 分叉的 `Sender`/`Mail-Reply-To`/
+/// `Reply-To` 面直接画在 `From` 正下方。缺陷 (2)「回复即自动写通讯簿」在
+/// meli 无对应面：`meli/src/mail/compose.rs` 整个回复路径不含任何 `add_card`
+/// 调用、不含 `contacts`；全部 `add_card` 调用点都是显式用户动作
+/// （`AddAddressesToContacts` 命令/快捷键选择器只从 `from()+to()+cc()` 构建、
+/// 联系人编辑器显式 Save 按钮、启动时反序列化用户已存数据文件、配置驱动的
+/// mutt/vcard/notmuch 来源）或测试/golden 代码。
+///
+/// [`cve_2001_1088`] 分五层锁定（详见模块文档）：L0 五份语料经
+/// `Envelope::from_bytes` 解析，`From` 地址与 `Reply-To` 原始值逐字保存在
+/// `other_headers`（经 RFC2047 `phrase()` 解码），多个 `Reply-To` 头锁定
+/// `populate_headers` 的「最后一个胜出」语义；L1 镜像 `Composer::reply_to`
+/// 收件人推导链（cve crate 拿不到 `Context::new_mock`），断言 A/B/C 落点为
+/// 攻击者地址、D 锁定 `Mail-Reply-To`/`Mail-Followup-To` 优先级；L2 数据层
+/// 断言分叉 specs 不等 + `include_str!` 钉锚分叉可见性防御存在且被调用；
+/// L3 `include_str!` 扫描回复路径无通讯簿写入 + 清点全部 `add_card` 调用点；
+/// L4 直接构造 `Contacts`/`Card` 锁定 `add_card` 按 `CardId` 幂等覆盖、
+/// `card_exists` 去重、`search` 行为。
+///
+/// 与近亲划界：[`cve_2023_35619`]（issue #134）已修复分叉不可见缺口（本文件
+/// 把该防御作为既有设施引用并钉锚），[`cve_2006_1305`]（issue #30）锁回复
+/// 草稿重解析的资源耗尽面；本文件锁回复落点语义 + 通讯簿写入面。语料 marker
+/// `1088` 与近亲逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**。
+///
+/// [`cve_2001_1088`]: self::cve_2001_1088
+/// [`cve_2006_1305`]: self::cve_2006_1305
+/// [`cve_2023_35619`]: self::cve_2023_35619
+#[cfg(test)]
+#[path = "CVE-2001-1088.rs"]
+mod cve_2001_1088;
