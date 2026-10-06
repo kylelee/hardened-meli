@@ -5603,3 +5603,55 @@ mod cve_2024_27443;
 #[cfg(test)]
 #[path = "CVE-2025-27915.rs"]
 mod cve_2025_27915;
+
+/// CVE-2025-30349（Horde IMP through 6.2.27，配合 Horde Application Framework
+/// through 5.2.23；CVSS v3.1 7.2；CWE-79）**邮件正文存储型 XSS 导致账户接管**
+/// regression（Gitea issue #168），调研报告表 3「网页嵌入与 HTML/链接渲染」批次
+/// 成员、在野利用（2025-03）：攻击者发送特制 `text/html` 邮件正文，HTML 元素的
+/// `onerror` 事件属性内嵌 Base64 编码的 JavaScript，受害者仅查看邮件即在其已
+/// 认证会话里执行脚本、窃取凭据并最终账户接管。
+///
+/// meli 等价面映射（终端客户端无 webmail/浏览器/JS 运行时/DOM/Base64 解码器，
+/// 按 issue #168 要求按等价面断言）：
+///
+/// 1. HTML 清洗面：`meli/src/mail/view/html_render.rs::sanitize()` 的标签白名单
+///    只有文本/排版元素，`img`/`svg`/`body` 均不在其中，issue 原样的元素形连
+///    属性一起消亡。
+/// 2. 属性值走私面：白名单标签的保留属性值本可携带危险 token，但
+///    `attribute_filter` 已累积七处与 nh3 parity 的有意偏离——第五处（#117）
+///    拦裸 `onerror`/`javascript:`、第六处（#162）拦裸 `onload`/`srcdoc`/`data:`、
+///    第四处（#167）拦裸 `ontoggle`/`eval(`/`atob(`——本 CVE 的全部原料
+///    （`onerror`/`onload`/`eval(`/`atob(`）都落在既有守卫之内。
+/// 3. 终端渲染面：`render()` 先 [`sanitize`] 再交 html2text 转纯文本，不执行
+///    脚本、不解析 scheme、不解码 Base64；`title`/`lang` 属性值也不进终端文本。
+///    裸 Base64 blob 虽可在保留属性里存活，但纯惰性不透明文本，不可达。
+/// 4. 邮件投递面：`text/html` 正文经 `Envelope`/`Attachment` 解析后由
+///    `filters.rs::new_html` 在 `att.is_html()` 为真时调用，是唯一消费通路；
+///    会话/代发面不存在。
+///
+/// [`cve_2025_30349`] 以七个分层 `#[test]` 锁定（详见模块文档）：语料结构自检、
+/// sanitize 平面去活＋白名单预言机、嵌入上下文、端到端 RFC 822 邮件、属性值走私
+/// 缺口回归＋「未来放宽」锁、纯文本/裸 Base64 惰性观测、源码结构锚点＋良性对照。
+///
+/// 与近亲划界：[`cve_2024_45516`]（issue #117）锁 Zimbra Classic UI 畸形 `<img>`
+/// 的 `onerror`/`javascript:` 属性值走私；[`cve_2020_35730`]（issue #162）锁
+/// Roundcube 的 `onload`/`srcdoc`/`data:` 属性值走私；[`cve_2025_27915`]
+/// （issue #167）锁 Zimbra ICS `ontoggle`/`eval(`/`atob(` 属性值走私；
+/// [`cve_2023_5631`]（issue #164）锁 SVG/MathML 文档类载体。本文件锁
+/// **`onerror`/`onload` 事件属性 + Base64 混淆脚本原料 + `img`/`svg`/`body`
+/// 元素载体**的邮件正文投递面。语料 marker `imp30349.example` 与近亲逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**——三类元素载体死在标签白名单，
+/// 两类事件属性与两种 Base64 解码原语在全语料下都被既有 `attribute_filter` 守卫
+/// 整属性丢弃；因无 DOM/JS 运行时，XSS 无触发点。
+///
+/// [`cve_2025_30349`]: self::cve_2025_30349
+/// [`cve_2024_45516`]: self::cve_2024_45516
+/// [`cve_2020_35730`]: self::cve_2020_35730
+/// [`cve_2025_27915`]: self::cve_2025_27915
+/// [`cve_2023_5631`]: self::cve_2023_5631
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2025-30349.rs"]
+mod cve_2025_30349;
