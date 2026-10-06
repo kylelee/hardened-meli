@@ -4185,6 +4185,56 @@ mod cve_2018_14352;
 #[path = "CVE-2018-14353.rs"]
 mod cve_2018_14353;
 
+/// CVE-2018-14354（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8
+/// CRITICAL）**恶意 IMAP 服务器在 LIST/LSUB 响应里返回含反引号（命令替换）、
+/// 引号、CRLF、控制字符或超长邮箱名；mutt 的订阅/退订流程把服务器返回的名字
+/// 拼进 `mailboxes` 配置命令，mutt 配置语言把反引号当命令替换执行 → 远端任意
+/// 命令执行** regression（issue #148，表 2 病毒/代码执行；mutt/neomutt
+/// 2018-07 一次性披露 15 漏洞之一）。NVD 原文：*"They allow remote IMAP
+/// servers to execute arbitrary commands via backquote characters, related to
+/// the mailboxes command associated with a manual subscription or
+/// unsubscription."*
+///
+/// meli 对应面：解析层 `melib/src/imap/protocol_parser.rs::list_mailbox_result`
+/// （`mailbox_token`→`astring_token`→`string_token`/`literal`，整段响应先经
+/// `ImapLineIterator::split_rn` 分帧）；存储层
+/// `melib/src/imap/mod.rs::ingest_mailbox_list_line`/`imap_mailboxes` 把名字存进
+/// `ImapMailbox.imap_path` 并生成类型化 `MailboxHash`；重发层
+/// `set_mailbox_subscription`/`create_mailbox`/`delete_mailbox` 经
+/// `CommandBody::subscribe/unsubscribe`（imap-types 构造期逐字节校验，NUL
+/// fail-closed）与 `CommandCodec`/`Fragment::Line|Literal` 重新序列化；mutt
+/// 真正的漏洞点——`mailboxes` 式配置命令解释器——meli 不存在，邮箱名永不进入
+/// 任何 shell 或配置求值。
+///
+/// 语料内嵌反引号命令替换（`` `touch${IFS}/tmp/pwned` ``、`$(id)`、纯反引号
+/// atom、反引号+引号、反引号+CRLF、尾反斜杠）、≥1 万字节超长名（ASCII/
+/// 反引号/CRLF/NUL/非 ASCII 变体）、定长缓冲边界 ±1
+/// （0/1/2、255/256/257 … 65535/65536/65537）、非 ASCII literal 与
+/// 层级分隔符堆叠名。
+///
+/// [`cve_2018_14354`] 分层锁定（详见模块文档）：a 解析层断言未闭合引号、
+/// 引号内 CRLF（`split_rn` 分帧后逐行）、被反斜杠吞掉的闭合引号、缺失/`NIL`
+/// 分隔符、`{n}` 声明超出缓冲全部干净 `Err`，NUL/CTL/空串被接受时仅作数据
+/// 落地，逐条 `catch_unwind` 无 panic、有界时间；b 反引号核心层断言
+/// `imap_path` 原样保留反引号、`MailboxHash::from_bytes` 只产生类型化哈希、
+/// 每 `Fragment::Line` 恰好一个 CRLF 且内部无 CR/LF、反引号总数逐字节守恒、
+/// CR/LF 名强制 Literal（`{n}` == 字节长）、NUL 名 `CommandBody` 构造期
+/// `is_err()` fail-closed；c 全语料 parse→extract→subscribe/unsubscribe 往返
+/// 逐字节一致、纯 ASCII 安全名单 fragment 且命令前缀正确、超深度
+/// `MAX_MAILBOX_HIERARCHY_DEPTH` 断言 `Err`、时间有界；d 源码锚点层用
+/// `std::fs` 扫描 `melib/src/imap/` 全目录 `.rs` 证明无
+/// `Command::new`/`process::Command`/`.spawn(`，三处订阅/删除调用点仍用
+/// `CommandBody::subscribe(`/`unsubscribe(` 且无大写原始 verb，`imap_mailboxes`
+/// 的 LSUB 分支仍走 `protocol_parser::list_mailbox_result`，`send_command` 仍按
+/// `Fragment::Line`/`Literal` 分段并在 `LiteralMode::Sync` 等 continuation。
+/// 与 CVE-2018-14352/14353（同一 `imap_quote_string` 的定长缓冲内存破坏面）划界。
+/// 结论：**命令执行/内存安全免疫，未发现缺口，无需修改生产代码**。
+///
+/// [`cve_2018_14354`]: self::cve_2018_14354
+#[cfg(test)]
+#[path = "CVE-2018-14354.rs"]
+mod cve_2018_14354;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
