@@ -5748,3 +5748,39 @@ mod cve_2021_44026;
 #[cfg(test)]
 #[path = "CVE-2021-30761.rs"]
 mod cve_2021_30761;
+
+/// CVE-2021-30860（FORCEDENTRY；Apple CoreGraphics / ImageIO 的 JBIG2 解码器
+/// 整数溢出；CVSS 3.1 7.8；CWE-190；NSO Pegasus 在野「零点击」利用，2021-11
+/// 列入 CISA KEV；调研报告表 2「邮件可达的图像解码器」）——伪装成 GIF 的 PDF
+/// 内嵌 `/JBIG2Decode` 流，畸形段长 / 宽高坐标触发整数溢出，攻击者在解码器内
+/// 用 JBIG2 段搭建虚拟执行环境绕过 BlastDoor 沙箱。
+///
+/// meli 等价面映射（issue #171）：meli 不含任何 JBIG2 / PDF / 图像解码器。
+/// `melib/src/email/attachments.rs` 把附件当不透明字节解析（`decode()` 对
+/// `ContentType::Other` 原样返回）；`meli/src/types/helpers.rs` 的
+/// [`File::create_temp_file`] 以随机名、`create_new`、`0o600` 落盘；
+/// `meli/src/mailcap.rs` 只在用户显式确认后把临时文件路径交给外部查看器，
+/// 附件字节永不进入命令行。
+///
+/// [`cve_2021_30860`] 分四层锁定（详见模块文档）：L1 十份伪装 GIF/PDF +
+/// 畸形 JBIG2 段语料经 `Mail`/`Attachment` 解析不 panic / 不挂死、声明类型与
+/// 文件名原样保留、`decode()` / `body()` 逐字节不透明；L2 无嗅探 / 无递归展开 /
+/// 无进程 + `include_str!` 源码与 manifest 静态断言；L3 落盘保真、随机、私有、
+/// 有界、可清理；L4 `MailcapEntry::run` 命令行只含临时路径、邮件控制字段在
+/// bare / single / double / backtick / `$()` 五种 shell 上下文正确转义、
+/// `$((...))` 歧义上下文 fail-closed。
+///
+/// 与近亲划界：CVE-2016-3714（issue #69）同样攻击 mailcap 命令注入但载体是
+/// ImageMagick MVG；shell 引用上下文的深挖由 CVE-2024-37385（issue #56）承担，
+/// 本文件只针对 FORCEDENTRY 语料复锁。语料 marker `forcedentry30860.example`
+/// 与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——Rust safe 边界把
+/// JBIG2 解码器的越界读写类排除在语言之外，而 meli 根本没有 JBIG2/PDF 解码
+/// 功能面（静态可证）。
+///
+/// [`cve_2021_30860`]: self::cve_2021_30860
+/// [`File::create_temp_file`]: meli::types::File::create_temp_file
+#[cfg(test)]
+#[path = "CVE-2021-30860.rs"]
+mod cve_2021_30860;
