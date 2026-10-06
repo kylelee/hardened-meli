@@ -3958,6 +3958,35 @@ mod cve_2016_3714;
 #[path = "CVE-2020-15954.rs"]
 mod cve_2020_15954;
 
+/// CVE-2021-38372（Trojitá 0.7，CVSS 3.7，NVD）**STARTTLS 升级完成前即时处理 IMAP
+/// 未打标响应、MITM 借注入伪造响应操纵客户端状态（建文件夹/改计数/改
+/// UIDVALIDITY/BYE 结束会话）** regression（Gitea issue #177，表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：旧客户端在升级窗口内把握手前明文当合法响应
+/// 立即应用，攻击在 TLS 建立前即已生效。
+///
+/// [`cve_2021_38372`] 分层锁定（详见模块内注释）：Layer 1 纯模型复刻 Trojitá
+/// 「未打标响应到达即 `apply_line`」的缺陷（`* LIST …` 建 `Injected` 文件夹、
+/// `* 3 EXISTS` 改计数、`* OK [UIDVALIDITY 1]` 改会话标志、`* BYE` 置位），对照
+/// meli 协商语义同语料 fail-closed、状态零变更；Layer 2 证明 meli 的
+/// `untagged_responses`/`list_mailbox_result`/`imap_generic_status_response`
+/// 能识别注入语料，免疫是结构性的「协商窗口从不调用解析器」；Layer 3 五个真实
+/// loopback 敌意服务器场景（tagged OK 前注入、`* BYE`、`* OK` 紧黏伪造
+/// `M1 OK`、伪造 OK + `* LIST` 尾随进 TLS 握手失败、ManageSieve 裸 `OK ` 前脏行）
+/// 全部 fail-closed 且捕获字节无哨兵明文/base64、`UIDStore.mailboxes` 无注入条目；
+/// Layer 4 源码扫描锁定 `if server_conf.use_starttls` 到 `Connection::new_tls`
+/// 窗口不含 `untagged_responses`/`protocol_parser`、协商缓冲为块内局部
+/// `Vec::with_capacity(1024)`、`if !broken` fail-closed、`response.starts_with(b"M1
+/// OK")` 与 ManageSieve `OK `/`response.clear()`、`connector.connect(&path, socket)`
+/// 只包裸 socket、能力协商在 `Connection::new_tls` 之后重发。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——meli 的 STARTTLS 协商窗口只
+/// 认裸 tagged OK，从不把握手前未打标响应投递给 `protocol_parser`。
+///
+/// [`cve_2021_38372`]: self::cve_2021_38372
+#[cfg(test)]
+#[path = "CVE-2021-38372.rs"]
+mod cve_2021_38372;
+
 /// CVE-2021-38373（KMail 19.12.3 / 5.13.3，CVSS 5.3，NVD / CIRCL）**STARTTLS 安全
 /// 升级被认证设置门控、未勾「服务器需要认证」时明文发送** regression（Gitea issue
 /// #123，表 5 协议信任边界 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：账户勾选 STARTTLS
