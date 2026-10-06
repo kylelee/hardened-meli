@@ -6021,3 +6021,51 @@ mod cve_2020_28896;
 #[cfg(test)]
 #[path = "CVE-2020-15047.rs"]
 mod cve_2020_15047;
+
+/// CVE-2021-39272（fetchmail < 6.4.22，CVSS 3.1 5.9，CWE-345/CWE-346；2021
+/// USENIX Security「NO STARTTLS」研究后续披露）**STARTTLS 会话加密绕过 /
+/// 握手前缓冲残留跨升级消费** regression（Gitea issue，表 5 协议信任边界 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md`）：fetchmail 的缓冲式读取器一次大块
+/// `read(2)` 把服务器应答灌进用户态缓冲后逐行消费；STARTTLS 完成只翻转
+/// `encrypted` 标志，不清空 / 不重建缓冲，于是同一 TCP 报文里黏在 STARTTLS
+/// 应答后的明文命令 / 正文残留在读缓冲中，升级后被继续当作 TLS 会话内合法
+/// 输入（IMAP `M1 OK` + `A002 LOGIN attacker evil`、SMTP `220` + `250` 块、
+/// NNTP `382` + `200` 行、ManageSieve `OK "Begin TLS"` + 注入）。
+///
+/// **meli 等价面映射（侦察结论）**：三处 STARTTLS 升级路径均不把升级前明文
+/// 搬进升级后读取器。IMAP / ManageSieve（`melib/src/imap/connection.rs`
+/// L457-533）的 `let mut response = Vec::with_capacity(1024);` 是升级块内局部，
+/// `M1 OK` break 后整体丢弃，3 秒墙钟未见 tagged OK →
+/// `Could not initiate STARTTLS negotiation`，升级只包裸 socket；SMTP
+///（`melib/src/smtp.rs` L417-460）三次 pre-TLS `read_lines` 以临时
+/// `&mut String::new()` 收 leftover（free `read_lines` 的
+/// `buffer.extend(ret.drain(sep + 2..))`），`read_buffer: String::new()` 在
+/// `Connection::new_tls` 之后构造；NNTP（`melib/src/nntp/connection.rs`
+/// L97-207）每 chunk 校验回复前缀，残余留在调用方局部 `res` 并由下次
+/// `read_response` 开头的 `ret.clear()` 清空，`NntpStream` 无跨升级缓冲字段。
+///
+/// [`cve_2021_39272`] 分层锁定（详见模块内注释）：L1 纯模型自实现
+/// `FetchmailBufferedReader`（大块 read 进用户态缓冲、升级只翻标志）喂四协议
+/// 黏连语料断言注入明文升级后仍被逐行返回，对照清缓冲的 6.4.22 修复零残留；
+/// L2 按真实算法复刻 IMAP / ManageSieve / SMTP / NNTP 协商读法，断言黏连语料
+/// `Upgraded` 且 `carried_over` 恒空、注入行在 `M1 OK` 前 Failed、SMTP leftover
+/// 进临时 scratch、NNTP 残余被 `clear()` 清空；L3 六个真实 loopback 敌意服务器
+/// 场景（IMAP S1/S2、ManageSieve S3、SMTP S4/S5、NNTP S6）以 `completes_within`
+/// 看门狗断言升级后客户端字节流全为合法 TLS 记录、握手 / 协商 fail-closed、
+/// 注入内容不回显、哨兵凭据（明文及 base64 甲）零出门；L4 源码扫描锁定三处协商
+/// 缓冲生命周期、期望码校验与无明文回退。
+///
+/// 与近亲划界：CVE-2021-29969（issue #173，Thunderbird）是握手前**响应队列**
+/// 跨升级存活（响应一到即成帧排队），本 CVE 是 fetchmail 缓冲式读取器把握手前
+/// 读入**用户态缓冲**的字节跨升级继续消费；CVE-2020-15917（issue #90，Claws
+/// Mail）是 TLS 升级时点之后的后缀注入，本 CVE 锁升级时点之前已入缓冲、升级
+/// 未丢弃的字节；CVE-2016-10727（evolution-data-server）是 STARTTLS 被拒后的
+/// 明文回退决策面。marker 域名 `fetchmail39272.example` 与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未触碰生产代码**——协商缓冲是升级块内
+/// 局部，升级只包裹裸 socket，任何握手前注入的明文都到不了升级后的解析器。
+///
+/// [`cve_2021_39272`]: self::cve_2021_39272
+#[cfg(test)]
+#[path = "CVE-2021-39272.rs"]
+mod cve_2021_39272;
