@@ -4302,3 +4302,41 @@ mod cve_2001_0145;
 #[cfg(test)]
 #[path = "CVE-2025-49113.rs"]
 mod cve_2025_49113;
+
+/// CVE-2005-0667（Sylpheed < 1.0.3 / 1.9.x < 1.9.5，CVSS v2 5.1，CWE-120）
+/// 恶意邮件缓冲区溢出 → RCE 回归（issue #139，表 2 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution）：Sylpheed 解析
+/// 攻击者可控的邮件结构（超长头部、畸形 `multipart` boundary、深层嵌套
+/// MIME、非法 `Content-Type` 参数/charset）时写穿固定大小缓冲区，以受害者
+/// 上下文执行任意代码。meli 是 Safe Rust，无固定缓冲区、无 `strcpy`
+/// 等价物，CWE-120 无代码路径；按 issue 指定等价面
+/// （`melib/src/email/parser.rs` 的 `mail`/`headers::header`/
+/// `headers::headers`/`headers_raw` 与 `attachments` 模块的
+/// `multipart_parts`/`parts`/`content_type_parameter`/`content_type`/
+/// `multipart_boundary`，`melib/src/email/attachments.rs` 的
+/// `AttachmentBuilder::parts_with_depth`/
+/// `set_content_type_from_bytes_with_depth`/`decode_rec_helper` 与
+/// `MAX_MULTIPART_NESTING_DEPTH=100`）锁定「超长输入是否仍线性、有界、
+/// 无 panic、无放大、无栈溢出」——即 C 固定缓冲区的等价防线。
+/// [`cve_2005_0667`] 四层锁定：L1 512 KiB 单行 `Subject`/`X-Long` 与
+/// ≈256 KiB 折叠头经 `headers::header`/`mail`/`Envelope::from_bytes`
+/// 不 panic/有界/确定/头值无放大（512 KiB 值完整存活）；L2 100 KiB
+/// boundary（RFC 2046 §5.1.1 上限 70 字符）、空/纯空白/未闭合引号/含
+/// CR-LF-NUL boundary、body 首字节 delimiter、无终止 delimiter 经
+/// `multipart_boundary`/`parts`/`multipart_parts`/
+/// `AttachmentBuilder::new().build()` 干净 `Err`/`Vec::new()` 且有界、树
+/// 不放大；L3 150/300 层嵌套 `multipart/mixed`（每层不同 boundary）经
+/// build + `decode_rec` 在 2 MiB 栈工作线程上树深恰好停在
+/// `MAX_MULTIPART_NESTING_DEPTH=100`、第 100 层起退化为
+/// `ContentType::OctetStream` 叶；L4 参数缺 `=`/未闭合引号/含 NUL-CRLF
+/// 参数/数百 KiB 参数值/512 KiB charset/无 boundary 的 multipart/无 `/` 的
+/// type 经 `content_type_parameter`/`content_type`/
+/// `set_content_type_from_bytes` 干净 `Err` 或降级默认 `Text`/`UTF8`
+/// （未知 charset tag 走 `Charset::from` 已知集兜底 `Ascii`），RFC 2045
+/// token 白名单拒绝非法字节。结论为 **免疫证明，未发现缺口，未改动生产
+/// 代码**；与 CVE-2024-21378（#23，boundary 形状/RFC822 递归）、
+/// CVE-2020-16947（#105，256 KiB 头、100/101 层）、CVE-2026-70329（#27，
+/// 64 KiB boundary/4096 部件）、CVE-2000-0567（#135，1 MiB `Date`）正交。
+#[cfg(test)]
+#[path = "CVE-2005-0667.rs"]
+mod cve_2005_0667;
