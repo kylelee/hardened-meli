@@ -5234,3 +5234,54 @@ mod cve_2001_0999;
 #[cfg(test)]
 #[path = "CVE-2001-1088.rs"]
 mod cve_2001_1088;
+
+/// CVE-2020-11880（KDE KMail；CVSS v3.1 6.5）「`mailto?attach=` 私有扩展参数
+/// 读取本地文件」攻击模拟回归（issue #161）：KMail 支持非 RFC6068 的
+/// `attach=` 私有扩展查询参数，攻击者在邮件正文 / 邮件链接里放置
+/// `Attach: /etc/passwd`、`attach=file:///etc/shadow`、`X-Attach: ../../secret`
+/// 等魔法参数，诱骗客户端自动读取本地文件并作为附件外发（信息泄露）。
+/// 攻击样例：`attach=` 指向 `/etc/passwd`、`~/.ssh/id_rsa`、`file:///etc/shadow`
+/// 与路径穿越 `../../secret`，含 percent-encoded / 大小写 / `attachment` 拼写
+/// 变体与藏进 `body` 的 `Attach: /etc/passwd` 魔法行，以及整封带 `Attach:`/
+/// `X-Attach:` 头的收件语料。
+///
+/// meli 等价面：L0 mailto 解析器（`melib/src/email/parser.rs:1065-1265`）把
+/// 非标准查询参数当作未知头 `warn!` 后丢弃，`attach`/`Attach`/`attachment`/
+/// `X-Attach` 根本不是 `HeaderName`（`headers` 键只可能是标准/自定义头名，
+/// 自定义头被 L1255-1262 丢弃），危险标准头被 `Mailto::IGNORE_HEADERS`
+/// （`melib/src/email/mailto.rs:46`）拦截；L1 `From<Mailto> for Draft`
+/// （mailto.rs:118-138）只搬运 headers + body，`attachments` 来自
+/// `Draft::default()`（`melib/src/email/compose.rs:60-84`）恒为空 `Vec`；
+/// L2 mailto 入口 `ComposeAction::Mailto`
+/// （`meli/src/mail/listing.rs:3295-3303`）只 `with_account` + `set_draft`，
+/// `UnsubscribeAction::Send(mailto)`（`meli/src/mail/view.rs:502-503`）
+/// `Draft::from(mailto)` 后直接发送；L3 全仓库唯一「读文件成附件」函数
+/// `attachment_from_file`（`melib/src/email/compose.rs:442`）的生产调用点仅
+/// `meli/src/mail/compose.rs:2687/2860/2898`，全部是显式用户动作
+/// （`add-attachment` 命令 / 用户 pipe 命令产物 / 用户文件选择器 stdout）；
+/// L4 收件时 `Attach:` 头只是 `Envelope::other_headers` 惰性字符串、正文
+/// 魔法行只是字面文本，无指令解释器。
+///
+/// [`cve_2020_11880`] 分五层锁定（详见模块文档）：L0 全部攻击 mailto 解析成功
+/// 且 `headers` 无任何 attach 类键，正向对照 `subject`/`cc` 正常进入、
+/// `from`（`IGNORE_HEADERS`）被丢弃；L1 `Draft::from(mailto)` 附件恒空、
+/// `finalise()` 无 multipart 附件部件、魔法行逐字留在正文；L2 `include_str!`
+/// 钉锚 `attachment_from_file` 三个显式调用点 + `set_draft`/`with_account`
+/// 不触碰附件 + `listing.rs` mailto 分支只调 `set_draft`；L3 真实 canary 对照
+/// （显式调 `attachment_from_file` 能读到秘密，而 mailto 全链路输出绝不含
+/// 秘密）；L4 整封 `Attach:` 头语料只进 `other_headers`、附件派生面为空。
+///
+/// 与近亲划界：[`cve_2001_0677`]（issue #63）锁 Eudora `Attachment Converted`
+/// 头在**转发**时的回传面，[`cve_2007_4040`]（issue #65）锁 `mailto:` 元字符
+/// 被拼进 shell 命令行的**命令注入**面；本文件锁的是 attach 查询参数的
+/// **附件解释 / 本地文件读取**面。三者共用 `attachment_from_file` 这道显式
+/// 门禁，但攻击入口与触发动作不同。语料 marker `11880` 与近亲逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**。
+///
+/// [`cve_2001_0677`]: self::cve_2001_0677
+/// [`cve_2007_4040`]: self::cve_2007_4040
+/// [`cve_2020_11880`]: self::cve_2020_11880
+#[cfg(test)]
+#[path = "CVE-2020-11880.rs"]
+mod cve_2020_11880;
