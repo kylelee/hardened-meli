@@ -4158,3 +4158,35 @@ mod cve_2024_38173;
 #[cfg(test)]
 #[path = "CVE-2023-35636.rs"]
 mod cve_2023_35636;
+
+/// CVE-2023-36763（Microsoft Outlook 2016 / Office 2019 / Office LTSC 2021 /
+/// Microsoft 365 Apps for Enterprise，Windows；CVSS 3.1 7.5
+/// `AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`，CWE-200）Outlook 零交互信息泄露
+/// 回归（issue #133，表 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — 信息泄露零
+/// 交互）：MSRC 未公开根因，`UI:N` 是唯一硬约束——网络攻击者无需受害者任何
+/// 交互即可远程泄露敏感信息。按 issue 指定等价面模拟：构造在解析/渲染阶段
+/// 触发远程资源的邮件（HTML 远程图片/CSS 全家族、RTF/OLE 引用
+/// （`\objupdate` + 合成 OLE2Link）、`message/external-body` 四种
+/// access-type（URL/anon-ftp/mail-server/local-file）），逐层断言结局为
+/// **免疫证明，未发现缺口，未改动生产代码**：解析面（`parser.rs`/
+/// `attachments.rs`）把 external-body/RTF/TNEF 全部归为不透明
+/// `ContentType::Other` 叶、参数只是元数据、`decode` 只产本地字节；渲染面
+/// （`html_render.rs`）经 [`sanitize`] 白名单把远程引用家族整体剥离（tag 白
+/// 名单无 img/link/object 等、`style` 连内容删、属性只剩 `a[href|title]`），
+/// [`render`] 是纯进程内变换；源码级扫描证明三个面无 socket/进程原语，HTTP
+/// 客户端只作为可选 jmap 特性存在。「无用户显式操作时不存在新建的
+/// socket/ProcessRequest」的交互级断言由孪生单测
+/// `meli/src/mail/view/tests.rs::cve_2023_36763_zero_interaction_open_spawns_nothing`
+/// 锁定（真实打开语料邮件 → draw 驱动 `ViewFilter::new_html` 后台 job 完成
+/// 回填 → `ctx.children` 为空、无 `UIEvent::Fork`/`ProcessRequest`、正文零
+/// beacon 标记）。HTML 剥离、CSS 信道、external-body 惰性、RTF OLE 预览、
+/// scheme 门禁分别由 CVE-2005-2512/2006-1045/2026-0818/2006-6505/
+/// CVE-2020-9819/CVE-2018-0950/CVE-2023-35636/CVE-2024-38173 先行锁定，本
+/// 语料以独立标记（`beacon36763`）补齐 anon-ftp/mail-server 形态并断言家族
+/// 并集。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+/// [`render`]: meli::mail::view::html_render::render
+#[cfg(test)]
+#[path = "CVE-2023-36763.rs"]
+mod cve_2023_36763;
