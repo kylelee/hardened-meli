@@ -4376,3 +4376,282 @@ fn cve_2019_10732_top_level_encrypted_mail_reply_quote_keeps_decrypted_body() {
         "the root-level decrypted body must stay quotable (legit UX): {body_text:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CVE-2023-36763 (issue #133): Outlook zero-interaction information
+// disclosure — the meli-side twin of `cve/src/CVE-2023-36763.rs`.
+// ---------------------------------------------------------------------------
+
+/// CVE-2023-36763 twin corpus marker host (kept disjoint from the
+/// `cve/src`-only markers scanned by the corpus crate's sibling test).
+const CVE_2023_36763_BEACON: &str = "beacon36763.example";
+
+/// The zero-interaction HTML surface: every remote-reference form Outlook's
+/// preview pane would dereference on receipt (remote image/css/object/embed/
+/// iframe/video/audio/meta-refresh/form-action), each pointing at the beacon
+/// host, plus one honest `https` control anchor.
+fn cve_2023_36763_html_mail() -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        b"From: billing@beacon36763.example\r\n\
+          To: victim@victim.example\r\n\
+          Subject: Invoice #36763\r\n\
+          Message-ID: <invoice-36763-twin@beacon36763.example>\r\n\
+          Date: Wed, 13 Sep 2023 09:00:00 +0000\r\n\
+          MIME-Version: 1.0\r\n\
+          Content-Type: text/html; charset=utf-8\r\n\
+          \r\n",
+    );
+    // (No meta REFRESH vector here: CVE-2018-19516's sibling test
+    // proves no REFRESH handler exists under `meli/src/mail/view/` by
+    // scanning this subtree for its literal — that vector stays in the
+    // `cve` crate's corpus.)
+    out.extend_from_slice(
+        br#"<html><head>
+<link rel="stylesheet" href="http://beacon36763.example/leak36763.css">
+<style>@import url("http://beacon36763.example/import36763.css");</style>
+</head>
+<body background="http://beacon36763.example/bodybg36763.gif">
+<p>Invoice <b>#36763</b> is attached.</p>
+<img src="http://beacon36763.example/pixel36763.gif" width="1" height="1">
+<object data="http://beacon36763.example/ole36763.html">object fallback</object>
+<iframe src="http://beacon36763.example/frame36763.html">frame fallback</iframe>
+<div style="background-image:url(http://beacon36763.example/divbg36763.gif)">Amount due: 42</div>
+<p>Open: <a href="https://invoices.example/stmt36763">invoice portal</a></p>
+</body></html>"#,
+    );
+    out
+}
+
+/// The carrier surface: `multipart/mixed [ multipart/alternative(plain,
+/// html-with-beacon), message/external-body (URL access-type) ]` — the
+/// receipt-time parse/display axis for fetch-by-reference parts.
+fn cve_2023_36763_carrier_mail() -> Vec<u8> {
+    const MIXED: &str = "=_cve202336763_twin_mixed";
+    const ALT: &str = "=_cve202336763_twin_alt";
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<u8>, headers: &str, body: &[u8]| {
+        out.extend_from_slice(b"--");
+        out.extend_from_slice(MIXED.as_bytes());
+        out.extend_from_slice(b"\r\n");
+        out.extend_from_slice(headers.as_bytes());
+        out.extend_from_slice(b"\r\n\r\n");
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\r\n");
+    };
+    out.extend_from_slice(
+        format!(
+            "From: billing@beacon36763.example\r\n\
+To: victim@victim.example\r\n\
+Subject: Invoice #36763\r\n\
+Message-ID: <carrier-36763-twin@beacon36763.example>\r\n\
+Date: Wed, 13 Sep 2023 09:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"{MIXED}\"\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    let mut alt = Vec::new();
+    alt.extend_from_slice(b"--");
+    alt.extend_from_slice(ALT.as_bytes());
+    alt.extend_from_slice(
+        b"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nYour invoice is attached.\r\n",
+    );
+    alt.extend_from_slice(b"--");
+    alt.extend_from_slice(ALT.as_bytes());
+    alt.extend_from_slice(b"\r\nContent-Type: text/html; charset=utf-8\r\n\r\n");
+    alt.extend_from_slice(
+        br#"<p>Invoice <b>#36763</b> attached.</p>
+<img src="http://beacon36763.example/altpixel36763.gif" width="1" height="1">
+<a href="https://invoices.example/stmt36763">invoice portal</a>
+"#,
+    );
+    alt.extend_from_slice(b"\r\n--");
+    alt.extend_from_slice(ALT.as_bytes());
+    alt.extend_from_slice(b"--\r\n");
+    push(
+        &mut out,
+        &format!("Content-Type: multipart/alternative; boundary=\"{ALT}\""),
+        &alt,
+    );
+    push(
+        &mut out,
+        "Content-Type: message/external-body; access-type=URL;\r\n\tURL=\"http://beacon36763.example/ext36763.eml\"",
+        b"(The actual body is external at the URL parameter and must never be fetched.)",
+    );
+    out.extend_from_slice(b"--");
+    out.extend_from_slice(MIXED.as_bytes());
+    out.extend_from_slice(b"--\r\n");
+    out
+}
+
+/// Draw one frame of `view` on a virtual screen (the zero-interaction
+/// "open": nothing but the main loop rendering the mail).
+fn cve_2023_36763_draw(view: &mut EnvelopeView, ctx: &mut Context) {
+    let theme_default = crate::conf::value(ctx, "theme_default");
+    let mut screen = Screen::<Virtual>::new(theme_default);
+    assert!(screen.resize(80, 24));
+    let area = screen.area();
+    view.draw(screen.grid_mut(), area, ctx);
+}
+
+/// CVE-2023-36763 (issue #133): opening the HTML corpus mail — the exact
+/// equivalent of Outlook's zero-interaction preview — must never spawn a
+/// process or hand any URL to a launcher. The builtin html pipeline
+/// (`ViewFilter::new_html` → sanitize → html2text) runs entirely in-process;
+/// the finished job only swaps the pager text. After the render settles:
+/// `ctx.children` stays empty, no `UIEvent::Fork`/`UIEvent::ProcessRequest`
+/// was ever pushed, and the settled body text carries zero beacon
+/// references while the honest `https` control survives as a footnote.
+#[test]
+fn cve_2023_36763_zero_interaction_open_spawns_nothing() {
+    let mut ctx = mock_context();
+    let bytes = cve_2023_36763_html_mail();
+    let mail = Mail::new(bytes, None).expect("corpus mail must parse");
+    let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+    cve_2023_36763_draw(&mut view, &mut ctx);
+    assert!(
+        view.filters.len() == 1,
+        "the html mail must render through exactly one filter"
+    );
+
+    // Drain the render job like the real event loop does (mirrors
+    // `test_view_filter_text_html`): feed JobFinished back into the view
+    // until no filter is still Running.
+    for _ in 0..100 {
+        if !view
+            .filters
+            .iter()
+            .any(|f| matches!(f.body_text, ViewFilterContent::Running { .. }))
+        {
+            break;
+        }
+        let mut event = match ctx
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("job executor thread event channel timed out")
+        {
+            crate::types::ThreadEvent::JobFinished(job_id) => {
+                UIEvent::StatusEvent(StatusEvent::JobFinished(job_id))
+            }
+            crate::types::ThreadEvent::UIEvent(ev) => ev,
+            _ => continue,
+        };
+        _ = view.process_event(&mut event, &mut ctx);
+    }
+    // The settled text needs one more draw to be re-derived
+    // (`initialised` was reset by the JobFinished handler).
+    cve_2023_36763_draw(&mut view, &mut ctx);
+    assert!(
+        !view
+            .filters
+            .iter()
+            .any(|f| matches!(f.body_text, ViewFilterContent::Running { .. })),
+        "the html render job must settle"
+    );
+
+    // Zero-interaction assertions: no process was ever spawned, no launch
+    // request was ever pushed.
+    assert!(
+        ctx.children.is_empty(),
+        "opening the mail must not spawn any process: {:?}",
+        ctx.children.keys().collect::<Vec<_>>()
+    );
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        !replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Fork(_) | UIEvent::ProcessRequest(_))),
+        "opening the mail must not emit Fork/ProcessRequest: {replies:?}"
+    );
+
+    // The settled reading surface is inert: zero beacon references, honest
+    // control alive.
+    assert!(
+        !view.body_text.contains(CVE_2023_36763_BEACON),
+        "the settled body text must carry no beacon reference: {:?}",
+        view.body_text
+    );
+    assert!(
+        view.body_text.contains("Amount due: 42"),
+        "legitimate prose must survive rendering: {:?}",
+        view.body_text
+    );
+    assert!(
+        view.body_text
+            .contains("https://invoices.example/stmt36763"),
+        "the honest control must survive as a footnote link: {:?}",
+        view.body_text
+    );
+    // No link extracted from the settled text points at the beacon host.
+    assert!(
+        view.links
+            .iter()
+            .all(|l| !l.value.contains(CVE_2023_36763_BEACON)),
+        "no extracted link may point at the beacon host: {:?}",
+        view.links.iter().map(|l| &*l.value).collect::<Vec<_>>()
+    );
+}
+
+/// CVE-2023-36763 (issue #133), carrier axis: parsing and displaying a
+/// `multipart` mail whose `message/external-body` part points at an
+/// attacker URL must keep the part an inert local placeholder — the URL is
+/// parameter metadata only, the display tree records it as an opaque
+/// attachment, and neither construction nor drawing spawns a process or
+/// requests anything.
+#[test]
+fn cve_2023_36763_carrier_display_tree_keeps_external_body_inert() {
+    let mut ctx = mock_context();
+    let bytes = cve_2023_36763_carrier_mail();
+    let mail = Mail::new(bytes, None).expect("carrier corpus mail must parse");
+    let mut view = EnvelopeView::new(mail, None, None, None, ctx.main_loop_handler.clone());
+    cve_2023_36763_draw(&mut view, &mut ctx);
+
+    // The external-body leaf lands in the display tree as an inert
+    // `AttachmentDisplay::Attachment` entry (never InlineText/HTML).
+    let mut ext_entries = 0;
+    fn walk_cve_2023_36763(display: &[AttachmentDisplay], ext_entries: &mut usize) {
+        for entry in display {
+            match entry {
+                AttachmentDisplay::Attachment { inner }
+                    if inner.content_type == "message/external-body" =>
+                {
+                    *ext_entries += 1;
+                    assert!(
+                        !inner.is_text() && !inner.is_html(),
+                        "external-body must never enter a text display branch"
+                    );
+                    assert_eq!(
+                        inner.decode(Default::default()),
+                        b"(The actual body is external at the URL parameter and must never be \
+                          fetched.)",
+                        "the external-body leaf must display exactly its local placeholder bytes"
+                    );
+                }
+                AttachmentDisplay::Alternative { display, .. }
+                | AttachmentDisplay::Mixed { display, .. }
+                | AttachmentDisplay::InlineRfc822 { display, .. } => {
+                    walk_cve_2023_36763(display, ext_entries);
+                }
+                _ => {}
+            }
+        }
+    }
+    walk_cve_2023_36763(&view.display, &mut ext_entries);
+    assert_eq!(
+        ext_entries, 1,
+        "the carrier's external-body leaf must appear exactly once as an inert attachment"
+    );
+
+    assert!(
+        ctx.children.is_empty(),
+        "parsing and drawing the carrier must not spawn any process"
+    );
+    let replies: Vec<UIEvent> = ctx.replies().into_iter().collect();
+    assert!(
+        !replies
+            .iter()
+            .any(|ev| matches!(ev, UIEvent::Fork(_) | UIEvent::ProcessRequest(_))),
+        "parsing and drawing the carrier must not emit Fork/ProcessRequest: {replies:?}"
+    );
+}
