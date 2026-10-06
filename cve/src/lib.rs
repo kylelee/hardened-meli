@@ -4212,3 +4212,19 @@ mod cve_2023_36763;
 #[cfg(test)]
 #[path = "CVE-2023-35619.rs"]
 mod cve_2023_35619;
+
+/// CVE-2000-0567（Microsoft Outlook / Outlook Express；CVSS v2 5.0，CWE-120
+/// 缓冲区溢出）超长邮件头（超长 `Date` 头）缓冲区溢出→RCE 回归（issue #135，
+/// 表 2 of `SECURITY-CVE-RESEARCH.zh-CN.md` — virus / code execution）：攻击者
+/// 发送超长/畸形 `Date` 头写穿 Outlook 的固定长度拷贝缓冲区。meli 是 Safe
+/// Rust，无固定缓冲区、无 `strcpy` 等价物，`dates::date_time` 只用
+/// `SmallVec<[u8; 32]>` 拼接有界片段、`obs_zone` 把任意字母串折叠为固定
+/// `-0000`、`header_value` 零拷贝线性扫描折行、`rfc822_to_timestamp` 不匹配
+/// 即 `Ok(0)` epoch 兜底——三层锁定（L1 `header`/`headers`/`headers_raw`/
+/// `mail` 不 panic/有界/确定/无放大；L2 `rfc5322_date` 对 1 MiB `A`、超长
+/// 非法时区/月份 token 与截断/空格/NUL 畸形变体返回 `Result`；L3
+/// `Envelope::from_bytes`/`headers()` 全链路含折叠 `Received` 链）结论为
+/// **免疫证明，未发现缺口，未改动生产代码**。
+#[cfg(test)]
+#[path = "CVE-2000-0567.rs"]
+mod cve_2000_0567;
