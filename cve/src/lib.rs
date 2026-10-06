@@ -4048,3 +4048,27 @@ mod cve_2019_10734;
 #[cfg(test)]
 #[path = "CVE-2019-10735.rs"]
 mod cve_2019_10735;
+
+/// CVE-2019-10740（Roundcube &lt; 1.3.10 webmail 解密预言机/回复泄露，CVSS 4.3；
+/// 同族五连之一，参考 MITRE / KDE bugs #404697；issue #129）同族攻击模拟
+/// 回归：[`cve_2019_10740`] 把 issue #103 的抛弃子钥密文（受害者子钥可解）
+/// 包装进 `multipart/mixed` 载体——第一部件一句无害说明的 text/plain 并以多个
+/// 空行把后续部件推出可视区，第二部件 RFC 3156 `multipart/encrypted`
+/// （`Version: 1` 控制 part + octet-stream 密文）——以及整段 PGP armor 的 inline
+/// text/plain 变体，攻击 meli 的回复引用面；对照邮件与载体 A 头部及无害文本
+/// 部件逐字节相同。
+///
+/// Roundcube 是 webmail、meli 无 webmail 服务端，故无独立功能面，按 issue 指定
+/// 的 meli 回复引用等价面做免疫证明：melib [`Draft::new_reply`]→
+/// [`Attachment::decode_rec`] 只引用无害文本、与「不含密文的普通 multipart
+/// 邮件」逐字节一致，加密子树空贡献、无密文字节、无解密明文标记；L4 源码扫描
+/// 证明免疫锚点仍在位——即 issue #104 为同族 KMail 变体 CVE-2019-10732 落地的
+/// 两处修复（melib `MultipartType::Encrypted` 空贡献 + meli UI
+/// `ViewFilter::decrypt_origin` 排除）与其端到端回归名。结论：
+/// **免疫证明，未发现新缺口，未触碰生产代码**。
+///
+/// [`Draft::new_reply`]: meli::melib::Draft::new_reply
+/// [`Attachment::decode_rec`]: meli::melib::email::Attachment::decode_rec
+#[cfg(test)]
+#[path = "CVE-2019-10740.rs"]
+mod cve_2019_10740;
