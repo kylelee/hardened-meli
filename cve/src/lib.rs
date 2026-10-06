@@ -4031,6 +4031,42 @@ mod cve_2018_12020;
 #[path = "CVE-2018-14349.rs"]
 mod cve_2018_14349;
 
+/// CVE-2018-14350（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8，
+/// CWE-121）**恶意 IMAP 服务器 FETCH 响应 INTERNALDATE 栈溢出** regression
+/// （issue #144，表 2 病毒/代码执行；mutt/neomutt 2018-07 一次性披露 15 漏
+/// 洞之一）：`imap/message.c::msg_parse_fetch` 用定长栈缓冲加 `sscanf` 类
+/// 拷贝解析 FETCH 响应里的 INTERNALDATE 日期串，无长度边界；恶意服务器在
+/// `* 1 FETCH (INTERNALDATE "<64KiB+ 无结束引号>` 塞超长/未终止日期即可写
+/// 穿栈 → 崩溃乃至 RCE。
+///
+/// 语料内嵌 issue 逐字三条（`* 1 FETCH (INTERNALDATE "<64KiB+ 无结束引
+/// 号>`、`INTERNALDATE ""`、非法时区/月份畸形日期）加定长缓冲边界 ±1、NIL、
+/// `{3}\r\n` 字面量形状、截断 EOF、与 UID 共存、4 MiB 档与等价面（ENVELOPE
+/// date nstring + `quoted` 原语）64KiB 标尺语料。
+///
+/// [`cve_2018_14350`] 分层锁定（详见模块文档）：解析层——meli 的
+/// `fetch_response` 字段分派集闭合、**无 INTERNALDATE 分支**，未知 token
+/// fail-closed `Err`（「Got unexpected token」），`raw_fetch_value` 单点
+/// 有界切片；原语层——`quoted` 线性有界扫描（未终止 `Err`）、64KiB 终止
+/// 日期堆 `Vec` 逐字节存活、`quoted_or_nil`/`literal` 截断干净失败；等价
+/// 日期面——ENVELOPE date 64KiB 逐字节存活、畸形月份/时区优雅回退、RFC
+/// 5322 形状日期与 `rfc5322_date` 直调一致（IMAP 连字符格式优雅回退）；
+/// 流级——
+/// `fetch_responses` 整体 `Err`、分帧确定、`many0` 得 0 封套不伪造；连接
+/// 循环层——`check`/`untagged_responses` 全 `Err`，敌意行只作原始数据保留，
+/// 并在本地 hostile IMAP server 上驱动真实 `ImapConnection::read_response`
+/// 验证逐字节保留 + 生产 `fetch_responses` 端到端干净 `Err`、永不发 tagged
+/// 完成的 INTERNALDATE 洪流在 64 MiB 上限 `ProtocolViolation`；源码锚点层
+/// 证明无 INTERNALDATE 分支/客户端不请求该字段/调用点 `Ok(Some(..))` 门控。
+/// 与 CVE-2000-0567（邮件头 `Date` 面）、CVE-2018-14349（NO 响应面）、
+/// CVE-2020-9818（raw_fetch_value 截断面）划界。结论：**免疫证明，未发现
+/// 缺口，无需修改生产代码**。
+///
+/// [`cve_2018_14350`]: self::cve_2018_14350
+#[cfg(test)]
+#[path = "CVE-2018-14350.rs"]
+mod cve_2018_14350;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
