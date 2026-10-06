@@ -5802,3 +5802,45 @@ mod cve_2021_30761;
 #[cfg(test)]
 #[path = "CVE-2021-30860.rs"]
 mod cve_2021_30860;
+
+/// CVE-2021-29969（Mozilla Thunderbird < 78.12，CVSS 5.9，MFSA 2021-31 /
+/// nostarttls.secvuln.info）**STARTTLS 握手前未打标响应注入** regression（Gitea
+/// issue #173，表 5 协议信任边界 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：客户端
+/// 在 STARTTLS 握手完成前收到的服务器响应仍被处理，中间人可在 TLS 升级前注入
+/// 伪造明文响应（IMAP `* 5 EXISTS` / `* OK [UIDNEXT …]`、伪造 tagged OK 后的
+/// 尾随字节、SMTP `250` 前缀续行、NNTP `200` 行），被升级后的解析器当成合法
+/// 响应。
+///
+/// **meli 等价面映射（issue #173 侦察结论）**：三处 STARTTLS 升级路径均把协商
+/// 读缓冲限制在升级块内、升级只包裹裸 socket、升级后在 TLS 会话内重新发起协商。
+/// IMAP / ManageSieve（`melib/src/imap/connection.rs`）的 `let mut response =
+/// Vec::with_capacity(1024);` 是块内局部：`M1 OK` break 后整体丢弃，3 秒墙钟未见
+/// tagged OK → `Could not initiate STARTTLS negotiation`；SMTP（`melib/src/smtp.rs`）
+/// 三次 `read_lines` 以 `&mut String::new()` 收 leftover、`read_buffer` 在升级后
+/// 构造、期望码非 220/250 即 Err；NNTP（`melib/src/nntp/connection.rs`）每 chunk
+/// 校验回复前缀（`200 `/`201 `、`101 `、`382 `），残余留在调用方局部 `res` 并由
+/// 下次 `clear()` 清空，`NntpStream` 无跨升级缓冲字段。三处均 fail-closed，无
+/// STARTTLS 失败回退明文的代码路径。
+///
+/// [`cve_2021_29969`] 分层锁定（详见模块内注释）：L1 纯模型复刻 Thunderbird
+/// 「响应队列跨升级存活」缺陷，喂 29969 语料断言注入行被当升级后响应返回；L2 按
+/// `connection.rs` 真实算法复刻 IMAP / ManageSieve 协商读法，断言脏行在 tagged OK
+/// 前 Failed、伪造 OK + 尾随 Upgraded 且 `carried_over` 恒空、`* OK ` 注入行被
+/// drain 丢弃；L3 六个真实 loopback 敌意服务器场景（IMAP S1/S2、SMTP S3/S4、
+/// NNTP S5/S6）以 `completes_within` 看门狗断言客户端进入 ClientHello 后
+/// fail-closed 或协商 Err、错误信息不把注入内容回显为「成功」、AUTH/AUTHINFO
+/// 哨兵凭据永不明文；L4 源码扫描锁定三处协商缓冲生命周期、期望码校验与无明文
+/// 回退。
+///
+/// 与近亲划界：CVE-2020-15917（Claws Mail，issue #90）是 TLS 升级时点之后的
+/// **后缀注入**，本 CVE 是握手**完成前**的未打标响应注入；CVE-2020-15954（KMail，
+/// issue #122）是 TLS 模式分类 / 无降级命题，不涉及握手前响应处理。marker 域名
+/// `thunderbird29969.example` 与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未触碰生产代码**——协商缓冲是升级块内的
+/// 局部变量，升级只包裹裸 socket，任何握手前注入的明文都到不了升级后的解析器。
+///
+/// [`cve_2021_29969`]: self::cve_2021_29969
+#[cfg(test)]
+#[path = "CVE-2021-29969.rs"]
+mod cve_2021_29969;
