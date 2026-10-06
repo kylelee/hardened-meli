@@ -5067,3 +5067,65 @@ mod cve_2018_14362;
 #[cfg(test)]
 #[path = "CVE-2018-14363.rs"]
 mod cve_2018_14363;
+
+/// CVE-2000-0621（Outlook 98/2000、Outlook Express 4.x/5.x；CVSS v2 7.5）
+/// 「Cache Bypass」本地文件读取攻击模拟回归（issue #158，表 3 of
+/// `SECURITY-CVE-RESEARCH.zh-CN.md` — 网页嵌入 / web/HTML embedding）：
+/// 畸形 HTML 邮件把内嵌资源写到缓存目录之外，客户端随后以缓存 / 本地上下文
+/// 读回，从而读走系统文件。
+///
+/// **meli 没有「缓存目录」这个概念**，也不链接任何 HTML / MIME 资源抓取器或
+/// 本地浏览器引擎——CVE 字面面没有对应物。等价面是「邮件控制的字节 → 磁盘
+/// 路径」的每一个落点，唯一的暂存根是 `<temp_dir>/meli/`：
+///
+/// - `meli/src/types/helpers.rs` 的 `File::create_temp_file`：
+///   `sanitize_separator` 无条件删除 `/` 与 `\`、`sanitize_filename` +
+///   `cap_filename_component_bytes` 压成单一扁平组件、退化名
+///   （`""`/`.`/`..`）回退随机名、合法名带 32 位 hex UUID v4 中缀、
+///   `create_new(true)` + `0o600`、默认分支 `path` 实参为 `None`。
+/// - `meli/src/mailcap.rs` 的 `expand_args` `%s` 分支：
+///   `expand_nametemplate(nametemplate, a).as_deref()` 只当**文件名提示**，
+///   第三实参 `None` 证明邮件内容无从选择目标目录。
+/// - `meli/src/mail/view/filters.rs` 的 html filter：
+///   `create_temp_file(&self_.unfiltered, None, None, Some("html"), true)`，
+///   文件名实参 `None`、扩展名固定 `Some("html")`，HTML 渲染管线
+///   （`sanitize` → `render`）无远程抓取器、无缓存目录。
+///
+/// [`cve_2000_0621`] 分五层锁定（详见模块文档）：L0 语料为真载体——内嵌
+/// `multipart/mixed` 邮件（`text/html` 正文含 `<img src="cid:…">` + 八个
+/// 附件）覆盖 `../../../../etc/passwd`、`..\..\windows\system32\config\SAM`、
+/// `....//....//etc/shadow`、`/etc/passwd`、`..%2f..%2fetc%2fpasswd`、
+/// `%2e%2e%2f%2e%2e%2fetc%2fpasswd` 与 RFC 2047 Q 装甲等价形，`Attachment::
+/// filename()` 解码重组装甲、逐字保留百分号编码（meli 无 percent-decoder）；
+/// L1 `sanitize_separator` 删除两族分隔符、`sanitize_filename_component`
+/// 输出单一扁平组件、退化名返回 `false`；L2 `create_temp_file` 对每个拼写
+/// 落在 `<temp_dir>/meli/` 内、组件扁平、`0o600`，退化名回退随机名，绝对
+/// 路径拼写不触碰真实 `/etc/passwd`（len/mtime 不变）；L3 mailcap `%s`
+/// 端到端（`MailcapEntry::run` 驱动 `expand_args`）用敌意附件名 +
+/// `nametemplate`（`%s/../../../../etc/passwd`、`..\..\%s`）验证临时文件在
+/// temp root 内、展开命令引号包裹该路径；L4 `include_str!` 钉住
+/// `dir.push("meli")`、`.create_new(true)`、`permissions.set_mode(0o600)`、
+/// `matches!(f, "" | "." | "..")`、`value.replace(['/', '\\'], "_")`、
+/// `expand_nametemplate(nametemplate, a).as_deref(),None,None,false,` 与 html
+/// filter 的固定 `Some("html")` 落盘，并扫描 HTML 渲染管线证明无远程抓取器 /
+/// 无缓存目录。
+///
+/// 与近亲划界：与 [`cve_2024_43604`]（issue #28 保存路径扁平化）、
+/// [`cve_2002_1210`]（issue #59 落盘可预测性 / `file://` 读回）、
+/// [`cve_2003_0376`]（issue #47 超长名）、[`cve_2002_2351`]（issue #61 尾点
+/// 检查 / 落盘分歧）、[`cve_2025_47176`]（issue #26 分隔符类路径穿越）正交；
+/// 本回归焦点 = 「缓存 / 暂存根逃逸 + 读回」类、1998–2000 年代拼写
+/// （`....//` 点堆、Windows `SAM` 目标、百分号编码形），语料 marker `0621`
+/// 逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未改动生产代码**。
+///
+/// [`cve_2000_0621`]: self::cve_2000_0621
+/// [`cve_2002_1210`]: self::cve_2002_1210
+/// [`cve_2002_2351`]: self::cve_2002_2351
+/// [`cve_2003_0376`]: self::cve_2003_0376
+/// [`cve_2024_43604`]: self::cve_2024_43604
+/// [`cve_2025_47176`]: self::cve_2025_47176
+#[cfg(test)]
+#[path = "CVE-2000-0621.rs"]
+mod cve_2000_0621;
