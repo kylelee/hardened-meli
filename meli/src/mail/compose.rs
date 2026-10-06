@@ -3809,6 +3809,124 @@ hello world.
         );
     }
 
+    /// CVE-2001-1088 twin regression: the real `Composer::reply_to` — not only
+    /// the mirrored derivation in `cve/src/CVE-2001-1088.rs` — must address the
+    /// draft to the `Reply-To` attacker face, for both reply-to-author and
+    /// reply-all. This proves the L1 mirror matches the production chain
+    /// (`Mail-Reply-To > Reply-To > From`; `Mail-Followup-To > Reply-To > From`
+    /// for reply-all). Following the diverging `Reply-To` is the CVE's first
+    /// defect, and meli makes it visible in the header band
+    /// (`address_faces_disagreeing_with_from`); the second defect ("a reply
+    /// writes the address book automatically") has no counterpart here —
+    /// `Composer::reply_to` never writes a contact card.
+    #[test]
+    fn reply_to_spoofed_reply_to_targets_reply_to_visible_in_composer_to_header() {
+        let raw_mail = r#"From: ceo@victim1088.example
+To: victim1088@victim1088.example
+Reply-To: attacker@evil1088.example
+Subject: 请回复确认
+Message-ID: <20011210-a-1088@evil1088.example>
+Content-Type: text/plain; charset=utf-8
+
+请回复确认您的账户信息。
+"#;
+
+        let envelope =
+            Envelope::from_bytes(raw_mail.as_bytes(), None).expect("Could not parse mail");
+        let tempdir = tempfile::tempdir().unwrap();
+        let context = Context::new_mock(&tempdir);
+        let account_hash = context.accounts[0].hash();
+        let mailbox_hash = MailboxHash::default();
+        let envelope_hash = envelope.hash();
+        context.accounts[0]
+            .collection
+            .insert(envelope, mailbox_hash);
+
+        // reply-to-author: the `To` header is the spoofed `Reply-To` face.
+        let composer = Composer::reply_to(
+            (account_hash, mailbox_hash, envelope_hash),
+            String::new(),
+            &context,
+            false,
+        )
+        .expect("reply_to must succeed for an inserted envelope");
+        assert_eq!(
+            &composer.draft.headers()[HeaderName::TO],
+            "attacker@evil1088.example",
+            "reply-to-author must address the spoofed Reply-To face"
+        );
+        assert_eq!(
+            &composer.draft.headers()[HeaderName::SUBJECT],
+            "Re: 请回复确认",
+            "the Re: subject prefix must still be applied"
+        );
+
+        // reply-all: `To` = Reply-To + original To; no Cc header in this mail.
+        let composer = Composer::reply_to(
+            (account_hash, mailbox_hash, envelope_hash),
+            String::new(),
+            &context,
+            true,
+        )
+        .expect("reply_to must succeed for an inserted envelope");
+        let to = &composer.draft.headers()[HeaderName::TO];
+        assert!(
+            to.contains("attacker@evil1088.example"),
+            "reply-all must include the spoofed Reply-To face: {to:?}"
+        );
+        assert!(
+            to.contains("victim1088@victim1088.example"),
+            "reply-all must include the original recipients: {to:?}"
+        );
+    }
+
+    /// CVE-2001-1088 twin regression, malformed multi-header variant: with two
+    /// `Reply-To` headers melib keeps the last one (`populate_headers` inserts
+    /// headers in order into `other_headers`), so the real
+    /// `Composer::reply_to` must address the draft to the *last* `Reply-To`
+    /// face. This locks the L0/L1 mirror's "last header wins" claim against the
+    /// production composer.
+    #[test]
+    fn reply_to_multiple_reply_to_headers_last_wins_in_composer() {
+        let raw_mail = r#"From: ceo@victim1088.example
+To: victim1088@victim1088.example
+Reply-To: first@evil1088.example
+Reply-To: second@evil1088.example
+Subject: Multiple Reply-To
+Message-ID: <20011210-c-1088@evil1088.example>
+Content-Type: text/plain; charset=utf-8
+
+Confirm now.
+"#;
+
+        let envelope =
+            Envelope::from_bytes(raw_mail.as_bytes(), None).expect("Could not parse mail");
+        let tempdir = tempfile::tempdir().unwrap();
+        let context = Context::new_mock(&tempdir);
+        let account_hash = context.accounts[0].hash();
+        let mailbox_hash = MailboxHash::default();
+        let envelope_hash = envelope.hash();
+        context.accounts[0]
+            .collection
+            .insert(envelope, mailbox_hash);
+        let composer = Composer::reply_to(
+            (account_hash, mailbox_hash, envelope_hash),
+            String::new(),
+            &context,
+            false,
+        )
+        .expect("reply_to must succeed for an inserted envelope");
+        assert_eq!(
+            &composer.draft.headers()[HeaderName::TO],
+            "second@evil1088.example",
+            "the last Reply-To header must win in the real composer"
+        );
+        assert_eq!(
+            &composer.draft.headers()[HeaderName::SUBJECT],
+            "Re: Multiple Reply-To"
+        );
+    }
+
     /// `Collection::get_env` now reports a hash that is no longer in the
     /// collection as `None`. The reply/edit constructors cannot produce a
     /// meaningful composer without the envelope, so they must return a
