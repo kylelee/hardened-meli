@@ -650,6 +650,20 @@ fn test_imap_set_flags_ignores_passed() {
     });
 }
 
+/// Tencent exmail silently reassigns the UIDs of its virtual folders while
+/// keeping `UIDVALIDITY` unchanged. A cached `UID MOVE` then fails with
+/// `NO [ALERT] 100001 Mails not exist!`; `copy_messages` must re-derive the
+/// UIDs by message identity and retry once. See
+/// `tests::run_imap_exmail_uid_renumber_move_recovery`.
+#[cfg(feature = "sqlite3")]
+#[test]
+fn test_imap_exmail_uid_renumber_move_recovery() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_exmail_uid_renumber_move_recovery();
+    });
+}
+
 pub mod server {
     use std::{
         convert::TryInto,
@@ -881,6 +895,31 @@ pub mod server {
         /// `UIDVALIDITY` still comes from the live `uidvalidity`. `None`
         /// (the default) keeps the historical live-count reply.
         pub status_override: Option<(usize, usize, UID)>,
+        /// When `Some(name)`, the named extra mailbox (advertised by
+        /// `LIST`) is a *view alias* of the historical single-mailbox
+        /// `envelopes` map: its `SELECT`/`EXAMINE`/`STATUS` report the
+        /// `envelopes` counters and every envelope-level command
+        /// (`SEARCH`/`FETCH`/`UID FETCH`) operating on the selected
+        /// mailbox reads that map. Emulates a server whose virtual folder
+        /// (e.g. Tencent exmail "Sent Messages", issue #180) holds the
+        /// mail the client operates on, without generalizing every mock
+        /// arm to a per-mailbox state map. INBOX itself is never part of
+        /// these tests, so it may alias the same state.
+        pub primary_mailbox: Option<String>,
+        /// Envelopes of additional (non-INBOX, non-`primary_mailbox`)
+        /// mailboxes advertised by `LIST`, keyed by IMAP path. Used as the
+        /// destination of `UID MOVE`/`UID COPY`.
+        pub mailbox_envelopes: IndexMap<String, IndexMap<UID, Mail>>,
+        /// Next UID of the mailboxes in [`Self::mailbox_envelopes`].
+        pub mailbox_next_uid: IndexMap<String, UID>,
+        /// UIDVALIDITY of the mailboxes in [`Self::mailbox_envelopes`].
+        pub mailbox_uidvalidity: IndexMap<String, UID>,
+        /// When `true`, a `UID MOVE` whose requested UIDs are not all
+        /// present in the source mailbox is answered with Tencent exmail's
+        /// `NO [ALERT] 100001 Mails not exist!`; a MOVE whose UIDs are all
+        /// present executes normally. Emulates the server silently
+        /// renumbering the view behind the client's back (issue #180).
+        pub move_no_alert_mails_not_exist: bool,
     }
 
     impl Default for ServerState {
@@ -919,6 +958,11 @@ pub mod server {
                 fetch_envelope_fetches: 0,
                 fetch_drop_connection_count: 0,
                 status_override: None,
+                primary_mailbox: None,
+                mailbox_envelopes: IndexMap::new(),
+                mailbox_next_uid: IndexMap::new(),
+                mailbox_uidvalidity: IndexMap::new(),
+                move_no_alert_mails_not_exist: false,
             }
         }
     }
@@ -953,6 +997,97 @@ pub mod server {
         /// `selected_sessions`).
         pub fn selected_session_count(&self, mailbox: &str) -> usize {
             self.selected_sessions.get(mailbox).copied().unwrap_or(0)
+        }
+
+        /// Whether `mailbox` reads the historical `envelopes` map: INBOX or
+        /// the configured [`Self::primary_mailbox`] view alias.
+        pub fn is_primary_mailbox(&self, mailbox: &str) -> bool {
+            mailbox.eq_ignore_ascii_case("inbox")
+                || self
+                    .primary_mailbox
+                    .as_deref()
+                    .is_some_and(|primary| primary == mailbox)
+        }
+
+        /// Whether the mock has explicit state for `mailbox` (the primary
+        /// view or one of [`Self::mailbox_envelopes`]). Used to decide
+        /// whether `SELECT`/`EXAMINE` should advertise `UIDNEXT`.
+        pub fn mailbox_has_state(&self, mailbox: &str) -> bool {
+            self.is_primary_mailbox(mailbox) || self.mailbox_envelopes.contains_key(mailbox)
+        }
+
+        /// `(exists, unseen, next_uid, uidvalidity)` of `mailbox`; an
+        /// unknown mailbox reads empty with `UIDVALIDITY 1`.
+        pub fn mailbox_counters(&self, mailbox: &str) -> (usize, usize, UID, UID) {
+            if self.is_primary_mailbox(mailbox) {
+                (
+                    self.envelopes.len(),
+                    self.envelopes
+                        .values()
+                        .filter(|mail| !mail.is_seen())
+                        .count(),
+                    self.next_uid,
+                    self.uidvalidity,
+                )
+            } else if let Some(envelopes) = self.mailbox_envelopes.get(mailbox) {
+                (
+                    envelopes.len(),
+                    envelopes.values().filter(|mail| !mail.is_seen()).count(),
+                    self.mailbox_next_uid.get(mailbox).copied().unwrap_or(1),
+                    self.mailbox_uidvalidity.get(mailbox).copied().unwrap_or(1),
+                )
+            } else {
+                (0, 0, 1, 1)
+            }
+        }
+
+        /// Move `uids` out of the primary `envelopes` view into
+        /// `destination`, assigning fresh UIDs there. Returns how many
+        /// messages were moved.
+        pub fn move_to_mailbox(&mut self, destination: &str, uids: &[UID]) -> usize {
+            let mut moved = 0;
+            let next_uid = self
+                .mailbox_next_uid
+                .entry(destination.to_string())
+                .or_insert(1);
+            for uid in uids {
+                let Some(mail) = self.envelopes.shift_remove(uid) else {
+                    continue;
+                };
+                self.mailbox_envelopes
+                    .entry(destination.to_string())
+                    .or_default()
+                    .insert(*next_uid, mail);
+                *next_uid += 1;
+                moved += 1;
+            }
+            self.mailbox_uidvalidity
+                .entry(destination.to_string())
+                .or_insert(1);
+            moved
+        }
+
+        /// Renumber every UID of `mailbox` by `shift`, keeping
+        /// `UIDVALIDITY` unchanged (the Tencent exmail behavior of issue
+        /// #180).
+        pub fn renumber_mailbox_uids(&mut self, mailbox: &str, shift: UID) {
+            fn renumber(envelopes: &mut IndexMap<UID, Mail>, next_uid: &mut UID, shift: UID) {
+                let old = std::mem::take(envelopes);
+                *envelopes = old
+                    .into_iter()
+                    .map(|(uid, mail)| (uid.saturating_add(shift), mail))
+                    .collect();
+                *next_uid = envelopes.keys().copied().max().map_or(1, |max| max + 1);
+            }
+            if self.is_primary_mailbox(mailbox) {
+                renumber(&mut self.envelopes, &mut self.next_uid, shift);
+            } else if let Some(envelopes) = self.mailbox_envelopes.get_mut(mailbox) {
+                let next_uid = self
+                    .mailbox_next_uid
+                    .entry(mailbox.to_string())
+                    .or_insert(1);
+                renumber(envelopes, next_uid, shift);
+            }
         }
     }
 
@@ -1214,6 +1349,10 @@ pub mod server {
                         m3_reply.push_str(" UNSELECT");
                     }
                     m3_reply.push_str(" ENABLE");
+                    // `MOVE` (RFC 6851) is always advertised so that
+                    // `copy_messages` takes the `UID MOVE` path exercised by
+                    // the issue #180 UID-renumbering recovery.
+                    m3_reply.push_str(" MOVE");
                     if advertise_x_gm_ext_1 {
                         m3_reply.push_str(" X-GM-EXT-1");
                     }
@@ -1526,11 +1665,31 @@ pub mod server {
                                 .write_all(b"* LIST () \"/\" \"inbox\"\r\n")
                                 .await
                                 .unwrap();
-                            let extra_mailbox = state.lock().unwrap().extra_mailbox.clone();
-                            if let Some(extra) = extra_mailbox {
+                            // Advertise the `extra_mailbox`, the
+                            // `primary_mailbox` view alias (issue #180) and
+                            // every mailbox that has a
+                            // `mailbox_envelopes` entry, deduplicated.
+                            let mut mailboxes: Vec<String> = Vec::new();
+                            {
+                                let st = state.lock().unwrap();
+                                if let Some(extra) = st.extra_mailbox.clone() {
+                                    mailboxes.push(extra);
+                                }
+                                if let Some(primary) = st.primary_mailbox.clone() {
+                                    if !mailboxes.iter().any(|m| m == &primary) {
+                                        mailboxes.push(primary);
+                                    }
+                                }
+                                for name in st.mailbox_envelopes.keys() {
+                                    if !mailboxes.iter().any(|m| m == name) {
+                                        mailboxes.push(name.clone());
+                                    }
+                                }
+                            }
+                            for mailbox in mailboxes {
                                 tcp_stream
                                     .write_all(
-                                        format!("* LIST () \"/\" \"{extra}\"\r\n").as_bytes(),
+                                        format!("* LIST () \"/\" \"{mailbox}\"\r\n").as_bytes(),
                                     )
                                     .await
                                     .unwrap();
@@ -1643,17 +1802,40 @@ pub mod server {
                             select_reply_sent.store(true, Ordering::SeqCst);
                         }
                         examine if examine.starts_with("EXAMINE ") => {
-                            // A non-INBOX mailbox (see
-                            // `ServerState::extra_mailbox`): the mailbox is
-                            // always empty. INBOX-only session counting
+                            // A non-INBOX mailbox. When it is the
+                            // `primary_mailbox` view alias (issue #180) or
+                            // has an explicit `mailbox_envelopes` state,
+                            // report its counters; otherwise it reads empty.
+                            // INBOX-only session counting
                             // (`selected_sessions`) is unaffected by these.
+                            let requested = examine
+                                .trim_end_matches("\r\n")
+                                .strip_prefix("EXAMINE ")
+                                .unwrap_or_default()
+                                .trim_matches('"');
+                            let (exists, next_uid, uidvalidity, has_state) = {
+                                let st = state.lock().unwrap();
+                                let (exists, _unseen, next_uid, uidvalidity) =
+                                    st.mailbox_counters(requested);
+                                (exists, next_uid, uidvalidity, st.mailbox_has_state(requested))
+                            };
+                            let recent = 0;
                             session_state = SessionState::SelectedMailbox;
+                            let uidnext_line = if has_state {
+                                format!("* OK [UIDNEXT {next_uid}] Predicted next UID\r\n")
+                            } else {
+                                String::new()
+                            };
                             tcp_stream
                                 .write_all(
-                                    b"* 0 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 1] \
-                                     UIDs valid\r\n* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \
-                                     \\Draft)\r\n* OK [PERMANENTFLAGS ()] No permanent \
-                                     flags permitted\r\n",
+                                    format!(
+                                        "* {exists} EXISTS\r\n* {recent} RECENT\r\n* OK \
+                                         [UIDVALIDITY {uidvalidity}] UIDs valid\r\n* FLAGS \
+                                         (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n* OK \
+                                         [PERMANENTFLAGS ()] No permanent flags \
+                                         permitted\r\n{uidnext_line}"
+                                    )
+                                    .as_bytes(),
                                 )
                                 .await
                                 .unwrap();
@@ -1672,22 +1854,23 @@ pub mod server {
                             // fallback to drop a selection (this is what QQ
                             // Mail does). Emulate it here: reply `NO` and
                             // treat the session as unselected.
-                            let (advertise_unselect, extra_mailbox) = {
-                                let state_lck = state.lock().unwrap();
-                                (
-                                    state_lck.advertise_unselect,
-                                    state_lck.extra_mailbox.clone(),
-                                )
-                            };
                             let requested = select
                                 .trim_end_matches("\r\n")
                                 .strip_prefix("SELECT ")
                                 .unwrap_or_default()
                                 .trim_matches('"');
-                            let mailbox_exists = requested.eq_ignore_ascii_case("inbox")
-                                || extra_mailbox
+                            let (advertise_unselect, mailbox_exists) = {
+                                let st = state.lock().unwrap();
+                                (
+                                    st.advertise_unselect,
+                                    st.is_primary_mailbox(requested)
+                                        || st
+                                            .extra_mailbox
                                     .as_deref()
-                                    .is_some_and(|extra| extra == requested);
+                                            .is_some_and(|extra| extra == requested)
+                                        || st.mailbox_envelopes.contains_key(requested),
+                                )
+                            };
                             if !advertise_unselect && !mailbox_exists {
                                 if matches!(session_state, SessionState::SelectedMailbox) {
                                     state.lock().unwrap().session_unselected("INBOX");
@@ -1702,17 +1885,35 @@ pub mod server {
                                 tcp_stream.flush().await.unwrap();
                                 continue 'main;
                             }
-                            // A non-INBOX mailbox (see
-                            // `ServerState::extra_mailbox`): the mailbox is
-                            // always empty. INBOX-only session counting
+                            // A non-INBOX mailbox. When it is the
+                            // `primary_mailbox` view alias (issue #180) or
+                            // has an explicit `mailbox_envelopes` state,
+                            // report its counters; otherwise it reads empty.
+                            // INBOX-only session counting
                             // (`selected_sessions`) is unaffected by these.
+                            let (exists, next_uid, uidvalidity, has_state) = {
+                                let st = state.lock().unwrap();
+                                let (exists, _unseen, next_uid, uidvalidity) =
+                                    st.mailbox_counters(requested);
+                                (exists, next_uid, uidvalidity, st.mailbox_has_state(requested))
+                            };
+                            let recent = 0;
                             session_state = SessionState::SelectedMailbox;
+                            let uidnext_line = if has_state {
+                                format!("* OK [UIDNEXT {next_uid}] Predicted next UID\r\n")
+                            } else {
+                                String::new()
+                            };
                             tcp_stream
                                 .write_all(
-                                    b"* 0 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 1] \
-                                     UIDs valid\r\n* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \
-                                     \\Draft)\r\n* OK [PERMANENTFLAGS ()] No permanent \
-                                     flags permitted\r\n",
+                                    format!(
+                                        "* {exists} EXISTS\r\n* {recent} RECENT\r\n* OK \
+                                         [UIDVALIDITY {uidvalidity}] UIDs valid\r\n* FLAGS \
+                                         (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n* OK \
+                                         [PERMANENTFLAGS ()] No permanent flags \
+                                         permitted\r\n{uidnext_line}"
+                                    )
+                                    .as_bytes(),
                                 )
                                 .await
                                 .unwrap();
@@ -2381,6 +2582,45 @@ pub mod server {
                                 .unwrap();
                             tcp_stream.flush().await.unwrap();
                         }
+                        status
+                            if status.starts_with("STATUS ")
+                                && status.ends_with(")\r\n")
+                                && !status.starts_with("STATUS INBOX (") =>
+                        {
+                            // STATUS of a non-INBOX mailbox (e.g. the
+                            // `primary_mailbox` view alias of issue #180).
+                            // Answer with the full counter set; the item
+                            // order matches what melib's `status_response`
+                            // parser accepts.
+                            let rest = status
+                                .trim_end_matches("\r\n")
+                                .strip_prefix("STATUS ")
+                                .unwrap_or_default();
+                            let mailbox = rest
+                                .split_once(" (")
+                                .map(|(mailbox, _)| mailbox.trim_matches('"'))
+                                .unwrap_or_default();
+                            let (messages, unseen, uidnext, uidvalidity) = {
+                                let st = state.lock().unwrap();
+                                st.mailbox_counters(mailbox)
+                            };
+                            tcp_stream
+                                .write_all(
+                                    format!(
+                                        "* STATUS \"{mailbox}\" (MESSAGES {messages} UIDNEXT \
+                                         {uidnext} UIDVALIDITY {uidvalidity} UNSEEN {unseen})\r\n"
+                                    )
+                                    .as_bytes(),
+                                )
+                                .await
+                                .unwrap();
+                            tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                            tcp_stream
+                                .write_all(b" OK STATUS completed\r\n")
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
                         fetch
                             if fetch.starts_with("FETCH ")
                                 && fetch.ends_with(
@@ -2506,6 +2746,129 @@ pub mod server {
                             tcp_stream.write_all(id.as_bytes()).await.unwrap();
                             tcp_stream
                                 .write_all(b" OK STORE completed\r\n")
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
+                        uid_move if uid_move.starts_with("UID MOVE ") => {
+                            if !matches!(session_state, SessionState::SelectedMailbox) {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD no mailbox is selected\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            let rest = uid_move
+                                .trim_end_matches("\r\n")
+                                .strip_prefix("UID MOVE ")
+                                .unwrap_or_default();
+                            let (sequence_set_str, destination) =
+                                rest.split_once(' ').unwrap_or((rest, ""));
+                            let destination = destination.trim_matches('"').to_string();
+                            let sequence_set = Self::parse_sequence_set(sequence_set_str);
+                            let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
+                            let requested: Vec<UID> = sequence_set
+                                .iter(largest.try_into().unwrap())
+                                .map(|uid| uid.get() as usize)
+                                .collect();
+                            let move_no_alert_mails_not_exist =
+                                state.lock().unwrap().move_no_alert_mails_not_exist;
+                            if move_no_alert_mails_not_exist
+                                && !requested.iter().all(|uid| {
+                                    state.lock().unwrap().envelopes.contains_key(uid)
+                                })
+                            {
+                                // Tencent exmail answers a stale UID with this
+                                // exact alert (issue #180).
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" NO [ALERT] 100001 Mails not exist!\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            let moved = state
+                                .lock()
+                                .unwrap()
+                                .move_to_mailbox(&destination, &requested);
+                            eprintln!(
+                                "{name} loop_handler: UID MOVE moved {moved} message(s) to \
+                                 {destination:?}"
+                            );
+                            tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                            tcp_stream
+                                .write_all(b" OK MOVE completed\r\n")
+                                .await
+                                .unwrap();
+                            tcp_stream.flush().await.unwrap();
+                        }
+                        uid_fetch
+                            if uid_fetch.starts_with("UID FETCH ")
+                                && uid_fetch.ends_with(" (UID ENVELOPE)\r\n") =>
+                        {
+                            // Issue #180 recovery: `UID FETCH 1:* (UID
+                            // ENVELOPE)` enumerates the live view with
+                            // identity data only.
+                            if !matches!(session_state, SessionState::SelectedMailbox) {
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD no mailbox is selected\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            let sequence_set = Self::parse_sequence_set(
+                                uid_fetch
+                                    .strip_prefix("UID FETCH ")
+                                    .unwrap()
+                                    .strip_suffix(" (UID ENVELOPE)\r\n")
+                                    .unwrap(),
+                            );
+                            eprintln!(
+                                "{name} loop_handler got UID FETCH envelope-only \
+                                 {sequence_set:?}"
+                            );
+                            let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
+                            'uid_fetch_envelope_only: for uid in
+                                sequence_set.iter(largest.try_into().unwrap())
+                            {
+                                let (msn, mail) = {
+                                    let st = state.lock().unwrap();
+                                    let Some(index) =
+                                        st.envelopes.get_index_of(&(uid.get() as usize))
+                                    else {
+                                        continue 'uid_fetch_envelope_only;
+                                    };
+                                    (index + 1, st.envelopes[&(uid.get() as usize)].clone())
+                                };
+                                let response = Response::Data(Data::Fetch {
+                                    seq: (msn as u32).try_into().unwrap(),
+                                    items: vec![
+                                        MessageDataItem::Uid(uid),
+                                        MessageDataItem::Envelope(mail.as_envelope()),
+                                    ]
+                                    .try_into()
+                                    .unwrap(),
+                                });
+                                for fragment in ResponseCodec::new().encode(&response) {
+                                    match fragment {
+                                        Fragment::Line { data } => {
+                                            tcp_stream.write_all(&data).await.unwrap();
+                                            tcp_stream.flush().await.unwrap();
+                                        }
+                                        Fragment::Literal { data, .. } => {
+                                            tcp_stream.write_all(&data).await.unwrap();
+                                            tcp_stream.flush().await.unwrap();
+                                        }
+                                    }
+                                }
+                            }
+                            tcp_stream
+                                .write_all(format!("{id} OK UID FETCH completed\r\n").as_bytes())
                                 .await
                                 .unwrap();
                             tcp_stream.flush().await.unwrap();
@@ -5969,6 +6332,230 @@ hello world 4.
         loop_handle.join().unwrap();
     }
 
+    /// Regression test for issue #180: Tencent exmail (Coremail) silently
+    /// reassigns the UIDs of a virtual folder -- here "Sent Messages" --
+    /// while keeping `UIDVALIDITY` unchanged, so a cached `UID MOVE` fails
+    /// with `NO [ALERT] 100001 Mails not exist!`. `copy_messages` must
+    /// re-derive the live UIDs by message identity, retry the MOVE once and
+    /// succeed, swapping the cached `EnvelopeHash` for the mail's new one
+    /// and telling the UI via `Remove`/`Create` events.
+    #[cfg(feature = "sqlite3")]
+    pub(crate) fn run_imap_exmail_uid_renumber_move_recovery() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(64)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+
+        // Three mailboxes: INBOX (empty, never fetched), the
+        // `primary_mailbox` view alias "Sent Messages" backed by the
+        // historical `envelopes` map, and the MOVE destination
+        // "Deleted Messages".
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            extra_mailbox: Some("Deleted Messages".to_string()),
+            primary_mailbox: Some("Sent Messages".to_string()),
+            move_no_alert_mails_not_exist: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            for i in 0..4 {
+                state_lck.insert(Box::new(
+                    Mail::new(
+                        format!(
+                            "From: \"me\" <myself@example.com>
+To: \"you\" <you@example.com>
+Date: Thu, 01 Jan 2020 00:00:{i:02} +0000
+Cc:
+Subject: sent message {i}
+Message-ID: <sent{i}@example.com>
+Content-Type: text/plain
+
+sent body {i}.
+"
+                        )
+                        .into_bytes(),
+                        None,
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, _inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        // Resolve the two extra mailbox hashes from the cached LIST map.
+        let mailboxes = block_on(imap.mailboxes().unwrap()).unwrap();
+        let sent_hash = *mailboxes
+            .iter()
+            .find(|(_, mailbox)| mailbox.path() == "Sent Messages")
+            .expect("the mock advertises Sent Messages")
+            .0;
+        let deleted_hash = *mailboxes
+            .iter()
+            .find(|(_, mailbox)| mailbox.path() == "Deleted Messages")
+            .expect("the mock advertises Deleted Messages")
+            .0;
+
+        // Populate the cache with the four "Sent Messages" mails. This
+        // registers `hash(uid)` -> (uid, sent_hash) in `hash_index`.
+        let old_envs = {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let envs = fetch_all_envs(imap, sent_hash).await;
+                            assert_eq!(envs.len(), 4, "initial fetch must load the four mails");
+                            envs
+                        })
+                    })
+                    .join()
+                    .unwrap()
+            })
+        };
+        let old_hashes: Vec<EnvelopeHash> = old_envs.iter().map(|env| env.hash()).collect();
+        let old_uid_by_hash: std::collections::HashMap<EnvelopeHash, UID> = {
+            let hash_index = imap.uid_store.hash_index.lock().unwrap();
+            old_hashes
+                .iter()
+                .map(|hash| {
+                    (
+                        *hash,
+                        hash_index
+                            .get(hash)
+                            .unwrap_or_else(|| panic!("hash {hash:?} must be cached"))
+                            .0,
+                    )
+                })
+                .collect()
+        };
+
+        // The server silently renumbers the whole view; UIDVALIDITY is
+        // deliberately left unchanged, exactly as exmail does.
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.renumber_mailbox_uids("Sent Messages", 100);
+            assert_eq!(
+                state_lck.envelopes.keys().copied().collect::<Vec<_>>(),
+                vec![101, 102, 103, 104],
+                "the renumbering must shift every UID"
+            );
+        }
+
+        // The first MOVE uses the stale UIDs and is answered with exmail's
+        // alert; the recovery re-derives the UIDs by identity and the retry
+        // succeeds.
+        {
+            let imap = &mut imap;
+            let old_hashes = &old_hashes;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let batch = EnvelopeHashBatch::try_from(old_hashes.as_slice()).unwrap();
+                            imap.copy_messages(batch, sent_hash, deleted_hash, true)
+                                .unwrap()
+                                .await
+                                .expect("copy_messages must recover and complete");
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // The mail reached the destination...
+        {
+            let state_lck = server_state.lock().unwrap();
+            assert!(
+                state_lck.envelopes.is_empty(),
+                "every mail must have left Sent Messages"
+            );
+            let moved = state_lck
+                .mailbox_envelopes
+                .get("Deleted Messages")
+                .expect("the destination mailbox must have received the mail");
+            assert_eq!(moved.len(), 4, "all four mails must be in Deleted Messages");
+        }
+
+        // ...the in-memory index swapped the stale hashes for the fresh
+        // ones...
+        {
+            let hash_index = imap.uid_store.hash_index.lock().unwrap();
+            for old_hash in &old_hashes {
+                let old_uid = old_uid_by_hash[old_hash];
+                assert!(
+                    !hash_index.contains_key(old_hash),
+                    "stale hash {old_hash:?} (uid {old_uid}) must be replaced"
+                );
+                let new_hash = generate_envelope_hash("Sent Messages", old_uid + 100);
+                let (new_uid, mailbox_hash) = hash_index
+                    .get(&new_hash)
+                    .copied()
+                    .unwrap_or_else(|| panic!("new hash {new_hash:?} must map to a UID"));
+                assert_eq!(new_uid, old_uid + 100);
+                assert_eq!(mailbox_hash, sent_hash);
+            }
+        }
+
+        // ...and the wire shows the recovery fetch and the retried MOVE
+        // with the fresh UIDs.
+        {
+            let commands = main_commands.lock().unwrap();
+            let moves: Vec<&String> = commands.iter().filter(|l| l.contains("UID MOVE")).collect();
+            assert!(
+                moves.len() >= 2,
+                "expected a failed MOVE and a retried MOVE: {commands:?}"
+            );
+            assert!(
+                moves
+                    .iter()
+                    .any(|l| l.contains("101") && l.contains("Deleted Messages")),
+                "the retry must use the fresh UID and the real destination: {moves:?}"
+            );
+            assert!(
+                commands
+                    .iter()
+                    .any(|l| l.contains("UID FETCH 1:* (UID ENVELOPE)")),
+                "the recovery must enumerate the live view by identity: {commands:?}"
+            );
+        }
+
+        // The UI was told to drop every stale hash and add the fresh ones.
+        {
+            let removed = queue_remove_events(&backend_event_queue);
+            for old_hash in &old_hashes {
+                assert!(
+                    removed.contains(old_hash),
+                    "missing Remove event for {old_hash:?}: {removed:?}"
+                );
+            }
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
     fn set_test_xdg_env(temp_dir: &TempDir) {
         for var in [
             "HOME",
@@ -8748,6 +9335,11 @@ hello new world b.
             fetch_envelope_fetches: 0,
             fetch_drop_connection_count: 0,
             status_override: None,
+            primary_mailbox: None,
+            mailbox_envelopes: Default::default(),
+            mailbox_next_uid: Default::default(),
+            mailbox_uidvalidity: Default::default(),
+            move_no_alert_mails_not_exist: false,
         }));
         {
             let mut state_lck = server_state.lock().unwrap();
