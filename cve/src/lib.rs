@@ -4286,6 +4286,56 @@ mod cve_2018_14354;
 #[path = "CVE-2018-14356.rs"]
 mod cve_2018_14356;
 
+/// CVE-2018-14357（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8
+/// CRITICAL；NVD 原文 *"They allow remote IMAP servers to execute arbitrary
+/// commands via backquote characters"*；Gentoo 标注 *"LSUB Remote Code
+/// Execution"*）**恶意 IMAP 服务器在 `LSUB` 响应里返回含反引号的邮箱名；
+/// mutt 把 LSUB 得到的名字送进 `mailboxes` 配置命令解释器，反引号被当作
+/// 命令替换执行 → 远端任意命令执行** 攻击模拟回归（issue #151，表 2 病毒/
+/// 代码执行）。家族描述见 `SECURITY-CVE-RESEARCH.zh-CN.md` 表 2 第 91 行：
+/// mutt/neomutt 2018-07 一次性披露的 15 漏洞之一，14354（手工订阅/退订的
+/// 重发序列化面）与 14357（LSUB 响应消费面）并列为「imap_subscribe 与 LSUB
+/// 远程代码执行」。
+///
+/// meli 对应面（issue #151 指定）：解析层
+/// `melib/src/imap/protocol_parser.rs::list_mailbox_result` 对
+/// `* LSUB (...)` 行的字段文法（flags `take_until(")")`、分隔符
+/// `delimited(tag("\""), take(1), tag("\""))`、其后强制 SP、`mailbox_token`、
+/// CRLF 收尾），与消费层 `melib/src/imap/mod.rs::imap_mailboxes` 的 LSUB
+/// 分支（`CommandBody::lsub("", "*")` → 逐行
+/// `protocol_parser::list_mailbox_result` → 仅对已存在条目 `get_mut` 置
+/// `is_subscribed = true` 并可能升级 `special_usage`）。mutt 真正的漏洞点
+/// ——`mailboxes` 式配置命令解释器——meli 不存在：`melib/src/imap/` 下无
+/// `Command::new`/`process::Command`/`.spawn(`，邮箱名永不进入任何 shell 或
+/// 配置求值。
+///
+/// **本次发现并修复一个真实缺口**：分隔符字段之后的 SP 在 RFC 3501
+/// `mailbox-list` 里是强制的，原 `list_mailbox_result` 却用 `take(1_u32)`
+/// 盲目消费一个字节，使 `* LSUB (\HasNoChildren) "."INBOX\r\n` 静默截掉
+/// 名字首字节、解析为 `Ok(imap_path="NBOX")` 而非 `Err`。修复改为字面
+/// `tag(&b" "[..])`，畸形 LSUB/LIST 字段 fail-closed。
+///
+/// 语料内嵌反引号命令替换（`` `touch${IFS}/tmp/pwned` ``、`$(id)`、纯
+/// 反引号 atom、反引号+引号）、NUL/CTL/空串、引号内 CRLF、缺空格、
+/// `{999}`/`{u64::MAX}` literal 超声明、超长分隔符/邮箱名/flags 字段、
+/// 层级深度边界、定长缓冲边界 ±1（0/1/2、255/256/257 … 65535/65536/65537）。
+///
+/// [`cve_2018_14357`] 分五层锁定（详见模块文档）：L0 规范 LSUB 基线与
+/// INBOX 大小写归一化、`\Subscribed`/`\Sent` 标志；La 字段层畸形全部
+/// `Err` 且含缺空格回归断言；Lb 反引号/转义/NUL/CTL/空串只落为
+/// `imap_path` 数据与类型化 `MailboxHash`；Lc 定长边界、≥1 万字节与
+/// `MAX_MAILBOX_HIERARCHY_DEPTH` 深度上限有界；Ld 用 `std::fs` 递归扫描
+/// `melib/src/imap/` 全目录证明无
+/// `Command::new`/`process::Command`/`.spawn(`，且 LSUB 分支只 `get_mut`
+/// 不重发名字、必需 SP 已是字面 `tag`。与 CVE-2018-14354（重发序列化面）、
+/// CVE-2018-14356（POP 空 UID）及 CVE-2020-16094（深度上限复用）划界，
+/// 标记 `14357` 语料逐字隔离。
+///
+/// [`cve_2018_14357`]: self::cve_2018_14357
+#[cfg(test)]
+#[path = "CVE-2018-14357.rs"]
+mod cve_2018_14357;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
