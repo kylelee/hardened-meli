@@ -4442,6 +4442,52 @@ mod cve_2018_14358;
 #[path = "CVE-2018-14359.rs"]
 mod cve_2018_14359;
 
+/// CVE-2018-14360（mutt < 1.10.1、neomutt < 2018-07-16；CVSS v3.1 9.8
+/// CRITICAL，CWE-121 栈缓冲区溢出）**恶意 NNTP 服务器对 `GROUP` 命令返回
+/// 首行字段超长的 `211 <超长数字> <超长数字> <超长数字> <组名>`，mutt 用定长
+/// 栈缓冲 + `sscanf` 解析 → 越界写穿栈**攻击模拟回归（issue #154，表 2 病毒/
+/// 代码执行）。NVD 口径：*"An issue was discovered in Mutt before 1.10.1 and
+/// NeoMutt before 2018-07-16. nntp_add_group in newsrc.c has a stack-based
+/// buffer overflow because of incorrect sscanf usage."*
+///
+/// 攻击面核实：meli 的 NNTP `GROUP` 回复解析全在 `melib/src/nntp/`——
+/// 响应累积进堆 `String`（`read_lines` 的 `ret.push_str(&String::from_utf8_lossy(
+/// &buf[0..b]))`），每 chunk 后 `enforce_response_size_limit(ret.len())?` 在超过
+/// `Connection::MAX_SERVER_RESPONSE_SIZE`（64 MiB）时报
+/// `NetworkErrorKind::ProtocolViolation`；期望码只接受
+/// `command_to_replycodes("GROUP") == &["211 "]`；mailbox hash 来自客户端侧
+/// `path`（`MailboxHash::from_bytes`），与服务器返回字段无关；数值字段唯一
+/// 消费点 `fetch_envs` 以 `s.len() != 5` fail-closed、`usize::from_str(..)
+/// .unwrap_or(0)`、`saturating_add`；全目录无 `unsafe`、无 C 定长缓冲原语。
+///
+/// [`cve_2018_14360`] 分五层锁定（详见模块文档）：L0 合法
+/// `211 3000234 3000182 3000233 alt.test\r\n` 经真实 `read_lines` 逐字节保留、
+/// 再经 `select_group_by_name` 选中且命令恰为 `GROUP alt.test\r\n`；L1 攻击
+/// 语料（万位/十万位超长数字、定长缓冲边界 ±1、数值边界、缺/多字段、非数字、
+/// tab 分隔、64 KiB 组名、NUL/无效 UTF-8、首码 50 位超长、裸 LF + EOF）经
+/// `read_lines` 与 `select_group_by_name` 两层 `catch_unwind` 不 panic，Ok 形态
+/// 返回码恰为 211、hash 只由客户端 path 决定，Err 形态错误信息明确，并以相同
+/// 表达式钉死 `fetch_envs` 的 token 计数/受检 parse/饱和消费语义；L2 永不结束
+/// 的 CRLF-free `211` 行在生产 64 MiB 上限处 `ProtocolViolation`，`ret.len()`
+/// 有界、写入量 > cap、watchdog 预算内完成（debug 实测约 40 秒：未终止单行
+/// 每个 chunk 重扫累积缓冲，时间二次方但内存始终有界）；L3 `include_str!`
+/// 钉住堆 String、上限调用
+/// 点、`split_whitespace().next().map(str::parse)`、GROUP 期望码与
+/// `format!("GROUP {path}")`，递归扫 `melib/src/nntp/` 证明无 `unsafe`、无
+/// `sscanf(`/`strcpy(`/`strcat(`/`strtol(`/`sprintf(`；L4 struct literal 构造
+/// 真实 `NntpConnection`（注入 `Connection::Fd` + `UnixStream::pair()`）全链路
+/// 断言 hash 由客户端 path 决定、`211\r\n` fail-closed。与 CVE-2018-14349
+/// （IMAP NO 文本）、14350（INTERNALDATE）、14351（STATUS literal）、
+/// 14352/14353（imap_quote_string）、14354/14357（命令注入）、14356（空 UID）、
+/// 14358（RFC822.SIZE）、14359（base64）划界，标记 `14360` 语料逐字隔离。
+/// 结论：**结构性免疫（GROUP 首行以堆 String 解析、数值字段受检 parse、
+/// 64 MiB 封顶、无定长栈缓冲、无 unsafe），未发现缺口，未修改生产代码**。
+///
+/// [`cve_2018_14360`]: self::cve_2018_14360
+#[cfg(test)]
+#[path = "CVE-2018-14360.rs"]
+mod cve_2018_14360;
+
 /// CVE-2018-19516（KDE Applications < 18.12.0，messagelib；CVSS v3.1 5.3，
 /// CWE-20）**`http-equiv="REFRESH"` 远程内容绕过** regression（issue #126，
 /// 表 1 追踪与隐私）：`messagepartthemes/default/defaultrenderer.cpp` 未正确
