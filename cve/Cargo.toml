@@ -2,7 +2,7 @@
 
 [package]
 name = "cve"
-version = "0.1.0"
+version.workspace = true
 authors = ["Kyle Lee"]
 edition = "2021"
 rust-version = "1.85.0"
