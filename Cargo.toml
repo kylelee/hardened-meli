@@ -3,6 +3,9 @@ resolver = "2"
 
 members = ["cve", "meli", "meli-test", "melib", "melib-test"]
 
+[workspace.package]
+version = "0.11.0"
+
 # Dependencies shared by two or more workspace members are declared here once
 # and inherited with `workspace = true`; member manifests only keep
 # crate-specific (differentiated) entries and per-crate feature additions.
