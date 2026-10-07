@@ -153,6 +153,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [v0.11.0] - 2026-10-08
+
+### Security
+
+- Known e-mail CVE attack coverage and fixes: all 153 known CVEs against mail clients (plus Mozilla advisory MFSA-2005-11) now carry per-CVE attack-simulation corpora and immune/fixed regressions in the `cve/` workspace; the reconnaissance rounds exposed and fixed real gaps in meli itself (Unicode-invisible display-name spoofing, plaintext-HTTP JMAP endpoints, HTML-sanitizer attribute smuggling, NNTP/IMAP parser overflows, decryption-oracle reply leaks, and more).
+
+### Changed
+
+- The runtime was fully reworked onto the tokio multi-threaded framework: jobs, timers, heartbeats and signal delivery now all ride one tokio async runtime (the test runtime moved to tokio-test as well), improving the user experience with smoother interaction.
+- All dependency crates were upgraded to their latest versions, improving user security and minimizing supply-chain attack exposure.
+
 ## [v0.9.0] - 2026-09-13
 
 First release of the hardened-meli fork. Condensed summary of all fork changes

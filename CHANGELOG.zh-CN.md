@@ -157,6 +157,17 @@ fork 自身版本（`[Unreleased]`、`[v0.9.0]`）提供完整中文对照；for
 - 与上游 meli 完全同步（截至 2026-09-28）：上游区间 `3d7eb2c5..bb6d5916`（22 个提交）在四个并行 worktree 上语义移植——PGP 可插拔后端、JMAP EventSource 推送及八个修复/重构提交（逐提交记账见 [SYNC.zh-CN.md](./SYNC.zh-CN.md)）。刻意跳过：命令补全框架重构 `a041bc90`（fork 自有命令面板 + nucleo 模糊匹配已覆盖并更优）、`ListingTrait::select` 纯内部重构 `03e1f5de`（无外部调用方）、上游 CI 移除 cargo-derivefmt 的 `0eaae124`（fork CI 为绿且保留该步骤）、`quote` 升级 `45a5d376`（fork 已在 1.0.47）。已通过 `make check`、`make lint`、`make test`（全 feature 全绿）。
 
 
+## [v0.11.0] - 2026-10-08
+
+### 安全（Security）
+
+- 已知邮件 CVE 攻击测试用例覆盖和修复：针对邮件客户端的 153 个已知 CVE（另含 Mozilla 安全公告 MFSA-2005-11）全部建立攻击模拟语料与免疫/修复回归（`cve/` 工作区）；多轮侦察还暴露并修复了 meli 自身的真实缺口（Unicode 不可见字符显示名欺骗、明文 HTTP JMAP 端点、HTML 清洗属性走私、NNTP/IMAP 解析溢出、解密预言机回复泄露等）。
+
+### 变更（Changed）
+
+- 全面重构使用 tokio 多线程框架：作业、定时器、心跳与信号派发统一由单一 tokio 异步运行时驱动（测试运行时同步迁移至 tokio-test），提升用户体验，交互更加丝滑。
+- 升级所有依赖库的版本到最新版本，提升用户使用安全，尽可能消除供应链攻击风险。
+
 ## [v0.9.0] - 2026-09-13
 
 加固版（hardened）meli fork 的首个版本。汇总自仓库创建（2026-09-08，基于上游

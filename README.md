@@ -8,7 +8,7 @@ https://github.com/user-attachments/assets/5cdbbc3e-9b49-46e4-ae37-be0a58cf300c
 
 Hardened and based on <https://github.com/meli/meli>
 
-## Highlights
+## Highlights & Diff Fork
 
 This repository is a security-hardened and UX-optimized fork of meli: on top of the original it received a full code audit, hardening and refactoring, plus several real-world usability improvements. Four core highlights:
 
@@ -16,10 +16,11 @@ This repository is a security-hardened and UX-optimized fork of meli: on top of 
 
 A comprehensive code audit and refactor of the original meli fixed 18 audit findings (including 3 HIGH: mailcap command injection, mailto CRLF header injection, and RFC2047 display-name reply hijacking) and removed ~1500 lines of dead code while deduplicating logic. Against malformed/hostile e-mail content (such as QQ Mail's unescaped quoted Message-IDs, empty local-part sender addresses, and script-laden HTML bodies), four lines of defense were designed, layer upon layer:
 
-1. **Parse tolerance**: when an IMAP ENVELOPE field fails strict parsing, it automatically falls back to raw-bytes parsing — any single malformed field can no longer abort the fetch of an entire mailbox;
-2. **Ingestion sanitization**: address fields (From/Sender/Reply-To/To/Cc/Bcc) are validated and normalized before being written to the cache; fixable ones are automatically quoted and re-verified, unfixable ones are replaced with a safe placeholder — new data can never produce "poison rows";
-3. **Visible quarantine**: legacy poisoned cache rows no longer trigger a whole-database reset; they are quarantined row by row into an `invalid_envelopes` table and shown as visible placeholder e-mails (with error-detail headers), self-healing after the server re-fetch — eliminating "one poison e-mail nukes the entire cache".
-4. **Sanitize HTML**: HTML e-mail bodies are rendered by a built-in HTML renderer — the mail is sanitized with an allow-list (ammonia), keeping only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), then converted to plain text (html2text) at the terminal's width, all in-process with no external dependency (the standalone sanitizer binary is gone, absorbed into `meli`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view.
+1. **Known-CVE attack coverage**: all 153 known CVEs against mail clients (plus Mozilla advisory MFSA-2005-11) are covered by per-CVE attack-simulation corpora and regression tests in the `cve/` workspace; the reconnaissance rounds also exposed and fixed real gaps in meli itself (Unicode-invisible display-name spoofing, plaintext-HTTP JMAP endpoints, HTML-sanitizer attribute smuggling, NNTP/IMAP parser overflows, decryption-oracle reply leaks);
+2. **Parse tolerance**: when an IMAP ENVELOPE field fails strict parsing, it automatically falls back to raw-bytes parsing — any single malformed field can no longer abort the fetch of an entire mailbox;
+3. **Ingestion sanitization**: address fields (From/Sender/Reply-To/To/Cc/Bcc) are validated and normalized before being written to the cache; fixable ones are automatically quoted and re-verified, unfixable ones are replaced with a safe placeholder — new data can never produce "poison rows";
+4. **Visible quarantine**: legacy poisoned cache rows no longer trigger a whole-database reset; they are quarantined row by row into an `invalid_envelopes` table and shown as visible placeholder e-mails (with error-detail headers), self-healing after the server re-fetch — eliminating "one poison e-mail nukes the entire cache".
+5. **Sanitize HTML**: HTML e-mail bodies are rendered by a built-in HTML renderer — the mail is sanitized with an allow-list (ammonia), keeping only safe structural tags and `http`/`https`/`mailto` links while stripping scripts, styles, event-handler attributes, comments and dangerous URL schemes (`javascript:`, `data:`), then converted to plain text (html2text) at the terminal's width, all in-process with no external dependency (the standalone sanitizer binary is gone, absorbed into `meli`), so hostile HTML mail can no longer smuggle scripts or tracking links into the rendered view.
 
 ### 2. UX: browse the whole mailbox with the arrow keys
 
@@ -35,7 +36,7 @@ The whole product interface was rebuilt with the beautiful [ratatui](https://rat
 
 **Table of contents**:
 
-- [Highlights](#highlights)
+- [Highlights & Diff Fork](#highlights--diff-fork)
 - [Install](#install)
 - [Build](#build)
   - [Cargo Compile-time Features](#cargo-compile-time-features)
