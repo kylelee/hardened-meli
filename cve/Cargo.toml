@@ -18,4 +18,5 @@ name = "cve"
 path = "src/lib.rs"
 
 [dev-dependencies]
+libc = { workspace = true }
 meli = { path = "../meli" }
