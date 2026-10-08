@@ -112,7 +112,6 @@ pub type VersionMap = IndexMap<VersionIdentifier, Box<dyn Version + Send + Sync 
 ///    v0_9_0::V0_9_0_ID => v0_9_0::V0_9_0,
 ///    v0_10_0::V0_10_0_ID => v0_10_0::V0_10_0,
 ///    v0_11_0::V0_11_0_ID => v0_11_0::V0_11_0,
-///    v0_12_0::V0_12_0_ID => v0_12_0::V0_12_0,
 /// }
 /// ```
 ///
