@@ -937,6 +937,7 @@ dependencies = [
 name = "cve"
 version = "0.12.0"
 dependencies = [
+ "libc",
  "meli",
 ]
 
