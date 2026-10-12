@@ -1101,10 +1101,7 @@ iy22S9oOhvpIcPXS/GjgUQMrImZNsmCwx4kiQ9Dex7Xs+hKkp1+siM9P2XS5iiDm
                 }
             }
         }
-        let _restore = RestoreGuard(match &old_sequoia_home {
-            Some(v) => Some(v.clone()),
-            None => None,
-        });
+        let _restore = RestoreGuard(old_sequoia_home);
         std::env::set_var("SEQUOIA_HOME", tempdir.path());
 
         let mut gpgme_ctx = match melib::gpgme::Context::new() {
@@ -1238,7 +1235,7 @@ iy22S9oOhvpIcPXS/GjgUQMrImZNsmCwx4kiQ9Dex7Xs+hKkp1+siM9P2XS5iiDm
                 Some(FINGERPRINT.to_string()),
                 None,
                 None,
-                vec![pubkey.clone()],
+                vec![pubkey],
                 false,
             )
             .unwrap())(body_attachment))

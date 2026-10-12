@@ -1772,8 +1772,7 @@ hello world.
         let collection = jmap.collection();
         let fetched = fetch_result
             .into_iter()
-            .map(|res| res.unwrap())
-            .flatten()
+            .flat_map(|res| res.unwrap())
             .collect::<Vec<Envelope>>();
         assert_eq!(fetched.len(), 1);
         {

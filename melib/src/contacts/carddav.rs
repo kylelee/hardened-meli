@@ -278,7 +278,7 @@ pub struct CardDAVContacts {
 }
 
 impl CardDAVContacts {
-    /// 建立 WebDAV 连接并构造 CardDAV 通讯录后端。
+    /// 建立 `WebDAV` 连接并构造 `CardDAV` 通讯录后端。
     pub async fn new(server_conf: &WebDAVServerConf) -> Result<Self> {
         let mut webdav_connection = WebDAVConnection::new(server_conf).await?;
         webdav_connection.connect().await?;

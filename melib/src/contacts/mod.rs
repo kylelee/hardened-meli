@@ -234,10 +234,7 @@ impl Contacts {
                             for c in cards {
                                 book.add_card(c);
                             }
-                            ret.add_book(
-                                Self::source_backend_id(&s.name, "mutt_alias_file"),
-                                book,
-                            );
+                            ret.add_book(Self::source_backend_id(&s.name, "mutt_alias_file"), book);
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -391,7 +388,7 @@ impl Contacts {
         })
     }
 
-    /// 为 with_account 的来源书构造 backend 标识：`name` 为账户名，
+    /// 为 `with_account` 的来源书构造 backend 标识：`name` 为账户名，
     /// `format` 为来源种类。
     fn source_backend_id(account_name: &str, format: &str) -> Arc<ContactBackendID> {
         Arc::new(ContactBackendID {
@@ -460,7 +457,7 @@ impl Contacts {
 
     /// 返回默认书的卡片表，供前端持久化合并逻辑使用。
     pub fn cards(&self) -> &IndexMap<CardId, Card> {
-        static EMPTY: LazyLock<IndexMap<CardId, Card>> = LazyLock::new(|| IndexMap::default());
+        static EMPTY: LazyLock<IndexMap<CardId, Card>> = LazyLock::new(IndexMap::default);
         self.default_book()
             .map(|book| &book.cards)
             .unwrap_or(&EMPTY)

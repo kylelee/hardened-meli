@@ -851,7 +851,7 @@ mod tests {
     #[test]
     fn test_set_source_downcasts_inner_error_without_wrapping() {
         let inner = Error::new("inner failure").set_kind(ErrorKind::NotFound);
-        let outer = Error::new("outer failure").set_source(Some(Arc::new(inner.clone())));
+        let outer = Error::new("outer failure").set_source(Some(Arc::new(inner)));
         let source = outer.source.as_ref().expect("source must be set");
         assert_eq!(source.summary, "inner failure");
         assert_eq!(source.kind, ErrorKind::NotFound);

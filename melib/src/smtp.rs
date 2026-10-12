@@ -1755,11 +1755,13 @@ mod tests {
                 "reply code {s} must round-trip through TryFrom<&str>"
             );
         }
-        // `_530` is a known pre-existing gap: its arm is also absent from
-        // `TryFrom<&str>`, but fixing it is out of scope for this change, so
-        // pin the current behaviour instead of asserting it round-trips.
-        let err = ReplyCode::try_from("530").unwrap_err();
-        assert!(err.to_string().contains("Unknown SMTP reply code"));
+        // 上游 b0c6bcda 起 `_530`（认证必需）补入 `TryFrom<&str>`，
+        // fork 随 2026-10-12 同步采纳——纳入往返断言。
+        assert_eq!(
+            ReplyCode::try_from("530").ok(),
+            Some(ReplyCode::_530),
+            "reply code 530 must round-trip through TryFrom<&str>"
+        );
     }
 
     #[test]
