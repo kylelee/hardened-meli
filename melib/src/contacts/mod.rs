@@ -191,11 +191,14 @@ pub struct Contacts {
     pub backends: IndexSet<Arc<ContactBackendID>>,
 }
 
-/// fork 兼容门面：默认书的固定 backend 标识（S5 前端重做后随门面拆除）。
-const DEFAULT_BACKEND_NAME: &str = "default";
-const DEFAULT_BACKEND_FORMAT: &str = "default";
-/// fork 兼容门面：默认书名称（S5 前端重做后随门面拆除）。
-const DEFAULT_BOOK_NAME: &str = "default";
+/// fork 兼容门面：默认本地书的固定 backend 标识。
+///
+/// 取值与上游账户装载模块的 `DefaultContacts` 后端一致（`meli`/`Card`），
+/// 这样 meli 侧真实装载出来的默认书与门面的默认书识别合而为一。
+pub const DEFAULT_BACKEND_NAME: &str = "meli";
+pub const DEFAULT_BACKEND_FORMAT: &str = "Card";
+/// fork 兼容门面：默认书名称（上游 `DefaultContacts::DEFAULT_ADDRESS_BOOK`）。
+pub const DEFAULT_BOOK_NAME: &str = "default";
 
 impl Contacts {
     pub fn new(name: String) -> Self {
