@@ -60,6 +60,14 @@ fn test_jmap_operations() {
     });
 }
 
+#[test]
+fn test_jmap_contacts() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_jmap_contacts();
+    });
+}
+
 pub mod server {
     use std::{
         net::{SocketAddr, TcpListener},
@@ -187,7 +195,8 @@ pub mod server {
            "urn:ietf:params:jmap:mail": {{
              "maxMailboxesPerEmail": null,
              "maxMailboxDepth": 10
-           }}
+           }},
+           "urn:ietf:params:jmap:contacts": {{}}
          }}
        }}
      }},
@@ -2028,5 +2037,124 @@ hello world.
         })
         .join()
         .unwrap();
+    }
+    /// Test that `JmapType::contact_backend` wires a JMAP contacts backend
+    /// against the mock server's session object: the session advertises the
+    /// contacts capability and a primary contacts account, so
+    /// `contact_backend()` must resolve into a `JmapContacts` instance whose
+    /// reported contact capabilities match the mock server's (empty) contacts
+    /// capability object, all offline.
+    pub(crate) fn run_jmap_contacts() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_consumer = {
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+            }))
+        };
+
+        for var in [
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_DIRS",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_DIRS",
+            "XDG_DATA_HOME",
+        ] {
+            std::env::remove_var(var);
+        }
+        for (var, dir) in [
+            ("HOME", temp_dir.path().to_path_buf()),
+            ("XDG_CACHE_HOME", temp_dir.path().join(".cache")),
+            ("XDG_STATE_HOME", temp_dir.path().join(".local/state")),
+            ("XDG_CONFIG_HOME", temp_dir.path().join(".config")),
+            ("XDG_DATA_HOME", temp_dir.path().join(".local/share")),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
+                panic!("Could not create {} path, {}: {}", var, dir.display(), err);
+            });
+            std::env::set_var(var, &dir);
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let account_conf = AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: "INBOX".to_string(),
+            format: "jmap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra: {
+                let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                    indexmap::IndexMap::new();
+
+                m.insert(
+                    "server_url".to_string(),
+                    serde_json::Value::String(format!(
+                        "http://{}:{}",
+                        local_addr.ip(),
+                        local_addr.port()
+                    )),
+                );
+                m.insert(
+                    "server_username".to_string(),
+                    serde_json::Value::String("user".to_string()),
+                );
+                m.insert(
+                    "server_password".to_string(),
+                    serde_json::Value::String("password".to_string()),
+                );
+                m.insert(
+                    "use_token".to_string(),
+                    serde_json::Value::String("true".to_string()),
+                );
+
+                m
+            },
+        };
+
+        let mut jmap =
+            JmapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
+        let (server_event_sender, server_event_receiver) = unbounded();
+        let server = JmapServerStream::new(
+            smol::Async::new(listener).unwrap(),
+            server_event_receiver,
+            local_addr,
+        );
+        std::thread::spawn(move || {
+            block_on(server.loop_handler()).unwrap();
+        });
+
+        eprintln!("Assert contact_backend resolves into a JMAP contacts backend.");
+        let mut contacts = block_on(jmap.contact_backend().unwrap()).unwrap();
+        block_on(contacts.is_online().unwrap()).unwrap();
+        let contact_caps = contacts.capabilities();
+        assert!(
+            contact_caps.is_async && contact_caps.is_remote && contact_caps.supports_search,
+            "Unexpected contact backend capabilities: {contact_caps:?}"
+        );
+        assert!(
+            !contact_caps.can_create_address_book,
+            "mock server does not advertise mayCreateAddressBook: {contact_caps:?}"
+        );
+        assert_eq!(
+            contact_caps.max_address_books_per_card, None,
+            "mock server does not advertise maxAddressBooksPerCard: {contact_caps:?}"
+        );
+        eprintln!("Assert MailBackend capabilities advertise contacts support.");
+        let mail_caps = jmap.capabilities();
+        assert!(
+            mail_caps.supports_contacts,
+            "expected MailBackendCapabilities::supports_contacts after session connect:              {mail_caps:?}"
+        );
+        server_event_sender
+            .unbounded_send(ServerEvent::Quit)
+            .unwrap();
     }
 }
