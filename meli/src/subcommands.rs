@@ -30,9 +30,9 @@ use crossbeam::channel::{Receiver, Sender};
 use melib::{utils::futures::timeout, Result, ShellExpandTrait};
 
 use crate::{
-    args::{PathOrStdio, ToolOpt},
+    args::{MigrationOpt, PathOrStdio, ToolOpt},
     conf::preprocessing::get_included_configs,
-    *,
+    version_migrations, *,
 };
 
 pub fn create_config(path: Option<PathOrStdio>) -> Result<()> {
@@ -458,6 +458,79 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
                                 println!("Saved to {}", path.display());
                             }
                         };
+                    }
+                }
+            }
+        }
+        ToolOpt::Migration(opt) => {
+            // 上游在 `tool` 入口初始化 `melib::utils::logging::Logger`；本 fork 已把
+            // 日志统一到 `crate::logging::init_log`（tracing 文件轮转），迁移流程的
+            // verbose 输出依赖订阅者落盘，故在此接入。
+            crate::logging::init_log();
+            let version_map = version_migrations::versions();
+            match opt {
+                MigrationOpt::List => {
+                    for v in version_map.values() {
+                        print!("version {}", v.version());
+                        let migrations = v.migrations();
+                        if migrations.is_empty() {
+                            println!(": no migrations");
+                        } else {
+                            println!();
+                            for migr in migrations {
+                                println!("{id}: {desc}", id = migr.id(), desc = migr.description());
+                            }
+                        }
+                    }
+                }
+                MigrationOpt::Apply {
+                    dry_run,
+                    verbose,
+                    migration,
+                } => {
+                    let Some(m) = version_map
+                        .values()
+                        .flat_map(|v| v.migrations().into_iter().filter(|m| m.id() == migration))
+                        .next()
+                    else {
+                        return Err(Error::new(format!("Migration {migration:?} not found."))
+                            .set_kind(ErrorKind::NotFound));
+                    };
+                    let config = conf::get_config_file()?;
+                    let mut stdout = std::io::stdout();
+                    let stdin = std::io::stdin();
+                    let ask = Ask::new(m.question());
+                    if ask.run(&mut stdout, &mut stdin.lock()) {
+                        if let Err(err) = m.perform(&config, dry_run, verbose) {
+                            eprintln!("\nCould not perform migration: {err}");
+                            return Err(err);
+                        }
+                        println!("v{}/{} [OK]", m.version(), m.id());
+                    }
+                }
+                MigrationOpt::Revert {
+                    dry_run,
+                    verbose,
+                    migration,
+                } => {
+                    let Some(m) = version_map
+                        .values()
+                        .flat_map(|v| v.migrations().into_iter().filter(|m| m.id() == migration))
+                        .next()
+                    else {
+                        return Err(Error::new(format!("Migration {migration:?} not found."))
+                            .set_kind(ErrorKind::NotFound));
+                    };
+                    let config = conf::get_config_file()?;
+                    let mut stdout = std::io::stdout();
+                    let stdin = std::io::stdin();
+                    let ask = Ask::new(m.question());
+                    if ask.run(&mut stdout, &mut stdin.lock()) {
+                        if let Err(err) = m.revert(&config, dry_run, verbose) {
+                            eprintln!("\nCould not revert migration: {err}");
+                            return Err(err);
+                        }
+                        println!("v{}/{} [OK]", m.version(), m.id());
                     }
                 }
             }
