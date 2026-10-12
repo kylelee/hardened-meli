@@ -28,6 +28,9 @@ nntp = ["tls"]
 maildir = ["notify"]
 mbox-notify = ["notify"]
 notmuch = ["maildir"]
+# Opt-in Sequoia OpenPGP backend. Not part of `default`; pure-Rust crypto
+# (no nettle/gmp FFI) and vendored sqlite keep the feature self-contained.
+sequoia = ["dep:sqz", "rusqlite/bundled"]
 smtp = ["tls"]
 sqlite3 = ["sqlite3-static"]
 sqlite3-static = ["rusqlite", "rusqlite/bundled-full"]
@@ -66,6 +69,13 @@ serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error = { version = "0.1" }
 smallvec = { workspace = true }
 smol = { workspace = true }
+# `sqz` pulls the Sequoia OpenPGP stack. Upstream picks `crypto-nettle`
+# (nettle/gmp FFI); we pick `crypto-openssl`, which Sequoia rates
+# production-ready and constant-time and which reuses the system OpenSSL
+# this crate already links for `native-tls` — no extra FFI surface.
+sqz = { version = "0.1.0", optional = true, default-features = false, features = [
+    "crypto-openssl",
+] }
 socket2 = { workspace = true }
 # `release_max_level_error` compiles every `tracing` event below `ERROR`
 # out of release builds entirely — zero formatting or branch cost; debug
