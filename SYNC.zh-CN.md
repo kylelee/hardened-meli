@@ -38,6 +38,86 @@ git fetch upstream
 
 ## 同步记录
 
+
+## 2026-10-12 23:30 (UTC+8)
+
+- 同步方式：八个并行 worktree 分支（`sync/contacts-framework`、`sync/jmap-core`、`sync/backend-trait`、`sync/pgp-sequoia`、`sync/melib-fixes`、`sync/carddav-backend`、`sync/jmap-contacts`、`sync/frontend-integration`）按依赖分两波语义移植，各由 dsh 子代理执行；UI 层提交按策略刻意跳过（fork UI 架构更先进）
+- 上游区间：`aea4508b..168410ab`（73 个提交；53 个移植——其中 5 个部分移植、丢弃 UI hunk——20 个跳过，见下表）
+- 合并提交：`a0ddb2a1`（melib-fixes）、`c2dcd560`（jmap-core）、`42585c11`（contacts-framework）、`f41fd7b1`（backend-trait）、`f36305f3`（pgp-sequoia）、`96945e7d`（carddav-backend）、`a5ffd126`（jmap-contacts）、`ce6f4ab6`（frontend-integration）
+- 合并期语义解冲突：
+  - `melib-test/tests/jmap/main.rs`：S3a（上游 `5b68048d` 移植：keywords 跟踪 + tracing + `StateChange` 广播 + `EmailObjRef` 寻址）对撞 S4（为 save-with-flags-and-tags 测试独立重建了同套 mock 机制并新增 `POST /upload`/`Email/import`/真实 `Email/query`）。裁决：保留 S3a 骨架 + S4 的 upload/import/query 增量；两套分歧的 `keywords` 存储统一为 JMAP 原生 `IndexMap<String, bool>` 形态并加 `flag_keyword` 辅助函数（flag 位关键字经 `Email/get` 可回环）；冗余的 `set_flags_by_id`/`set_flags(String)` 并入 `set_flags(EmailObjRef, FlagOp)`。
+  - `melib/src/imap/mod.rs`：S1 的字面量 `supports_contacts: false, extra_submission_headers: &[]` 被 S4 的 `..MailBackendCapabilities::default()` 展开包含（Default = EMPTY 常量，值相同）。
+  - `melib/src/utils/mod.rs`：S4 与 S6 各加了一份 `canonicalize_crlf`，`fba25257` 去重。
+- 验收：`make check`、`make lint`、`make test` 全绿（全 feature）；MSRV 1.85.0 → 1.88.0（上游 `edaa6736`）。
+
+| 本地提交 | 上游提交 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `d4593170` | `b0c6bcda` | fix(melib) | SMTP `ReplyCode` 解析 `530` |
+| `1576386c` | `9cc5293d` | fix(melib) | `Error::set_source` 尝试 downcast 回 Self（fork 保留 `Arc`；同提交的 Arc→Box 重构未随迁） |
+| `1ca89a1d` | `c83c9e67` | fix(melib) | 拼接 summary/details 不重复句号 |
+| `27cde630` | `f1bd593d` | fix(melib) | Display 始终展示 related path |
+| `e4c9155d` | `d6b2bc79` | fix(meli) | 临时文件冲突重命名保留扩展名（`rsplit_once`，优于上游按最后点重切） |
+| `c8a69b20` | `834679d6` | refactor(melib) | JMAP capabilities 迁独立模块 |
+| `3ccbc1bf` | `085de222` | refactor(melib) | identities 存 Store 而非 Session |
+| `87ba174d` | `c1b32e3a` | perf(melib) | mail `account_id` 缓存进 EmailFetcher |
+| `862d2907` | `4325dbe1` | fix(melib) | Set 响应只含 server-set 属性 |
+| `7762737e` | `d5ba7be8` | fix(melib) | EventSource 流免超时 + 60s 连接超时 |
+| `66f2f10e` | `5b68048d` | test | 测试服务器跟踪 keywords（其 Email/import+upload 设施由 S4 的 `eeb91753` 移植补齐，后者同时带来 `EmailImport` wire 类型） |
+| `210b5313` | `3e7133b9`+`62c24b52`+`db9f7f93`+`6c61f34b` | feat(melib) | AddressBook 多容器 + Contacts 门面（手写 serde 保持旧单书 JSON 持久化形状；fork 前端经兼容门面零改动编译） |
+| `656cb283` | （同上，meli 侧 hunk） | refactor(meli) | 仅最小机械适配（accounts.rs 3 行） |
+| `ed273b6a` | `62c24b52`+`6c61f34b`+`5eda1ee1` | feat(melib) | `ContactBackend` trait + Capabilities + CRUD；`MailBackendCapabilities::supports_contacts` 与 `MailBackend::contact_backend()` 默认方法 |
+| `f76b947d` | `1554983e` | feat(melib) | mutt alias 文件后端 |
+| `912fe2d3` | `982dd328` | feat(melib) | notmuch 地址查询后端 |
+| `8a3007e0` | `254d8a5a`+`6c61f34b`+`d771b08f` | feat(melib) | vCard 文件后端 + 值折叠检测（保留 fork 的 CWE-754 单文件隔离语义） |
+| `7dfd8720` | `8b82457a` | refactor(melib) | Card 的 `Display` 渲染为 Address 形态 |
+| `7da07e3d` | `d5ecc5a8` | feat(melib) | notmuch 查询 `--output=recipients` + 手册 |
+| `15bfc9c3`/`5f8a7110`/`68e20787`/`b8331cbd`/`6641e214`/`54e3e033` | `06a63d1b`/`195aabb6`/`d08d69e7`/`b61d1178`/`3a98bf00`/`c5b0faaa` | feat/fix(melib) | JSContact Clone、Send/Sync、schema 修复、serde 实现、name components、API 修正 |
+| `39a123b4` | `d628a7dd` | fix(melib) | NNTP 提交路径 CRLF 规范化（免 regex 探测） |
+| `eda853ee` | `9e0d441d` | refactor(melib) | imap capabilities 改 `..default()` 展开 |
+| `96c0fd6a` | `4dd81ffa` | refactor(melib) | `submit()` 删除从未使用的 flags 参数 |
+| `b1d4cf9c` | `eeb91753` | feat(melib) | `save` 同时携带 flags 与 tags（imap APPEND keyword / jmap import 后 EmailSet keywords / maildir·mbox·nntp 签名涟漪） |
+| `07a617e8` | `cb633c63` | feat(melib) | notmuch 仅刷新指定 mailbox |
+| `7b626f2b` | `b2360adf` | feat(melib) | notmuch 数据库 revision（无变化跳过刷新） |
+| `6f5f2633` | `fa4a3daa` | feat(melib) | notmuch `Message` Debug 实现 |
+| `458a3680` | `7cf9e3c2` + `924d00f8` | feat(melib) | notmuch `save_to` + `MailboxConf` extra 任意值（ExtraSetting） |
+| `ff2e2d34` | `2fa32889` + `6e0740db` | feat(melib) | Sequoia PGP 后端——opt-in cargo feature `sequoia`（默认关闭）、PGPBackendChoice::Sequoia、decrypt 返回 SignaturesMetadata；fork 的 CLI 后端保留先签后加密（不回退） |
+| `dec0b9fe` | `e8276c7a` | fix(melib) | gpgme 加载失败回退备选库名 |
+| `a3a8055e` | `b0b2aa1e` | perf(melib) | `convert_attachment_to_rfc_spec` 返回 Cow |
+| `cdd0d637` | `d4d83770` | refactor(melib) | canonicalize_crlf 迁 utils |
+| `b8a6a558` | `edaa6736` | chore | MSRV 1.88.0 |
+| `9a9310a8` | `16ada4cb` + `6af4a32e` | ci | Gitea CI：sequoia 构建依赖 + 显式 `--features sequoia` 校验步骤 |
+| `e889d0fe` | `88c8451c` + `6c61f34b` | feat(melib) | WebDAV 客户端 + CardDAV ContactBackend（isahc 2、http 1.x、quick-xml；`webdav` feature 镜照上游 default 集） |
+| `f67b51ee` | `14640216`（melib 侧） | feat(melib) | `AccountSettings::carddav_server_conf`（conf 键 `carddav`） |
+| `45a9611b` | `281da6a3` + `6c61f34b` + `c5b0faaa` | feat(melib) | JMAP 通讯录后端（ContactCard CRUD、capabilities 接线、`contact_backend()` 覆写） |
+| `24756e5d` | — | fix(melib-test) | jmap_redirect Store 字面量补 `identities`（第一波涟漪） |
+| `9a569183` | — | test | 离线 jmap-contacts 用例 + mock 服务器 contacts 能力 |
+| `97cce6a1` | `db9f7f93`（melib conf） | feat(melib) | `ContactBackendConf` 枚举 + 每账户 `contacts` map；删除旧 `notmuch_address_book_query`/`mutt_alias_file`/`vcard_folder` 键 |
+| `05911e9e` | `6c61f34b` | refactor(melib) | 默认书后端标识对齐上游 `DefaultContacts` |
+| `3f29255a` | `db9f7f93` + `6c61f34b` + `14640216` | feat(meli) | accounts/contacts.rs 翻译到 fork 的 tokio 作业执行器；后端装载（mutt/vcard/notmuch/CardDAV/JMAP）+ CRUD 作业；fork 默认书 JSON 持久化与 `external_resource` 过滤语义保留（往返单测锁定） |
+| `4ed6dbe6` | `db9f7f93`（迁移） | feat(meli) | `v0_12_0` ContactBackendRefactor 迁移（旧三键 → `contacts` map）+ 工作区版本 0.12.0 |
+| `5e6f987f` | `ab506b45` | fix(meli) | ServerPasswordCommand 迁移补链 related path |
+| `0db9af49` | `c3de4afd` | feat(meli) | `meli migration` 工具（list/apply/revert，dry-run/verbose） |
+| `ce4654bf` | `c6c49d77` | docs(meli.1) | 补缺失 CLI 参数 |
+| `38803c54` | `db9f7f93` + `14640216`（docs） | docs(meli.conf.5) | `contacts` 配置面 + CardDAV 段 |
+| `fba25257`、`73b2b127`、验收修复批 | — | fix | 合并残留：canonicalize_crlf 去重；cve 夹具适配 `Contacts::cards()` 门面与 `Store.identities`；clippy/文档验收批；`decl_version_map` doctest 示例 map 扩至 `v0_12_0`；CVE 语料断言面适配（2386 换 `contacts` 配置 + 跨书 `search("")` 计数、1088 重锚 accounts/contacts.rs 与 add_card 计数、0145 折行改等价性断言、2009 族 danger_* 白名单纳入 webdav.rs）、SMTP 530 往返测试更新 |
+
+  合并前已覆盖（无单独移植）：`dc14fbbf`（job metadata——被 `3f29255a` 的翻译吸收）、`c8f0a95e`（`From<bool> for IsAsync`——同形实现随 `3f29255a` 落地）、`924d00f8`（随 `458a3680`）。
+
+  跳过（20 个提交，UI/主题/清理类、落在分叉形态上）：
+
+| 上游提交 | 理由 |
+| --- | --- |
+| `3e7133b9`/`db9f7f93`/`6c61f34b`/`14640216`（仅 UI hunk） | contacts list/editor/export UI 重做——fork UI 更先进；经 Contacts 门面 fork UI 零改动编译 |
+| `15ec10ec`、`168410ab` | contact 导出对话框 + Escape 取消——UI |
+| `21895e71`、`c9182179`、`0cc149ee`、`82d3a4b5` | 通用组件（Enter 消费、normal mode、secondary_area、List 组件）——UI |
+| `1c9cbe30`、`e6b2bdfe` | 任意输入长度补全——fork 撰写页补全已更先进 |
+| `fc9ab541`、`3fa4ec87`、`b5d389db` | contacts list/editor 行为修复——UI |
+| `64d89b8e` | MailboxManager 迁通用 List——UI |
+| `a0dc6d37`、`5d41a2bc` | OSC10/11 自动主题 + themes 模块公开——UI/主题 |
+| `082f3c58` | 内嵌终端 SGR 分组——UI 性能 |
+| `33147fad`、`e4098bf9`、`5aa4fb7a`、`dcf153ee` | 分叉形态上的琐碎修复/清理 |
+| `d3640f72` | workspace `[lints]` 段——fork CI 的 `RUSTFLAGS=-D warnings`（含 tests/examples/benches）已承担同等门禁；照搬上游 nursery/style 全量 deny 会拖入 fork 分叉 UI 代码内的数十处 clippy 修正 |
+
 ## 2026-10-03 01:20 (UTC+8)
 
 - 同步方式：两个并行 worktree 分支语义移植（`sync-melib-trio`、`sync-flag-toggle`），各由一个 dsh 子代理执行,每项改动 TDD 先红后绿

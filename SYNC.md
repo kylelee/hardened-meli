@@ -39,6 +39,86 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 ## Sync log
 
 
+## 2026-10-12 23:30 (UTC+8)
+
+- Method: semantic port on eight parallel worktree branches (`sync/contacts-framework`, `sync/jmap-core`, `sync/backend-trait`, `sync/pgp-sequoia`, `sync/melib-fixes`, `sync/carddav-backend`, `sync/jmap-contacts`, `sync/frontend-integration`), executed by dsh sub-agents in two dependency-ordered waves; UI-layer commits deliberately skipped (fork UI architecture supersedes)
+- Upstream range: `aea4508b..168410ab` (73 commits; 53 ported — 5 of them partially, UI hunks dropped — and 20 skipped, see tables)
+- Merge commits: `a0ddb2a1` (melib-fixes), `c2dcd560` (jmap-core), `42585c11` (contacts-framework), `f41fd7b1` (backend-trait), `f36305f3` (pgp-sequoia), `96945e7d` (carddav-backend), `a5ffd126` (jmap-contacts), `ce6f4ab6` (frontend-integration)
+- Conflicts resolved semantically at merge time:
+  - `melib-test/tests/jmap/main.rs`: S3a (port of `5b68048d`: keywords tracking with `tracing`, `StateChange` broadcast, `EmailObjRef` addressing) vs S4 (independently rebuilt equivalent mock-server machinery plus `POST /upload`, `Email/import`, real `Email/query` for its save-with-flags-and-tags tests). Resolution: S3a skeleton kept; S4's upload/import/query additions kept; the two divergent `keywords` stores unified on the JMAP-native `IndexMap<String, bool>` form with a `flag_keyword` helper so flag-bit keywords round-trip through `Email/get`; redundant `set_flags_by_id`/`set_flags(String)` dropped in favour of `set_flags(EmailObjRef, FlagOp)`.
+  - `melib/src/imap/mod.rs`: S1's literal `supports_contacts: false, extra_submission_headers: &[]` subsumed by S4's `..MailBackendCapabilities::default()` spread (Default = EMPTY const, same values).
+  - `melib/src/utils/mod.rs`: S4 and S6 both added `canonicalize_crlf`; deduplicated in `fba25257`.
+- Acceptance: `make check`, `make lint`, `make test` all green (all features); MSRV 1.85.0 → 1.88.0 (upstream `edaa6736`).
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| `d4593170` | `b0c6bcda` | fix(melib) | SMTP `ReplyCode` parses `530` |
+| `1576386c` | `9cc5293d` | fix(melib) | `Error::set_source` downcasts to Self (fork keeps `Arc`; the Arc→Box refactor in the same upstream commit not carried) |
+| `1ca89a1d` | `c83c9e67` | fix(melib) | no repeated period when concatenating summary/details |
+| `27cde630` | `f1bd593d` | fix(melib) | Display always shows related path |
+| `e4c9155d` | `d6b2bc79` | fix(meli) | temp-file conflict rename keeps extension (`rsplit_once`, improves upstream's last-dot reset) |
+| `c8a69b20` | `834679d6` | refactor(melib) | JMAP capabilities moved to module |
+| `3ccbc1bf` | `085de222` | refactor(melib) | identities stored in Store, not Session |
+| `87ba174d` | `c1b32e3a` | perf(melib) | mail `account_id` cached in EmailFetcher |
+| `862d2907` | `4325dbe1` | fix(melib) | Set responses only include server-set properties |
+| `7762737e` | `d5ba7be8` | fix(melib) | EventSource stream without request timeout + 60s connect timeout |
+| `66f2f10e` | `5b68048d` | test | test server tracks keywords (its Email/import+upload facilities were completed by S4's port of `eeb91753`, which also added the `EmailImport` wire types) |
+| `210b5313` | `3e7133b9`+`62c24b52`+`db9f7f93`+`6c61f34b` | feat(melib) | AddressBook multi-container + Contacts facade (hand-written serde keeps the legacy single-book JSON persistence shape; fork frontend keeps compiling through the compat facade) |
+| `656cb283` | (same, meli hunks) | refactor(meli) | minimal mechanical adaptation only (3 lines in accounts.rs) |
+| `ed273b6a` | `62c24b52`+`6c61f34b`+`5eda1ee1` | feat(melib) | `ContactBackend` trait + Capabilities + CRUD; `MailBackendCapabilities::supports_contacts` + `MailBackend::contact_backend()` default method |
+| `f76b947d` | `1554983e` | feat(melib) | mutt alias-file backend |
+| `912fe2d3` | `982dd328` | feat(melib) | notmuch address-query backend |
+| `8a3007e0` | `254d8a5a`+`6c61f34b`+`d771b08f` | feat(melib) | vCard file backend + value-folding detection (fork's CWE-754 per-file isolation semantics kept) |
+| `7dfd8720` | `8b82457a` | refactor(melib) | Card `Display` renders as Address |
+| `7da07e3d` | `d5ecc5a8` | feat(melib) | notmuch query `--output=recipients` + meli.conf.5 |
+| `15bfc9c3`/`5f8a7110`/`68e20787`/`b8331cbd`/`6641e214`/`54e3e033` | `06a63d1b`/`195aabb6`/`d08d69e7`/`b61d1178`/`3a98bf00`/`c5b0faaa` | feat/fix(melib) | JSContact Clone, Send/Sync, schema fix, serde impl, name components, API fixes |
+| `39a123b4` | `d628a7dd` | fix(melib) | NNTP submission CRLF canonicalization (regex-free probe, shared later via utils) |
+| `eda853ee` | `9e0d441d` | refactor(melib) | imap capabilities via `..default()` spread |
+| `96c0fd6a` | `4dd81ffa` | refactor(melib) | `submit()` drops the never-used flags argument |
+| `b1d4cf9c` | `eeb91753` | feat(melib) | `save` with flags and tags (imap APPEND keywords, jmap EmailSet keywords after import, maildir/mbox/nntp signatures) |
+| `07a617e8` | `cb633c63` | feat(melib) | notmuch refresh scoped to one mailbox |
+| `7b626f2b` | `b2360adf` | feat(melib) | notmuch database revision (skip no-op refreshes) |
+| `6f5f2633` | `fa4a3daa` | feat(melib) | notmuch `Message` Debug impl |
+| `458a3680` | `7cf9e3c2` + `924d00f8` | feat(melib) | notmuch `save_to` + `MailboxConf` extra arbitrary values (ExtraSetting) |
+| `ff2e2d34` | `2fa32889` + `6e0740db` | feat(melib) | Sequoia PGP backend — opt-in cargo feature `sequoia` (default off), PGPBackendChoice::Sequoia, decrypt returns SignaturesMetadata; fork's CLI backend keeps sign-then-encrypt (no regression) |
+| `dec0b9fe` | `e8276c7a` | fix(melib) | gpgme loader falls back to alternative library names |
+| `a3a8055e` | `b0b2aa1e` | perf(melib) | `convert_attachment_to_rfc_spec` returns Cow |
+| `cdd0d637` | `d4d83770` | refactor(melib) | canonicalize_crlf moved to utils |
+| `b8a6a558` | `edaa6736` | chore | MSRV 1.88.0 |
+| `9a9310a8` | `16ada4cb` + `6af4e32e` | ci | Gitea CI: sequoia build deps + explicit `--features sequoia` check step |
+| `e889d0fe` | `88c8451c` + `6c61f34b` | feat(melib) | WebDAV client + CardDAV ContactBackend (isahc 2, http 1.x, quick-xml; `webdav` feature mirrors upstream default set) |
+| `f67b51ee` | `14640216` (melib side) | feat(melib) | `AccountSettings::carddav_server_conf` (`carddav` conf key) |
+| `45a9611b` | `281da6a3` + `6c61f34b` + `c5b0faaa` | feat(melib) | JMAP contacts backend (ContactCard CRUD, capabilities wiring, `contact_backend()` override) |
+| `24756e5d` | — | fix(melib-test) | jmap_redirect Store literal missing `identities` (wave-1 fallout) |
+| `9a569183` | — | test | offline jmap-contacts test + mock-server contacts capability |
+| `97cce6a1` | `db9f7f93` (melib conf) | feat(melib) | `ContactBackendConf` enum + per-account `contacts` map; legacy `notmuch_address_book_query`/`mutt_alias_file`/`vcard_folder` keys removed |
+| `05911e9e` | `6c61f34b` | refactor(melib) | default-book backend id aligned with upstream `DefaultContacts` |
+| `3f29255a` | `db9f7f93` + `6c61f34b` + `14640216` | feat(meli) | accounts/contacts.rs translated onto the fork's tokio job executor; backend loading (mutt/vcard/notmuch/CardDAV/JMAP) + CRUD jobs; fork default-book JSON persistence and `external_resource` filter semantics preserved (round-trip tests) |
+| `4ed6dbe6` | `db9f7f93` (migration) | feat(meli) | `v0_12_0` ContactBackendRefactor migration (legacy keys → `contacts` map) + workspace version 0.12.0 |
+| `5e6f987f` | `ab506b45` | fix(meli) | ServerPasswordCommand migration chains related path |
+| `0db9af49` | `c3de4afd` | feat(meli) | `meli migration` tool (list/apply/revert, dry-run/verbose) |
+| `ce4654bf` | `c6c49d77` | docs(meli.1) | missing CLI args |
+| `38803c54` | `db9f7f93` + `14640216` (docs) | docs(meli.conf.5) | `contacts` config surface + CardDAV section |
+| `fba25257`, `73b2b127`, acceptance-fix batch | — | fix | merge residue: canonicalize_crlf dedupe; cve fixtures adapted to the `Contacts::cards()` facade and `Store.identities`; clippy/doc acceptance fixes; `decl_version_map` doctest map extended to `v0_12_0` |
+
+  Already covered before/at merge (no separate port): `dc14fbbf` (job metadata — subsumed by `3f29255a`'s translation), `c8f0a95e` (`From<bool> for IsAsync` — same-shape impl landed with `3f29255a`), `924d00f8` (with `458a3680`).
+
+  Skipped (20 commits, UI/theme/cleanup on diverged shapes):
+
+| Upstream commit | Reason |
+| --- | --- |
+| `3e7133b9`/`db9f7f93`/`6c61f34b`/`14640216` (UI hunks only) | contacts list/editor/export UI rework — fork UI supersedes; fork UI compiles unchanged via the Contacts facade |
+| `15ec10ec`, `168410ab` | contact export dialog + Escape cancel — UI |
+| `21895e71`, `c9182179`, `0cc149ee`, `82d3a4b5` | generic widgets (Enter-consume, normal mode, secondary_area, List component) — UI |
+| `1c9cbe30`, `e6b2bdfe` | autocomplete for any input length — fork's composer autocomplete already supersedes |
+| `fc9ab541`, `3fa4ec87`, `b5d389db` | contacts list/editor behavioral fixes — UI |
+| `64d89b8e` | MailboxManager → generic List migration — UI |
+| `a0dc6d37`, `5d41a2bc` | OSC10/11 auto theme + public themes module — UI/theme |
+| `082f3c58` | grouped SGR updates in embedded terminal — UI perf |
+| `33147fad`, `e4098bf9`, `5aa4fb7a`, `dcf153ee` | trivial fix/cleanups on diverged shapes |
+| `d3640f72` | workspace `[lints]` section — fork CI's `RUSTFLAGS=-D warnings` (tests/examples/benches included) already provides the equivalent gate; adopting upstream's nursery/style deny set would drag in dozens of clippy fixes inside fork-diverged UI code |
+
+
 ## 2026-10-03 01:20 (UTC+8)
 
 - Method: semantic port on two parallel worktree branches (`sync-melib-trio`, `sync-flag-toggle`), executed by two dsh sub-agents with TDD (red→green) per change
