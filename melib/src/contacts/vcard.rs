@@ -28,15 +28,22 @@
 //! - Version 4 [RFC 6350: vCard Format Specification](https://datatracker.ietf.org/doc/rfc6350/)
 //! - Parameter escaping [RFC 6868 Parameter Value Encoding in iCalendar and vCard](https://datatracker.ietf.org/doc/rfc6868/)
 
-use std::convert::TryInto;
+use std::{convert::TryInto, hash::Hasher, path::PathBuf};
 
 use indexmap::IndexMap;
 
-use super::*;
 use crate::{
-    error::{Error, ErrorKind, Result},
-    utils::parsec::{
-        match_literal_anycase, one_or_more, peek, prefix, take_until, whitespace_wrap, Parser,
+    backends::prelude::ResultFuture,
+    contacts::{
+        backend::{ContactBackend, ContactBackendCapabilities},
+        AddressBook, AddressBookName, Card, CardId,
+    },
+    error::{Error, ErrorKind, Result, ResultIntoError},
+    utils::{
+        parsec::{
+            match_literal_anycase, one_or_more, peek, prefix, take_until, whitespace_wrap, Parser,
+        },
+        shellexpand::ShellExpandTrait,
     },
 };
 
@@ -102,6 +109,12 @@ pub struct ContentLine {
 
 impl CardDeserializer {
     pub fn try_from_str(mut input: &str) -> Result<VCard<impl VCardVersion>> {
+        let (sep, fold) = if input.starts_with(HEADER_CRLF) {
+            ("\r\n", "\r\n ")
+        } else {
+            ("\n", "\n ")
+        };
+
         input = if (!input.starts_with(HEADER_CRLF)
             || (!input.ends_with(FOOTER_CRLF) && !input.ends_with(FOOTER)))
             && (!input.starts_with(HEADER_LF)
@@ -148,7 +161,27 @@ impl CardDeserializer {
         }
         let mut stage: Stage;
 
-        for l in input.lines() {
+        let mut cursor = 0;
+        while cursor < input.len() {
+            let mut line_end = 0;
+            while let Some(next_ln) = input[cursor..][line_end..].find(sep) {
+                if input[cursor..][line_end..][next_ln + sep.len()..].starts_with(' ') {
+                    line_end += next_ln + sep.len();
+                    if !input[cursor..][line_end..].contains(sep) {
+                        line_end = input[cursor..].len();
+                        break;
+                    }
+                    continue;
+                }
+                line_end += next_ln + sep.len();
+                break;
+            }
+            if line_end == 0 {
+                line_end = input[cursor..].len();
+            }
+            let l = input[cursor..][..line_end].trim();
+            cursor += line_end;
+
             let mut el = ContentLine::default();
             let mut value_start = 0;
             let mut has_colon = false;
@@ -204,7 +237,11 @@ impl CardDeserializer {
                 ))
                 .set_kind(ErrorKind::ValueError));
             }
-            el.value = l[value_start..].replace("\\:", ":");
+            let mut value = l[value_start..].replace("\\:", ":");
+            if value.contains(fold) {
+                value = value.replace(fold, "");
+            }
+            el.value = value;
             ret.insert(name, el);
         }
         Ok(VCard(ret, std::marker::PhantomData::<*const VCardVersion4>))
@@ -306,51 +343,50 @@ fn parse_card<'a>() -> impl Parser<'a, Vec<&'a str>> {
 }
 
 pub fn load_cards(p: &std::path::Path) -> Result<Vec<Card>> {
-    let vcf_dir = std::fs::read_dir(p);
+    let vcf_dir = std::fs::read_dir(p).chain_err_related_path(p)?;
     let mut ret: Vec<Result<_>> = Vec::new();
     let mut is_any_valid = false;
-    if vcf_dir.is_ok() {
-        let mut contents = String::with_capacity(256);
-        for f in vcf_dir? {
-            if f.is_err() {
+    let mut contents = String::with_capacity(256);
+    for f in vcf_dir {
+        if f.is_err() {
+            continue;
+        }
+        let f = f.chain_err_related_path(p)?.path();
+        if f.is_file() {
+            use std::io::Read;
+            contents.clear();
+            // One unreadable or non-UTF-8 file (a vCard is a UTF-8 text
+            // format, so binary garbage fails `read_to_string`) must cost
+            // only that file. Propagating the error with `?` used to abort
+            // the whole address book load and drop every card from every
+            // other file too (CWE-754).
+            if let Err(err) = std::fs::File::open(&f)
+                .chain_err_related_path(&f)
+                .and_then(|mut file| {
+                    file.read_to_string(&mut contents)
+                        .chain_err_related_path(&f)
+                })
+            {
+                tracing::warn!("Could not read vcard file {}: {}", f.display(), err);
                 continue;
             }
-            let f = f?.path();
-            if f.is_file() {
-                use std::io::Read;
-                contents.clear();
-                // One unreadable or non-UTF-8 file (a vCard is a UTF-8 text
-                // format, so binary garbage fails `read_to_string`) must cost
-                // only that file. Propagating the error with `?` used to abort
-                // the whole address book load and drop every card from every
-                // other file too (CWE-754).
-                if let Err(err) = std::fs::File::open(&f)
-                    .map_err(|err| err.to_string())
-                    .and_then(|mut file| {
-                        file.read_to_string(&mut contents)
-                            .map_err(|err| err.to_string())
-                    })
-                {
-                    tracing::warn!("Could not read vcard file {}: {}", f.display(), err);
-                    continue;
+            match parse_card().parse(contents.as_str()) {
+                Ok((_, c)) => {
+                    for s in c {
+                        ret.push(
+                            CardDeserializer::try_from_str(s)
+                                .and_then(TryInto::try_into)
+                                .map(|mut card| {
+                                    Card::set_external_resource(&mut card, true);
+                                    is_any_valid = true;
+                                    card
+                                })
+                                .map_err(|err| err.set_related_path(Some(&f))),
+                        );
+                    }
                 }
-                match parse_card().parse(contents.as_str()) {
-                    Ok((_, c)) => {
-                        for s in c {
-                            ret.push(
-                                CardDeserializer::try_from_str(s)
-                                    .and_then(TryInto::try_into)
-                                    .map(|mut card| {
-                                        Card::set_external_resource(&mut card, true);
-                                        is_any_valid = true;
-                                        card
-                                    }),
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!("Could not parse vcard from {}: {}", f.display(), err);
-                    }
+                Err(err) => {
+                    tracing::warn!("Could not parse vcard from {}: {}", f.display(), err);
                 }
             }
         }
@@ -364,6 +400,71 @@ pub fn load_cards(p: &std::path::Path) -> Result<Vec<Card>> {
         ret.retain(Result::is_ok);
     }
     ret.into_iter().collect::<Result<Vec<Card>>>()
+}
+
+#[derive(Debug)]
+pub struct VCardContacts {
+    pub path: PathBuf,
+}
+
+impl ContactBackend for VCardContacts {
+    fn capabilities(&mut self) -> ContactBackendCapabilities {
+        ContactBackendCapabilities::default()
+    }
+
+    fn address_books(&mut self) -> ResultFuture<Vec<AddressBookName>> {
+        Ok(Box::pin(async {
+            Ok(vec![AddressBookName("vcard_folder".into())])
+        }))
+    }
+
+    fn fetch_book(&mut self, address_book: &AddressBookName) -> ResultFuture<AddressBook> {
+        if address_book.0.as_ref() != "vcard_folder" {
+            return Err(Error::new("").set_kind(ErrorKind::ValueError));
+        }
+        let name = address_book.clone();
+        let vcard_path = self.path.clone();
+        Ok(Box::pin(async move {
+            let expanded_path = vcard_path.expand();
+            let cards = load_cards(&expanded_path).map_err(|err| {
+                let mut err = err.set_summary("Could not load vcards");
+                if expanded_path != *vcard_path {
+                    err = err.set_details(format!(
+                        "Note: vcard_folder was expanded from {} to {}",
+                        vcard_path.display(),
+                        expanded_path.display()
+                    ));
+                }
+                err
+            })?;
+
+            let mut book = AddressBook::new(name, true);
+            for c in cards {
+                book.add_card(c);
+            }
+            Ok(book)
+        }))
+    }
+
+    fn add(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<Card> {
+        Err(Error::new("").set_kind(ErrorKind::NotSupported))
+    }
+
+    fn edit(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<Card> {
+        Err(Error::new("").set_kind(ErrorKind::NotSupported))
+    }
+
+    fn delete(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<()> {
+        Err(Error::new("").set_kind(ErrorKind::NotSupported))
+    }
+
+    fn search(
+        &self,
+        _term: &str,
+        _address_book: Option<&AddressBookName>,
+    ) -> ResultFuture<Vec<Card>> {
+        Err(Error::new("").set_kind(ErrorKind::NotSupported))
+    }
 }
 
 #[test]
@@ -445,6 +546,12 @@ fn test_vcard_v4_parse() {
     let parsed2 = CardDeserializer::try_from_str(j).unwrap();
     assert_eq!(parsed2.version(), VCardVersion4::NAME);
     assert_eq!(parsed2.0, contents,);
+
+    // Test with value folding
+    let j = "BEGIN:VCARD\nVERSION:4.0\nN:Gump;Forrest;;Mr.;\nFN:Forrest \n Gump\nORG:Bubba Gump Shrimp Co.\nTITLE:Shrimp Man\nPHOTO;MEDIATYPE=image/gif:http://www.example.com/dir_photos/my_photo.gif\nTEL;TYPE=work,voice;VALUE=uri:tel:+1-111-555-1212\nTEL;TYPE=home,voice;VALUE=uri:tel:+1-404-555-1212\nADR;TYPE=WORK;PREF=1;LABEL=\"100 Waters Edge\\nBaytown\\, LA 30314\\nUnited States of America\":;;100 Waters Edge;Baytown;LA;30314;United States of America\nADR;TYPE=HOME;LABEL=\"42 Plantation St.\\nBaytown\\, LA 30314\\nUnited States of America\":;;42 Plantation St.;Baytown;LA;30314;United States of America\nEMAIL:forrestgump@example.com\nREV:20080424T195243Z\nx-qq:21588891\nEND:VCARD\n";
+    let parsed3 = CardDeserializer::try_from_str(j).unwrap();
+    assert_eq!(parsed3.version(), VCardVersion4::NAME);
+    assert_eq!(parsed3.0, contents,);
 }
 
 // Regression tests (CWE-1287) for the header/footer variant-length mismatch in
