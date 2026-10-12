@@ -21,10 +21,6 @@
 
 //! Utility modules for general use.
 
-use std::borrow::Cow;
-
-use crate::email::parser::BytesExt;
-
 pub mod connections;
 pub mod datetime;
 pub mod fnmatch;
@@ -304,9 +300,7 @@ pub fn canonicalize_crlf(input: &'_ [u8]) -> std::borrow::Cow<'_, [u8]> {
     // without compiling (and `unwrap()`ing) a regex on every call; mirrors
     // `email::pgp::convert_attachment_to_rfc_spec`.
     if input.windows(2).any(|w| w[0] != b'\r' && w[1] == b'\n') {
-        return std::borrow::Cow::Owned(
-            input.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"),
-        );
+        return std::borrow::Cow::Owned(input.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"));
     }
     std::borrow::Cow::Borrowed(input)
 }
@@ -364,18 +358,4 @@ macro_rules! identify {
         let _: ::core::marker::PhantomData<Self> = __debugify();
         stringify!($f$($t)*)
     }};
-}
-
-/// Canonicalize line endings to `<CR><LF>` (`\r\n`).
-///
-/// Equivalent to the former `regex::bytes::Regex::new(r"[^\r]\n")` probe,
-/// without compiling (and `unwrap()`ing) a regex on every call.
-pub fn canonicalize_crlf(input: &'_ [u8]) -> Cow<'_, [u8]> {
-    if input.is_empty() {
-        return Cow::Borrowed(input);
-    }
-    if input.windows(2).any(|w| w[0] != b'\r' && w[1] == b'\n') {
-        return Cow::Owned(input.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"));
-    }
-    Cow::Borrowed(input)
 }
