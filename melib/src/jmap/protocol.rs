@@ -36,7 +36,7 @@ use crate::{
         email::{EmailFilterCondition, EmailGet, EmailObject, EmailQuery},
         filters::Filter,
         methods::{Get, GetResponse, MethodResponse, Query},
-        objects::{Object, State},
+        objects::{Account, Id, Object, State},
         JmapConnection, Store,
     },
     Flag, MailboxHash,
@@ -110,6 +110,7 @@ impl Request {
 
 pub struct EmailFetcher {
     pub connection: Arc<FutureMutex<JmapConnection>>,
+    pub mail_account_id: Id<Account>,
     pub store: Arc<Store>,
     pub batch_size: u64,
     pub state: EmailFetchState,
@@ -161,7 +162,6 @@ impl EmailFetcher {
                 EmailFetchState::Ongoing { mut position } => {
                     let mut conn = self.connection.lock().await;
                     conn.connect().await?;
-                    let mail_account_id = conn.session_guard().await?.mail_account_id()?;
                     let mailbox_id = self
                         .store
                         .mailboxes
@@ -179,7 +179,7 @@ impl EmailFetcher {
                         .clone();
                     let email_query_call: EmailQuery = EmailQuery::new(
                         Query::new()
-                            .account_id(mail_account_id.clone())
+                            .account_id(self.mail_account_id.clone())
                             .filter(Some(Filter::Condition(
                                 EmailFilterCondition::new().in_mailbox(Some(mailbox_id)),
                             )))
@@ -200,7 +200,7 @@ impl EmailFetcher {
                             >(
                                 prev_seq, EmailQuery::RESULT_FIELD_IDS
                             )))
-                            .account_id(mail_account_id),
+                            .account_id(self.mail_account_id.clone()),
                     );
 
                     let _prev_seq = req.add_call(&email_call).await;

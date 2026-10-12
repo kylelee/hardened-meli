@@ -538,6 +538,11 @@ impl MailBackend for JmapType {
         let store = self.store.clone();
         let connection = self.connection.clone();
         Ok(Box::pin(try_fn_stream(|emitter| async move {
+            let mail_account_id = {
+                let conn = connection.lock().await;
+                let session_guard = conn.session_guard().await?;
+                session_guard.mail_account_id()?
+            };
             // Suggested minimum from RFC8620 Section 2 "The JMAP Session Resource" is 500.
             let batch_size: u64 = {
                 let core_capabilities = store.core_capabilities.lock().unwrap();
@@ -551,6 +556,7 @@ impl MailBackend for JmapType {
             };
             let mut fetch_state = EmailFetcher {
                 connection,
+                mail_account_id,
                 store,
                 batch_size,
                 state: EmailFetchState::Start,
