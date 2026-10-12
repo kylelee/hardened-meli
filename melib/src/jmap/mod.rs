@@ -99,6 +99,7 @@ use backend_mailbox::JmapMailbox;
 pub mod argument;
 pub mod capabilities;
 pub mod comparator;
+pub mod contacts;
 pub mod email;
 pub mod eventsource;
 pub mod filters;
@@ -109,7 +110,9 @@ pub mod thread;
 pub mod url_template;
 
 use argument::Argument;
-use capabilities::{JmapCoreCapability, JmapMailCapability, JmapSubmissionCapability};
+use capabilities::{
+    JmapContactsCapability, JmapCoreCapability, JmapMailCapability, JmapSubmissionCapability,
+};
 use filters::Filter;
 use identity::Identity;
 
@@ -479,15 +482,18 @@ impl MailBackend for JmapType {
             ..crate::backends::EMPTY_MAIL_BACKEND_CAPABILITIES
         };
         let mut supports_submission = false;
+        let mut supports_contacts = false;
         let mut extensions = None;
         if let Ok(core_capabilities) = self.store.core_capabilities.lock() {
             let mut caps = vec![];
             supports_submission = core_capabilities.contains_key(JmapSubmissionCapability::uri());
+            supports_contacts = core_capabilities.contains_key(JmapContactsCapability::uri());
             for k in core_capabilities.keys() {
                 if [
                     JmapCoreCapability::uri(),
                     JmapMailCapability::uri(),
                     JmapSubmissionCapability::uri(),
+                    JmapContactsCapability::uri(),
                 ]
                 .contains(&k.as_str())
                 {
@@ -517,6 +523,7 @@ impl MailBackend for JmapType {
 
         MailBackendCapabilities {
             supports_submission,
+            supports_contacts,
             metadata,
             extensions,
             ..CAPABILITIES
@@ -1772,6 +1779,70 @@ impl MailBackend for JmapType {
                 };
             }
             Ok(())
+        }))
+    }
+
+    fn contact_backend(
+        &mut self,
+    ) -> ResultFuture<Box<dyn crate::contacts::backend::ContactBackend>> {
+        let server_conf = self.server_conf.clone();
+        let store = self.store.clone();
+        let connection = self.connection.clone();
+        Ok(Box::pin(async move {
+            {
+                let mut conn = timeout(server_conf.timeout, connection.lock()).await?;
+                conn.connect().await?;
+            }
+            let (account_id, capabilities) = {
+                let conn = connection.lock().await;
+                let session_guard = conn.session_guard().await?;
+                let core_capabilities = store.core_capabilities.lock().unwrap();
+                if !core_capabilities.contains_key(JmapContactsCapability::uri()) {
+                    return Err(Error::new(
+                        "Server does not support JSON Meta Application Protocol (JMAP) for \
+                         Contacts",
+                    )
+                    .set_kind(ErrorKind::NotSupported));
+                }
+                let account_id = session_guard.contacts_account_id()?;
+                let account = session_guard.accounts.get(&account_id).ok_or_else(|| {
+                    Error::new(format!(
+                        "JMAP Server session does not have primary contact account {account_id} \
+                         in `accounts` field. It has: {:?}",
+                        session_guard.accounts
+                    ))
+                    .set_kind(ErrorKind::Bug)
+                })?;
+                let account_caps = account
+                    .account_capabilities
+                    .get(JmapContactsCapability::uri())
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "JMAP Server session does not have primary contact account \
+                             {account_id} capabilities for {} in `accounts` field. It has: {:?}",
+                            JmapContactsCapability::uri(),
+                            account.account_capabilities
+                        ))
+                        .set_kind(ErrorKind::Bug)
+                    })?;
+                let account_caps =
+                    serde_json::from_value(account_caps.clone()).map_err(|err| {
+                        Error::new(format!(
+                            "Could not deserialize contacts Capabilities object from Session \
+                             object: {account_caps:?}"
+                        ))
+                        .set_kind(ErrorKind::Bug)
+                        .set_source(Some(Arc::new(err)))
+                    })?;
+                (account_id, account_caps)
+            };
+            Ok(Box::new(contacts::JmapContacts {
+                account_id,
+                capabilities,
+                server_conf,
+                connection,
+                store,
+            }) as Box<dyn crate::contacts::backend::ContactBackend>)
         }))
     }
 }
