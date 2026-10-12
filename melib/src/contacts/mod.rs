@@ -20,6 +20,8 @@
  */
 
 pub mod backend;
+#[cfg(feature = "webdav")]
+pub mod carddav;
 pub mod jscontact;
 pub mod mutt;
 pub mod notmuchcontact;

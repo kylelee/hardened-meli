@@ -36,6 +36,8 @@ pub mod sqlite3;
 #[cfg(test)]
 pub mod tests;
 pub mod vobject;
+#[cfg(feature = "webdav")]
+pub mod webdav;
 pub mod xdg;
 
 /// Convert an integer to a base 36 string using only ASCII letters and numbers.
