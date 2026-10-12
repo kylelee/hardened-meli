@@ -186,7 +186,7 @@ impl Migration for ServerPasswordCommand {
                 continue;
             };
 
-            Self::transform(&mut doc, verbose)?;
+            Self::transform(&mut doc, verbose).chain_err_related_path(&c)?;
 
             if !dry_run {
                 std::fs::write(&c, doc.to_string()).chain_err_related_path(&c)?;
@@ -206,7 +206,7 @@ impl Migration for ServerPasswordCommand {
                 continue;
             };
 
-            Self::revert_transform(&mut doc, verbose)?;
+            Self::revert_transform(&mut doc, verbose).chain_err_related_path(&c)?;
 
             if !dry_run {
                 std::fs::write(&c, doc.to_string()).chain_err_related_path(&c)?;
