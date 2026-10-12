@@ -109,8 +109,9 @@ pub mod thread;
 pub mod url_template;
 
 use argument::Argument;
-use capabilities::JmapCoreCapability;
+use capabilities::{JmapCoreCapability, JmapMailCapability, JmapSubmissionCapability};
 use filters::Filter;
+use identity::Identity;
 
 #[cfg(test)]
 mod tests;
@@ -362,6 +363,7 @@ pub struct Store {
     pub id_store: Arc<FutureMutex<HashMap<EnvelopeHash, Id<email::EmailObject>>>>,
     pub reverse_id_store: Arc<FutureMutex<HashMap<Id<email::EmailObject>, EnvelopeHash>>>,
     pub blob_id_store: Arc<FutureMutex<HashMap<EnvelopeHash, Id<BlobObject>>>>,
+    pub identities: Arc<FutureMutex<IndexMap<Id<Identity>, Identity>>>,
     pub collection: Collection,
     pub mailboxes: Arc<RwLock<HashMap<MailboxHash, JmapMailbox>>>,
     pub mailboxes_index: Arc<RwLock<HashMap<MailboxHash, HashSet<EnvelopeHash>>>>,
@@ -375,6 +377,11 @@ pub struct Store {
 }
 
 impl Store {
+    /// Return the first identity.
+    pub async fn mail_identity_id(&self) -> Option<Id<Identity>> {
+        self.identities.lock().await.keys().next().cloned()
+    }
+
     pub async fn add_envelope(&self, obj: email::EmailObject) -> Envelope {
         let mut flags = Flag::default();
         let mut labels: IndexSet<TagHash> = IndexSet::new();
@@ -531,6 +538,11 @@ impl MailBackend for JmapType {
         let store = self.store.clone();
         let connection = self.connection.clone();
         Ok(Box::pin(try_fn_stream(|emitter| async move {
+            let mail_account_id = {
+                let conn = connection.lock().await;
+                let session_guard = conn.session_guard().await?;
+                session_guard.mail_account_id()?
+            };
             // Suggested minimum from RFC8620 Section 2 "The JMAP Session Resource" is 500.
             let batch_size: u64 = {
                 let core_capabilities = store.core_capabilities.lock().unwrap();
@@ -544,6 +556,7 @@ impl MailBackend for JmapType {
             };
             let mut fetch_state = EmailFetcher {
                 connection,
+                mail_account_id,
                 store,
                 batch_size,
                 state: EmailFetchState::Start,
@@ -1562,7 +1575,7 @@ impl MailBackend for JmapType {
             let mail_account_id = conn.session_guard().await?.mail_account_id()?;
 
             // [ref:TODO] smarter identity detection based on From: ?
-            let Some(identity_id) = conn.session_guard().await?.mail_identity_id() else {
+            let Some(identity_id) = conn.store.mail_identity_id().await else {
                 return Err(Error::new(
                     "You need to setup an Identity in the JMAP server.",
                 ));
@@ -1719,6 +1732,7 @@ impl JmapType {
             mailboxes_index: Default::default(),
             mailbox_state: Default::default(),
             email_state: Default::default(),
+            identities: Default::default(),
         });
 
         Ok(Box::new(Self {

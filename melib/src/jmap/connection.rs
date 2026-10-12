@@ -44,7 +44,7 @@ use crate::{
         identity::{Identity, IdentityGet, IdentitySet},
         methods::{Changes, ChangesResponse, Get, GetResponse, MethodResponse, ResultField, Set},
         objects::{Id, State},
-        protocol::{self, JmapMailCapability, Request},
+        protocol::{self, Request},
         session::Session,
         validate_session_urls, validate_transport_url, JmapServerConf, Store,
     },
@@ -72,6 +72,7 @@ impl JmapConnection {
     pub fn new(server_conf: &JmapServerConf, store: Arc<Store>) -> Result<Self> {
         let client = HttpClient::builder()
             .dns_cache(isahc::net::dns::DnsCache::Forever)
+            .connect_timeout(Duration::from_secs(60))
             .connection_cache_size(8)
             .connection_cache_ttl(Duration::from_secs(30 * 60))
             .default_header(http::header::CONTENT_TYPE, "application/json")
@@ -92,9 +93,7 @@ impl JmapConnection {
             // see [`JmapConnection::redirect_target`].
             .redirect_policy(RedirectPolicy::None);
         let client = if let Some(dur) = server_conf.timeout.filter(|dur| *dur != Duration::ZERO) {
-            client
-                .timeout(dur)
-                .connect_timeout(dur + Duration::from_secs(300))
+            client.timeout(dur)
         } else {
             client
         };
@@ -449,7 +448,7 @@ impl JmapConnection {
                 GetResponse::<Identity>::try_from(v.take_first()?)?;
             id_list = list;
         }
-        self.session_guard().await?.identities =
+        *self.store.identities.lock().await =
             id_list.into_iter().map(|id| (id.id.clone(), id)).collect();
 
         Ok(())
