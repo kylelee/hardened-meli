@@ -35,7 +35,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{
     backends::prelude::*,
-    error::{Error, ErrorKind, IntoError, Result},
+    error::{Error, ErrorKind, IntoError, Result, ResultIntoError},
+    maildir::utilities::MaildirFilePathExt as _,
     utils::shellexpand::ShellExpandTrait,
 };
 
@@ -106,6 +107,7 @@ impl Drop for DbPointer {
 #[derive(Debug, Clone)]
 pub struct DbConnection {
     pub lib: Arc<NotmuchLibrary>,
+    pub path: PathBuf,
     pub inner: Arc<Mutex<DbPointer>>,
 }
 
@@ -153,6 +155,7 @@ impl DbConnection {
             })?;
         let ret = Self {
             lib,
+            path: path.to_path_buf(),
             inner: Arc::new(Mutex::new(database)),
         };
         Ok(ret)
@@ -338,6 +341,18 @@ impl From<NotmuchError> for Error {
     }
 }
 
+/// Configuration of an on-disk Maildir directory a notmuch mailbox can save
+/// e-mail to (e.g. for the Drafts and Sent special-use mailboxes).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub struct SaveToConf {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+}
+
+impl crate::conf::ExtraSetting for SaveToConf {}
+
 #[derive(Debug)]
 pub struct NotmuchDb {
     lib: Arc<NotmuchLibrary>,
@@ -444,11 +459,13 @@ impl NotmuchDb {
         let mut mailboxes = IndexMap::with_capacity(s.mailboxes.len());
         let mut parents: Vec<(MailboxHash, String)> = Vec::with_capacity(s.mailboxes.len());
         for (k, f) in s.mailboxes.iter() {
-            if let Some(query_str) = f.extra.get("query").map(String::as_str) {
+            if let Some(query_str) = f.extra.get("query").and_then(|v| v.as_str()) {
                 let hash = MailboxHash::from_bytes(k.as_bytes());
-                if let Some(parent) = f.extra.get("parent").map(String::as_str) {
+                if let Some(parent) = f.extra.get("parent").and_then(|v| v.as_str()) {
                     parents.push((hash, parent.to_string()));
                 }
+                let save_to = f.deserialize_extra_field::<SaveToConf>("save_to")?;
+                let usage = f.usage.unwrap_or(SpecialUsageMailbox::Normal);
                 mailboxes.insert(
                     hash,
                     NotmuchMailbox {
@@ -458,7 +475,8 @@ impl NotmuchDb {
                         children: vec![],
                         parent: None,
                         query_str: query_str.to_string(),
-                        usage: Arc::new(RwLock::new(SpecialUsageMailbox::Normal)),
+                        save_to,
+                        usage: Arc::new(RwLock::new(usage)),
                         counters: Default::default(),
                     },
                 );
@@ -597,7 +615,24 @@ impl NotmuchDb {
                 ))
                 .set_kind(ErrorKind::Configuration));
             }
-            if let Some(parent) = f.extra.swap_remove("parent") {
+            if let Some(value) = f.extra.swap_remove("save_to") {
+                if let Err(err) =
+                    <SaveToConf as crate::conf::ExtraSetting>::deserialize_extra(&value)
+                {
+                    return Err(
+                        Error::new(format!(
+                            "notmuch mailbox configuration entry `{k}` for account                              {account_name} has an invalid `save_to` value"
+                        ))
+                        .set_source(Some(crate::src_err_arc_wrap! {err}))
+                        .set_kind(ErrorKind::Configuration)
+                    );
+                }
+            }
+            if let Some(parent) = f
+                .extra
+                .swap_remove("parent")
+                .and_then(|v| v.as_str().map(str::to_string))
+            {
                 parents.push((k.clone(), parent));
             }
         }
@@ -894,26 +929,168 @@ impl MailBackend for NotmuchDb {
     fn save(
         &mut self,
         bytes: Vec<u8>,
-        _mailbox_hash: MailboxHash,
+        mailbox_hash: MailboxHash,
         flags: Option<(Flag, Vec<String>)>,
     ) -> ResultFuture<()> {
-        // [ref:FIXME]: call notmuch_database_index_file ?
-        let path = self.path.clone();
-        crate::maildir::MaildirType::save_to_mailbox(path, bytes, flags.map(|(f, _)| f))?;
-        Ok(Box::pin(async { Ok(()) }))
+        let save_to = if let Some(m) = self.mailboxes.read().unwrap().get(&mailbox_hash) {
+            m.save_to.clone().ok_or_else(|| {
+                Error::new(format!(
+                    "Mailbox {} needs to have `save_to` field configured in order to store \
+                     e-mail",
+                    m.name
+                ))
+                .set_kind(ErrorKind::Configuration)
+            })?
+        } else {
+            return Err(
+                Error::new(format!("Mailbox with hash {mailbox_hash} not found!"))
+                    .set_kind(ErrorKind::NotFound),
+            );
+        };
+        let database = DbConnection::new(self.path.as_path(), self.lib.clone(), true)?;
+        Ok(Box::pin(async move {
+            let (flags, tags) = if let Some((flags, tags)) = flags {
+                (Some(flags), Some(tags))
+            } else {
+                (None, None)
+            };
+            let path =
+                crate::maildir::MaildirType::save_to_mailbox(save_to.path.clone(), bytes, flags)?;
+            let mut message: *mut ffi::notmuch_message_t = std::ptr::null_mut();
+            let path = CString::new(path.display().to_string())?;
+            unsafe {
+                try_call!(
+                    database.lib,
+                    (database.lib.database_index_file())(
+                        database.inner.lock().unwrap().as_mut(),
+                        path.as_ptr(),
+                        std::ptr::null_mut(),
+                        &raw mut message,
+                    )
+                )
+            }?;
+            let message = Message {
+                lib: database.lib.clone(),
+                message: NonNull::new(message).ok_or_else(|| {
+                    Error::new("notmuch_database_index_file set a non-NULL value to `message`")
+                        .set_kind(ErrorKind::Bug)
+                })?,
+                is_from_thread: false,
+                freezes: 0.into(),
+                _ph: std::marker::PhantomData,
+            };
+
+            message.freeze();
+            if let Some(tags) = tags {
+                for tag in tags {
+                    // Tags come from user configuration; a NUL byte cannot be
+                    // passed through the C API, so skip it with a warning
+                    // rather than panicking.
+                    let Ok(c_tag) = CString::new(tag.as_str()) else {
+                        tracing::warn!("Skipping tag with a NUL byte: {tag:?}");
+                        continue;
+                    };
+                    message.add_tag(&c_tag)?;
+                }
+            }
+            message.thaw();
+
+            Ok(())
+        }))
     }
 
     fn copy_messages(
         &mut self,
-        _env_hashes: EnvelopeHashBatch,
-        _source_mailbox_hash: MailboxHash,
-        _destination_mailbox_hash: MailboxHash,
-        _move_: bool,
+        env_hashes: EnvelopeHashBatch,
+        source_mailbox_hash: MailboxHash,
+        destination_mailbox_hash: MailboxHash,
+        move_: bool,
     ) -> ResultFuture<()> {
-        Err(
-            Error::new("Copying messages is currently unimplemented for notmuch backend")
-                .set_kind(ErrorKind::NotImplemented),
-        )
+        if move_ {
+            return Err(Error::new(
+                "Moving messages is currently unimplemented for notmuch backend",
+            )
+            .set_kind(ErrorKind::NotImplemented));
+        }
+        let mut save_to = {
+            let mailboxes = self.mailboxes.read().unwrap();
+            if !mailboxes.contains_key(&source_mailbox_hash) {
+                return Err(Error::new("Invalid source mailbox hash").set_kind(ErrorKind::NotFound));
+            }
+            if let Some(m) = mailboxes.get(&destination_mailbox_hash) {
+                m.save_to.clone().ok_or_else(|| {
+                    Error::new(format!(
+                        "Mailbox {} needs to have `save_to` field configured in order to store \
+                         e-mail",
+                        m.name
+                    ))
+                    .set_kind(ErrorKind::Configuration)
+                })?
+            } else {
+                return Err(Error::new(format!(
+                    "Mailbox with hash {destination_mailbox_hash} not found!"
+                ))
+                .set_kind(ErrorKind::NotFound));
+            }
+        };
+        save_to.path.push("cur");
+        let database = DbConnection::new(self.path.as_path(), self.lib.clone(), true)?;
+        let snapshot = self.snapshot.clone();
+
+        Ok(Box::pin(async move {
+            let snapshot = snapshot.read().unwrap();
+            let maildir_conf = Default::default();
+            for env_hash in env_hashes.iter() {
+                let Some(message_id) = snapshot.message_id_index.get(&env_hash) else {
+                    tracing::debug!("copy_messages: no message id cached for envelope {env_hash}");
+                    continue;
+                };
+                let message = match Message::find_message(&database, message_id) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::debug!("not found {err}");
+                        continue;
+                    }
+                };
+                let (_, tags) = message.tags().collect_flags_and_tags();
+                let from = Path::new(message.get_filename());
+                let to = from.place_in_dir(&save_to.path, &maildir_conf)?;
+
+                let mut message: *mut ffi::notmuch_message_t = std::ptr::null_mut();
+                std::fs::copy(from, &to).chain_err_related_path(&to)?;
+                let path = CString::new(to.display().to_string())?;
+                unsafe {
+                    try_call!(
+                        database.lib,
+                        (database.lib.database_index_file())(
+                            database.inner.lock().unwrap().as_mut(),
+                            path.as_ptr(),
+                            std::ptr::null_mut(),
+                            &raw mut message,
+                        )
+                    )
+                }?;
+                let message = Message {
+                    lib: database.lib.clone(),
+                    message: NonNull::new(message).ok_or_else(|| {
+                        Error::new(
+                            "notmuch_database_index_file set a non-NULL value to `message`",
+                        )
+                        .set_kind(ErrorKind::Bug)
+                    })?,
+                    is_from_thread: false,
+                    freezes: 0.into(),
+                    _ph: std::marker::PhantomData,
+                };
+                message.freeze();
+                for tag in tags {
+                    let c_tag = CString::new(tag.as_str()).unwrap();
+                    message.add_tag(&c_tag)?;
+                }
+                message.thaw();
+            }
+            Ok(())
+        }))
     }
 
     fn set_flags(

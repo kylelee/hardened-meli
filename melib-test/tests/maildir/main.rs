@@ -88,7 +88,7 @@ fn new_maildir_backend(
             "INBOX".into(),
             melib::conf::MailboxConf {
                 extra: indexmap::indexmap! {
-                    "path".into() => root_mailbox.display().to_string(),
+                    "path".into() => serde_json::Value::String(root_mailbox.display().to_string()),
                 },
                 ..Default::default()
             },

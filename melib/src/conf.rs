@@ -338,7 +338,7 @@ pub struct MailboxConf {
     #[serde(default = "none")]
     pub encoding: Option<String>,
     #[serde(flatten)]
-    pub extra: IndexMap<String, String>,
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 impl Default for MailboxConf {
@@ -359,6 +359,26 @@ impl Default for MailboxConf {
 impl MailboxConf {
     pub fn alias(&self) -> Option<&str> {
         self.alias.as_deref()
+    }
+
+    /// Deserialize an [`Self::extra`] field as an [`ExtraSetting`] type.
+    pub fn deserialize_extra_field<'de, 'a: 'de, D: ExtraSetting>(
+        &'a self,
+        extra_field: &str,
+    ) -> Result<Option<D>> {
+        let Some(v) = self.extra.get(extra_field) else {
+            return Ok(None);
+        };
+        <D>::deserialize_extra(v)
+            .map_err(|err| {
+                Error::new(format!(
+                    "Could not deserialize {extra_field} as {type_name}",
+                    type_name = std::any::type_name::<D>()
+                ))
+                .set_source(Some(crate::src_err_arc_wrap! { err }))
+                .set_kind(ErrorKind::Configuration)
+            })
+            .map(Some)
     }
 }
 
