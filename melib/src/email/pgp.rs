@@ -22,6 +22,8 @@
 
 //! `OpenPGP` signatures and encryption.
 
+use std::borrow::Cow;
+
 use futures::future::BoxFuture;
 use serde::{
     de::{self, Deserialize},
@@ -192,16 +194,16 @@ impl std::fmt::Display for LocateKey {
 ///         along with the OpenPGP signature to the signature verification
 ///         service.
 /// ```
-pub fn convert_attachment_to_rfc_spec(input: &[u8]) -> Vec<u8> {
+pub fn convert_attachment_to_rfc_spec(input: &'_ [u8]) -> Cow<'_, [u8]> {
     if input.is_empty() {
-        return Vec::new();
+        return Cow::Borrowed(input);
     }
     // Equivalent to the former `regex::bytes::Regex::new(r"[^\r]\n")` probe,
     // without compiling (and `unwrap()`ing) a regex on every call.
     if input.windows(2).any(|w| w[0] != b'\r' && w[1] == b'\n') {
-        return input.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n");
+        return Cow::Owned(input.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"));
     }
-    input.to_vec()
+    Cow::Borrowed(input)
 }
 
 pub enum UnverifiedSignature<'a> {
@@ -257,7 +259,7 @@ pub fn extract_unverified_signature(a: &'_ Attachment) -> Result<UnverifiedSigna
                 })
                 .map(|a| convert_attachment_to_rfc_spec(a.raw()))
             {
-                v
+                v.into_owned()
             } else {
                 return Err(
                     Error::new("multipart/signed attachment without a signed part")
