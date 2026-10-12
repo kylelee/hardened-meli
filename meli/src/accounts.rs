@@ -1280,11 +1280,10 @@ impl Account {
                     }
                     SendMail::ServerSubmission => {
                         if capabilities.supports_submission {
-                            let fut = backend.lock().unwrap().submit(
-                                message.as_bytes().to_vec(),
-                                None,
-                                None,
-                            )?;
+                            let fut = backend
+                                .lock()
+                                .unwrap()
+                                .submit(message.as_bytes().to_vec(), None)?;
                             fut.await?;
                             return Ok(());
                         }
