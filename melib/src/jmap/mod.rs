@@ -701,7 +701,7 @@ impl MailBackend for JmapType {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        _flags: Option<Flag>,
+        flags: Option<(Flag, Vec<String>)>,
     ) -> ResultFuture<()> {
         let store = self.store.clone();
         let connection = self.connection.clone();
@@ -750,7 +750,7 @@ impl MailBackend for JmapType {
             let creation_id: Id<email::EmailObject> = "1".to_string().into();
 
             let import_call: email::EmailImport = email::EmailImport::new()
-                .account_id(mail_account_id)
+                .account_id(mail_account_id.clone())
                 .emails(indexmap! {
                     creation_id.clone() => email::EmailImportObject::new()
                     .blob_id(upload_response.blob_id)
@@ -758,7 +758,6 @@ impl MailBackend for JmapType {
                         mailbox_id => true
                     })
                 });
-
             req.add_call(&import_call).await;
 
             let res_text = conn
@@ -774,7 +773,13 @@ impl MailBackend for JmapType {
                 }
                 Ok(s) => s,
             };
-            let m = email::EmailImportResponse::try_from(v.take_first()?).map_err(|err| {
+            let email::EmailImportResponse {
+                account_id: _,
+                old_state: _,
+                new_state,
+                not_created,
+                created,
+            } = email::EmailImportResponse::try_from(v.take_first()?).map_err(|err| {
                 let ierr: Result<email::EmailImportError> = deserialize_from_str(&res_text);
                 if let Ok(err) = ierr {
                     Error::new(format!("Could not save message: {err:?}"))
@@ -782,9 +787,81 @@ impl MailBackend for JmapType {
                     err
                 }
             })?;
+            if let Some(event) = conn.email_changed(Some(new_state)).await? {
+                conn.add_backend_event(event);
+            }
 
-            if let Some(err) = m.not_created.and_then(|m| m.get(&creation_id).cloned()) {
+            if let Some(err) = not_created.and_then(|m| m.get(&creation_id).cloned()) {
                 return Err(Error::new(format!("Could not save message: {err:?}")));
+            }
+            let Some(created_id) = created.and_then(|m| m.get_index(0).map(|(id, _)| id.clone()))
+            else {
+                return Ok(());
+            };
+            if let Some((flags, tags)) = flags {
+                let mut req = Request::new(conn.request_no.clone());
+                let mut update_map: IndexMap<Argument<Id<email::EmailObject>>, Value> =
+                    IndexMap::default();
+                let mut update_keywords: IndexMap<String, Value> = IndexMap::default();
+                for f in flags.iter() {
+                    update_keywords.insert(
+                        format!(
+                            "keywords/{}",
+                            match f {
+                                Flag::DRAFT => "$draft",
+                                Flag::FLAGGED => "$flagged",
+                                Flag::SEEN => "$seen",
+                                Flag::REPLIED => "$answered",
+                                Flag::TRASHED => "$junk",
+                                Flag::PASSED => "$passed",
+                                _ => continue, // [ref:VERIFY]
+                            }
+                        ),
+                        serde_json::json!(true),
+                    );
+                }
+                for tag in tags {
+                    update_keywords.insert(format!("keywords/{tag}"), serde_json::json!(true));
+                }
+                let state = conn.store.email_state.lock().await.clone();
+                update_map.insert(
+                    Argument::from(created_id),
+                    serde_json::json!(update_keywords.clone()),
+                );
+                let email_set_call = email::EmailSet::new(
+                    Set::<email::EmailObject>::new(state)
+                        .account_id(mail_account_id.clone())
+                        .update(Some(update_map)),
+                );
+                req.add_call(&email_set_call).await;
+                let res_text = conn
+                    .post_async(None, serde_json::to_string(&req)?)
+                    .await?
+                    .text()
+                    .await?;
+
+                let mut v: MethodResponse = match deserialize_from_str(&res_text) {
+                    Err(err) => {
+                        _ = conn.store.online_status.set(None, Err(err.clone())).await;
+                        return Err(err);
+                    }
+                    Ok(s) => s,
+                };
+                let SetResponse {
+                    not_updated,
+                    new_state,
+                    ..
+                } = SetResponse::<email::EmailObject>::try_from(v.take_first()?)?;
+                if let Some(event) = conn.email_changed(Some(new_state)).await? {
+                    conn.add_backend_event(event);
+                }
+                if let Some(ids) = not_updated {
+                    if !ids.is_empty() {
+                        tracing::error!(
+                            "Could not set flags/keywords to newly imported e-mail. This might                              be a bug."
+                        );
+                    }
+                }
             }
             Ok(())
         }))
@@ -1250,45 +1327,49 @@ impl MailBackend for JmapType {
             let mut update_keywords: IndexMap<String, Value> = IndexMap::default();
             for op in flags.iter() {
                 match op {
-                    FlagOp::Set(f) => {
-                        update_keywords.insert(
-                            format!(
-                                "keywords/{}",
-                                match *f {
-                                    Flag::DRAFT => "$draft",
-                                    Flag::FLAGGED => "$flagged",
-                                    Flag::SEEN => "$seen",
-                                    Flag::REPLIED => "$answered",
-                                    Flag::TRASHED => "$junk",
-                                    Flag::PASSED => "$passed",
-                                    _ => continue, // [ref:VERIFY]
-                                }
-                            ),
-                            serde_json::json!(true),
-                        );
+                    FlagOp::Set(flags) => {
+                        for f in flags.iter() {
+                            update_keywords.insert(
+                                format!(
+                                    "keywords/{}",
+                                    match f {
+                                        Flag::DRAFT => "$draft",
+                                        Flag::FLAGGED => "$flagged",
+                                        Flag::SEEN => "$seen",
+                                        Flag::REPLIED => "$answered",
+                                        Flag::TRASHED => "$junk",
+                                        Flag::PASSED => "$passed",
+                                        _ => continue, // [ref:VERIFY]
+                                    }
+                                ),
+                                serde_json::json!(true),
+                            );
+                        }
                     }
-                    FlagOp::UnSet(f) => {
-                        update_keywords.insert(
-                            format!(
-                                "keywords/{}",
-                                match *f {
-                                    Flag::DRAFT => "$draft",
-                                    Flag::FLAGGED => "$flagged",
-                                    Flag::SEEN => "$seen",
-                                    Flag::REPLIED => "$answered",
-                                    Flag::TRASHED => "$junk",
-                                    Flag::PASSED => "$passed",
-                                    _ => continue, // [ref:VERIFY]
-                                }
-                            ),
-                            serde_json::json!(null),
-                        );
+                    FlagOp::UnSet(flags) => {
+                        for f in flags.iter() {
+                            update_keywords.insert(
+                                format!(
+                                    "keywords/{}",
+                                    match f {
+                                        Flag::DRAFT => "$draft",
+                                        Flag::FLAGGED => "$flagged",
+                                        Flag::SEEN => "$seen",
+                                        Flag::REPLIED => "$answered",
+                                        Flag::TRASHED => "$junk",
+                                        Flag::PASSED => "$passed",
+                                        _ => continue, // [ref:VERIFY]
+                                    }
+                                ),
+                                serde_json::json!(null),
+                            );
+                        }
                     }
-                    FlagOp::SetTag(t) => {
-                        update_keywords.insert(format!("keywords/{t}"), serde_json::json!(true));
+                    FlagOp::SetTag(tag) => {
+                        update_keywords.insert(format!("keywords/{tag}"), serde_json::json!(true));
                     }
-                    FlagOp::UnSetTag(t) => {
-                        update_keywords.insert(format!("keywords/{t}"), serde_json::json!(null));
+                    FlagOp::UnSetTag(tag) => {
+                        update_keywords.insert(format!("keywords/{tag}"), serde_json::json!(null));
                     }
                 }
             }

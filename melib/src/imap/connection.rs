@@ -47,6 +47,7 @@ use imap_codec::{
         command::{Command, CommandBody},
         core::{AString, IString, Literal, LiteralMode, NString, Tag, Vec1},
         extensions::{compress::CompressionAlgorithm, enable::CapabilityEnable},
+        flag::Flag as ImapCodecFlag,
         mailbox::Mailbox,
         search::SearchKey,
         secret::Secret,
@@ -2103,7 +2104,7 @@ impl ImapConnection {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        flags: Option<Flag>,
+        flags: Option<(Flag, Vec<String>)>,
     ) -> Result<()> {
         let mut response = Vec::with_capacity(8 * 1024);
         self.select_mailbox(mailbox_hash, &mut response, true)
@@ -2123,7 +2124,21 @@ impl ImapConnection {
 
             mailbox.imap_path().to_string()
         };
-        let flags = flags.unwrap_or_else(Flag::empty);
+        let flags = if let Some((flags, tags)) = &flags {
+            let mut flags: Vec<ImapCodecFlag<'_>> = (*flags).into();
+            for tag in tags {
+                flags.push(ImapCodecFlag::try_from(tag.as_str()).map_err(|err| {
+                    Error::new(format!(
+                        "Could not convert tag {tag:?} into an IMAP keyword",
+                    ))
+                    .set_source(Some(Arc::new(err)))
+                    .set_kind(ErrorKind::ValueError)
+                })?);
+            }
+            flags
+        } else {
+            vec![]
+        };
         let data = {
             let capabilities = self.uid_store.capabilities.lock().unwrap();
             let has_literal_plus: bool = capabilities
@@ -2139,7 +2154,7 @@ impl ImapConnection {
                 Literal::try_from(bytes)?
             }
         };
-        self.send_command(CommandBody::append(path, flags.into(), None, data)?)
+        self.send_command(CommandBody::append(path, flags, None, data)?)
             .await?;
         // [ref:TODO]: check for APPENDUID [RFC4315 - UIDPLUS]
         self.read_response(&mut response, RequiredResponses::empty())

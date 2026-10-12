@@ -52,6 +52,14 @@ fn test_jmap_watch() {
     });
 }
 
+#[test]
+fn test_jmap_operations() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_jmap_operations();
+    });
+}
+
 pub mod server {
     use std::{
         net::{SocketAddr, TcpListener},
@@ -118,6 +126,11 @@ pub mod server {
         pub mailbox_state: State<mailbox::MailboxObject>,
         pub email_state_changes:
             IndexMap<State<email::EmailObject>, StateChange<email::EmailObject>>,
+        /// Blobs uploaded through the `uploadUrl` endpoint, keyed by blob id.
+        pub uploaded_blobs: IndexMap<Id<objects::BlobObject>, Vec<u8>>,
+        /// Per-email JMAP keywords (`String[Boolean]`), including custom tags
+        /// that have no [`Mail`] flag-bit representation.
+        pub keywords: IndexMap<Id<email::EmailObject>, IndexMap<String, bool>>,
         /// Error response types the server has replied with, for assertions.
         pub error_responses: Vec<String>,
         pub session: Session,
@@ -201,6 +214,8 @@ pub mod server {
                 email_state: State::new_random(),
                 mailbox_state: State::new_random(),
                 email_state_changes: indexmap::indexmap! {},
+                uploaded_blobs: indexmap::indexmap! {},
+                keywords: indexmap::indexmap! {},
                 error_responses: vec![],
                 session,
             }
@@ -223,6 +238,7 @@ pub mod server {
                 Copy,
                 Query,
                 QueryChanges,
+                Import,
             }
 
             fn parse_type(value: &str) -> (String, MethodCallType) {
@@ -235,6 +251,7 @@ pub mod server {
                     "copy" => MethodCallType::Copy,
                     "query" => MethodCallType::Query,
                     "queryChanges" => MethodCallType::QueryChanges,
+                    "import" => MethodCallType::Import,
                     other => panic!("Unexpected method call type: {other}"),
                 };
                 (name, r#type)
@@ -288,7 +305,7 @@ pub mod server {
                                 eprintln!("Parsed Email/get object {get:?}");
                                 let mut not_found = vec![];
                                 eprintln!("get.ids = {:?}", get.ids);
-                                let list = match get.ids {
+                                let mut list = match get.ids {
                                     None => {
                                         // Return all.
                                         self.envelopes
@@ -406,6 +423,11 @@ pub mod server {
                                             .collect::<Vec<email::EmailObject>>()
                                     }
                                 };
+                                for email_obj in list.iter_mut() {
+                                    if let Some(keywords) = self.keywords.get(&email_obj.id) {
+                                        email_obj.keywords = keywords.clone();
+                                    }
+                                }
                                 let response: GetResponse<email::EmailObject> = GetResponse {
                                     account_id: get.account_id,
                                     state: self.email_state.clone(),
@@ -632,6 +654,86 @@ pub mod server {
                                 .method_responses
                                 .insert(id.clone(), serde_json::json! {[r#type, response, id]});
                         }
+                        "Email" => {
+                            let set = serde_json::value::from_value(body).unwrap();
+                            eprintln!("Parsed Email/set object {set:?}");
+                            let Set {
+                                account_id,
+                                if_in_state,
+                                create,
+                                update,
+                                destroy,
+                            }: Set<email::EmailObject> = set;
+                            let created = indexmap::indexmap! {};
+                            let mut updated = indexmap::indexmap! {};
+                            let destroyed = vec![];
+                            if let Some(ref if_in_state) = if_in_state {
+                                if *if_in_state != self.email_state {
+                                    panic!(
+                                        "if_in_state == {if_in_state} while current state is {:?}",
+                                        self.email_state
+                                    );
+                                }
+                            }
+                            if create.is_some() {
+                                panic!("Email/set create is not implemented in the test server");
+                            }
+                            let old_state = self.email_state.clone();
+                            let mut new_state = self.email_state.clone();
+                            eprintln!("Email/set updates: {update:?}");
+                            for (id, obj) in update.unwrap_or_default() {
+                                let argument::Argument::Value(id) = id else {
+                                    panic!("Email/set with ResultReference id is unimplemented");
+                                };
+                                let update: IndexMap<String, Value> =
+                                    serde_json::value::from_value(obj).unwrap();
+                                for (u, v) in update {
+                                    let Some(keyword) = u.strip_prefix("keywords/") else {
+                                        panic!("unimplemented update type: {u:?}");
+                                    };
+                                    let set: bool = serde_json::value::from_value(v).unwrap();
+                                    new_state = self.set_flags_by_id(
+                                        &id,
+                                        keyword,
+                                        set,
+                                    );
+                                }
+                                updated.insert(id.clone(), None);
+                            }
+                            assert_eq!(destroy.unwrap_or_default().len(), 0);
+                            let old_state = if new_state != old_state {
+                                Some(old_state)
+                            } else {
+                                None
+                            };
+                            let response: SetResponse<email::EmailObject> = SetResponse {
+                                account_id,
+                                old_state,
+                                new_state,
+                                created: if created.is_empty() {
+                                    None
+                                } else {
+                                    Some(created)
+                                },
+                                updated: if updated.is_empty() {
+                                    None
+                                } else {
+                                    Some(updated)
+                                },
+                                destroyed: if destroyed.is_empty() {
+                                    None
+                                } else {
+                                    Some(destroyed)
+                                },
+                                not_created: None,
+                                not_updated: None,
+                                not_destroyed: None,
+                            };
+                            eprintln!("Sending {id} {type} response: {response:?}");
+                            responses
+                                .method_responses
+                                .insert(id.clone(), serde_json::json! {[r#type, response, id]});
+                        }
                         other => panic!("other type name {other}"),
                     },
                     MethodCallType::Copy => unimplemented!(),
@@ -640,12 +742,14 @@ pub mod server {
                             let query: email::EmailQuery =
                                 serde_json::value::from_value(body).unwrap();
                             eprintln!("Parsed Email/query object {query:?}");
+                            let position = query.query_call.position;
+                            let position_u = usize::try_from(position).unwrap_or_default();
                             let response: QueryResponse<email::EmailObject> = QueryResponse {
                                 account_id: query.query_call.account_id,
                                 query_state: String::new(),
                                 can_calculate_changes: false,
-                                position: 0,
-                                ids: vec![],
+                                position,
+                                ids: self.envelopes.keys().skip(position_u).cloned().collect(),
                                 total: if query.query_call.calculate_total {
                                     Some(self.envelopes.len().try_into().unwrap_or_default())
                                 } else {
@@ -662,6 +766,64 @@ pub mod server {
                         other => panic!("other type name {other}"),
                     },
                     MethodCallType::QueryChanges => unimplemented!(),
+                    MethodCallType::Import => match object_type_name.as_str() {
+                        "Email" => {
+                            let import = serde_json::value::from_value(body).unwrap();
+                            eprintln!("Parsed Email/import object {import:?}");
+                            let email::EmailImport {
+                                account_id,
+                                if_in_state: _,
+                                emails,
+                            } = import;
+                            let mut created = indexmap::indexmap! {};
+                            let old_state = self.email_state.clone();
+                            let mut new_state = self.email_state.clone();
+                            for (_creation_id, import_object) in emails {
+                                let blob_id = import_object.blob_id.clone();
+                                let blob = &self.uploaded_blobs[&blob_id];
+                                let size = blob.len();
+                                new_state = self
+                                    .insert_email(Box::new(Mail::new(blob.clone(), None).unwrap()));
+                                let id = self
+                                    .email_state_changes
+                                    .last()
+                                    .map(|(_, s)| {
+                                        let StateChange::Created(id) = s else {
+                                            panic!("expected Created state change");
+                                        };
+                                        id.clone()
+                                    })
+                                    .unwrap();
+                                self.keywords.insert(id.clone(), indexmap::indexmap! {});
+                                created.insert(
+                                    id.clone(),
+                                    email::EmailImportResult {
+                                        id,
+                                        blob_id,
+                                        thread_id: Id::default(),
+                                        size,
+                                    },
+                                );
+                            }
+                            let old_state = if old_state == self.email_state {
+                                None
+                            } else {
+                                Some(old_state)
+                            };
+                            let response: email::EmailImportResponse = email::EmailImportResponse {
+                                account_id,
+                                old_state,
+                                new_state,
+                                created: Some(created),
+                                not_created: None,
+                            };
+                            eprintln!("Sending {id} {type} response: {response:?}");
+                            responses
+                                .method_responses
+                                .insert(id.clone(), serde_json::json! {[r#type, response, id]});
+                        }
+                        other => panic!("other type name {other}"),
+                    },
                 }
             }
             eprintln!("Sending API call responses: {responses:?}");
@@ -687,6 +849,90 @@ pub mod server {
                 .insert(old_state, StateChange::Destroyed(id));
             assert!(_none.is_none());
 
+            self.email_state.clone()
+        }
+
+        /// Apply a JMAP keyword (`keyword` is the raw keyword string) to an
+        /// email by object id, mirroring `Email/set` `keywords/{keyword}`
+        /// updates. Flag-bit keywords also update the stored [`Mail`]
+        /// envelope; custom tags only live in [`Self::keywords`].
+        pub fn set_flags_by_id(
+            &mut self,
+            id: &Id<email::EmailObject>,
+            keyword: &str,
+            set: bool,
+        ) -> State<email::EmailObject> {
+            let flag_op = match keyword {
+                "$draft" => {
+                    if set {
+                        Some(FlagOp::Set(Flag::DRAFT))
+                    } else {
+                        Some(FlagOp::UnSet(Flag::DRAFT))
+                    }
+                }
+                "$flagged" => {
+                    if set {
+                        Some(FlagOp::Set(Flag::FLAGGED))
+                    } else {
+                        Some(FlagOp::UnSet(Flag::FLAGGED))
+                    }
+                }
+                "$seen" => {
+                    if set {
+                        Some(FlagOp::Set(Flag::SEEN))
+                    } else {
+                        Some(FlagOp::UnSet(Flag::SEEN))
+                    }
+                }
+                "$answered" => {
+                    if set {
+                        Some(FlagOp::Set(Flag::REPLIED))
+                    } else {
+                        Some(FlagOp::UnSet(Flag::REPLIED))
+                    }
+                }
+                "$junk" => {
+                    if set {
+                        Some(FlagOp::Set(Flag::TRASHED))
+                    } else {
+                        Some(FlagOp::UnSet(Flag::TRASHED))
+                    }
+                }
+                "$passed" => {
+                    if set {
+                        Some(FlagOp::Set(Flag::PASSED))
+                    } else {
+                        Some(FlagOp::UnSet(Flag::PASSED))
+                    }
+                }
+                _ => None,
+            };
+            if let Some(flag_op) = flag_op {
+                self.envelopes
+                    .entry(id.clone())
+                    .and_modify(|entry| match flag_op {
+                        FlagOp::Set(f) => {
+                            entry.envelope.set_flag(f, true);
+                        }
+                        FlagOp::UnSet(f) => {
+                            entry.envelope.set_flag(f, false);
+                        }
+                        _ => {}
+                    });
+            }
+            {
+                let keywords = self.keywords.entry(id.clone()).or_default();
+                if set {
+                    keywords.insert(keyword.to_string(), true);
+                } else {
+                    keywords.shift_remove(keyword);
+                }
+            }
+            let old_state = std::mem::replace(&mut self.email_state, State::new_random());
+            let _none = self
+                .email_state_changes
+                .insert(old_state, StateChange::Updated(id.clone()));
+            assert!(_none.is_none());
             self.email_state.clone()
         }
 
@@ -815,6 +1061,23 @@ pub mod server {
                                     .unwrap()
                                     .api(lossy.lines().rev().nth(0).unwrap()),
                             )
+                            .unwrap()
+                            .into_bytes()
+                        } else if lossy.starts_with("POST /upload/A13824/") {
+                            let (_, body) = lossy.split_once("\r\n\r\n").unwrap();
+                            let size = body.len();
+                            let blob_id = Id::new_random();
+                            state
+                                .lock()
+                                .unwrap()
+                                .uploaded_blobs
+                                .insert(blob_id.clone(), body.as_bytes().to_vec());
+                            serde_json::to_string(&UploadResponse {
+                                account_id: "A13824".into(),
+                                blob_id,
+                                _type: "message/rfc822".into(),
+                                size,
+                            })
                             .unwrap()
                             .into_bytes()
                         } else if lossy.starts_with("GET /eventsource/") {
@@ -1223,6 +1486,220 @@ hello world.
     /// Test that `JmapType::watch` `Stream` returns the expected `Refresh`
     /// events when altering the mail store in the JMAP server, using
     /// eventSourceUrl-type instead of polling.
+    /// Test various data operations: saving an e-mail with both flags and
+    /// tags must round-trip through upload, `Email/import` and `Email/set`
+    /// keyword updates.
+    pub(crate) fn run_jmap_operations() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+
+        for var in [
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_DIRS",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_DIRS",
+            "XDG_DATA_HOME",
+        ] {
+            std::env::remove_var(var);
+        }
+        for (var, dir) in [
+            ("HOME", temp_dir.path().to_path_buf()),
+            ("XDG_CACHE_HOME", temp_dir.path().join(".cache")),
+            ("XDG_STATE_HOME", temp_dir.path().join(".local/state")),
+            ("XDG_CONFIG_HOME", temp_dir.path().join(".config")),
+            ("XDG_DATA_HOME", temp_dir.path().join(".local/share")),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
+                panic!("Could not create {} path, {}: {}", var, dir.display(), err);
+            });
+            std::env::set_var(var, &dir);
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let account_conf = AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: "INBOX".to_string(),
+            format: "jmap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra: {
+                let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                    indexmap::IndexMap::new();
+
+                m.insert(
+                    "server_url".to_string(),
+                    serde_json::Value::String(format!(
+                        "http://{}:{}",
+                        local_addr.ip(),
+                        local_addr.port()
+                    )),
+                );
+                m.insert(
+                    "server_username".to_string(),
+                    serde_json::Value::String("user".to_string()),
+                );
+                m.insert(
+                    "server_password".to_string(),
+                    serde_json::Value::String("password".to_string()),
+                );
+                m.insert(
+                    "use_token".to_string(),
+                    serde_json::Value::String("true".to_string()),
+                );
+
+                m
+            },
+        };
+
+        let mut jmap =
+            JmapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
+        let (server_event_sender, server_event_receiver) = unbounded();
+        let server = JmapServerStream::new(
+            smol::Async::new(listener).unwrap(),
+            server_event_receiver,
+            local_addr,
+        );
+        std::thread::spawn(move || {
+            block_on(server.loop_handler()).unwrap();
+        });
+        eprintln!(
+            "Assert that account is not online because we have not performed any operations yet."
+        );
+        assert_eq!(
+            &block_on(jmap.is_online().unwrap()).unwrap_err().to_string(),
+            "Account is uninitialised."
+        );
+        let mailboxes = block_on(jmap.mailboxes().unwrap()).unwrap();
+        assert_eq!(
+            mailboxes.len(),
+            1,
+            "Expected one mailbox, Inbox. Got: {mailboxes:?}"
+        );
+        let inbox_hash = *mailboxes.keys().next().unwrap();
+        eprintln!("Inbox hash: {inbox_hash:?}");
+        {
+            let events = backend_event_queue
+                .lock()
+                .unwrap()
+                .drain(..)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events.len(),
+                0,
+                "Unexpected events without having performed any changes: {events:?}"
+            );
+        }
+        eprintln!("Refresh account and assert that no events arrive.");
+        block_on(jmap.refresh(inbox_hash).unwrap()).unwrap();
+        {
+            let events = backend_event_queue
+                .lock()
+                .unwrap()
+                .drain(..)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events.len(),
+                0,
+                "Unexpected events after refreshing without having performed any changes: \
+                 {events:?}"
+            );
+        }
+
+        eprintln!(
+            "Add new e-mail on server store and assert that a refresh results in a Refresh \
+             Create event."
+        );
+        let new_mail = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Cc:
+Subject: RE: your e-mail
+Message-ID: <h2g7f.z0gy2pgaen5m@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let fetch_result: Vec<_> = block_on(
+            jmap.fetch(inbox_hash)
+                .unwrap()
+                .collect::<Vec<Result<Vec<Envelope>>>>(),
+        );
+        for res in fetch_result {
+            let res = res.unwrap();
+            assert_eq!(res, vec![]);
+        }
+        block_on(
+            jmap.save(
+                new_mail.bytes.clone(),
+                inbox_hash,
+                Some((Flag::DRAFT, vec!["sent".to_string()])),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        block_on(jmap.refresh(inbox_hash).unwrap()).unwrap();
+        {
+            let events = backend_event_queue
+                .lock()
+                .unwrap()
+                .drain(..)
+                .collect::<Vec<_>>();
+            eprintln!("got events: {events:?}");
+        };
+        let fetch_result: Vec<_> = block_on(
+            jmap.fetch(inbox_hash)
+                .unwrap()
+                .collect::<Vec<Result<Vec<Envelope>>>>(),
+        );
+        let collection = jmap.collection();
+        let fetched = fetch_result
+            .into_iter()
+            .map(|res| res.unwrap())
+            .flatten()
+            .collect::<Vec<Envelope>>();
+        assert_eq!(fetched.len(), 1);
+        {
+            let tag_index = collection.tag_index.read().unwrap();
+            assert_eq!(fetched[0].flags(), Flag::DRAFT);
+            assert_eq!(
+                fetched[0]
+                    .tags()
+                    .into_iter()
+                    .map(|t| &tag_index[t])
+                    .collect::<Vec<_>>(),
+                vec!["sent"]
+            );
+        }
+        server_event_sender
+            .unbounded_send(ServerEvent::Quit)
+            .unwrap();
+    }
+
     pub(crate) fn run_jmap_watch() {
         melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
