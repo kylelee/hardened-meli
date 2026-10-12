@@ -332,6 +332,13 @@ impl Error {
         new_val: Option<std::sync::Arc<dyn error::Error + Send + Sync + 'static>>,
     ) -> Self {
         self.source = new_val.map(|inner| {
+            // 若传入的 source 本身就是本模块的 `Error`，直接采用它，而不是再
+            // 包一层 `ErrorKind::External`：多包一层会把错误链压深一级，使内部
+            // 错误的 kind 与 related path 被一个空 summary 的中间节点遮住；
+            // 极端情况下 Self 套 Self 还会形成自引用。
+            if let Some(inner) = inner.downcast_ref::<Self>() {
+                return Box::new(inner.clone());
+            }
             Box::new(Self {
                 summary: "".into(),
                 details: None,
@@ -749,6 +756,22 @@ mod tests {
             "the OpenSSL SYSCALL-no-errno \"unexpected EOF\" connection drop must classify \
              as Network(ConnectionFailed), got {}",
             unexpected_eof.kind
+        );
+    }
+
+    /// 回归上游 meli 提交 `9cc5293d`：`Error::set_source` 收到本模块的
+    /// `Error` 时必须直接采用，而不是再包一层 `ErrorKind::External` 空壳，
+    /// 否则错误链会多出一级并遮住内部错误的 kind。
+    #[test]
+    fn test_set_source_downcasts_inner_error_without_wrapping() {
+        let inner = Error::new("inner failure").set_kind(ErrorKind::NotFound);
+        let outer = Error::new("outer failure").set_source(Some(Arc::new(inner.clone())));
+        let source = outer.source.as_ref().expect("source must be set");
+        assert_eq!(source.summary, "inner failure");
+        assert_eq!(source.kind, ErrorKind::NotFound);
+        assert!(
+            source.inner.is_none(),
+            "already-an-Error source must not be re-wrapped as an External layer"
         );
     }
 }
