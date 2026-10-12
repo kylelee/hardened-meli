@@ -1739,6 +1739,16 @@ impl Component for EnvelopeView {
                                             &self.view_settings,
                                             0,
                                         );
+                                        let description =
+                                            match crate::mail::pgp::signatures_into_error(metadata)
+                                            {
+                                                // 有签名：解密且验签成功的合并结论。
+                                                Ok(Some(text)) => {
+                                                    format!("Encrypted and signed {text}")
+                                                }
+                                                // 纯加密（无内嵌签名）。
+                                                Ok(None) | Err(_) => "Encrypted".to_string(),
+                                            };
                                         *d = AttachmentDisplay::EncryptedSuccess {
                                             inner: std::mem::replace(
                                                 inner,
@@ -1746,7 +1756,7 @@ impl Component for EnvelopeView {
                                             ),
                                             plaintext,
                                             plaintext_display,
-                                            description: format!("{metadata:?}"),
+                                            description,
                                         };
                                     }
                                     Ok(Some(Err(error))) => {

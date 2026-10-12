@@ -699,6 +699,78 @@ impl From<base64::DecodeError> for Error {
     }
 }
 
+#[cfg(feature = "sequoia")]
+impl From<sqz::anyhow::Error> for Error {
+    #[inline]
+    fn from(err: sqz::anyhow::Error) -> Self {
+        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
+            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
+    }
+}
+
+#[cfg(feature = "sequoia")]
+impl From<sqz::lookup_by::Error> for Error {
+    #[inline]
+    fn from(err: sqz::lookup_by::Error) -> Self {
+        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
+            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
+    }
+}
+
+#[cfg(feature = "sequoia")]
+impl From<sqz::lookup::Error> for Error {
+    #[inline]
+    fn from(err: sqz::lookup::Error) -> Self {
+        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
+            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
+    }
+}
+
+#[cfg(feature = "sequoia")]
+impl From<sqz::verify::Error> for Error {
+    #[inline]
+    fn from(err: sqz::verify::Error) -> Self {
+        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
+            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
+    }
+}
+
+#[cfg(feature = "sequoia")]
+impl From<sqz::cert::list::Error> for Error {
+    #[inline]
+    fn from(err: sqz::cert::list::Error) -> Self {
+        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
+            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
+    }
+}
+
+#[cfg(feature = "sequoia")]
+impl From<sqz::sign::Error> for Error {
+    #[inline]
+    fn from(err: sqz::sign::Error) -> Self {
+        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
+            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
+    }
+}
+
+#[cfg(feature = "sequoia")]
+impl From<sqz::encrypt::Error> for Error {
+    #[inline]
+    fn from(err: sqz::encrypt::Error) -> Self {
+        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
+            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
+    }
+}
+
+#[cfg(feature = "sequoia")]
+impl From<sqz::decrypt::Error> for Error {
+    #[inline]
+    fn from(err: sqz::decrypt::Error) -> Self {
+        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
+            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

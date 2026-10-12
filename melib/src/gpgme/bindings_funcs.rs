@@ -77,6 +77,13 @@ convert_to_typedefs! {
         secret: ::core::ffi::c_int,
     ) -> gpgme_error_t;
     pub fn gpgme_op_encrypt_result(ctx: gpgme_ctx_t) -> gpgme_encrypt_result_t;
+    pub fn gpgme_op_encrypt_sign_start(
+        ctx: gpgme_ctx_t,
+        recp: *mut gpgme_key_t,
+        flags: gpgme_encrypt_flags_t,
+        plain: gpgme_data_t,
+        cipher: gpgme_data_t,
+    ) -> gpgme_error_t;
     pub fn gpgme_op_encrypt_start(
         ctx: gpgme_ctx_t,
         recp: *mut gpgme_key_t,
@@ -86,6 +93,11 @@ convert_to_typedefs! {
     ) -> gpgme_error_t;
     pub fn gpgme_op_decrypt_result(ctx: gpgme_ctx_t) -> gpgme_decrypt_result_t;
     pub fn gpgme_op_decrypt_start(
+        ctx: gpgme_ctx_t,
+        cipher: gpgme_data_t,
+        plain: gpgme_data_t,
+    ) -> gpgme_error_t;
+    pub fn gpgme_op_decrypt_verify_start(
         ctx: gpgme_ctx_t,
         cipher: gpgme_data_t,
         plain: gpgme_data_t,

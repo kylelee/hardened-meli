@@ -10,7 +10,7 @@ categories = ["email", "parser-implementations"]
 license = "EUPL-1.2 OR GPL-3.0-or-later"
 edition = "2021"
 build = "build.rs"
-rust-version = "1.85.0"
+rust-version = "1.88.0"
 
 [lib]
 name = "melib"
@@ -28,6 +28,9 @@ nntp = ["tls"]
 maildir = ["notify"]
 mbox-notify = ["notify"]
 notmuch = ["maildir"]
+# Opt-in Sequoia OpenPGP backend. Not part of `default`; pure-Rust crypto
+# (no nettle/gmp FFI) and vendored sqlite keep the feature self-contained.
+sequoia = ["dep:sqz", "rusqlite/bundled"]
 smtp = ["tls"]
 sqlite3 = ["sqlite3-static"]
 sqlite3-static = ["rusqlite", "rusqlite/bundled-full"]
@@ -42,7 +45,7 @@ bitflags = { workspace = true }
 cfg-if = { version = "^1.0.0" }
 chrono = { version = "^0.4", default-features = false }
 data-encoding = { version = "2.11" }
-# encoding_rs 0.8.40+ requires rustc 1.88, above this crate's MSRV (1.85).
+# Pinned: encoding_rs 0.8.40+ requires rustc 1.88.
 encoding_rs = { version = "=0.8.35" }
 flate2 = { workspace = true }
 futures = { workspace = true }
@@ -51,7 +54,7 @@ imap-types = { workspace = true, optional = true }
 indexmap = { workspace = true }
 isahc = { workspace = true, optional = true }
 libc = { workspace = true }
-# libloading 0.9 requires rustc 1.88, above this crate's MSRV (1.85).
+# Pinned: libloading 0.9 requires rustc 1.88.
 libloading = { version = "0.8" }
 native-tls = { version = "0.2", default-features = false, optional = true }
 nix = { workspace = true, default-features = false, features = ["fs", "socket", "dir", "hostname"] }
@@ -66,6 +69,13 @@ serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error = { version = "0.1" }
 smallvec = { workspace = true }
 smol = { workspace = true }
+# `sqz` pulls the Sequoia OpenPGP stack. Upstream picks `crypto-nettle`
+# (nettle/gmp FFI); we pick `crypto-openssl`, which Sequoia rates
+# production-ready and constant-time and which reuses the system OpenSSL
+# this crate already links for `native-tls` — no extra FFI surface.
+sqz = { version = "0.1.0", optional = true, default-features = false, features = [
+    "crypto-openssl",
+] }
 socket2 = { workspace = true }
 # `release_max_level_error` compiles every `tracing` event below `ERROR`
 # out of release builds entirely — zero formatting or branch cost; debug
@@ -74,7 +84,7 @@ tracing = { workspace = true, features = ["release_max_level_error"] }
 unicode-segmentation = { version = "1.13", default-features = false }
 unicode-width = { workspace = true }
 url = { workspace = true, optional = true }
-# uuid 1.27+ requires rustc 1.89, above this crate's MSRV (1.85).
+# Pinned: uuid 1.27+ requires rustc 1.89.
 uuid = { version = "=1.26.1", features = ["serde", "v4", "v5"] }
 xdg = { workspace = true }
 

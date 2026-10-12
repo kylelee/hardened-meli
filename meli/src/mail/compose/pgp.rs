@@ -50,7 +50,9 @@ impl KeySelectionLoading {
     ) -> Result<Self> {
         use melib::email::pgp::LocateKey;
         let mut backend = backend_choice.instantiate()?;
-        if local {
+        // 当用户显式禁用远程查找（allow_remote_lookup 为 false）时，即便
+        // `local` 选择器被复用也不得发起 WKD 等网络查询。
+        if local || allow_remote_lookup.is_false() {
             backend.set_auto_key_locate(LocateKey::LOCAL)?;
         } else {
             backend.set_auto_key_locate(LocateKey::WKD | LocateKey::LOCAL)?;

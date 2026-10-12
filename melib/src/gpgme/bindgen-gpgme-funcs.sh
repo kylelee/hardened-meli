@@ -44,7 +44,9 @@ bindgen \
   --allowlist-function gpgme_new \
   --allowlist-function gpgme_op_decrypt_result \
   --allowlist-function gpgme_op_decrypt_start \
+  --allowlist-function gpgme_op_decrypt_verify_start \
   --allowlist-function gpgme_op_encrypt_result \
+  --allowlist-function gpgme_op_encrypt_sign_start \
   --allowlist-function gpgme_op_encrypt_start \
   --allowlist-function gpgme_op_import \
   --allowlist-function gpgme_op_import_result \

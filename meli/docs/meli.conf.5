@@ -2408,6 +2408,26 @@ repository under the
 directory you can find python scripts that work with the
 .Xr gpg 1
 binary.
+.It
+sequoia backend
+.Po
+requires that
+.Xr meli 1
+has been compiled with the opt-in
+.Cm sequoia
+feature,
+check output of
+.Cm compiled-with
+CLI subcommand
+.Pc Ns
+:
+.Bd -literal
+backend = "sequoia"
+.Ed
+Note: the Sequoia backend cannot hide recipient key IDs; requesting
+hidden-recipient encryption for a draft with
+.Sy Bcc
+recipients fails instead of leaking them.
 .El
 .El
 .\"

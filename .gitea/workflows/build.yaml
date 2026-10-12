@@ -52,7 +52,7 @@ jobs:
         name: install OS dependencies
         run: |
           apt-get update
-          apt-get install -y libdbus-1-dev pkg-config mandoc libssl-dev make libnotmuch5 notmuch gnupg libgpgme11
+          apt-get install -y libdbus-1-dev pkg-config mandoc libssl-dev make libnotmuch5 notmuch gnupg libgpgme11 clang capnproto
       - name: Cache rustup
         id: cache-rustup
         uses: actions/cache@v4
@@ -105,6 +105,9 @@ jobs:
       - name: cargo-check
         run: |
           make -f ./.gitea/Makefile.build cargo-check
+      - name: cargo-check with sequoia feature
+        run: |
+          make -f ./.gitea/Makefile.build cargo-check-sequoia
       - if: steps.cache-deps.outputs.cache-hit != 'true'
         name: Save build artifacts in target dir
         id: save-cache-deps
