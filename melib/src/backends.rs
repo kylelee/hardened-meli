@@ -509,6 +509,7 @@ pub struct MailBackendCapabilities {
     pub supports_raw_search: bool,
     pub supports_tags: bool,
     pub supports_submission: bool,
+    pub supports_contacts: bool,
     pub extra_submission_headers: &'static [HeaderName],
     pub metadata: Option<serde_json::Value>,
 }
@@ -522,6 +523,7 @@ pub const EMPTY_MAIL_BACKEND_CAPABILITIES: MailBackendCapabilities = MailBackend
     extensions: None,
     supports_tags: false,
     supports_submission: false,
+    supports_contacts: false,
     extra_submission_headers: &[],
     metadata: None,
 };
@@ -678,6 +680,15 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
             }
             Ok(())
         })))
+    }
+
+    fn contact_backend(
+        &mut self,
+    ) -> ResultFuture<Box<dyn crate::contacts::backend::ContactBackend>> {
+        Err(
+            Error::new("Contact support not implemented in this backend.")
+                .set_kind(ErrorKind::NotImplemented),
+        )
     }
 }
 

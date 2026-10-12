@@ -20,6 +20,8 @@
 //
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 
+use indexmap::IndexMap;
+
 use crate::{
     contacts::{Card, CardId},
     error::Result,
@@ -33,7 +35,7 @@ pub struct JSContactVersionUnknown;
 impl JSContactVersion for JSContactVersionUnknown {}
 
 /// Version 1 <https://www.rfc-editor.org/rfc/rfc9553.html>
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct JSContactVersion1;
 impl JSContactVersion for JSContactVersion1 {}
 
@@ -41,15 +43,15 @@ pub struct CardDeserializer;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JSContact<T: JSContactVersion>(
-    json_types::JsonCardValue,
-    std::marker::PhantomData<*const T>,
+    pub json_types::JsonCardValue,
+    pub std::marker::PhantomData<fn() -> T>,
 );
 
 impl<V: JSContactVersion> JSContact<V> {
     pub fn new_v1() -> JSContact<impl JSContactVersion> {
         JSContact(
             json_types::JsonCardValue::default(),
-            std::marker::PhantomData::<*const JSContactVersion1>,
+            std::marker::PhantomData::<fn() -> JSContactVersion1>,
         )
     }
 }
@@ -62,29 +64,95 @@ impl CardDeserializer {
     }
 }
 
-impl<V: JSContactVersion> TryInto<Card> for JSContact<V> {
-    type Error = crate::error::Error;
-
-    fn try_into(self) -> Result<Card> {
+impl<V: JSContactVersion> From<JSContact<V>> for Card {
+    fn from(val: JSContact<V>) -> Self {
         let json_types::JsonCardValue {
-            uid, name, email, ..
-        } = self.0;
-        let mut card = Card::new();
+            uid, name, emails, ..
+        } = val.0;
+        let mut card = Self::new();
         card.set_id(CardId::from(uid));
         if let Some(name) = name.full {
             card.set_name(name);
+        } else if name.is_ordered {
+            card.set_name(
+                name.components
+                    .iter()
+                    .map(|c| c.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(name.default_separator.as_deref().unwrap_or(" ")),
+            );
+        } else {
+            use json_types::JsonCardNameComponentKind::*;
+
+            let mut name_s = String::new();
+            let sep = name.default_separator.as_deref().unwrap_or(" ");
+            for kind in [
+                Title, Given, Given2, Surname, Surname2, Credential, Generation,
+            ] {
+                if let Some(c) = name.components.iter().find(|c| c.kind == kind) {
+                    if !name_s.is_empty() {
+                        name_s.push_str(sep);
+                    }
+                    name_s.push_str(&c.value)
+                }
+            }
+            card.set_name(name_s);
         }
-        if let Some(e) = email.get_index(0) {
+        if let Some(e) = emails.get_index(0) {
             card.set_email(e.1.address.to_string());
         }
 
-        Ok(card)
+        card
+    }
+}
+
+impl From<Card> for JSContact<JSContactVersion1> {
+    fn from(card: Card) -> Self {
+        let mut ret = Self(
+            json_types::JsonCardValue::default(),
+            std::marker::PhantomData::<fn() -> JSContactVersion1>,
+        );
+        if let CardId::Uuid(uid) = card.id {
+            ret.0.uid = uid.to_string();
+        }
+        ret.0.name.full = Some(card.name);
+        ret.0.emails.insert(
+            "main".into(),
+            json_types::JsonCardEmailAddress {
+                __type: None,
+                address: card.email,
+                contexts: IndexMap::new(),
+                pref: None,
+                label: None,
+            },
+        );
+
+        ret
     }
 }
 
 impl From<json_types::JsonCardValue> for JSContact<JSContactVersion1> {
     fn from(val: json_types::JsonCardValue) -> Self {
-        Self(val, std::marker::PhantomData::<*const JSContactVersion1>)
+        Self(val, std::marker::PhantomData::<fn() -> JSContactVersion1>)
+    }
+}
+
+impl serde::Serialize for JSContact<JSContactVersion1> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for JSContact<JSContactVersion1> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = <json_types::JsonCardValue>::deserialize(deserializer)?;
+        Ok(Self(s, std::marker::PhantomData))
     }
 }
 
@@ -97,7 +165,7 @@ pub mod json_types {
     macro_rules! impl_json_type_struct_serde {
         ($t:tt, $s:literal) => {
             #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-            struct $t;
+            pub struct $t;
 
             impl Serialize for $t {
                 fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -113,7 +181,7 @@ pub mod json_types {
                 where
                     D: Deserializer<'de>,
                 {
-                    let s = <&'de str>::deserialize(deserializer)?;
+                    let s = <String>::deserialize(deserializer)?;
                     if s != $s {
                         return Err(serde::de::Error::custom(format!(
                             concat!(r#"expected @type value ""#, $s, ", found `{}`"),
@@ -128,6 +196,7 @@ pub mod json_types {
 
     impl_json_type_struct_serde! {JsonCardType, "Card"}
     impl_json_type_struct_serde! {JsonNameType, "Name"}
+    impl_json_type_struct_serde! {JsonNameComponentType, "NameComponent"}
     impl_json_type_struct_serde! {JsonEmailAddressType, "EmailAddress"}
 
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -151,7 +220,7 @@ pub mod json_types {
         where
             D: Deserializer<'de>,
         {
-            let s = <&'de str>::deserialize(deserializer)?;
+            let s = <String>::deserialize(deserializer)?;
             if s != "1.0" {
                 return Err(serde::de::Error::custom(format!(
                     r#"expected version value "1.0", found `{s}`"#
@@ -188,8 +257,8 @@ pub mod json_types {
                 formats::RFC3339_DATETIME_Z, parse_timestamp_from_string,
             };
 
-            let s = <&'de str>::deserialize(deserializer)?;
-            let Ok((_, val)) = parse_timestamp_from_string(s, RFC3339_DATETIME_Z) else {
+            let s = <String>::deserialize(deserializer)?;
+            let Ok((_, val)) = parse_timestamp_from_string(s.as_str(), RFC3339_DATETIME_Z) else {
                 return Err(serde::de::Error::custom(format!(
                     r#"expected UTCDateTime value, found `{s}`"#
                 )));
@@ -220,7 +289,7 @@ pub mod json_types {
     #[serde(rename_all = "camelCase")]
     pub struct JsonCardValue {
         #[serde(rename = "@type")]
-        __type: JsonCardType,
+        pub __type: JsonCardType,
         pub version: JsonCardVersion,
         pub uid: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,29 +305,82 @@ pub mod json_types {
         pub kind: Option<JsonCardKind>,
         pub name: JsonCardName,
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-        pub email: IndexMap<String, JsonCardEmailAddress>,
+        pub emails: IndexMap<String, JsonCardEmailAddress>,
     }
 
-    #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum JsonCardNameComponentKind {
+        Title,
+        Given,
+        Given2,
+        Surname,
+        Surname2,
+        Credential,
+        Generation,
+        Separator,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct JsonCardNameCmponent {
+        #[serde(rename = "@type", default, skip_serializing_if = "Option::is_none")]
+        pub __type: Option<JsonNameComponentType>,
+        pub value: String,
+        pub kind: JsonCardNameComponentKind,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub phonetic: String,
+    }
+
+    #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
     #[serde(rename_all = "camelCase")]
     pub struct JsonCardName {
         #[serde(rename = "@type", default, skip_serializing_if = "Option::is_none")]
-        __type: Option<JsonNameType>,
+        pub __type: Option<JsonNameType>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pub components: Vec<()>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub is_ordered: Option<bool>,
+        pub components: Vec<JsonCardNameCmponent>,
+        #[serde(default)]
+        pub is_ordered: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub default_separator: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub full: Option<String>,
     }
 
+    impl serde::Serialize for JsonCardName {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeMap as _;
+
+            let map_len = usize::from(self.__type.is_some())
+                + usize::from(!self.components.is_empty()) * 2
+                + usize::from(self.default_separator.is_some())
+                + usize::from(self.full.is_some());
+            let mut map = serializer.serialize_map(Some(map_len))?;
+            if let Some(__type) = &self.__type {
+                map.serialize_entry("@type", __type)?;
+            }
+            if !self.components.is_empty() {
+                map.serialize_entry("components", &self.components)?;
+                map.serialize_entry("isOrdered", &self.is_ordered)?;
+            }
+            if let Some(default_separator) = &self.default_separator {
+                map.serialize_entry("defaultSeparator", default_separator)?;
+            }
+            if let Some(full) = &self.full {
+                map.serialize_entry("full", full)?;
+            }
+            map.end()
+        }
+    }
+
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct JsonCardEmailAddress {
         #[serde(rename = "@type", default, skip_serializing_if = "Option::is_none")]
-        __type: Option<JsonEmailAddressType>,
+        pub __type: Option<JsonEmailAddressType>,
         pub address: String,
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         pub contexts: IndexMap<String, bool>,
@@ -286,10 +408,10 @@ pub mod json_types {
                     __type: None,
                     components: vec![],
                     full: Some("full_name".to_string()),
-                    is_ordered: Some(true),
+                    is_ordered: false,
                     default_separator: None,
                 },
-                email: indexmap! {
+                emails: indexmap! {
                     "main".to_string() => JsonCardEmailAddress {
                         __type: None,
                         address: "user@example.com".to_string(),
@@ -305,7 +427,7 @@ pub mod json_types {
             "version": "1.0",
             "uid": "22B2C7DF-9120-4969-8460-05956FE6B065",
             "kind": "individual",
-            "email": {
+            "emails": {
                 "main": {
                     "address": "user@example.com"
                 }
@@ -313,7 +435,7 @@ pub mod json_types {
             "name": {
                 "components": [],
                 "full": "full_name",
-                "isOrdered": true
+                "isOrdered": false
             }
         }"#
             )
@@ -322,15 +444,14 @@ pub mod json_types {
         assert_eq!(
             Card {
                 last_edited: 1727155810,
-                ..<JSContact<JSContactVersion1> as std::convert::TryInto<Card>>::try_into(
-                    JSContact::<JSContactVersion1>::from(
-                        serde_json::from_str::<JsonCardValue>(
-                            r#"{
+                ..JSContact::<JSContactVersion1>::from(
+                    serde_json::from_str::<JsonCardValue>(
+                        r#"{
             "@type": "Card",
             "version": "1.0",
             "uid": "22B2C7DF-9120-4969-8460-05956FE6B065",
             "kind": "individual",
-            "email": {
+            "emails": {
                 "main": {
                     "address": "user@example.com"
                 }
@@ -338,14 +459,13 @@ pub mod json_types {
             "name": {
                 "components": [],
                 "full": "full_name",
-                "isOrdered": true
+                "isOrdered": false
             }
         }"#
-                        )
-                        .unwrap()
                     )
+                    .unwrap()
                 )
-                .unwrap()
+                .into()
             },
             Card {
                 id: CardId::Uuid(
