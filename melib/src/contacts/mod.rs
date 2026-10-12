@@ -19,6 +19,7 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
+pub mod backend;
 pub mod jscontact;
 pub mod mutt;
 pub mod notmuchcontact;
@@ -50,6 +51,15 @@ use crate::utils::{parsec::Parser, shellexpand::ShellExpandTrait};
 pub enum CardId {
     Uuid(Uuid),
     Hash(u64),
+}
+
+impl CardId {
+    pub const fn as_uuid(&self) -> Option<Uuid> {
+        let Self::Uuid(uuid) = self else {
+            return None;
+        };
+        Some(*uuid)
+    }
 }
 
 impl std::fmt::Display for CardId {
