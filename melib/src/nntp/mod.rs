@@ -464,7 +464,7 @@ impl MailBackend for NntpType {
         &mut self,
         _bytes: Vec<u8>,
         _mailbox_hash: MailboxHash,
-        _flags: Option<Flag>,
+        _flags: Option<(Flag, Vec<String>)>,
     ) -> ResultFuture<()> {
         Err(Error::new("NNTP doesn't support saving.").set_kind(ErrorKind::NotSupported))
     }
@@ -618,12 +618,8 @@ impl MailBackend for NntpType {
             .set_kind(ErrorKind::NotSupported))
     }
 
-    fn submit(
-        &mut self,
-        mut bytes: Vec<u8>,
-        mailbox_hash: Option<MailboxHash>,
-        _flags: Option<Flag>,
-    ) -> ResultFuture<()> {
+    fn submit(&mut self, bytes: Vec<u8>, mailbox_hash: Option<MailboxHash>) -> ResultFuture<()> {
+        let mut bytes = crate::utils::canonicalize_crlf(&bytes).into_owned();
         let is_online_fut = self.is_online()?;
         let connection = self.connection.clone();
         let timeout_dur = self.server_conf.timeout_dur;
@@ -636,7 +632,6 @@ impl MailBackend for NntpType {
                     Error::new("Server prohibits posting.").set_kind(ErrorKind::NotSupported)
                 );
             }
-            // [ref:TODO] normalize CRLF in `bytes`
             let mut res = String::with_capacity(8 * 1024);
             if let Some((mailbox_hash, path)) = mailbox_hash
                 .map_or_else(

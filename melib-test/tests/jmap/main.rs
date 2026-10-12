@@ -52,6 +52,14 @@ fn test_jmap_watch() {
     });
 }
 
+#[test]
+fn test_jmap_operations() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_jmap_operations();
+    });
+}
+
 pub mod server {
     use std::{
         net::{SocketAddr, TcpListener},
@@ -109,11 +117,22 @@ pub mod server {
         Updated(Id<OBJ>),
         Destroyed(Id<OBJ>),
     }
+    /// [`Flag`] 位到 JMAP 关键字字符串的映射，供测试服务器关键字表记账。
+    fn flag_keyword(flag: Flag) -> &'static str {
+        match flag {
+            Flag::DRAFT => "$draft",
+            Flag::FLAGGED => "$flagged",
+            Flag::SEEN => "$seen",
+            Flag::REPLIED => "$answered",
+            Flag::TRASHED => "$junk",
+            Flag::PASSED => "$passed",
+            _ => unimplemented!("Flag {flag:?} 没有 JMAP 关键字映射"),
+        }
+    }
 
     /// Server state with only one mailbox (INBOX).
     pub struct ServerState {
         pub envelopes: IndexMap<Id<email::EmailObject>, Mail>,
-        pub keywords: IndexMap<Id<email::EmailObject>, Vec<String>>,
         pub identities: IndexMap<Id<identity::Identity>, identity::Identity>,
         pub mailboxes: IndexMap<Id<mailbox::MailboxObject>, mailbox::MailboxObject>,
         pub identity_state: State<identity::Identity>,
@@ -121,6 +140,11 @@ pub mod server {
         pub mailbox_state: State<mailbox::MailboxObject>,
         pub email_state_changes:
             IndexMap<State<email::EmailObject>, StateChange<email::EmailObject>>,
+        /// Blobs uploaded through the `uploadUrl` endpoint, keyed by blob id.
+        pub uploaded_blobs: IndexMap<Id<objects::BlobObject>, Vec<u8>>,
+        /// Per-email JMAP keywords (`String[Boolean]`), including custom tags
+        /// that have no [`Mail`] flag-bit representation.
+        pub keywords: IndexMap<Id<email::EmailObject>, IndexMap<String, bool>>,
         /// Error response types the server has replied with, for assertions.
         pub error_responses: Vec<String>,
         pub session: Session,
@@ -213,6 +237,7 @@ pub mod server {
                 email_state,
                 mailbox_state: State::new_random(),
                 email_state_changes,
+                uploaded_blobs: indexmap::indexmap! {},
                 error_responses: vec![],
                 session,
             }
@@ -235,6 +260,7 @@ pub mod server {
                 Copy,
                 Query,
                 QueryChanges,
+                Import,
             }
 
             fn parse_type(value: &str) -> (String, MethodCallType) {
@@ -247,6 +273,7 @@ pub mod server {
                     "copy" => MethodCallType::Copy,
                     "query" => MethodCallType::Query,
                     "queryChanges" => MethodCallType::QueryChanges,
+                    "import" => MethodCallType::Import,
                     other => panic!("Unexpected method call type: {other}"),
                 };
                 (name, r#type)
@@ -300,7 +327,7 @@ pub mod server {
                                 eprintln!("Parsed Email/get object {get:?}");
                                 let mut not_found = vec![];
                                 eprintln!("get.ids = {:?}", get.ids);
-                                let list = match get.ids {
+                                let mut list = match get.ids {
                                     None => {
                                         // Return all.
                                         self.envelopes
@@ -312,9 +339,10 @@ pub mod server {
                                                     self.mailboxes.keys().next().unwrap().clone(),
                                                     true,
                                                 );
-                                                let tags = &self.keywords[id];
-                                                for tag in tags {
-                                                    email.keywords.insert(tag.clone(), true);
+                                                for (kw, on) in &self.keywords[id] {
+                                                    if *on {
+                                                        email.keywords.insert(kw.clone(), true);
+                                                    }
                                                 }
 
                                                 email
@@ -331,9 +359,10 @@ pub mod server {
                                                     self.mailboxes.keys().next().unwrap().clone(),
                                                     true,
                                                 );
-                                                let tags = &self.keywords[&email_id];
-                                                for tag in tags {
-                                                    email_obj.keywords.insert(tag.clone(), true);
+                                                for (kw, on) in &self.keywords[&email_id] {
+                                                    if *on {
+                                                        email_obj.keywords.insert(kw.clone(), true);
+                                                    }
                                                 }
                                                 list.push(email_obj);
                                             } else {
@@ -416,11 +445,12 @@ pub mod server {
                                                             .clone(),
                                                         true,
                                                     );
-                                                    let tags = &self.keywords[&email_id];
-                                                    for tag in tags {
-                                                        email_obj
-                                                            .keywords
-                                                            .insert(tag.clone(), true);
+                                                    for (kw, on) in &self.keywords[&email_id] {
+                                                        if *on {
+                                                            email_obj
+                                                                .keywords
+                                                                .insert(kw.clone(), true);
+                                                        }
                                                     }
                                                     Some(email_obj)
                                                 } else {
@@ -431,6 +461,11 @@ pub mod server {
                                             .collect::<Vec<email::EmailObject>>()
                                     }
                                 };
+                                for email_obj in list.iter_mut() {
+                                    if let Some(keywords) = self.keywords.get(&email_obj.id) {
+                                        email_obj.keywords = keywords.clone();
+                                    }
+                                }
                                 let response: GetResponse<email::EmailObject> = GetResponse {
                                     account_id: get.account_id,
                                     state: self.email_state.clone(),
@@ -795,7 +830,7 @@ pub mod server {
                                 serde_json::value::from_value(body).unwrap();
                             eprintln!("Parsed Email/query object {query:?}");
                             let position = query.query_call.position;
-                            let position_u = usize::try_from(position).unwrap();
+                            let position_u = usize::try_from(position).unwrap_or_default();
                             let response: QueryResponse<email::EmailObject> = QueryResponse {
                                 account_id: query.query_call.account_id,
                                 query_state: String::new(),
@@ -822,6 +857,63 @@ pub mod server {
                         other => panic!("other type name {other}"),
                     },
                     MethodCallType::QueryChanges => unimplemented!(),
+                    MethodCallType::Import => match object_type_name.as_str() {
+                        "Email" => {
+                            let import = serde_json::value::from_value(body).unwrap();
+                            eprintln!("Parsed Email/import object {import:?}");
+                            let email::EmailImport {
+                                account_id,
+                                if_in_state: _,
+                                emails,
+                            } = import;
+                            let mut created = indexmap::indexmap! {};
+                            let old_state = self.email_state.clone();
+                            let mut new_state = self.email_state.clone();
+                            for (_creation_id, import_object) in emails {
+                                let blob_id = import_object.blob_id.clone();
+                                let blob = &self.uploaded_blobs[&blob_id];
+                                let size = blob.len();
+                                new_state = self
+                                    .insert_email(Box::new(Mail::new(blob.clone(), None).unwrap()));
+                                let id = self
+                                    .email_state_changes
+                                    .last()
+                                    .map(|(_, s)| {
+                                        let StateChange::Created(id) = s else {
+                                            panic!("expected Created state change");
+                                        };
+                                        id.clone()
+                                    })
+                                    .unwrap();
+                                created.insert(
+                                    id.clone(),
+                                    email::EmailImportResult {
+                                        id,
+                                        blob_id,
+                                        thread_id: Id::default(),
+                                        size,
+                                    },
+                                );
+                            }
+                            let old_state = if old_state == self.email_state {
+                                None
+                            } else {
+                                Some(old_state)
+                            };
+                            let response: email::EmailImportResponse = email::EmailImportResponse {
+                                account_id,
+                                old_state,
+                                new_state,
+                                created: Some(created),
+                                not_created: None,
+                            };
+                            eprintln!("Sending {id} {type} response: {response:?}");
+                            responses
+                                .method_responses
+                                .insert(id.clone(), serde_json::json! {[r#type, response, id]});
+                        }
+                        other => panic!("other type name {other}"),
+                    },
                 }
             }
             eprintln!("Sending API call responses: {responses:?}");
@@ -832,7 +924,7 @@ pub mod server {
             let id: Id<email::EmailObject> = Id::new_random();
             let old_state = std::mem::replace(&mut self.email_state, State::new_random());
             self.envelopes.insert(id.clone(), *new);
-            self.keywords.insert(id.clone(), vec![]);
+            self.keywords.insert(id.clone(), indexmap::indexmap! {});
             let _none = self
                 .email_state_changes
                 .insert(old_state, StateChange::Created(id));
@@ -882,22 +974,27 @@ pub mod server {
             flag_op: FlagOp,
         ) -> State<email::EmailObject> {
             let id = self.id_by_ref(eref).unwrap();
-            match flag_op {
+            // 关键字表统一 JMAP 原生形态（String[Boolean]）：flag 位与自定义 tag
+            // 一并记账，Email/get 注入与 set/回环测试共享同一真值源。
+            let (keyword, set) = match flag_op {
                 FlagOp::Set(f) => {
                     self.envelopes[&id].envelope.set_flag(f, true);
+                    (flag_keyword(f).to_string(), true)
                 }
                 FlagOp::UnSet(f) => {
                     self.envelopes[&id].envelope.set_flag(f, false);
+                    (flag_keyword(f).to_string(), false)
                 }
-                FlagOp::SetTag(tag) => {
-                    self.keywords.entry(id.clone()).or_default().push(tag);
-                }
-                FlagOp::UnSetTag(tag) => {
-                    self.keywords
-                        .entry(id.clone())
-                        .or_default()
-                        .retain(|t| *t != tag);
-                }
+                FlagOp::SetTag(tag) => (tag, true),
+                FlagOp::UnSetTag(tag) => (tag, false),
+            };
+            if set {
+                self.keywords
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(keyword, true);
+            } else if let Some(keywords) = self.keywords.get_mut(&id) {
+                keywords.shift_remove(&keyword);
             }
             let old_state = std::mem::replace(&mut self.email_state, State::new_random());
             let _none = self
@@ -1002,6 +1099,23 @@ pub mod server {
                                     .unwrap()
                                     .api(lossy.lines().rev().nth(0).unwrap()),
                             )
+                            .unwrap()
+                            .into_bytes()
+                        } else if lossy.starts_with("POST /upload/A13824/") {
+                            let (_, body) = lossy.split_once("\r\n\r\n").unwrap();
+                            let size = body.len();
+                            let blob_id = Id::new_random();
+                            state
+                                .lock()
+                                .unwrap()
+                                .uploaded_blobs
+                                .insert(blob_id.clone(), body.as_bytes().to_vec());
+                            serde_json::to_string(&UploadResponse {
+                                account_id: "A13824".into(),
+                                blob_id,
+                                _type: "message/rfc822".into(),
+                                size,
+                            })
                             .unwrap()
                             .into_bytes()
                         } else if lossy.starts_with("GET /eventsource/") {
@@ -1454,6 +1568,220 @@ hello world.
     /// Test that `JmapType::watch` `Stream` returns the expected `Refresh`
     /// events when altering the mail store in the JMAP server, using
     /// eventSourceUrl-type instead of polling.
+    /// Test various data operations: saving an e-mail with both flags and
+    /// tags must round-trip through upload, `Email/import` and `Email/set`
+    /// keyword updates.
+    pub(crate) fn run_jmap_operations() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+
+        for var in [
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_DIRS",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_DIRS",
+            "XDG_DATA_HOME",
+        ] {
+            std::env::remove_var(var);
+        }
+        for (var, dir) in [
+            ("HOME", temp_dir.path().to_path_buf()),
+            ("XDG_CACHE_HOME", temp_dir.path().join(".cache")),
+            ("XDG_STATE_HOME", temp_dir.path().join(".local/state")),
+            ("XDG_CONFIG_HOME", temp_dir.path().join(".config")),
+            ("XDG_DATA_HOME", temp_dir.path().join(".local/share")),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
+                panic!("Could not create {} path, {}: {}", var, dir.display(), err);
+            });
+            std::env::set_var(var, &dir);
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let account_conf = AccountSettings {
+            name: "test".to_string(),
+            root_mailbox: "INBOX".to_string(),
+            format: "jmap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra: {
+                let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                    indexmap::IndexMap::new();
+
+                m.insert(
+                    "server_url".to_string(),
+                    serde_json::Value::String(format!(
+                        "http://{}:{}",
+                        local_addr.ip(),
+                        local_addr.port()
+                    )),
+                );
+                m.insert(
+                    "server_username".to_string(),
+                    serde_json::Value::String("user".to_string()),
+                );
+                m.insert(
+                    "server_password".to_string(),
+                    serde_json::Value::String("password".to_string()),
+                );
+                m.insert(
+                    "use_token".to_string(),
+                    serde_json::Value::String("true".to_string()),
+                );
+
+                m
+            },
+        };
+
+        let mut jmap =
+            JmapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
+        let (server_event_sender, server_event_receiver) = unbounded();
+        let server = JmapServerStream::new(
+            smol::Async::new(listener).unwrap(),
+            server_event_receiver,
+            local_addr,
+        );
+        std::thread::spawn(move || {
+            block_on(server.loop_handler()).unwrap();
+        });
+        eprintln!(
+            "Assert that account is not online because we have not performed any operations yet."
+        );
+        assert_eq!(
+            &block_on(jmap.is_online().unwrap()).unwrap_err().to_string(),
+            "Account is uninitialised."
+        );
+        let mailboxes = block_on(jmap.mailboxes().unwrap()).unwrap();
+        assert_eq!(
+            mailboxes.len(),
+            1,
+            "Expected one mailbox, Inbox. Got: {mailboxes:?}"
+        );
+        let inbox_hash = *mailboxes.keys().next().unwrap();
+        eprintln!("Inbox hash: {inbox_hash:?}");
+        {
+            let events = backend_event_queue
+                .lock()
+                .unwrap()
+                .drain(..)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events.len(),
+                0,
+                "Unexpected events without having performed any changes: {events:?}"
+            );
+        }
+        eprintln!("Refresh account and assert that no events arrive.");
+        block_on(jmap.refresh(inbox_hash).unwrap()).unwrap();
+        {
+            let events = backend_event_queue
+                .lock()
+                .unwrap()
+                .drain(..)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events.len(),
+                0,
+                "Unexpected events after refreshing without having performed any changes: \
+                 {events:?}"
+            );
+        }
+
+        eprintln!(
+            "Add new e-mail on server store and assert that a refresh results in a Refresh \
+             Create event."
+        );
+        let new_mail = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Cc:
+Subject: RE: your e-mail
+Message-ID: <h2g7f.z0gy2pgaen5m@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let fetch_result: Vec<_> = block_on(
+            jmap.fetch(inbox_hash)
+                .unwrap()
+                .collect::<Vec<Result<Vec<Envelope>>>>(),
+        );
+        for res in fetch_result {
+            let res = res.unwrap();
+            assert_eq!(res, vec![]);
+        }
+        block_on(
+            jmap.save(
+                new_mail.bytes.clone(),
+                inbox_hash,
+                Some((Flag::DRAFT, vec!["sent".to_string()])),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        block_on(jmap.refresh(inbox_hash).unwrap()).unwrap();
+        {
+            let events = backend_event_queue
+                .lock()
+                .unwrap()
+                .drain(..)
+                .collect::<Vec<_>>();
+            eprintln!("got events: {events:?}");
+        };
+        let fetch_result: Vec<_> = block_on(
+            jmap.fetch(inbox_hash)
+                .unwrap()
+                .collect::<Vec<Result<Vec<Envelope>>>>(),
+        );
+        let collection = jmap.collection();
+        let fetched = fetch_result
+            .into_iter()
+            .map(|res| res.unwrap())
+            .flatten()
+            .collect::<Vec<Envelope>>();
+        assert_eq!(fetched.len(), 1);
+        {
+            let tag_index = collection.tag_index.read().unwrap();
+            assert_eq!(fetched[0].flags(), Flag::DRAFT);
+            assert_eq!(
+                fetched[0]
+                    .tags()
+                    .into_iter()
+                    .map(|t| &tag_index[t])
+                    .collect::<Vec<_>>(),
+                vec!["sent"]
+            );
+        }
+        server_event_sender
+            .unbounded_send(ServerEvent::Quit)
+            .unwrap();
+    }
+
     pub(crate) fn run_jmap_watch() {
         melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();

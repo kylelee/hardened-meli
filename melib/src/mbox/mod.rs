@@ -1210,7 +1210,7 @@ impl MailBackend for MboxType {
         &mut self,
         _bytes: Vec<u8>,
         _mailbox_hash: MailboxHash,
-        _flags: Option<Flag>,
+        _flags: Option<(Flag, Vec<String>)>,
     ) -> ResultFuture<()> {
         Err(
             Error::new("Saving messages is currently unimplemented for mbox backend")
@@ -1395,13 +1395,14 @@ impl MboxType {
         );
         /* Look for other mailboxes */
         for (k, f) in s.mailboxes.iter() {
-            let Some(path_str) = f.extra.get("path").map(String::as_str) else {
+            let Some(path_str) = f.extra.get("path").and_then(|v| v.as_str()) else {
                 return Err(Error::new(format!(
                     "mbox mailbox configuration entry \"{k}\" should have a \"path\" value set \
                      pointing to an mbox file."
                 )));
             };
-            let format = if let Some(format_str) = f.extra.get("format").map(String::as_str) {
+            let format = if let Some(format_str) = f.extra.get("format").and_then(|v| v.as_str())
+            {
                 if format_str == "auto" {
                     MboxFormat::default()
                 } else {

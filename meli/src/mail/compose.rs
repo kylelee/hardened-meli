@@ -765,7 +765,7 @@ To: {}
             self.draft.clone().finalise().unwrap().as_bytes(),
             context,
             SpecialUsageMailbox::Drafts,
-            Flag::SEEN | Flag::DRAFT,
+            (Flag::SEEN | Flag::DRAFT, vec![]),
             self.account_hash,
         );
         self.mode = ViewMode::Edit;
@@ -784,7 +784,7 @@ To: {}
             self.draft.clone().finalise().unwrap().as_bytes(),
             context,
             SpecialUsageMailbox::Drafts,
-            Flag::SEEN | Flag::DRAFT,
+            (Flag::SEEN | Flag::DRAFT, vec![]),
             self.account_hash,
         );
         #[cfg(feature = "gpgme")]
@@ -3135,7 +3135,7 @@ pub fn save_draft(
     bytes: &[u8],
     context: &mut Context,
     mailbox_type: SpecialUsageMailbox,
-    flags: Flag,
+    flags: (Flag, Vec<String>),
     account_hash: AccountHash,
 ) {
     match context.accounts[&account_hash].save_special(bytes, mailbox_type, flags) {
@@ -3292,11 +3292,14 @@ pub fn send_draft_async(
                             } else {
                                 SpecialUsageMailbox::Drafts
                             },
-                            if is_ok {
-                                flags
-                            } else {
-                                Flag::SEEN | Flag::DRAFT
-                            },
+                            (
+                                if is_ok {
+                                    flags
+                                } else {
+                                    Flag::SEEN | Flag::DRAFT
+                                },
+                                vec![],
+                            ),
                             account_hash,
                         );
                     }),

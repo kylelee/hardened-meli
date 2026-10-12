@@ -70,8 +70,14 @@ impl MailboxEntry {
         };
         match ret.conf.mailbox_conf.extra.get("encoding") {
             None => {}
-            Some(v) if ["utf-8", "utf8"].iter().any(|e| v.eq_ignore_ascii_case(e)) => {}
-            Some(v) if ["utf-7", "utf7"].iter().any(|e| v.eq_ignore_ascii_case(e)) => {
+            Some(v) if ["utf-8", "utf8"].iter().any(|e| {
+                v.as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case(e))
+            }) => {}
+            Some(v) if ["utf-7", "utf7"].iter().any(|e| {
+                v.as_str()
+                    .is_some_and(|v| v.eq_ignore_ascii_case(e))
+            }) => {
                 ret.name = melib::backends::utf7::decode_utf7_imap(&ret.name);
                 ret.path = melib::backends::utf7::decode_utf7_imap(&ret.path);
             }

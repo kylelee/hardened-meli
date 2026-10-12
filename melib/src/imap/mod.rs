@@ -499,9 +499,9 @@ impl MailBackend for ImapType {
             extensions: Some(extensions),
             supports_tags: true,
             supports_submission: false,
-            supports_contacts: false,
-            extra_submission_headers: &[],
+
             metadata,
+            ..MailBackendCapabilities::default()
         }
     }
 
@@ -760,7 +760,7 @@ impl MailBackend for ImapType {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        flags: Option<Flag>,
+        flags: Option<(Flag, Vec<String>)>,
     ) -> ResultFuture<()> {
         let connection = self.connection.clone();
         Ok(Box::pin(async move {

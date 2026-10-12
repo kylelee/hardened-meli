@@ -522,3 +522,22 @@ fn test_utils_base36() {
         );
     }
 }
+
+#[test]
+fn test_utils_canonicalize_crlf() {
+    use super::canonicalize_crlf;
+    use std::borrow::Cow;
+
+    assert!(matches!(canonicalize_crlf(b""), Cow::Borrowed(b"")));
+    assert!(matches!(canonicalize_crlf(b"a\r\nb"), Cow::Borrowed(_)));
+    assert_eq!(
+        canonicalize_crlf(b"a\nb\r\nc").as_ref(),
+        b"a\r\nb\r\nc"
+    );
+    // Mixed content collapses to uniform CRLF, not doubled newlines.
+    assert_eq!(canonicalize_crlf(b"a\nb\n").as_ref(), b"a\r\nb\r\n");
+    // Already-CRLF content is preserved byte for byte.
+    assert_eq!(canonicalize_crlf(b"a\r\nb").as_ref(), b"a\r\nb");
+    // A lone CR is not a line ending to normalize.
+    assert_eq!(canonicalize_crlf(b"a\rb\n").as_ref(), b"a\rb\r\n");
+}
