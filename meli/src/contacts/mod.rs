@@ -33,8 +33,14 @@ pub fn export_to_vcard(card: &Card, account_hash: AccountHash, context: &mut Con
     let mut output_dir = context.accounts[&account_hash]
         .settings
         .account
-        .vcard_folder()
-        .map(|s| std::path::Path::new(s).to_path_buf());
+        .contacts
+        .values()
+        .find_map(|conf| match conf {
+            melib::conf::ContactBackendConf::VCard(path) => {
+                Some(std::path::Path::new(path).to_path_buf())
+            }
+            _ => None,
+        });
     let filename = format!(
         "{prefix}{name}{suffix}{space}{additionalname}",
         prefix = card.name_prefix(),

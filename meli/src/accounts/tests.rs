@@ -180,6 +180,7 @@ fn new_maildir_backend(
         subscribed_mailboxes,
         mailboxes,
         manual_refresh: true,
+        contacts: Default::default(),
         extra,
     };
 

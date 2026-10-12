@@ -218,6 +218,8 @@ pub struct FileAccount {
     pub manual_refresh: bool,
     #[serde(default = "none", skip_serializing_if = "Option::is_none")]
     pub refresh_command: Option<String>,
+    #[serde(default)]
+    pub contacts: IndexMap<String, melib::conf::ContactBackendConf>,
     #[serde(flatten)]
     pub conf_override: MailUIConf,
     #[serde(flatten)]
@@ -348,6 +350,7 @@ impl From<FileAccount> for AccountConf {
             subscribed_mailboxes: x.subscribed_mailboxes.clone(),
             mailboxes,
             manual_refresh: x.manual_refresh,
+            contacts: x.contacts.clone(),
             extra: x.extra.clone().into_iter().collect(),
         };
 
@@ -692,6 +695,7 @@ impl FileSettings {
                 mailboxes,
                 extra,
                 manual_refresh,
+                contacts,
                 default_mailbox: _,
                 refresh_command: _,
                 search_backend: _,
@@ -709,13 +713,13 @@ impl FileSettings {
                 display_name,
                 subscribed_mailboxes,
                 manual_refresh,
+                contacts,
                 mailboxes: mailboxes
                     .into_iter()
                     .map(|(k, v)| (k, v.mailbox_conf))
                     .collect(),
                 extra: extra.into_iter().collect(),
             };
-            s.validate_config()?;
             backends.validate_config(&lowercase_format, &mut s)?;
             // Refuse to start if the account's SMTP mailer disables TLS
             // certificate/hostname validation (CVE-2009-3765 hardening).
@@ -806,6 +810,7 @@ impl FileSettings {
                 mailboxes,
                 extra,
                 manual_refresh,
+                contacts,
                 default_mailbox: _,
                 refresh_command: _,
                 search_backend: _,
@@ -823,13 +828,13 @@ impl FileSettings {
                 display_name,
                 subscribed_mailboxes,
                 manual_refresh,
+                contacts,
                 mailboxes: mailboxes
                     .into_iter()
                     .map(|(k, v)| (k, v.mailbox_conf))
                     .collect(),
                 extra: extra.into_iter().collect(),
             };
-            s.validate_config()?;
             backends.validate_config(&lowercase_format, &mut s)?;
             // Refuse to start if the account's SMTP mailer disables TLS
             // certificate/hostname validation (CVE-2009-3765 hardening).

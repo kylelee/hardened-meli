@@ -3443,6 +3443,7 @@ mod tests {
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut m: indexmap::IndexMap<String, serde_json::Value> =
                     indexmap::IndexMap::new();
@@ -3978,6 +3979,7 @@ hello world 3.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut m: indexmap::IndexMap<String, serde_json::Value> =
                     indexmap::IndexMap::new();
@@ -4934,6 +4936,7 @@ hello world 4.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut m: indexmap::IndexMap<String, serde_json::Value> =
                     indexmap::IndexMap::new();
@@ -5525,6 +5528,7 @@ hello world 3.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut m: indexmap::IndexMap<String, serde_json::Value> =
                     indexmap::IndexMap::new();
@@ -5836,6 +5840,7 @@ hello world 4.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut m: indexmap::IndexMap<String, serde_json::Value> =
                     indexmap::IndexMap::new();
@@ -6093,6 +6098,7 @@ hello world 4.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut m: indexmap::IndexMap<String, serde_json::Value> =
                     indexmap::IndexMap::new();
@@ -6218,6 +6224,7 @@ hello world 4.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut m: indexmap::IndexMap<String, serde_json::Value> =
                     indexmap::IndexMap::new();
@@ -6597,6 +6604,7 @@ sent body {i}.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut m: indexmap::IndexMap<String, serde_json::Value> =
                     indexmap::IndexMap::new();
@@ -7498,6 +7506,7 @@ hello world 3.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra,
         };
 
@@ -10936,6 +10945,7 @@ hello new world.
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra: {
                 let mut extra: indexmap::IndexMap<String, serde_json::Value> = {
                     let mut m: indexmap::IndexMap<String, serde_json::Value> =

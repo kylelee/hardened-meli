@@ -23,7 +23,7 @@
 //! Basic mail account configuration to use with
 //! [`backends`](./backends/index.html)
 
-use std::{borrow::Cow, path::Path};
+use std::borrow::Cow;
 
 use indexmap::IndexMap;
 
@@ -31,7 +31,6 @@ use crate::{
     backends::SpecialUsageMailbox,
     email::Address,
     error::{Error, ErrorKind, Result},
-    ShellExpandTrait,
 };
 
 mod field_types;
@@ -96,6 +95,26 @@ macro_rules! impl_extra_setting_from_str {
 
 impl_extra_setting_from_str! { u16, u64 }
 
+/// 账户联系人后端的配置。
+///
+/// 账户的 `contacts` 映射把后端名称映射到一个后端配置：
+///
+/// ```toml
+/// contacts = { mutt = { type = "MuttAlias", value = "~/.mutt/aliases" } }
+/// ```
+///
+/// `type` 取值为变体名，`value` 为该后端的路径或查询串。`CardDAV` 变体只在
+/// 启用 `webdav` 特性时可用。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", content = "value")]
+pub enum ContactBackendConf {
+    NotmuchAddress(String),
+    MuttAlias(String),
+    VCard(String),
+    #[cfg(feature = "webdav")]
+    CardDAV(crate::utils::webdav::WebDAVServerConf),
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AccountSettings {
     pub name: String,
@@ -118,6 +137,8 @@ pub struct AccountSettings {
     pub mailboxes: IndexMap<String, MailboxConf>,
     #[serde(default)]
     pub manual_refresh: bool,
+    #[serde(default)]
+    pub contacts: IndexMap<String, ContactBackendConf>,
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
 }
@@ -147,43 +168,6 @@ impl AccountSettings {
             .iter()
             .map(|i| Address::new(None::<&str>, i.clone()))
             .collect()
-    }
-
-    pub fn vcard_folder(&self) -> Option<&str> {
-        self.extra.get("vcard_folder").and_then(|v| v.as_str())
-    }
-
-    pub fn notmuch_address_book_query(&self) -> Option<&str> {
-        self.extra
-            .get("notmuch_address_book_query")
-            .and_then(|v| v.as_str())
-    }
-
-    /// 从 `extra` 的 `carddav` 键解析 CardDAV 服务器配置。
-    ///
-    /// 键不存在时返回 `Ok(None)`；反序列化失败或启用
-    /// `danger_accept_invalid_certs` 时返回 `ErrorKind::Configuration` 错误。
-    #[cfg(feature = "webdav")]
-    pub fn carddav_server_conf(
-        &self,
-    ) -> Result<Option<crate::utils::webdav::WebDAVServerConf>> {
-        let Some(value) = self.extra.get("carddav") else {
-            return Ok(None);
-        };
-        let conf: crate::utils::webdav::WebDAVServerConf = serde_json::from_value(value.clone())
-            .map_err(|err| {
-                Error::new(format!(
-                    "({}) could not parse `carddav` value as a WebDAV server configuration",
-                    self.name,
-                ))
-                .set_source(Some(crate::src_err_arc_wrap! { err }))
-                .set_kind(ErrorKind::Configuration)
-            })?;
-        reject_danger_accept_invalid_certs(
-            conf.danger_accept_invalid_certs,
-            &format!("CardDAV account `{}`", self.name),
-        )?;
-        Ok(Some(conf))
     }
 
     /// Look up an `extra` value as a string slice.
@@ -251,74 +235,6 @@ impl AccountSettings {
                  `{ command = \"...\" }` table)",
             )),
         }
-    }
-
-    pub fn validate_config(&mut self) -> Result<()> {
-        {
-            if let Some(folder) = self
-                .extra
-                .swap_remove("vcard_folder")
-                .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s),
-                    serde_json::Value::Bool(b) => Some(b.to_string()),
-                    serde_json::Value::Number(n) => Some(n.to_string()),
-                    _ => None,
-                })
-            {
-                let path = Path::new(&folder).expand();
-
-                if !matches!(path.try_exists(), Ok(true)) {
-                    return Err(Error::new(format!(
-                        "`vcard_folder` path {} does not exist",
-                        path.display()
-                    ))
-                    .set_details("`vcard_folder` must be a path of a folder containing .vcf files")
-                    .set_kind(ErrorKind::Configuration));
-                }
-                if !path.is_dir() {
-                    return Err(Error::new(format!(
-                        "`vcard_folder` path {} is not a directory",
-                        path.display()
-                    ))
-                    .set_details("`vcard_folder` must be a path of a folder containing .vcf files")
-                    .set_kind(ErrorKind::Configuration));
-                }
-            }
-            _ = self.extra.swap_remove("notmuch_address_book_query");
-        }
-        {
-            if let Some(mutt_alias_file) =
-                self.extra
-                    .swap_remove("mutt_alias_file")
-                    .and_then(|v| match v {
-                        serde_json::Value::String(s) => Some(s),
-                        serde_json::Value::Bool(b) => Some(b.to_string()),
-                        serde_json::Value::Number(n) => Some(n.to_string()),
-                        _ => None,
-                    })
-            {
-                let path = Path::new(&mutt_alias_file).expand();
-
-                if !matches!(path.try_exists(), Ok(true)) {
-                    return Err(Error::new(format!(
-                        "`mutt_alias_file` path {} does not exist",
-                        path.display()
-                    ))
-                    .set_details("`mutt_alias_file` must be an existing path of a mutt alias file")
-                    .set_kind(ErrorKind::Configuration));
-                }
-                if !path.is_file() {
-                    return Err(Error::new(format!(
-                        "`mutt_alias_file` path {} is not a file",
-                        path.display()
-                    ))
-                    .set_details("`mutt_alias_file` must be a path of a mutt alias file")
-                    .set_kind(ErrorKind::Configuration));
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
