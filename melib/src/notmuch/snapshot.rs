@@ -47,6 +47,12 @@ pub struct Snapshot {
     /// Mutex copy of [`Collection::tag_index`] associated with this account.
     pub tag_index: Arc<RwLock<BTreeMap<TagHash, String>>>,
     pub account_hash: AccountHash,
+    /// Database revision as of the latest synchronisation, as reported by
+    /// `notmuch_database_get_revision`. Used to skip refreshes when the
+    /// database has not changed at all.
+    pub revision: ::std::os::raw::c_ulong,
+    /// Unique identifier of the database the [`Self::revision`] refers to.
+    pub uuid: CString,
 }
 
 impl Snapshot {
