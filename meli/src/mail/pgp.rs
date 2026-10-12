@@ -85,9 +85,9 @@ pub async fn decrypt(
                 && content.trim_end().ends_with("-----END PGP MESSAGE-----")
             {
                 // Cleartext (PGP message format) — pass to backend for decryption.
-                let trimmed = content.trim().as_bytes().to_vec();
+                let octet_stream = melib::utils::canonicalize_crlf(content.trim().as_bytes());
                 let mut backend = backend;
-                return backend.decrypt(&trimmed)?.await;
+                return backend.decrypt(&octet_stream)?.await;
             }
         }
         return Err(Error::new("No encrypted payload found").set_kind(ErrorKind::ValueError));
@@ -254,7 +254,7 @@ pub fn sign_filter(
                 }
                 let a: Attachment = a.into();
                 let raw = a.into_raw();
-                let signed_data = melib_pgp::convert_attachment_to_rfc_spec(raw.as_bytes());
+                let signed_data = melib::utils::canonicalize_crlf(raw.as_bytes());
                 let (sig_metadata, sig_bytes) =
                     backend.sign(sign_keys, &signed_data, false)?.await?;
                 let sig_attachment =
@@ -362,7 +362,7 @@ pub fn encrypt_filter(
                 let a: Attachment = if let Some(sign_keys) = sign_keys {
                     let a: Attachment = a.into();
                     let raw = a.into_raw();
-                    let data = melib_pgp::convert_attachment_to_rfc_spec(raw.as_bytes());
+                    let data = melib::utils::canonicalize_crlf(raw.as_bytes());
                     let (sig_metadata, sig_bytes) = backend.sign(sign_keys, &data, false)?.await?;
                     let sig_attachment =
                         Attachment::new(ContentType::PGPSignature, Default::default(), sig_bytes);
