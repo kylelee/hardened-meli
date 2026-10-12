@@ -44,7 +44,7 @@ use crate::{
         identity::{Identity, IdentityGet, IdentitySet},
         methods::{Changes, ChangesResponse, Get, GetResponse, MethodResponse, ResultField, Set},
         objects::{Id, State},
-        protocol::{self, JmapMailCapability, Request},
+        protocol::{self, Request},
         session::Session,
         validate_session_urls, validate_transport_url, JmapServerConf, Store,
     },

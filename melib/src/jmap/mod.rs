@@ -109,7 +109,7 @@ pub mod thread;
 pub mod url_template;
 
 use argument::Argument;
-use capabilities::JmapCoreCapability;
+use capabilities::{JmapCoreCapability, JmapMailCapability, JmapSubmissionCapability};
 use filters::Filter;
 
 #[cfg(test)]
