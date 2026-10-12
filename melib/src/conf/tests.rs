@@ -200,6 +200,7 @@ fn test_account_settings_extra_conf_string() {
         subscribed_mailboxes: vec![],
         mailboxes: indexmap::IndexMap::new(),
         manual_refresh: false,
+        contacts: Default::default(),
         extra,
     };
 
@@ -234,4 +235,96 @@ fn test_account_settings_extra_conf_string() {
     // Objects (Secret inline tables) and absent keys stay None.
     assert_eq!(account.extra_conf_string("server_password"), None);
     assert_eq!(account.extra_conf_string("missing"), None);
+}
+
+/// `AccountSettings` 的基础必需字段，供 `contacts` 用例拼接。
+const CONTACTS_BASE_TOML: &str = r#"
+name = "contacts-test"
+root_mailbox = "INBOX"
+format = "imap"
+identity = "user@example.org"
+"#;
+
+#[test]
+fn test_account_settings_contacts_complete_toml() {
+    use crate::conf::{AccountSettings, ContactBackendConf};
+
+    let settings: AccountSettings = toml::from_str(&format!(
+        r#"{CONTACTS_BASE_TOML}
+contacts = {{ mutt = {{ type = "MuttAlias", value = "~/.mutt/aliases" }}, vcard = {{ type = "VCard", value = "/home/user/vcards" }}, notmuch = {{ type = "NotmuchAddress", value = "tag:contacts" }} }}
+"#
+    ))
+    .unwrap();
+    assert_eq!(settings.contacts.len(), 3);
+    assert!(matches!(
+        settings.contacts.get("mutt"),
+        Some(ContactBackendConf::MuttAlias(v)) if v == "~/.mutt/aliases"
+    ));
+    assert!(matches!(
+        settings.contacts.get("vcard"),
+        Some(ContactBackendConf::VCard(v)) if v == "/home/user/vcards"
+    ));
+    assert!(matches!(
+        settings.contacts.get("notmuch"),
+        Some(ContactBackendConf::NotmuchAddress(v)) if v == "tag:contacts"
+    ));
+}
+
+#[test]
+fn test_account_settings_contacts_default_is_empty_map() {
+    use crate::conf::AccountSettings;
+
+    let settings: AccountSettings = toml::from_str(CONTACTS_BASE_TOML).unwrap();
+    assert!(settings.contacts.is_empty());
+}
+
+#[test]
+fn test_account_settings_contacts_empty_table_is_empty_map() {
+    use crate::conf::AccountSettings;
+
+    let settings: AccountSettings =
+        toml::from_str(&format!("{CONTACTS_BASE_TOML}\ncontacts = {{}}\n")).unwrap();
+    assert!(settings.contacts.is_empty());
+}
+
+#[cfg(feature = "webdav")]
+#[test]
+fn test_account_settings_contacts_carddav_toml() {
+    use crate::conf::{AccountSettings, ContactBackendConf};
+
+    let settings: AccountSettings = toml::from_str(&format!(
+        r#"{CONTACTS_BASE_TOML}
+contacts = {{ carddav = {{ type = "CardDAV", value = {{ url = "https://dav.example.org/", username = "user@example.org", password = "example-password", auth = "Basic" }} }} }}
+"#
+    ))
+    .unwrap();
+    assert!(matches!(
+        settings.contacts.get("carddav"),
+        Some(ContactBackendConf::CardDAV(_))
+    ));
+}
+
+#[test]
+fn test_account_settings_contacts_rejects_invalid_type_and_missing_value() {
+    use crate::conf::AccountSettings;
+
+    let invalid_type = format!(
+        r#"{CONTACTS_BASE_TOML}
+contacts = {{ bad = {{ type = "NotABackend", value = "x" }} }}
+"#
+    );
+    assert!(
+        toml::from_str::<AccountSettings>(&invalid_type).is_err(),
+        "未知后端类型必须被拒绝"
+    );
+
+    let missing_value = format!(
+        r#"{CONTACTS_BASE_TOML}
+contacts = {{ bad = {{ type = "VCard" }} }}
+"#
+    );
+    assert!(
+        toml::from_str::<AccountSettings>(&missing_value).is_err(),
+        "缺少 value 的 contacts 条目必须被拒绝"
+    );
 }

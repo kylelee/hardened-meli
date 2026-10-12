@@ -75,6 +75,17 @@ pub enum IsAsync {
     Blocking,
 }
 
+impl From<bool> for IsAsync {
+    /// `true` → [`IsAsync::Async`]，`false` → [`IsAsync::Blocking`]。
+    fn from(is_async: bool) -> Self {
+        if is_async {
+            Self::Async
+        } else {
+            Self::Blocking
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FinishedTimestamp(Arc<Mutex<UnixTimestamp>>);
 

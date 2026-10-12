@@ -223,6 +223,7 @@ other_email=test2@example.com;test3@example.com
             subscribed_mailboxes,
             mailboxes,
             manual_refresh: true,
+            contacts: Default::default(),
             extra,
         };
 

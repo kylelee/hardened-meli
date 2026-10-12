@@ -88,6 +88,7 @@ fn new_maildir_backend(
         .into_iter()
         .collect(),
         manual_refresh: true,
+        contacts: Default::default(),
         extra: {
             let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
             m.insert(

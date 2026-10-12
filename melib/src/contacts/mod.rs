@@ -191,11 +191,14 @@ pub struct Contacts {
     pub backends: IndexSet<Arc<ContactBackendID>>,
 }
 
-/// fork 兼容门面：默认书的固定 backend 标识（S5 前端重做后随门面拆除）。
-const DEFAULT_BACKEND_NAME: &str = "default";
-const DEFAULT_BACKEND_FORMAT: &str = "default";
-/// fork 兼容门面：默认书名称（S5 前端重做后随门面拆除）。
-const DEFAULT_BOOK_NAME: &str = "default";
+/// fork 兼容门面：默认本地书的固定 backend 标识。
+///
+/// 取值与上游账户装载模块的 `DefaultContacts` 后端一致（`meli`/`Card`），
+/// 这样 meli 侧真实装载出来的默认书与门面的默认书识别合而为一。
+pub const DEFAULT_BACKEND_NAME: &str = "meli";
+pub const DEFAULT_BACKEND_FORMAT: &str = "Card";
+/// fork 兼容门面：默认书名称（上游 `DefaultContacts::DEFAULT_ADDRESS_BOOK`）。
+pub const DEFAULT_BOOK_NAME: &str = "default";
 
 impl Contacts {
     pub fn new(name: String) -> Self {
@@ -214,117 +217,135 @@ impl Contacts {
             Self::default_backend_id(),
             AddressBook::new(DEFAULT_BOOK_NAME.into(), false),
         );
-        if let Some(mutt_alias_file) = s.extra.get("mutt_alias_file").and_then(|v| v.as_str()) {
-            match std::fs::read_to_string(Path::new(mutt_alias_file).expand())
-                .map_err(|err| err.to_string())
-                .and_then(|contents| {
-                    contents
-                        .lines()
-                        .map(|line| mutt::parse_mutt_contact().parse(line).map(|(_, c)| c))
-                        .collect::<Result<Vec<Card>, &str>>()
+        for (_backend_name, backend_conf) in &s.contacts {
+            match backend_conf {
+                crate::conf::ContactBackendConf::MuttAlias(mutt_alias_file) => {
+                    match std::fs::read_to_string(Path::new(mutt_alias_file).expand())
                         .map_err(|err| err.to_string())
-                }) {
-                Ok(cards) => {
-                    let mut book = AddressBook::new(mutt_alias_file.into(), true);
-                    for c in cards {
-                        book.add_card(c);
-                    }
-                    ret.add_book(Self::source_backend_id(&s.name, "mutt_alias_file"), book);
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "Could not load mutt alias file {:?}: {}",
-                        mutt_alias_file,
-                        err
-                    );
-                }
-            }
-        }
-        if let Some(vcard_path) = s.vcard_folder() {
-            let expanded_path = Path::new(vcard_path).expand();
-            match vcard::load_cards(&expanded_path) {
-                Ok(cards) => {
-                    let mut book = AddressBook::new(vcard_path.into(), true);
-                    for c in cards {
-                        book.add_card(c);
-                    }
-                    ret.add_book(Self::source_backend_id(&s.name, "vcard"), book);
-                }
-                Err(err) => {
-                    tracing::warn!("Could not load vcards from {:?}: {}", vcard_path, err);
-                    if expanded_path.display().to_string() != vcard_path {
-                        tracing::warn!(
-                            "Note: vcard_folder was expanded from {} to {}",
-                            vcard_path,
-                            expanded_path.display()
-                        );
+                        .and_then(|contents| {
+                            contents
+                                .lines()
+                                .map(|line| mutt::parse_mutt_contact().parse(line).map(|(_, c)| c))
+                                .collect::<Result<Vec<Card>, &str>>()
+                                .map_err(|err| err.to_string())
+                        }) {
+                        Ok(cards) => {
+                            let mut book = AddressBook::new(mutt_alias_file.as_str().into(), true);
+                            for c in cards {
+                                book.add_card(c);
+                            }
+                            ret.add_book(
+                                Self::source_backend_id(&s.name, "mutt_alias_file"),
+                                book,
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "Could not load mutt alias file {:?}: {}",
+                                mutt_alias_file,
+                                err
+                            );
+                        }
                     }
                 }
-            }
-        }
-        if let Some(notmuch_addressbook_query) = s.notmuch_address_book_query() {
-            match Command::new("sh")
-                .args([
-                    "-c",
-                    &format!(
-                        "notmuch address --format=json --output=recipients \
-                         {notmuch_addressbook_query}",
-                    ),
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-            {
-                Ok(notmuch_addresses) => {
-                    if notmuch_addresses.status.success() {
-                        match std::str::from_utf8(&notmuch_addresses.stdout) {
-                            Ok(notmuch_address_out) => {
-                                match notmuchcontact::parse_notmuch_contacts(notmuch_address_out) {
-                                    Ok(contacts) => {
-                                        let mut book = AddressBook::new(
-                                            notmuch_addressbook_query.into(),
-                                            true,
-                                        );
-                                        for c in contacts {
-                                            book.add_card(c.clone());
+                crate::conf::ContactBackendConf::VCard(vcard_path) => {
+                    let expanded_path = Path::new(vcard_path).expand();
+                    match vcard::load_cards(&expanded_path) {
+                        Ok(cards) => {
+                            let mut book = AddressBook::new(vcard_path.as_str().into(), true);
+                            for c in cards {
+                                book.add_card(c);
+                            }
+                            ret.add_book(Self::source_backend_id(&s.name, "vcard"), book);
+                        }
+                        Err(err) => {
+                            tracing::warn!("Could not load vcards from {:?}: {}", vcard_path, err);
+                            if expanded_path.display().to_string() != *vcard_path {
+                                tracing::warn!(
+                                    "Note: vcard_folder was expanded from {} to {}",
+                                    vcard_path,
+                                    expanded_path.display()
+                                );
+                            }
+                        }
+                    }
+                }
+                crate::conf::ContactBackendConf::NotmuchAddress(notmuch_addressbook_query) => {
+                    match Command::new("sh")
+                        .args([
+                            "-c",
+                            &format!(
+                                "notmuch address --format=json --output=recipients \
+                                 {notmuch_addressbook_query}",
+                            ),
+                        ])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .output()
+                    {
+                        Ok(notmuch_addresses) => {
+                            if notmuch_addresses.status.success() {
+                                match std::str::from_utf8(&notmuch_addresses.stdout) {
+                                    Ok(notmuch_address_out) => {
+                                        match notmuchcontact::parse_notmuch_contacts(
+                                            notmuch_address_out,
+                                        ) {
+                                            Ok(contacts) => {
+                                                let mut book = AddressBook::new(
+                                                    notmuch_addressbook_query.as_str().into(),
+                                                    true,
+                                                );
+                                                for c in contacts {
+                                                    book.add_card(c.clone());
+                                                }
+                                                ret.add_book(
+                                                    Self::source_backend_id(
+                                                        &s.name,
+                                                        "notmuch_address_book_query",
+                                                    ),
+                                                    book,
+                                                );
+                                            }
+                                            Err(err) => {
+                                                tracing::warn!(
+                                                    "Unable to parse notmuch contact result into \
+                                                     cards: {} {}",
+                                                    notmuch_address_out,
+                                                    err
+                                                );
+                                            }
                                         }
-                                        ret.add_book(
-                                            Self::source_backend_id(
-                                                &s.name,
-                                                "notmuch_address_book_query",
-                                            ),
-                                            book,
-                                        );
                                     }
                                     Err(err) => {
                                         tracing::warn!(
-                                            "Unable to parse notmuch contact result into cards: \
-                                             {} {}",
-                                            notmuch_address_out,
+                                            "Unable to read from notmuch address query: {} {}",
+                                            notmuch_addressbook_query,
                                             err
                                         );
                                     }
                                 }
-                            }
-                            Err(err) => {
+                            } else {
                                 tracing::warn!(
-                                    "Unable to read from notmuch address query: {} {}",
-                                    notmuch_addressbook_query,
-                                    err
+                                    "Error ({}) running notmuch address: {} {}",
+                                    notmuch_addresses.status,
+                                    String::from_utf8_lossy(&notmuch_addresses.stdout),
+                                    String::from_utf8_lossy(&notmuch_addresses.stderr)
                                 );
                             }
                         }
-                    } else {
-                        tracing::warn!(
-                            "Error ({}) running notmuch address: {} {}",
-                            notmuch_addresses.status,
-                            String::from_utf8_lossy(&notmuch_addresses.stdout),
-                            String::from_utf8_lossy(&notmuch_addresses.stderr)
-                        );
+                        Err(e) => tracing::warn!("Unable to run notmuch address command: {}", e),
                     }
                 }
-                Err(e) => tracing::warn!("Unable to run notmuch address command: {}", e),
+                #[cfg(feature = "webdav")]
+                crate::conf::ContactBackendConf::CardDAV(_) => {
+                    tracing::warn!(
+                        "Account `{}`: CardDAV contact backend `{}` is not loaded by the legacy \
+                         Contacts::with_account facade yet; skipping.",
+                        s.name,
+                        _backend_name
+                    );
+                }
             }
         }
         ret

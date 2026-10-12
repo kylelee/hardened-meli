@@ -2119,6 +2119,7 @@ mod tests {
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra,
         };
         let base = || {
@@ -2182,6 +2183,7 @@ mod tests {
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra,
         };
         // `use_tls`/`use_starttls` are deliberately absent: their defaults
@@ -2343,6 +2345,7 @@ mod tests {
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
+            contacts: Default::default(),
             extra,
         };
         let base = || {

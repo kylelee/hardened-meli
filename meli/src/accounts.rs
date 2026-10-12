@@ -38,6 +38,7 @@ use futures::stream::StreamExt;
 use indexmap::IndexMap;
 use melib::{
     backends::{prelude::*, Backends},
+    contacts::{backend::ContactBackend, ContactBackendID},
     error::{Error, ErrorKind, NetworkErrorKind, Result},
     thread::Threads,
     tracing,
@@ -55,6 +56,7 @@ use crate::{
 };
 
 mod backend_ops;
+mod contacts;
 mod jobs;
 mod mailbox;
 mod mailbox_ops;
@@ -209,6 +211,7 @@ pub struct Account {
     pub tree: Vec<MailboxNode>,
     pub collection: Collection,
     pub contacts: Contacts,
+    pub contact_backends: IndexMap<ContactBackendID, Arc<Mutex<Box<dyn ContactBackend>>>>,
     pub settings: AccountConf,
     pub backend: Arc<Mutex<Box<dyn MailBackend>>>,
 
@@ -327,23 +330,6 @@ impl Account {
             event_consumer,
         )?;
 
-        let data_dir = xdg::BaseDirectories::with_profile("meli", name.as_ref());
-        let mut contacts = Contacts::with_account(settings.account());
-
-        if let Ok(data) = data_dir.place_data_file("contacts") {
-            if data.exists() {
-                let reader = std::io::BufReader::new(std::fs::File::open(data).unwrap());
-                let result: std::result::Result<Contacts, _> = serde_json::from_reader(reader);
-                if let Ok(data_t) = result {
-                    for (id, c) in data_t.cards() {
-                        if !contacts.card_exists(*id) && !c.external_resource() {
-                            contacts.add_card(c.clone());
-                        }
-                    }
-                }
-            }
-        };
-
         if settings.conf.search_backend == SearchBackend::Auto {
             if backend.capabilities().supports_search {
                 settings.conf.search_backend = SearchBackend::None;
@@ -435,7 +421,7 @@ impl Account {
             }
         }
 
-        Ok(Self {
+        let mut ret = Self {
             hash,
             name,
             is_online: if !backend.capabilities().is_remote {
@@ -446,7 +432,8 @@ impl Account {
             mailbox_entries: Default::default(),
             mailboxes_order: Default::default(),
             tree: Default::default(),
-            contacts,
+            contacts: Contacts::new(settings.account().name.clone()),
+            contact_backends: IndexMap::default(),
             collection: backend.collection(),
             settings,
             main_loop_handler,
@@ -455,7 +442,10 @@ impl Account {
             event_queue: IndexMap::default(),
             backend_capabilities: backend.capabilities(),
             backend: Arc::new(Mutex::new(backend)),
-        })
+        };
+        // 通讯录后端的装载统一走新模块（默认本地书 + 邮件后端 + `contacts` 配置）。
+        ret.init_contacts();
+        Ok(ret)
     }
 
     fn init(&mut self, mut ref_mailboxes: HashMap<MailboxHash, Mailbox>) -> Result<()> {
@@ -2206,6 +2196,9 @@ impl Account {
                                 on_finish.take().unwrap(),
                             )));
                     }
+                }
+                JobRequest::Contacts(job) => {
+                    return self.process_contact_event(job_id, job);
                 }
             }
             true

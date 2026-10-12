@@ -1214,6 +1214,7 @@ mod tests {
                 "example.test".to_string() => MailboxConf::default(),
             },
             manual_refresh: false,
+            contacts: Default::default(),
             extra,
         };
         let base = || {
@@ -1282,6 +1283,7 @@ mod tests {
                 "example.test".to_string() => MailboxConf::default(),
             },
             manual_refresh: false,
+            contacts: Default::default(),
             extra,
         };
         let base = || {

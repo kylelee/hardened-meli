@@ -180,6 +180,7 @@ fn new_maildir_backend(
         subscribed_mailboxes,
         mailboxes,
         manual_refresh: true,
+        contacts: Default::default(),
         extra,
     };
 
@@ -234,6 +235,7 @@ fn test_accounts_mailbox_by_path_error_msg() {
             mailboxes_order: Default::default(),
             tree: Default::default(),
             contacts,
+            contact_backends: Default::default(),
             collection: backend.collection(),
             settings,
             main_loop_handler: ctx.main_loop_handler.clone(),
@@ -443,6 +445,7 @@ fn test_accounts_mailbox_by_path_error_msg() {
             mailboxes_order: Default::default(),
             tree: Default::default(),
             contacts,
+            contact_backends: Default::default(),
             collection: backend.collection(),
             settings,
             main_loop_handler: ctx.main_loop_handler.clone(),
@@ -694,6 +697,7 @@ fn reconcile_mailboxes_merge() {
         mailboxes_order: Default::default(),
         tree: Default::default(),
         contacts,
+        contact_backends: Default::default(),
         collection: backend.collection(),
         settings,
         main_loop_handler: ctx.main_loop_handler.clone(),
