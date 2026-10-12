@@ -41,6 +41,17 @@ fn test_smtp_transaction_rcpt_rejected() {
     });
 }
 
+/// 回归上游 meli 提交 `b0c6bcda`：`ReplyCode` 已定义 `530` 变体，但解析器
+/// 从未产出它，服务器回复 `530 ...`（要求认证，或要求先发 STARTTLS）时会被
+/// 当作未知回复码。此处锁定该回复码可被解析且按错误码分类。
+#[test]
+fn test_reply_code_530_parses_as_auth_required() {
+    let code = melib::smtp::ReplyCode::try_from("530").expect("530 必须是已知回复码");
+    assert_eq!(code, melib::smtp::ReplyCode::_530);
+    assert!(code.is_err(), "530 属于错误回复码");
+    assert_eq!(code.value(), 530);
+}
+
 pub mod server {
     use std::{
         net::{IpAddr, SocketAddr, TcpListener, TcpStream},
