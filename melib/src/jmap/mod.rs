@@ -111,6 +111,7 @@ pub mod url_template;
 use argument::Argument;
 use capabilities::{JmapCoreCapability, JmapMailCapability, JmapSubmissionCapability};
 use filters::Filter;
+use identity::Identity;
 
 #[cfg(test)]
 mod tests;
@@ -362,6 +363,7 @@ pub struct Store {
     pub id_store: Arc<FutureMutex<HashMap<EnvelopeHash, Id<email::EmailObject>>>>,
     pub reverse_id_store: Arc<FutureMutex<HashMap<Id<email::EmailObject>, EnvelopeHash>>>,
     pub blob_id_store: Arc<FutureMutex<HashMap<EnvelopeHash, Id<BlobObject>>>>,
+    pub identities: Arc<FutureMutex<IndexMap<Id<Identity>, Identity>>>,
     pub collection: Collection,
     pub mailboxes: Arc<RwLock<HashMap<MailboxHash, JmapMailbox>>>,
     pub mailboxes_index: Arc<RwLock<HashMap<MailboxHash, HashSet<EnvelopeHash>>>>,
@@ -375,6 +377,11 @@ pub struct Store {
 }
 
 impl Store {
+    /// Return the first identity.
+    pub async fn mail_identity_id(&self) -> Option<Id<Identity>> {
+        self.identities.lock().await.keys().next().cloned()
+    }
+
     pub async fn add_envelope(&self, obj: email::EmailObject) -> Envelope {
         let mut flags = Flag::default();
         let mut labels: IndexSet<TagHash> = IndexSet::new();
@@ -1562,7 +1569,7 @@ impl MailBackend for JmapType {
             let mail_account_id = conn.session_guard().await?.mail_account_id()?;
 
             // [ref:TODO] smarter identity detection based on From: ?
-            let Some(identity_id) = conn.session_guard().await?.mail_identity_id() else {
+            let Some(identity_id) = conn.store.mail_identity_id().await else {
                 return Err(Error::new(
                     "You need to setup an Identity in the JMAP server.",
                 ));
@@ -1719,6 +1726,7 @@ impl JmapType {
             mailboxes_index: Default::default(),
             mailbox_state: Default::default(),
             email_state: Default::default(),
+            identities: Default::default(),
         });
 
         Ok(Box::new(Self {
