@@ -277,6 +277,18 @@ pub struct CardDAVContacts {
     pub connection: Arc<CardDAVConnection>,
 }
 
+impl CardDAVContacts {
+    /// 建立 WebDAV 连接并构造 CardDAV 通讯录后端。
+    pub async fn new(server_conf: &WebDAVServerConf) -> Result<Self> {
+        let mut webdav_connection = WebDAVConnection::new(server_conf).await?;
+        webdav_connection.connect().await?;
+        let connection = CardDAVConnection::new(webdav_connection).await?;
+        Ok(Self {
+            connection: Arc::new(connection),
+        })
+    }
+}
+
 impl ContactBackend for CardDAVContacts {
     fn capabilities(&mut self) -> ContactBackendCapabilities {
         ContactBackendCapabilities {
