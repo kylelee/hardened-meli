@@ -10,7 +10,7 @@ categories = ["email", "parser-implementations"]
 license = "EUPL-1.2 OR GPL-3.0-or-later"
 edition = "2021"
 build = "build.rs"
-rust-version = "1.85.0"
+rust-version = "1.88.0"
 
 [lib]
 name = "melib"
@@ -42,7 +42,7 @@ bitflags = { workspace = true }
 cfg-if = { version = "^1.0.0" }
 chrono = { version = "^0.4", default-features = false }
 data-encoding = { version = "2.11" }
-# encoding_rs 0.8.40+ requires rustc 1.88, above this crate's MSRV (1.85).
+# Pinned: encoding_rs 0.8.40+ requires rustc 1.88.
 encoding_rs = { version = "=0.8.35" }
 flate2 = { workspace = true }
 futures = { workspace = true }
@@ -51,7 +51,7 @@ imap-types = { workspace = true, optional = true }
 indexmap = { workspace = true }
 isahc = { workspace = true, optional = true }
 libc = { workspace = true }
-# libloading 0.9 requires rustc 1.88, above this crate's MSRV (1.85).
+# Pinned: libloading 0.9 requires rustc 1.88.
 libloading = { version = "0.8" }
 native-tls = { version = "0.2", default-features = false, optional = true }
 nix = { workspace = true, default-features = false, features = ["fs", "socket", "dir", "hostname"] }
@@ -74,7 +74,7 @@ tracing = { workspace = true, features = ["release_max_level_error"] }
 unicode-segmentation = { version = "1.13", default-features = false }
 unicode-width = { workspace = true }
 url = { workspace = true, optional = true }
-# uuid 1.27+ requires rustc 1.89, above this crate's MSRV (1.85).
+# Pinned: uuid 1.27+ requires rustc 1.89.
 uuid = { version = "=1.26.1", features = ["serde", "v4", "v5"] }
 xdg = { workspace = true }
 
