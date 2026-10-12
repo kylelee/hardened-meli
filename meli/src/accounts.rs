@@ -335,9 +335,9 @@ impl Account {
                 let reader = std::io::BufReader::new(std::fs::File::open(data).unwrap());
                 let result: std::result::Result<Contacts, _> = serde_json::from_reader(reader);
                 if let Ok(data_t) = result {
-                    for (id, c) in data_t.cards {
-                        if !contacts.card_exists(id) && !c.external_resource() {
-                            contacts.add_card(c);
+                    for (id, c) in data_t.cards() {
+                        if !contacts.card_exists(*id) && !c.external_resource() {
+                            contacts.add_card(c.clone());
                         }
                     }
                 }
