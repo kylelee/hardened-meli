@@ -308,7 +308,9 @@ impl Error {
         M: Into<Cow<'static, str>>,
     {
         if let Some(old_details) = self.details.as_ref() {
-            self.details = Some(format!("{}. {}", old_details, details.into()).into());
+            // 拼接前去掉旧文本末尾的句号，避免出现 `..`。
+            self.details =
+                Some(format!("{}. {}", old_details.trim_end_matches('.'), details.into()).into());
         } else {
             self.details = Some(details.into());
         }
@@ -322,7 +324,9 @@ impl Error {
         if self.summary.is_empty() {
             self.summary = summary.into();
         } else {
-            self.summary = format!("{}. {}", self.summary, summary.into()).into();
+            // 拼接前去掉旧 summary 末尾的句号，避免出现 `..`。
+            self.summary =
+                format!("{}. {}", self.summary.trim_end_matches('.'), summary.into()).into();
         }
         self
     }
@@ -773,5 +777,19 @@ mod tests {
             source.inner.is_none(),
             "already-an-Error source must not be re-wrapped as an External layer"
         );
+    }
+
+    /// 回归上游 meli 提交 `c83c9e67`：拼接 summary/details 时不得重复句号。
+    #[test]
+    fn test_set_summary_and_details_do_not_repeat_period() {
+        let err = Error::new("first.").set_summary("second.");
+        assert_eq!(err.summary, "first. second.");
+        let err = err.set_summary("third");
+        assert_eq!(err.summary, "first. second. third");
+
+        let err = Error::new("summary")
+            .set_details("first.")
+            .set_details("second.");
+        assert_eq!(err.details.as_deref(), Some("first. second."));
     }
 }
