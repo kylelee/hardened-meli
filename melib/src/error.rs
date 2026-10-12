@@ -308,7 +308,9 @@ impl Error {
         M: Into<Cow<'static, str>>,
     {
         if let Some(old_details) = self.details.as_ref() {
-            self.details = Some(format!("{}. {}", old_details, details.into()).into());
+            // 拼接前去掉旧文本末尾的句号，避免出现 `..`。
+            self.details =
+                Some(format!("{}. {}", old_details.trim_end_matches('.'), details.into()).into());
         } else {
             self.details = Some(details.into());
         }
@@ -322,7 +324,9 @@ impl Error {
         if self.summary.is_empty() {
             self.summary = summary.into();
         } else {
-            self.summary = format!("{}. {}", self.summary, summary.into()).into();
+            // 拼接前去掉旧 summary 末尾的句号，避免出现 `..`。
+            self.summary =
+                format!("{}. {}", self.summary.trim_end_matches('.'), summary.into()).into();
         }
         self
     }
@@ -332,6 +336,13 @@ impl Error {
         new_val: Option<std::sync::Arc<dyn error::Error + Send + Sync + 'static>>,
     ) -> Self {
         self.source = new_val.map(|inner| {
+            // 若传入的 source 本身就是本模块的 `Error`，直接采用它，而不是再
+            // 包一层 `ErrorKind::External`：多包一层会把错误链压深一级，使内部
+            // 错误的 kind 与 related path 被一个空 summary 的中间节点遮住；
+            // 极端情况下 Self 套 Self 还会形成自引用。
+            if let Some(inner) = inner.downcast_ref::<Self>() {
+                return Box::new(inner.clone());
+            }
             Box::new(Self {
                 summary: "".into(),
                 details: None,
@@ -411,14 +422,16 @@ impl std::fmt::Display for ErrorChainDisplay<'_> {
                 };
             } else {
                 write!(fmt, "{}", cur.current.summary)?;
-                if let Some(details) = cur.current.details.as_ref() {
-                    if !details.trim().is_empty() {
-                        write!(fmt, "\n{details}")?;
-                    }
+            }
+            // details 与 related path 不再依附于“无 inner”分支：即使本节点带有
+            // inner 错误，也必须把路径展示出来。
+            if let Some(details) = cur.current.details.as_ref() {
+                if !details.trim().is_empty() {
+                    write!(fmt, "\n{details}")?;
                 }
-                if let Some(ref path) = cur.current.related_path {
-                    write!(fmt, "\nRelated path: {}", path.display())?;
-                }
+            }
+            if let Some(ref path) = cur.current.related_path {
+                write!(fmt, "\nRelated path: {}", path.display())?;
             }
             if let Some(ref source) = cur.current.source {
                 writeln!(fmt, "\nCaused by:")?;
@@ -749,6 +762,50 @@ mod tests {
             "the OpenSSL SYSCALL-no-errno \"unexpected EOF\" connection drop must classify \
              as Network(ConnectionFailed), got {}",
             unexpected_eof.kind
+        );
+    }
+
+    /// 回归上游 meli 提交 `9cc5293d`：`Error::set_source` 收到本模块的
+    /// `Error` 时必须直接采用，而不是再包一层 `ErrorKind::External` 空壳，
+    /// 否则错误链会多出一级并遮住内部错误的 kind。
+    #[test]
+    fn test_set_source_downcasts_inner_error_without_wrapping() {
+        let inner = Error::new("inner failure").set_kind(ErrorKind::NotFound);
+        let outer = Error::new("outer failure").set_source(Some(Arc::new(inner.clone())));
+        let source = outer.source.as_ref().expect("source must be set");
+        assert_eq!(source.summary, "inner failure");
+        assert_eq!(source.kind, ErrorKind::NotFound);
+        assert!(
+            source.inner.is_none(),
+            "already-an-Error source must not be re-wrapped as an External layer"
+        );
+    }
+
+    /// 回归上游 meli 提交 `c83c9e67`：拼接 summary/details 时不得重复句号。
+    #[test]
+    fn test_set_summary_and_details_do_not_repeat_period() {
+        let err = Error::new("first.").set_summary("second.");
+        assert_eq!(err.summary, "first. second.");
+        let err = err.set_summary("third");
+        assert_eq!(err.summary, "first. second. third");
+
+        let err = Error::new("summary")
+            .set_details("first.")
+            .set_details("second.");
+        assert_eq!(err.details.as_deref(), Some("first. second."));
+    }
+
+    /// 回归上游 meli 提交 `f1bd593d`：即使错误节点带有 inner，Display 也要
+    /// 展示 related path，不能把它藏在“无 inner”分支里。
+    #[test]
+    fn test_display_shows_related_path_with_inner_error() {
+        let err = Error::from_inner(Arc::new(io::Error::other("underlying")))
+            .set_summary("could not open")
+            .set_related_path(Some("/tmp/example"));
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("Related path: /tmp/example"),
+            "Related path 必须展示，实际输出: {rendered:?}"
         );
     }
 }

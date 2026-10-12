@@ -112,17 +112,31 @@ impl File {
                 if p.try_exists().unwrap_or_default() && p.is_dir() {
                     if let Some(filename) = filename {
                         p.push(filename);
+                        // 记录主干与扩展名的切分，冲突重试时把 `_<n>`/`_<uuid>`
+                        // 插在扩展名之前，而不是把扩展名挤进后缀里。切分规则与
+                        // `unique_filename_component` 一致：以最后一个 `.` 为界，
+                        // 多段扩展名（`report.tar.gz`）整体保留；`.hidden` 这类
+                        // 隐藏文件名不视作带扩展名。
+                        let (stem, dot_ext) = match filename.rsplit_once('.') {
+                            Some((stem, ext)) if !stem.is_empty() => {
+                                (stem.to_string(), format!(".{ext}"))
+                            }
+                            _ => (filename.to_string(), String::new()),
+                        };
                         'exists: while p.try_exists().unwrap_or_default() {
                             for i in 0..u8::MAX {
                                 p.pop();
-                                p.push(format!("{filename}_{i}"));
-                                if p.try_exists().unwrap_or_default() {
+                                p.push(format!("{stem}_{i}{dot_ext}"));
+                                if !p.try_exists().unwrap_or_default() {
                                     break 'exists;
                                 }
                             }
-                            while p.try_exists().unwrap_or_default() {
+                            loop {
                                 p.pop();
-                                p.push(format!("{filename}_{}", Uuid::new_v4().as_simple()));
+                                p.push(format!("{stem}_{}{dot_ext}", Uuid::new_v4().as_simple()));
+                                if !p.try_exists().unwrap_or_default() {
+                                    break;
+                                }
                             }
                         }
                     } else {
@@ -166,17 +180,28 @@ impl File {
                     // collision retry loop runs on top of that name.
                     let randomized = randomized_temp_component(filename);
                     dir.push(randomized.as_str());
+                    // `randomized` 已把扩展名接在 UUID 之后；冲突重试时仍要把
+                    // 后缀插回扩展名之前，多段扩展名整体保留。
+                    let (stem, dot_ext) = match randomized.rsplit_once('.') {
+                        Some((stem, ext)) if !stem.is_empty() => {
+                            (stem.to_string(), format!(".{ext}"))
+                        }
+                        _ => (randomized.clone(), String::new()),
+                    };
                     'exists: while dir.try_exists().unwrap_or_default() {
                         for i in 0..u8::MAX {
                             dir.pop();
-                            dir.push(format!("{randomized}_{i}"));
-                            if dir.try_exists().unwrap_or_default() {
+                            dir.push(format!("{stem}_{i}{dot_ext}"));
+                            if !dir.try_exists().unwrap_or_default() {
                                 break 'exists;
                             }
                         }
-                        while dir.try_exists().unwrap_or_default() {
+                        loop {
                             dir.pop();
-                            dir.push(format!("{randomized}_{}", Uuid::new_v4().as_simple()));
+                            dir.push(format!("{stem}_{}{dot_ext}", Uuid::new_v4().as_simple()));
+                            if !dir.try_exists().unwrap_or_default() {
+                                break;
+                            }
                         }
                     }
                 } else {
@@ -1190,5 +1215,83 @@ mod tests {
             "landed temp files must be readable by the owner only"
         );
         let _ = std::fs::remove_file(file.path());
+    }
+
+    /// 回归上游 meli 提交 `d6b2bc79`：目标目录中已存在同名文件时，追加冲突
+    /// 后缀必须保留原扩展名（`hello.txt` -> `hello_0.txt`，而不是
+    /// `hello.txt_0`），再次创建则取下一个可用序号。
+    #[test]
+    fn test_create_temp_file_existing_name_resets_extension() {
+        const S: &str = "hello world";
+        let tempdir = tempfile::tempdir().unwrap();
+
+        let initial = File::create_temp_file(
+            S.as_bytes(),
+            Some("hello.txt"),
+            Some(&mut tempdir.path().to_path_buf()),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(&initial.read_to_string().unwrap(), S);
+        assert!(tempdir.path().try_exists().unwrap());
+
+        let mut new_path = tempdir.path().to_path_buf();
+        let new = File::create_temp_file(
+            S.as_bytes(),
+            Some("hello.txt"),
+            Some(&mut new_path),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(&new.read_to_string().unwrap(), S);
+        assert_eq!(new.path(), new_path.as_path());
+        assert_eq!(new_path.file_stem().unwrap().to_str().unwrap(), "hello_0");
+        assert_eq!(new_path.extension().unwrap().to_str().unwrap(), "txt");
+
+        let mut new_path = tempdir.path().to_path_buf();
+        let _new_2 = File::create_temp_file(
+            S.as_bytes(),
+            Some("hello.txt"),
+            Some(&mut new_path),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(new_path.file_stem().unwrap().to_str().unwrap(), "hello_1");
+        assert_eq!(new_path.extension().unwrap().to_str().unwrap(), "txt");
+
+        // 多段扩展名整体保留：`report.tar.gz` -> `report.tar_0.gz`，而不是被
+        // 重切截成 `report.gz`。
+        let mut new_path = tempdir.path().to_path_buf();
+        let _report = File::create_temp_file(
+            S.as_bytes(),
+            Some("report.tar.gz"),
+            Some(&mut new_path),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_str().unwrap(),
+            "report.tar.gz"
+        );
+
+        let mut new_path = tempdir.path().to_path_buf();
+        let _report_2 = File::create_temp_file(
+            S.as_bytes(),
+            Some("report.tar.gz"),
+            Some(&mut new_path),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_str().unwrap(),
+            "report.tar_0.gz"
+        );
+
+        _ = tempdir.close();
     }
 }
