@@ -422,14 +422,16 @@ impl std::fmt::Display for ErrorChainDisplay<'_> {
                 };
             } else {
                 write!(fmt, "{}", cur.current.summary)?;
-                if let Some(details) = cur.current.details.as_ref() {
-                    if !details.trim().is_empty() {
-                        write!(fmt, "\n{details}")?;
-                    }
+            }
+            // details 与 related path 不再依附于“无 inner”分支：即使本节点带有
+            // inner 错误，也必须把路径展示出来。
+            if let Some(details) = cur.current.details.as_ref() {
+                if !details.trim().is_empty() {
+                    write!(fmt, "\n{details}")?;
                 }
-                if let Some(ref path) = cur.current.related_path {
-                    write!(fmt, "\nRelated path: {}", path.display())?;
-                }
+            }
+            if let Some(ref path) = cur.current.related_path {
+                write!(fmt, "\nRelated path: {}", path.display())?;
             }
             if let Some(ref source) = cur.current.source {
                 writeln!(fmt, "\nCaused by:")?;
@@ -791,5 +793,19 @@ mod tests {
             .set_details("first.")
             .set_details("second.");
         assert_eq!(err.details.as_deref(), Some("first. second."));
+    }
+
+    /// 回归上游 meli 提交 `f1bd593d`：即使错误节点带有 inner，Display 也要
+    /// 展示 related path，不能把它藏在“无 inner”分支里。
+    #[test]
+    fn test_display_shows_related_path_with_inner_error() {
+        let err = Error::from_inner(Arc::new(io::Error::other("underlying")))
+            .set_summary("could not open")
+            .set_related_path(Some("/tmp/example"));
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("Related path: /tmp/example"),
+            "Related path 必须展示，实际输出: {rendered:?}"
+        );
     }
 }
