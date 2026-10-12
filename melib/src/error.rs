@@ -771,6 +771,14 @@ impl From<sqz::decrypt::Error> for Error {
     }
 }
 
+#[cfg(feature = "webdav")]
+impl From<quick_xml::de::DeError> for Error {
+    #[inline]
+    fn from(err: quick_xml::de::DeError) -> Self {
+        Self::from_inner(Arc::new(err)).set_kind(ErrorKind::LinkedLibrary("quickxml"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

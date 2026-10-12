@@ -159,6 +159,33 @@ impl AccountSettings {
             .and_then(|v| v.as_str())
     }
 
+    /// 从 `extra` 的 `carddav` 键解析 CardDAV 服务器配置。
+    ///
+    /// 键不存在时返回 `Ok(None)`；反序列化失败或启用
+    /// `danger_accept_invalid_certs` 时返回 `ErrorKind::Configuration` 错误。
+    #[cfg(feature = "webdav")]
+    pub fn carddav_server_conf(
+        &self,
+    ) -> Result<Option<crate::utils::webdav::WebDAVServerConf>> {
+        let Some(value) = self.extra.get("carddav") else {
+            return Ok(None);
+        };
+        let conf: crate::utils::webdav::WebDAVServerConf = serde_json::from_value(value.clone())
+            .map_err(|err| {
+                Error::new(format!(
+                    "({}) could not parse `carddav` value as a WebDAV server configuration",
+                    self.name,
+                ))
+                .set_source(Some(crate::src_err_arc_wrap! { err }))
+                .set_kind(ErrorKind::Configuration)
+            })?;
+        reject_danger_accept_invalid_certs(
+            conf.danger_accept_invalid_certs,
+            &format!("CardDAV account `{}`", self.name),
+        )?;
+        Ok(Some(conf))
+    }
+
     /// Look up an `extra` value as a string slice.
     ///
     /// Returns `None` if the key is absent or the value is not a string.
