@@ -405,7 +405,7 @@ impl std::fmt::Display for ErrorChainDisplay<'_> {
                 ErrorKind::External | ErrorKind::None => {}
                 other => write!(fmt, "{other}: ")?,
             }
-            if let Some(ref inner) = cur.current.inner {
+            if let Some(inner) = &cur.current.inner {
                 if cur.current.summary.is_empty() {
                     write!(fmt, "{inner}")?;
                 } else {
@@ -414,17 +414,15 @@ impl std::fmt::Display for ErrorChainDisplay<'_> {
             } else {
                 write!(fmt, "{}", cur.current.summary)?;
             }
-            // details 与 related path 不再依附于“无 inner”分支：即使本节点带有
-            // inner 错误，也必须把路径展示出来。
             if let Some(details) = cur.current.details.as_ref() {
                 if !details.trim().is_empty() {
                     write!(fmt, "\n{details}")?;
                 }
             }
-            if let Some(ref path) = cur.current.related_path {
+            if let Some(path) = &cur.current.related_path {
                 write!(fmt, "\nRelated path: {}", path.display())?;
             }
-            if let Some(ref source) = cur.current.source {
+            if let Some(source) = &cur.current.source {
                 writeln!(fmt, "\nCaused by:")?;
                 cur = Self {
                     current: source,
