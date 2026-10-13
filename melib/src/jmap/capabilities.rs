@@ -93,4 +93,3 @@ macro_rules! _impl_jmap_capability {
 _impl_jmap_capability! { JmapCoreCapability: "urn:ietf:params:jmap:core", name: "Core" }
 _impl_jmap_capability! { JmapMailCapability: "urn:ietf:params:jmap:mail", name: "Mail" }
 _impl_jmap_capability! { JmapSubmissionCapability: "urn:ietf:params:jmap:submission", name: "Submission" }
-_impl_jmap_capability! { JmapContactsCapability: "urn:ietf:params:jmap:contacts", name: "Contacts" }

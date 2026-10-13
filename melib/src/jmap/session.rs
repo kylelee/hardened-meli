@@ -27,6 +27,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::jmap::{
+    capabilities::JmapMailCapability,
     methods::u64_zero,
     capabilities::{JmapContactsCapability, JmapMailCapability},
     objects::{Account, Id, Object, State},
