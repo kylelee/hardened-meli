@@ -568,7 +568,21 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
         flags: Option<(Flag, Vec<String>)>,
     ) -> ResultFuture<()>;
 
-    #[allow(clippy::type_complexity)]
+    /// Save a message like [`MailBackend::save`], additionally applying
+    /// `tags` when the backend supports storing them at save time.
+    ///
+    /// Backends that cannot store tags at save time ignore `tags` and
+    /// fall back to [`MailBackend::save`].
+    fn save_with_tags(
+        &mut self,
+        bytes: Vec<u8>,
+        mailbox_hash: MailboxHash,
+        flags: Option<Flag>,
+        _tags: Option<Vec<String>>,
+    ) -> ResultFuture<()> {
+        self.save(bytes, mailbox_hash, flags)
+    }
+
     fn save_batch(
         &mut self,
         batch: Vec<(Vec<u8>, MailboxHash, Option<(Flag, Vec<String>)>)>,
