@@ -33,10 +33,8 @@ use crate::{
         AddressBook, AddressBookName, Card,
     },
     error::{Error, ErrorKind},
-    utils::{
-        parsec::{is_not, map_res, match_literal_anycase, prefix, Parser},
-        shellexpand::ShellExpandTrait,
-    },
+    utils::parsec::{is_not, map_res, match_literal_anycase, prefix, Parser},
+    ShellExpandTrait as _,
 };
 
 //alias <nickname> [ <long name> ] <address>
@@ -131,16 +129,25 @@ impl ContactBackend for MuttContacts {
                     return Err(Error::new(format!(
                         "Could not load mutt alias file {mutt_alias_file:?}"
                     ))
-                    .set_source(Some(crate::src_err_arc_wrap!(err))));
+                    .set_source(Some(crate::src_err_arc_wrap! { err })));
                 }
             };
 
-            let mut book = AddressBook::new(name, true);
-            for c in cards {
-                book.add_card(c);
-            }
-            Ok(book)
+            let cards = cards.into_iter().map(|c| (c.id, c)).collect();
+            Ok(AddressBook {
+                name,
+                cards,
+                read_only: true,
+            })
         }))
+    }
+
+    fn search(
+        &self,
+        _term: &str,
+        _address_book: Option<&AddressBookName>,
+    ) -> ResultFuture<Vec<Card>> {
+        Err(Error::new("").set_kind(ErrorKind::NotSupported))
     }
 
     fn add(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<Card> {
@@ -152,14 +159,6 @@ impl ContactBackend for MuttContacts {
     }
 
     fn delete(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<()> {
-        Err(Error::new("").set_kind(ErrorKind::NotSupported))
-    }
-
-    fn search(
-        &self,
-        _term: &str,
-        _address_book: Option<&AddressBookName>,
-    ) -> ResultFuture<Vec<Card>> {
         Err(Error::new("").set_kind(ErrorKind::NotSupported))
     }
 }

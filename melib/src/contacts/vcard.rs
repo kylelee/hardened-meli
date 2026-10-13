@@ -28,22 +28,19 @@
 //! - Version 4 [RFC 6350: vCard Format Specification](https://datatracker.ietf.org/doc/rfc6350/)
 //! - Parameter escaping [RFC 6868 Parameter Value Encoding in iCalendar and vCard](https://datatracker.ietf.org/doc/rfc6868/)
 
-use std::{convert::TryInto, hash::Hasher, path::PathBuf};
+use std::{convert::TryInto, path::PathBuf};
 
 use indexmap::IndexMap;
 
 use crate::{
     backends::prelude::ResultFuture,
-    contacts::{
-        backend::{ContactBackend, ContactBackendCapabilities},
-        AddressBook, AddressBookName, Card, CardId,
-    },
-    error::{Error, ErrorKind, Result, ResultIntoError},
+    contacts::backend::{ContactBackend, ContactBackendCapabilities},
+    error::{Error, ErrorKind, Result},
     utils::{
         parsec::{
             match_literal_anycase, one_or_more, peek, prefix, take_until, whitespace_wrap, Parser,
         },
-        shellexpand::ShellExpandTrait,
+        shellexpand::ShellExpandTrait as _,
     },
 };
 
@@ -428,24 +425,36 @@ impl ContactBackend for VCardContacts {
         let vcard_path = self.path.clone();
         Ok(Box::pin(async move {
             let expanded_path = vcard_path.expand();
-            let cards = load_cards(&expanded_path).map_err(|err| {
-                let mut err = err.set_summary("Could not load vcards");
-                if expanded_path != *vcard_path {
-                    err = err.set_details(format!(
-                        "Note: vcard_folder was expanded from {} to {}",
-                        vcard_path.display(),
-                        expanded_path.display()
-                    ));
-                }
-                err
-            })?;
+            let cards = load_cards(&expanded_path)
+                .map_err(|err| {
+                    let mut err = err.set_summary("Could not load vcards");
+                    if expanded_path != *vcard_path {
+                        err = err.set_details(format!(
+                            "Note: vcard_folder was expanded from {} to {}",
+                            vcard_path.display(),
+                            expanded_path.display()
+                        ));
+                    }
+                    err
+                })?
+                .into_iter()
+                .map(|c| (c.id, c))
+                .collect();
 
-            let mut book = AddressBook::new(name, true);
-            for c in cards {
-                book.add_card(c);
-            }
-            Ok(book)
+            Ok(AddressBook {
+                name,
+                cards,
+                read_only: true,
+            })
         }))
+    }
+
+    fn search(
+        &self,
+        _term: &str,
+        _address_book: Option<&AddressBookName>,
+    ) -> ResultFuture<Vec<Card>> {
+        Err(Error::new("").set_kind(ErrorKind::NotSupported))
     }
 
     fn add(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<Card> {
@@ -457,14 +466,6 @@ impl ContactBackend for VCardContacts {
     }
 
     fn delete(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<()> {
-        Err(Error::new("").set_kind(ErrorKind::NotSupported))
-    }
-
-    fn search(
-        &self,
-        _term: &str,
-        _address_book: Option<&AddressBookName>,
-    ) -> ResultFuture<Vec<Card>> {
         Err(Error::new("").set_kind(ErrorKind::NotSupported))
     }
 }
