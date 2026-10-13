@@ -269,3 +269,16 @@ git fetch upstream
 | `d86129b1` | `5863123b` | refactor(meli) | 新增 `TagsIterator`（语义移植） |
 | `219a85d0` | `1713ec06` | fix(meli) | 打印标签时预留 1 格空间 |
 | `f52f1fdb` | `31298d3f` | feat(meli) | 新增 `tags.rename` 设置项 |
+
+## 下游镜像记录
+
+以下条目登记本 fork 向公开镜像 [hardened-meli](https://github.com/kylelee/hardened-meli)（独立根仓库，每次发布与本仓库保持文件树一致）的发布。
+
+### 2026-10-13（UTC+8）
+
+- 方式：原子发布——本 fork v0.11.0 之后的提交 `git cherry-pick -x -X theirs 0222891..7fce2bf`（共 67 个；13 个 merge 节点跳过），一个显式 `align` 提交清平重放残余，一个 `--no-ff --signoff` 合并入 `master`
+- 结果：**50 个拣选**（带 `-x` 溯源行）+ **4 个空拣选**（改动已存在于镜像仓的过渡移植中：jscontact 最终态、JMAP eventsource 超时、`ServerPasswordCommand` 相关路径、webdav `set_source` Box 适配——内容由对齐门兜底，非丢失）+ 1 align + 1 merge
+- 硬门：与本 fork `7fce2bf` 的 `git diff` = **0**（文件树一致，并在发布端复验）
+- 本次发布取代的镜像仓内容：其过渡期自行上游同步（`aea4508b..168410ab`，73 提交——聚合 Contacts 设计、v0.12.0、UI 移植、sequoia 后端、冻结 CVE 语料断言改动），由 align 提交移除（可见删除：`melib/src/sequoia.rs`、`meli/src/version_migrations/v0_12_0.rs`）
+- 镜像仓内验证：`make lint`、全量 `cargo test --workspace`（28 套件）、`cargo test -p cve` **1174/1174**、敏感信息扫描清洁（提交信息与历史 blob 均无内部域名/私网 IP/凭据）
+- 发布：`origin/master` 的 force-push 待执行（沙箱无 `ssh`，由用户本机运行）

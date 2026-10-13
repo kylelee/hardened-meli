@@ -269,3 +269,18 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 | `d86129b1` | `5863123b` | refactor(meli) | Added `TagsIterator` (semantic port) |
 | `219a85d0` | `1713ec06` | fix(meli) | Give 1 cell of room when printing a tag |
 | `f52f1fdb` | `31298d3f` | feat(meli) | Added the `tags.rename` setting |
+
+## Downstream mirror log
+
+Entries below record publishes of this fork to its public mirror
+[hardened-meli](https://github.com/kylelee/hardened-meli) (independent root,
+kept tree-identical to this repository at each publish).
+
+### 2026-10-13 (UTC+8)
+
+- Method: atomic publish — `git cherry-pick -x -X theirs 0222891..7fce2bf` of this fork's post-v0.11.0 commits (67 total; 13 merge nodes skipped), one explicit `align` commit clearing replay residue, one `--no-ff --signoff` merge to `master`
+- Outcome: **50 picks** with `-x` provenance lines + **4 empty-drops** (changes already present in the mirror's interim port: jscontact final shape, JMAP eventsource timeout, `ServerPasswordCommand` related-path, webdav `set_source` Box adaptation — content guaranteed by the align gate, not lost) + 1 align + 1 merge
+- Hard gate: `git diff` against this fork's `7fce2bf` = **0** (tree-identical, re-verified on the published tip)
+- Superseded in the mirror by this publish: its interim self-directed upstream sync (`aea4508b..168410ab`, 73 commits — aggregate-Contacts design, v0.12.0, UI ports, sequoia backend, frozen-CVE-corpus assertion edits), removed by the align commit (visible deletions: `melib/src/sequoia.rs`, `meli/src/version_migrations/v0_12_0.rs`)
+- Verification in the mirror repo: `make lint`, full `cargo test --workspace` (28 suites), `cargo test -p cve` **1174/1174**, sensitive-info scan clean (no internal domains/private IPs/credentials in messages or historical blobs)
+- Publish: force-push to `origin/master` pending (sandbox has no `ssh`; to be run from the user's shell)
