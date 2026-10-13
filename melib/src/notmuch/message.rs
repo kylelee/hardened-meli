@@ -37,8 +37,6 @@ pub struct Message<'m> {
 
 impl<'m> std::fmt::Debug for Message<'m> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // The `identify!` macro is not usable here: its `const fn` probe
-        // cannot mention the impl's generic lifetime parameter.
         fmt.debug_struct("Message")
             .field("freezes", &self.freezes)
             .field("env_hash", &self.env_hash())
