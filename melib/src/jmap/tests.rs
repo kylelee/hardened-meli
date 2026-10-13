@@ -1183,7 +1183,7 @@ fn test_jmap_server_conf_trace_option_parses_and_defaults_to_false() {
         subscribed_mailboxes: vec![],
         mailboxes: indexmap::indexmap! {},
         manual_refresh: false,
-        contacts: Default::default(),
+        contacts: None,
         extra: {
             let mut m: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
             for (k, v) in [
@@ -1237,7 +1237,7 @@ fn test_jmap_danger_accept_invalid_certs_is_rejected() {
         subscribed_mailboxes: vec![],
         mailboxes: indexmap::indexmap! {},
         manual_refresh: false,
-        contacts: Default::default(),
+        contacts: None,
         extra,
     };
     let base = || {

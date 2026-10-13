@@ -94,22 +94,33 @@ macro_rules! impl_extra_setting_from_str {
 
 impl_extra_setting_from_str! { u16, u64, i64 }
 
-/// 账户联系人后端的配置。
+/// Configuration of one named contact backend of an account
+/// (semantically ported from upstream meli `db9f7f93`).
 ///
-/// 账户的 `contacts` 映射把后端名称映射到一个后端配置：
+/// The map key of [`AccountSettings::contacts`] is an arbitrary name the
+/// user picks for reference; the value selects a
+/// [`crate::contacts::backend::ContactBackend`] implementation and carries
+/// its settings. The map is serialized as adjacently tagged values, e.g.
+/// `mutt = { type = "MuttAlias", value = "~/.mutt/aliases" }`.
 ///
-/// ```toml
-/// contacts = { mutt = { type = "MuttAlias", value = "~/.mutt/aliases" } }
-/// ```
-///
-/// `type` 取值为变体名，`value` 为该后端的路径或查询串。`CardDAV` 变体只在
-/// 启用 `webdav` 特性时可用。
+/// Fork deviation: upstream made this the replacement for the legacy
+/// `vcard_folder`/`mutt_alias_file`/`notmuch_address_book_query` extra keys.
+/// The fork keeps those legacy loaders (see
+/// [`crate::contacts::Contacts::with_account`]) as the fallback when no
+/// `contacts` map is configured, and layers the backends configured here on
+/// top of them.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "value")]
 pub enum ContactBackendConf {
+    /// Query string passed to `notmuch address --format=json
+    /// --output=recipients` to import contacts read-only.
     NotmuchAddress(String),
+    /// Path of a mutt-compatible alias file, imported read-only.
     MuttAlias(String),
+    /// Path of a folder containing `.vcf` files, imported read-only.
     VCard(String),
+    /// CardDAV server configuration. Only available when melib is built
+    /// with the `webdav` cargo feature.
     #[cfg(feature = "webdav")]
     CardDAV(crate::utils::webdav::WebDAVServerConf),
 }
@@ -136,8 +147,11 @@ pub struct AccountSettings {
     pub mailboxes: IndexMap<String, MailboxConf>,
     #[serde(default)]
     pub manual_refresh: bool,
+    /// Named contact backends for this account (see
+    /// [`ContactBackendConf`]). `None` when the account does not configure
+    /// any, in which case only the legacy implicit contact sources load.
     #[serde(default)]
-    pub contacts: IndexMap<String, ContactBackendConf>,
+    pub contacts: Option<IndexMap<String, ContactBackendConf>>,
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
 }

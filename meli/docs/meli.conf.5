@@ -334,6 +334,54 @@ is a string of a path of
 .Xr mutt 1
 compatible alias file in the option
 They are parsed and imported read-only.
+.It Ic notmuch_address_book_query Ar String
+.Pq Em optional
+Query passed to
+.Qq Li notmuch address
+to import contacts into meli. Contacts are parsed and imported read-only.
+.Pp
+.It Ic contacts Ar Map[String, ContactBackendConf]
+.Pq Em optional
+A map of named contact backends for this account.
+The key string value is an arbitrary name you set for your own reference.
+The value type of
+.Li ContactBackendConf
+is a map with two keys:
+.Bl -tag -width 36n
+.It Ic type Ar String
+.It Ic value Ar String
+.El
+Where
+.Li type
+is one of:
+.Bl -tag -width 36n
+.It Ic NotmuchAddress
+and
+.Li value
+is a string query passed to
+.Qq Li notmuch address
+to import contacts into meli.
+Contacts are parsed and imported read-only.
+This can be used with any backend, not just notmuch, since it only relies on the existence of the
+.Xr notmuch 1
+binary.
+.sp
+Example:
+.Bd -literal
+contacts = { "notmuch" = { type = "NotmuchAddress", value = "date:1Y.. AND from:you@example.com" } }
+.Ed
+This will run the command
+.Bd -literal
+notmuch address --format=json --output=recipients date:1Y.. AND from:you@example.com
+.Ed
+and parse its json output.
+.It Ic MuttAlias
+and
+.Li value
+is a string of a path of
+.Xr mutt 1
+compatible alias file in the option
+They are parsed and imported read-only.
 Example:
 .Bd -literal
 contacts = { "mutt" = { type = "MuttAlias", value = "~/.mutt/aliases" } }
@@ -352,7 +400,10 @@ contacts = { "vcards" = { type = "VCard", value = "~/.contacts/" } }
 .It Ic CardDAV
 and
 .Li value
-is a map including the CardDAV server configuration.
+is a map including the CardDAV server configuration
+(only available when meli is built with the
+.Qq Li webdav
+cargo feature).
 .Bl -tag -width 36n
 .It Ic url Ar String
 Server url.
@@ -376,19 +427,14 @@ contacts = { "my_carddav" =
 .Ed
 .El
 You can include as many contact backends as you wish.
-.sp
-The standalone
-.Ic notmuch_address_book_query Ns ,
-.Ic mutt_alias_file Ns ,
+The backends configured here are loaded in addition to the legacy
+.Ic vcard_folder ,
+.Ic mutt_alias_file
 and
-.Ic vcard_folder
-options of older versions were consolidated into the
+.Ic notmuch_address_book_query
+options described above; when no
 .Ic contacts
-field.
-Existing configuration files can be migrated with:
-.Bd -literal
-meli tools migration apply ContactBackendRefactor
-.Ed
+map is configured, only those legacy sources load, exactly as before.
 .It Ic mailboxes Ar mailbox
 .Pq Em optional
 Configuration for each mailbox.

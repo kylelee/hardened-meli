@@ -215,6 +215,11 @@ pub struct FileAccount {
     pub search_backend: data_types::SearchBackend,
     #[serde(default = "false_val")]
     pub manual_refresh: bool,
+    /// Named contact backends for this account; see
+    /// [`melib::conf::ContactBackendConf`]. The map key is an arbitrary
+    /// user-chosen name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contacts: Option<IndexMap<String, melib::conf::ContactBackendConf>>,
     #[serde(default = "none", skip_serializing_if = "Option::is_none")]
     pub refresh_command: Option<String>,
     #[serde(default)]
