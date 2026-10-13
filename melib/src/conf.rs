@@ -62,6 +62,7 @@ pub trait ExtraSetting: serde::de::DeserializeOwned {
 
 impl<'a> ExtraSetting for Cow<'a, str> {}
 impl ExtraSetting for String {}
+impl ExtraSetting for std::path::PathBuf {}
 impl ExtraSetting for field_types::Secret {}
 impl ExtraSetting for bool {}
 

@@ -352,8 +352,6 @@ impl From<NotmuchError> for Error {
     }
 }
 
-/// Configuration of an on-disk Maildir directory a notmuch mailbox can save
-/// e-mail to (e.g. for the Drafts and Sent special-use mailboxes).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub struct SaveToConf {
@@ -627,6 +625,9 @@ impl NotmuchDb {
             if let Some(parent) = f.extra.swap_remove("parent") {
                 let parent_str = parent.as_str().map(String::from).unwrap_or_else(|| parent.to_string());
                 parents.push((k.clone(), parent_str));
+            }
+            if let Some(save_to) = f.extra.swap_remove("save_to") {
+                <SaveToConf as crate::conf::ExtraSetting>::deserialize_extra(&save_to)?;
             }
         }
         let mut path = Vec::with_capacity(8);
@@ -923,13 +924,22 @@ impl MailBackend for NotmuchDb {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        flags: Option<(Flag, Vec<String>)>,
+        flags: Option<Flag>,
+    ) -> ResultFuture<()> {
+        self.save_with_tags(bytes, mailbox_hash, flags, None)
+    }
+
+    fn save_with_tags(
+        &mut self,
+        bytes: Vec<u8>,
+        mailbox_hash: MailboxHash,
+        flags: Option<Flag>,
+        tags: Option<Vec<String>>,
     ) -> ResultFuture<()> {
         let save_to = if let Some(m) = self.mailboxes.read().unwrap().get(&mailbox_hash) {
             m.save_to.clone().ok_or_else(|| {
                 Error::new(format!(
-                    "Mailbox {} needs to have `save_to` field configured in order to store \
-                     e-mail",
+                    "Mailbox {} needs to have `save_to` field configured in order to store e-mail",
                     m.name
                 ))
                 .set_kind(ErrorKind::Configuration)
@@ -942,11 +952,6 @@ impl MailBackend for NotmuchDb {
         };
         let database = DbConnection::new(self.path.as_path(), self.lib.clone(), true)?;
         Ok(Box::pin(async move {
-            let (flags, tags) = if let Some((flags, tags)) = flags {
-                (Some(flags), Some(tags))
-            } else {
-                (None, None)
-            };
             let path =
                 crate::maildir::MaildirType::save_to_mailbox(save_to.path.clone(), bytes, flags)?;
             let mut message: *mut ffi::notmuch_message_t = std::ptr::null_mut();
@@ -976,9 +981,9 @@ impl MailBackend for NotmuchDb {
             message.freeze();
             if let Some(tags) = tags {
                 for tag in tags {
-                    // Tags come from user configuration; a NUL byte cannot be
-                    // passed through the C API, so skip it with a warning
-                    // rather than panicking.
+                    // A NUL byte cannot be passed through the C API; skip it
+                    // with a warning rather than panicking or failing the
+                    // already saved message.
                     let Ok(c_tag) = CString::new(tag.as_str()) else {
                         tracing::warn!("Skipping tag with a NUL byte: {tag:?}");
                         continue;
@@ -1035,7 +1040,6 @@ impl MailBackend for NotmuchDb {
             let maildir_conf = Default::default();
             for env_hash in env_hashes.iter() {
                 let Some(message_id) = snapshot.message_id_index.get(&env_hash) else {
-                    tracing::debug!("copy_messages: no message id cached for envelope {env_hash}");
                     continue;
                 };
                 let message = match Message::find_message(&database, message_id) {
@@ -1066,10 +1070,8 @@ impl MailBackend for NotmuchDb {
                 let message = Message {
                     lib: database.lib.clone(),
                     message: NonNull::new(message).ok_or_else(|| {
-                        Error::new(
-                            "notmuch_database_index_file set a non-NULL value to `message`",
-                        )
-                        .set_kind(ErrorKind::Bug)
+                        Error::new("notmuch_database_index_file set a non-NULL value to `message`")
+                            .set_kind(ErrorKind::Bug)
                     })?,
                     is_from_thread: false,
                     freezes: 0.into(),
