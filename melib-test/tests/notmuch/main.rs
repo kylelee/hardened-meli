@@ -179,11 +179,19 @@ other_email=test2@example.com;test3@example.com
         )
         .unwrap();
         notmuch_new(true);
-        let subscribed_mailboxes = vec!["INBOX".into(), "Sent".into()];
-        let mailboxes = indexmap::indexmap! {
-            "INBOX".into() => melib::conf::MailboxConf {
-                extra: indexmap::indexmap! {
-                    "query".into() => serde_json::Value::String("not tag:sent".to_string()),
+        let subscribed_mailboxes = if with_root_mailbox {
+            vec!["INBOX".into()]
+        } else {
+            vec![]
+        };
+        let mailboxes = if with_root_mailbox {
+            vec![(
+                "INBOX".into(),
+                melib::conf::MailboxConf {
+                    extra: indexmap::indexmap! {
+                        "query".into() => "".into(),
+                    },
+                    ..Default::default()
                 },
                 ..Default::default()
             },
