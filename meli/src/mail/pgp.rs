@@ -362,42 +362,30 @@ pub fn encrypt_filter(
                         }
                     }
                 }
-                // CLI 后端脚本只支持纯加密，因此沿用先签后密（sign_filter
-                // 语义）：先组装 multipart/signed 再加密。gpgme/sequoia 后
-                // 端支持一体化签后加密，sign_keys 直接交给 backend.encrypt
-                // （RFC 3156 §6.2，签名在加密操作内部产生）。
-                let a: Attachment = if matches!(backend, PGPBackendInstance::CLI { .. }) {
-                    if let Some(sign_keys) = sign_keys.take() {
-                        let a: Attachment = a.into();
-                        let raw = a.into_raw();
-                        let data = melib::utils::canonicalize_crlf(raw.as_bytes());
-                        let (sig_metadata, sig_bytes) =
-                            backend.sign(sign_keys, &data, false)?.await?;
-                        let sig_attachment = Attachment::new(
-                            ContentType::PGPSignature,
-                            Default::default(),
-                            sig_bytes,
-                        );
-                        let a: AttachmentBuilder = a.into();
-                        let parts = vec![a, sig_attachment.into()];
-                        let boundary = ContentType::make_boundary(&parts);
-                        let micalg = sig_metadata.micalg().into_bytes();
-                        Attachment::new(
-                            ContentType::Multipart {
-                                boundary: boundary.into_bytes(),
-                                kind: MultipartType::Signed,
-                                parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
-                                parameters: vec![
-                                    (b"micalg".into(), micalg),
-                                    (b"protocol".into(), b"\"application/pgp-signature\"".into()),
-                                ],
-                            },
-                            Default::default(),
-                            vec![],
-                        )
-                    } else {
-                        a.into()
-                    }
+                let a: Attachment = if let Some(sign_keys) = sign_keys {
+                    let a: Attachment = a.into();
+                    let raw = a.into_raw();
+                    let data = melib::utils::canonicalize_crlf(raw.as_bytes());
+                    let (sig_metadata, sig_bytes) = backend.sign(sign_keys, &data, false)?.await?;
+                    let sig_attachment =
+                        Attachment::new(ContentType::PGPSignature, Default::default(), sig_bytes);
+                    let a: AttachmentBuilder = a.into();
+                    let parts = vec![a, sig_attachment.into()];
+                    let boundary = ContentType::make_boundary(&parts);
+                    let micalg = sig_metadata.micalg().into_bytes();
+                    Attachment::new(
+                        ContentType::Multipart {
+                            boundary: boundary.into_bytes(),
+                            kind: MultipartType::Signed,
+                            parts: parts.into_iter().map(|a| a.into()).collect::<Vec<_>>(),
+                            parameters: vec![
+                                (b"micalg".into(), micalg),
+                                (b"protocol".into(), b"\"application/pgp-signature\"".into()),
+                            ],
+                        },
+                        Default::default(),
+                        vec![],
+                    )
                 } else {
                     a.into()
                 };

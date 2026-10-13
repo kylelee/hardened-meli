@@ -183,6 +183,27 @@ impl std::fmt::Display for LocateKey {
     }
 }
 
+/// Convert raw attachment to the form needed for signature verification ([RFC3156](https://tools.ietf.org/html/rfc3156))
+///
+/// ## RFC3156
+///
+/// ```text
+/// Upon receipt of a signed message, an application MUST:
+///
+///   (1)   Convert line endings to the canonical <CR><LF> sequence before
+///         the signature can be verified.  This is necessary since the
+///         local MTA may have converted to a local end of line convention.
+///   (2)   Pass both the signed data and its associated content headers
+///         along with the OpenPGP signature to the signature verification
+///         service.
+/// ```
+pub fn convert_attachment_to_rfc_spec(input: &[u8]) -> Vec<u8> {
+    // The implementation lives in [`crate::utils::canonicalize_crlf`]
+    // (upstream commit `d4d83770`); this wrapper keeps the historical
+    // `Vec<u8>` signature that external regression tests pin.
+    crate::utils::canonicalize_crlf(input).into_owned()
+}
+
 pub enum UnverifiedSignature<'a> {
     Detached {
         signed_part: Vec<u8>,

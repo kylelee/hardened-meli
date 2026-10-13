@@ -22,6 +22,8 @@
 //! Utility modules for general use.
 
 pub mod connections;
+use crate::parser::BytesExt;
+
 pub mod datetime;
 pub mod fnmatch;
 pub mod futures;
@@ -360,4 +362,24 @@ macro_rules! identify {
         let _: ::core::marker::PhantomData<Self> = __debugify();
         stringify!($f$($t)*)
     }};
+}
+
+/// Canonicalize line endings to `<CR><LF>` (`\r\n`).
+///
+/// Returns a borrowed [`Cow`] when the input is empty or already canonical
+/// (every `\n` is preceded by `\r`), and an owned replacement otherwise.
+///
+/// Upstream commit `d4d83770` moved this logic out of
+/// [`crate::email::pgp::convert_attachment_to_rfc_spec`] so that the NNTP
+/// submission path can reuse it; the fork keeps the regex-free probe.
+pub fn canonicalize_crlf(input: &'_ [u8]) -> std::borrow::Cow<'_, [u8]> {
+    if input.is_empty() {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    // Equivalent to the former `regex::bytes::Regex::new(r"[^\r]\n")` probe,
+    // without compiling (and `unwrap()`ing) a regex on every call.
+    if input.windows(2).any(|w| w[0] != b'\r' && w[1] == b'\n') {
+        return std::borrow::Cow::Owned(input.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"));
+    }
+    std::borrow::Cow::Borrowed(input)
 }
