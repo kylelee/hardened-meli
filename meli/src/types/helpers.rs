@@ -268,7 +268,7 @@ pub fn pipe() -> Result<(OwnedFd, OwnedFd)> {
     nix::unistd::pipe().map_err(|err| {
         Error::new("Could not create pipe")
             .set_source(Some(
-                (Box::new(err) as Box<dyn std::error::Error + Send + Sync + 'static>).into(),
+                Box::new(err) as Box<dyn std::error::Error + Send + Sync + 'static>
             ))
             .set_kind(ErrorKind::Platform)
     })

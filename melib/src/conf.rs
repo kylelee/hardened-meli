@@ -54,7 +54,8 @@ pub trait ExtraSetting: serde::de::DeserializeOwned {
             Error::new(format!(
                 "could not deserialize value as {}",
                 std::any::type_name::<Self>()
-            )).set_source(Some(Box::new(err)))
+            ))
+            .set_source(Some(Box::new(err)))
             .set_kind(ErrorKind::Configuration)
         })
     }
@@ -120,7 +121,7 @@ pub enum ContactBackendConf {
     MuttAlias(String),
     /// Path of a folder containing `.vcf` files, imported read-only.
     VCard(String),
-    /// CardDAV server configuration. Only available when melib is built
+    /// `CardDAV` server configuration. Only available when melib is built
     /// with the `webdav` cargo feature.
     #[cfg(feature = "webdav")]
     CardDAV(crate::utils::webdav::WebDAVServerConf),
@@ -234,7 +235,8 @@ impl AccountSettings {
                     Error::new(format!(
                         "({}) could not parse `server_password` object as a Secret",
                         self.name,
-                    )).set_source(Some(Box::new(err)))
+                    ))
+                    .set_source(Some(Box::new(err)))
                     .set_kind(ErrorKind::Configuration)
                 })
             }

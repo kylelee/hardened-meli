@@ -1296,10 +1296,12 @@ fn test_jmap_contacts_using_clause() {
         Arc::new(FutureMutex::new(0)),
         crate::jmap::protocol::USING_CONTACTS,
     );
-    futures::executor::block_on(req.add_call(&crate::jmap::contacts::AddressBookGet::new(
-        crate::jmap::methods::Get::<crate::jmap::contacts::AddressBookObject>::new()
-            .account_id("A1".to_string().into()),
-    )));
+    futures::executor::block_on(
+        req.add_call(&crate::jmap::contacts::AddressBookGet::new(
+            crate::jmap::methods::Get::<crate::jmap::contacts::AddressBookObject>::new()
+                .account_id("A1".to_string().into()),
+        )),
+    );
     assert_eq!(
         json! {&req},
         json! {{
@@ -1342,7 +1344,7 @@ fn test_jmap_contacts_address_book_object_serde() {
     let parsed: AddressBookObject = serde_json::from_value(raw.clone()).unwrap();
     assert_eq!(parsed.id, Id::<AddressBookObject>::from("ab-1"));
     assert_eq!(parsed.name, "Personal");
-    assert_eq!(parsed.my_rights.may_write, false);
+    assert!(!parsed.my_rights.may_write);
     let emitted = serde_json::to_value(&parsed).unwrap();
     assert_eq!(emitted["name"], raw["name"]);
     assert_eq!(emitted["sortOrder"], raw["sortOrder"]);

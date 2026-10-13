@@ -293,7 +293,7 @@ identity = "user@example.com"
     assert!(plain.contacts.is_none());
 
     // Unknown backend types are a configuration error.
-    assert!(toml::from_str::<AccountSettings>(
+    toml::from_str::<AccountSettings>(
         r#"
 name = "test"
 root_mailbox = "INBOX"
@@ -303,7 +303,7 @@ identity = "user@example.com"
 [contacts.bad]
 type = "CarrierPigeon"
 value = "coop"
-"#
+"#,
     )
-    .is_err());
+    .unwrap_err();
 }

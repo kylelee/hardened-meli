@@ -222,19 +222,19 @@ other_email=test2@example.com;test3@example.com
         }
 
         let account_conf = AccountSettings {
-            name: acc_name.to_string(),
-            root_mailbox: root_mailbox.display().to_string(),
-            format: "notmuch".to_string(),
-            identity: "user@localhost".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes,
-            mailboxes,
-            manual_refresh: true,
-            contacts: Default::default(),
-            extra,
-        };
+                    name: acc_name.to_string(),
+                    contacts: None,
+                    root_mailbox: root_mailbox.display().to_string(),
+                    format: "notmuch".to_string(),
+                    identity: "user@localhost".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes,
+                    mailboxes,
+                    manual_refresh: true,
+                    extra,
+                };
 
         let notmuch = NotmuchDb::new(&account_conf, Default::default(), event_consumer)?;
         Ok((root_mailbox, account_conf, notmuch))

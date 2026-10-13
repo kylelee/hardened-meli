@@ -924,15 +924,15 @@ mod tests {
             ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
         ));
         // Different port.
-        assert!(redirect_target(
+        redirect_target(
             &original,
             &request,
             &redirect_response(301, Some("https://dav.example.com:8443/dav/")),
         )
-        .is_err());
+        .unwrap_err();
     }
 
-    /// WebDAV `PROPFIND` multistatus XML parsing, offline (no network).
+    /// `WebDAV` `PROPFIND` multistatus XML parsing, offline (no network).
     #[test]
     fn test_current_user_principal_propfind_deserialization() {
         let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
@@ -968,7 +968,7 @@ mod tests {
         assert_eq!(principals, vec![Box::from("/dav/user@example.com/")]);
     }
 
-    /// CardDAV `addressbook-home-set` `PROPFIND` multistatus XML parsing,
+    /// `CardDAV` `addressbook-home-set` `PROPFIND` multistatus XML parsing,
     /// offline (no network).
     #[test]
     fn test_addressbook_home_set_propfind_deserialization() {

@@ -1510,45 +1510,45 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "jmap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_url".to_string(),
-                    serde_json::Value::String(format!(
-                        "http://{}:{}",
-                        local_addr.ip(),
-                        local_addr.port()
-                    )),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "use_token".to_string(),
-                    serde_json::Value::String("true".to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "jmap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_url".to_string(),
+                            serde_json::Value::String(format!(
+                                "http://{}:{}",
+                                local_addr.ip(),
+                                local_addr.port()
+                            )),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "use_token".to_string(),
+                            serde_json::Value::String("true".to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         let mut jmap =
             JmapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
@@ -1968,45 +1968,45 @@ hello world.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "jmap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_url".to_string(),
-                    serde_json::Value::String(format!(
-                        "http://{}:{}",
-                        local_addr.ip(),
-                        local_addr.port()
-                    )),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "use_token".to_string(),
-                    serde_json::Value::String("true".to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "jmap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_url".to_string(),
+                            serde_json::Value::String(format!(
+                                "http://{}:{}",
+                                local_addr.ip(),
+                                local_addr.port()
+                            )),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "use_token".to_string(),
+                            serde_json::Value::String("true".to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         let mut jmap =
             JmapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
