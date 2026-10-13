@@ -92,7 +92,7 @@ macro_rules! impl_extra_setting_from_str {
     };
 }
 
-impl_extra_setting_from_str! { u16, u64 }
+impl_extra_setting_from_str! { u16, u64, i64 }
 
 /// 账户联系人后端的配置。
 ///
@@ -302,7 +302,7 @@ impl MailboxConf {
         self.alias.as_deref()
     }
 
-    /// Deserialize an [`Self::extra`] field as an [`ExtraSetting`] type.
+    /// Deserialize a single `extra` field as an [`ExtraSetting`]-typed value.
     pub fn deserialize_extra_field<'de, 'a: 'de, D: ExtraSetting>(
         &'a self,
         extra_field: &str,
@@ -310,16 +310,16 @@ impl MailboxConf {
         let Some(v) = self.extra.get(extra_field) else {
             return Ok(None);
         };
-        <D>::deserialize_extra(v)
+        D::deserialize_extra(v)
             .map_err(|err| {
                 Error::new(format!(
                     "Could not deserialize {extra_field} as {type_name}",
                     type_name = std::any::type_name::<D>()
                 ))
-                .set_source(Some(crate::src_err_arc_wrap! { err }))
+                .set_source(Some(Box::new(err)))
                 .set_kind(ErrorKind::Configuration)
             })
-            .map(Some)
+            .map(|v| Some(v))
     }
 }
 

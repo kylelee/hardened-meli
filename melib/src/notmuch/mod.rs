@@ -457,10 +457,10 @@ impl NotmuchDb {
         let mut mailboxes = IndexMap::with_capacity(s.mailboxes.len());
         let mut parents: Vec<(MailboxHash, String)> = Vec::with_capacity(s.mailboxes.len());
         for (k, f) in s.mailboxes.iter() {
-            if let Some(query_str) = f.extra.get("query").and_then(|v| v.as_str()) {
+            if let Some(query_str) = f.deserialize_extra_field::<String>("query")? {
                 let hash = MailboxHash::from_bytes(k.as_bytes());
-                if let Some(parent) = f.extra.get("parent").and_then(|v| v.as_str()) {
-                    parents.push((hash, parent.to_string()));
+                if let Some(parent) = f.deserialize_extra_field::<String>("parent")? {
+                    parents.push((hash, parent));
                 }
                 let save_to = f.deserialize_extra_field::<SaveToConf>("save_to")?;
                 let usage = f.usage.unwrap_or(SpecialUsageMailbox::Normal);
@@ -613,25 +613,9 @@ impl NotmuchDb {
                 ))
                 .set_kind(ErrorKind::Configuration));
             }
-            if let Some(value) = f.extra.swap_remove("save_to") {
-                if let Err(err) =
-                    <SaveToConf as crate::conf::ExtraSetting>::deserialize_extra(&value)
-                {
-                    return Err(
-                        Error::new(format!(
-                            "notmuch mailbox configuration entry `{k}` for account                              {account_name} has an invalid `save_to` value"
-                        ))
-                        .set_source(Some(crate::src_err_arc_wrap! {err}))
-                        .set_kind(ErrorKind::Configuration)
-                    );
-                }
-            }
-            if let Some(parent) = f
-                .extra
-                .swap_remove("parent")
-                .and_then(|v| v.as_str().map(str::to_string))
-            {
-                parents.push((k.clone(), parent));
+            if let Some(parent) = f.extra.swap_remove("parent") {
+                let parent_str = parent.as_str().map(String::from).unwrap_or_else(|| parent.to_string());
+                parents.push((k.clone(), parent_str));
             }
         }
         let mut path = Vec::with_capacity(8);

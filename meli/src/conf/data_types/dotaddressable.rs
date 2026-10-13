@@ -63,6 +63,7 @@ impl DotAddressable for melib::conf::ActionFlag {}
 impl DotAddressable for melib::conf::Secret {}
 impl DotAddressable for melib::SpecialUsageMailbox {}
 impl DotAddressable for melib::email::HeaderName {}
+impl DotAddressable for serde_json::Value {}
 impl<T: DotAddressable> DotAddressable for Option<T> {}
 impl<T: DotAddressable> DotAddressable for Vec<T> {}
 // impl<K: DotAddressable + std::cmp::Eq + std::hash::Hash, V: DotAddressable>
