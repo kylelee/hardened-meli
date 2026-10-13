@@ -36,6 +36,7 @@ default = [
 http = ["melib/http"]
 notmuch = ["melib/notmuch"]
 jmap = ["melib/jmap"]
+webdav = ["melib/webdav"]
 sqlite3 = ["melib/sqlite3"]
 smtp = ["melib/smtp"]
 dbus-notifications = ["dep:notify-rust"]

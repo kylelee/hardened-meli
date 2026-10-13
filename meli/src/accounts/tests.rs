@@ -235,7 +235,7 @@ fn test_accounts_mailbox_by_path_error_msg() {
             mailboxes_order: Default::default(),
             tree: Default::default(),
             contacts,
-            contact_backends: Default::default(),
+            contact_backends: IndexMap::default(),
             collection: backend.collection(),
             settings,
             main_loop_handler: ctx.main_loop_handler.clone(),
@@ -445,7 +445,7 @@ fn test_accounts_mailbox_by_path_error_msg() {
             mailboxes_order: Default::default(),
             tree: Default::default(),
             contacts,
-            contact_backends: Default::default(),
+            contact_backends: IndexMap::default(),
             collection: backend.collection(),
             settings,
             main_loop_handler: ctx.main_loop_handler.clone(),
@@ -697,7 +697,7 @@ fn reconcile_mailboxes_merge() {
         mailboxes_order: Default::default(),
         tree: Default::default(),
         contacts,
-        contact_backends: Default::default(),
+        contact_backends: IndexMap::default(),
         collection: backend.collection(),
         settings,
         main_loop_handler: ctx.main_loop_handler.clone(),
@@ -1141,6 +1141,111 @@ fn test_account_imap_offline_cold_start_serves_cached_mail() {
             }
         }
     }
+}
+
+/// Configured contact backends must load into the account's flat `Contacts`
+/// store through the job chain (initialize → address books → book fetch),
+/// layered on top of the legacy implicit sources (`vcard_folder` here) that
+/// keep loading at startup, and without disturbing accounts that configure
+/// no backends.
+#[test]
+fn test_account_contacts_backends_merge_into_account_contacts() {
+    use melib::conf::ContactBackendConf;
+
+    const ACCOUNT_NAME: &str = "contacts-glue";
+    // Pin XDG: the account's `Contacts::with_account` startup load and the
+    // drop-time write derive their paths from the environment.
+    let _home = crate::golden::shared_test_home();
+
+    let temp_dir = TempDir::new().unwrap();
+    // New `MuttAlias` backend source.
+    let alias_file = temp_dir.path().join("aliases");
+    std::fs::write(
+        &alias_file,
+        "alias mumon My dear pupil Mumon foobar@example.com\n\
+         alias nil Master None none@example.com\n",
+    )
+    .unwrap();
+    // New `VCard` backend source.
+    let vcard_dir = temp_dir.path().join("vcards");
+    std::fs::create_dir(&vcard_dir).unwrap();
+    std::fs::write(
+        vcard_dir.join("a.vcf"),
+        "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Forrest Gump\r\nEMAIL:forrestgump@example.com\r\n\
+         END:VCARD\r\n",
+    )
+    .unwrap();
+    // Legacy implicit source, still loaded by `Contacts::with_account`.
+    let legacy_dir = temp_dir.path().join("legacy");
+    std::fs::create_dir(&legacy_dir).unwrap();
+    std::fs::write(
+        legacy_dir.join("old.vcf"),
+        "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Legacy Contact\r\nEMAIL:legacy@example.com\r\n\
+         END:VCARD\r\n",
+    )
+    .unwrap();
+
+    let (_, mut account_conf, _maildir) = new_maildir_backend(
+        &temp_dir,
+        ACCOUNT_NAME,
+        BackendEventConsumer::new(Arc::new(|_, _| {})),
+        true,
+    )
+    .unwrap();
+    account_conf.account.contacts = Some(indexmap::indexmap! {
+        "mutt".to_string() =>
+            ContactBackendConf::MuttAlias(alias_file.display().to_string()),
+        "vcards".to_string() =>
+            ContactBackendConf::VCard(vcard_dir.display().to_string()),
+    });
+    account_conf.account.extra.insert(
+        "vcard_folder".to_string(),
+        serde_json::Value::String(legacy_dir.display().to_string()),
+    );
+
+    let mut ctx = crate::Context::new_mock(&temp_dir);
+    // Drain the mock account's own startup events so they cannot be
+    // mistaken for this account's jobs below.
+    while ctx.receiver.try_recv().is_ok() {}
+
+    let account_hash = melib::backends::prelude::AccountHash::from_bytes(ACCOUNT_NAME.as_bytes());
+    let account = crate::accounts::Account::new(
+        account_hash,
+        ACCOUNT_NAME.to_string(),
+        account_conf,
+        &melib::backends::Backends::new(),
+        ctx.main_loop_handler.clone(),
+        BackendEventConsumer::new(Arc::new(|_, _| {})),
+    )
+    .unwrap();
+    ctx.accounts.insert(account_hash, account);
+
+    let sources_loaded = |ctx: &crate::Context| {
+        let account = &ctx.accounts[&account_hash];
+        !account.contacts.search("foobar@example.com").is_empty()
+            && !account.contacts.search("forrestgump@example.com").is_empty()
+            && !account.contacts.search("legacy@example.com").is_empty()
+    };
+    assert!(
+        pump_cold_start(
+            &mut ctx,
+            account_hash,
+            &mut NoopComponent,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+            sources_loaded,
+        ),
+        "contact backends and legacy sources must all end up in account.contacts"
+    );
+
+    let account = &ctx.accounts[&account_hash];
+    // Both configured backends registered and fetched their single book.
+    assert_eq!(account.contact_backends.len(), 2);
+    // Two mutt aliases + one vcard + one legacy vcard, nothing else (the
+    // pinned home has no pre-existing contacts file for this account).
+    assert_eq!(account.contacts.cards.len(), 4);
+    // Autocomplete/search sees the remote sources.
+    assert_eq!(account.contacts.search("Mumon").len(), 1);
+    assert_eq!(account.contacts.search("none@example.com").len(), 1);
 }
 
 /// A component that ignores everything, for `pump_cold_start` runs that

@@ -161,7 +161,7 @@ pub enum JobRequest {
         )>,
     },
     Mailbox(MailboxJobRequest),
-    Contacts(crate::accounts::contacts::ContactJobRequest),
+    Contacts(super::contacts::ContactJobRequest),
 }
 
 impl std::fmt::Debug for JobRequest {

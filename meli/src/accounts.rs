@@ -211,7 +211,11 @@ pub struct Account {
     pub tree: Vec<MailboxNode>,
     pub collection: Collection,
     pub contacts: Contacts,
-    pub contact_backends: IndexMap<ContactBackendID, Arc<Mutex<Box<dyn ContactBackend>>>>,
+    /// Contact backends of this account (configured under the account's
+    /// `contacts` map plus the mail backend's own contact backend), keyed by
+    /// their [`ContactBackendID`]. They feed [`Account::contacts`] as their
+    /// address books are fetched.
+    pub contact_backends: IndexMap<Arc<ContactBackendID>, Arc<Mutex<Box<dyn ContactBackend>>>>,
     pub settings: AccountConf,
     pub backend: Arc<Mutex<Box<dyn MailBackend>>>,
 
@@ -432,7 +436,7 @@ impl Account {
             mailbox_entries: Default::default(),
             mailboxes_order: Default::default(),
             tree: Default::default(),
-            contacts: Contacts::new(settings.account().name.clone()),
+            contacts,
             contact_backends: IndexMap::default(),
             collection: backend.collection(),
             settings,
@@ -443,7 +447,6 @@ impl Account {
             backend_capabilities: backend.capabilities(),
             backend: Arc::new(Mutex::new(backend)),
         };
-        // 通讯录后端的装载统一走新模块（默认本地书 + 邮件后端 + `contacts` 配置）。
         ret.init_contacts();
         Ok(ret)
     }
@@ -1736,6 +1739,9 @@ impl Account {
                 JobRequest::Mailbox(inner) => {
                     self.process_mailbox_event(job_id, inner);
                     return true;
+                }
+                JobRequest::Contacts(job) => {
+                    return self.process_contact_event(job_id, job);
                 }
                 JobRequest::Fetch {
                     mailbox_hash,
