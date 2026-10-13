@@ -100,7 +100,7 @@ impl ContactBackend for NotmuchContacts {
                                             "Unable to parse notmuch contact result into cards: {}",
                                             notmuch_address_out.trim_at_boundary(100),
                                         ))
-                                        .set_source(Some(crate::src_err_arc_wrap! { err })));
+                                        .set_source(Some(Box::new(err))));
                                     }
                                 }
                             }
@@ -108,7 +108,7 @@ impl ContactBackend for NotmuchContacts {
                                 return Err(Error::new(format!(
                                     "Unable to read from notmuch address query: {query}",
                                 ))
-                                .set_source(Some(crate::src_err_arc_wrap! { err })));
+                                .set_source(Some(Box::new(err))));
                             }
                         }
                     } else {
@@ -124,7 +124,7 @@ impl ContactBackend for NotmuchContacts {
                 Err(err) => {
                     return Err(Error::new("Unable to run notmuch address command")
                         .set_kind(ErrorKind::External)
-                        .set_source(Some(crate::src_err_arc_wrap! { err })));
+                        .set_source(Some(Box::new(err))));
                 }
             };
             let cards = cards.into_iter().map(|c| (c.id, c)).collect();

@@ -148,6 +148,13 @@ pub fn ignore_not_found(err: Error) -> Result<()> {
     Err(err)
 }
 
+#[macro_export]
+macro_rules! src_err_arc_wrap {
+    ($err:expr) => {{
+        (Box::new($err) as Box<dyn std::error::Error + Send + Sync + 'static>).into()
+    }};
+}
+
 
 #[derive(Clone, Debug)]
 pub struct Error {
