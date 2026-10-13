@@ -308,7 +308,6 @@ impl Error {
         M: Into<Cow<'static, str>>,
     {
         if let Some(old_details) = self.details.as_ref() {
-            // 拼接前去掉旧文本末尾的句号，避免出现 `..`。
             self.details =
                 Some(format!("{}. {}", old_details.trim_end_matches('.'), details.into()).into());
         } else {
@@ -324,7 +323,6 @@ impl Error {
         if self.summary.is_empty() {
             self.summary = summary.into();
         } else {
-            // 拼接前去掉旧 summary 末尾的句号，避免出现 `..`。
             self.summary =
                 format!("{}. {}", self.summary.trim_end_matches('.'), summary.into()).into();
         }
@@ -817,6 +815,25 @@ mod tests {
             matches!(not_found.kind, ErrorKind::OSError(_)),
             "ENOENT maps to Platform via the catch-all arm, so it must fall back to OSError, got {}",
             not_found.kind
+        );
+    }
+
+    /// Regression test for upstream meli commit `c83c9e67` ("do not repeat
+    /// period when concatenating").
+    ///
+    /// `set_details`/`set_summary` append with a `". "` separator; when the
+    /// accumulated text already ends in a period, the separator used to
+    /// produce `"a.. b"`.
+    #[test]
+    fn test_no_repeated_period_when_concatenating() {
+        let err = Error::new("first.")
+            .set_details("second")
+            .set_details("third.");
+        assert_eq!(err.details.as_deref(), Some("first. second. third."));
+        assert_eq!(
+            err.set_summary("appended").summary,
+            "first. appended",
+            "trailing period must be trimmed before the separator"
         );
     }
 
