@@ -1,7 +1,7 @@
 //
 // meli
 //
-// Copyright 2026 Manos Pitsidianakis <manos@pitsidianak.is>
+// Copyright 2026 Manos Pitsidianakis <manos@pitsidianakis.is>
 //
 // This file is part of meli.
 //
@@ -16,7 +16,7 @@
 // GNU General Public License for more details.
 //
 // You should have received a copy of the GNU General Public License
-// along with meli. If not, see <http://www.gnu.org/licenses/>.
+// along with meli.  If not, see <http://www.gnu.org/licenses/>.
 //
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 
