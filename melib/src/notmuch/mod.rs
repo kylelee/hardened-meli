@@ -404,12 +404,10 @@ impl NotmuchDb {
                                  {} does not exist or is a directory or not a valid library file.",
                                 s.name
                             ))
-                            .set_kind(ErrorKind::Configuration)
-                            .set_source(Some(Arc::new(err))));
+                            .set_kind(ErrorKind::Configuration).set_source(Some(Box::new(err))));
                         } else {
                             return Err(Error::new("Could not load libnotmuch!")
-                                .set_details(super::NOTMUCH_ERROR_DETAILS)
-                                .set_source(Some(Arc::new(err))));
+                                .set_details(super::NOTMUCH_ERROR_DETAILS).set_source(Some(Box::new(err))));
                         }
                     }
                 }

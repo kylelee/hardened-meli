@@ -77,7 +77,7 @@ macro_rules! get_conf_val {
                         $s.name.as_str(),
                     ))
                     .set_kind(ErrorKind::Configuration)
-                    .set_source(Some(Arc::new(
+                    .set_source(Some(Box::new(
                         Error::new(format!("Invalid value for field `{v}`: {e}\n{}", $var))
                             .set_kind(ErrorKind::ValueError),
                     )))
@@ -929,7 +929,7 @@ impl NntpType {
                                 $s.name.as_str(),
                             ))
                             .set_kind(ErrorKind::Configuration)
-                            .set_source(Some(Arc::new(
+                            .set_source(Some(Box::new(
                                 Error::new(format!("Invalid value for field `{}`: {v}\n{e}", $var))
                                     .set_kind(ErrorKind::ValueError),
                             )))

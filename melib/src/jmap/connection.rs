@@ -176,7 +176,7 @@ impl JmapConnection {
                      supported)\n\nError connecting to server: {err}",
                     self.server_conf.server_url
                 ))
-                .set_source(Some(Arc::new(err)));
+                .set_source(Some(Box::new(err)));
                 _ = self.store.online_status.set(None, Err(err.clone())).await;
                 return Err(err);
             }
@@ -270,7 +270,7 @@ impl JmapConnection {
                      supported)\n\nReply from server: {err}",
                     self.server_conf.server_url
                 ))
-                .set_source(Some(Arc::new(err)));
+                .set_source(Some(Box::new(err)));
                 _ = self
                     .store
                     .online_status
@@ -290,7 +290,7 @@ impl JmapConnection {
                      supported)\n\nReply from server: {res_text}",
                     self.server_conf.server_url
                 ))
-                .set_source(Some(Arc::new(err)));
+                .set_source(Some(Box::new(err)));
                 _ = self
                     .store
                     .online_status

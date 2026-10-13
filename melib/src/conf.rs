@@ -54,8 +54,7 @@ pub trait ExtraSetting: serde::de::DeserializeOwned {
             Error::new(format!(
                 "could not deserialize value as {}",
                 std::any::type_name::<Self>()
-            ))
-            .set_source(Some(crate::src_err_arc_wrap! { err }))
+            )).set_source(Some(Box::new(err)))
             .set_kind(ErrorKind::Configuration)
         })
     }
@@ -85,7 +84,7 @@ macro_rules! impl_extra_setting_from_str {
                             "could not deserialize value as {}",
                             std::any::type_name::<Self>()
                         ))
-                        .set_source(Some(crate::src_err_arc_wrap! { err }))
+                        .set_source(Some(Box::new(err)))
                         .set_kind(ErrorKind::Configuration)
                     })
             }
@@ -220,8 +219,7 @@ impl AccountSettings {
                     Error::new(format!(
                         "({}) could not parse `server_password` object as a Secret",
                         self.name,
-                    ))
-                    .set_source(Some(crate::src_err_arc_wrap! { err }))
+                    )).set_source(Some(Box::new(err)))
                     .set_kind(ErrorKind::Configuration)
                 })
             }

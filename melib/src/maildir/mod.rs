@@ -80,8 +80,7 @@ impl Configuration {
                         "Configuration error ({}): Invalid value for field \
                      `{RENAME_REGEX_FIELDNAME}`: {v}",
                         settings.name.as_str(),
-                    ))
-                    .set_source(Some(crate::src_err_arc_wrap!(e)))
+                    )).set_source(Some(Box::new(e)))
                     .set_kind(ErrorKind::ValueError)
                 })
             }) {

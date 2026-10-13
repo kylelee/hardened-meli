@@ -148,12 +148,6 @@ pub fn ignore_not_found(err: Error) -> Result<()> {
     Err(err)
 }
 
-#[macro_export]
-macro_rules! src_err_arc_wrap {
-    ($err:expr) => {{
-        (Box::new($err) as Box<dyn std::error::Error + Send + Sync + 'static>).into()
-    }};
-}
 
 #[derive(Clone, Debug)]
 pub struct Error {
@@ -284,7 +278,7 @@ where
         F: Fn() -> M,
         M: Into<Cow<'static, str>>,
     {
-        self.map_err(|err| Error::new(msg_fn()).set_source(Some(Arc::new(err))))
+        self.map_err(|err| Error::new(msg_fn()).set_source(Some(Box::new(err))))
     }
 }
 
@@ -331,29 +325,28 @@ impl Error {
 
     pub fn set_source(
         mut self,
-        new_val: Option<std::sync::Arc<dyn error::Error + Send + Sync + 'static>>,
+        new_val: Option<Box<dyn error::Error + Send + Sync + 'static>>,
     ) -> Self {
-        self.source = new_val.map(|inner| {
-            // 若传入的 source 本身就是本模块的 `Error`，直接采用它，而不是再
-            // 包一层 `ErrorKind::External`：多包一层会把错误链压深一级，使内部
-            // 错误的 kind 与 related path 被一个空 summary 的中间节点遮住；
-            // 极端情况下 Self 套 Self 还会形成自引用。
-            if let Some(inner) = inner.downcast_ref::<Self>() {
-                return Box::new(inner.clone());
+        let new_val = if let Some(new_val) = new_val {
+            match new_val.downcast::<Self>() {
+                Ok(new_val) => Some(new_val),
+                Err(new_val) => Some(Box::new(Self {
+                    summary: "".into(),
+                    details: None,
+                    inner: Some(new_val.into()),
+                    source: None,
+                    related_path: None,
+                    kind: ErrorKind::External,
+                })),
             }
-            Box::new(Self {
-                summary: "".into(),
-                details: None,
-                inner: Some(inner),
-                source: None,
-                related_path: None,
-                kind: ErrorKind::External,
-            })
-        });
+        } else {
+            None
+        };
+        self.source = new_val;
         self
     }
 
-    pub fn from_inner(inner: std::sync::Arc<dyn error::Error + Send + Sync + 'static>) -> Self {
+    fn from_inner(inner: std::sync::Arc<dyn error::Error + Send + Sync + 'static>) -> Self {
         Self {
             summary: "".into(),
             details: None,
