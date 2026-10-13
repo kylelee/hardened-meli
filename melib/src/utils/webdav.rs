@@ -289,11 +289,16 @@ impl WebDAVConnection {
             .dns_cache(isahc::net::dns::DnsCache::Forever)
             .connection_cache_size(8)
             .connection_cache_ttl(Duration::from_secs(30 * 60))
+            // Fork policy: only disable the certificate-chain verifier
+            // under the user-opted danger flag. The two other isahc TLS
+            // relaxation knobs are scoped to the JMAP client by the fork's
+            // cve/ audit suite (frozen), so the WebDAV client leaves hostname
+            // verification and revocation checks on unconditionally —
+            // strictly stronger than upstream, and a smaller blast radius
+            // for the danger flag.
             .tls_config(
                 isahc::tls::TlsConfig::builder()
                     .danger_accept_invalid_certs(server_conf.danger_accept_invalid_certs)
-                    .danger_accept_invalid_hosts(server_conf.danger_accept_invalid_certs)
-                    .danger_accept_revoked_certs(server_conf.danger_accept_invalid_certs)
                     .build(),
             )
             .tcp_nodelay()
