@@ -27,7 +27,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::jmap::{
-    capabilities::JmapMailCapability,
+    capabilities::{JmapContactsCapability, JmapMailCapability},
     methods::u64_zero,
     capabilities::{JmapContactsCapability, JmapMailCapability},
     objects::{Account, Id, Object, State},
@@ -76,23 +76,11 @@ impl Session {
     }
 
     /// Return the account ID corresponding to the [`JmapContactsCapability`]
-    /// capability.
-    ///
-    /// Like `mail_account_id`, a session that advertises the contacts
-    /// capability but omits its `primaryAccounts` entry is reported as a
-    /// protocol error instead of panicking on the map index.
-    pub fn contacts_account_id(&self) -> crate::error::Result<Id<Account>> {
+    /// capability, if any.
+    pub fn contacts_account_id(&self) -> Option<Id<Account>> {
         self.primary_accounts
             .get(JmapContactsCapability::uri())
             .cloned()
-            .ok_or_else(|| {
-                crate::error::Error::new(format!(
-                    "Server session advertises the {} capability but has no entry for it in \
-                     `primaryAccounts`",
-                    JmapContactsCapability::uri()
-                ))
-                .set_kind(crate::error::ErrorKind::ProtocolError)
-            })
     }
 }
 

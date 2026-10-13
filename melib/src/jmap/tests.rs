@@ -1280,3 +1280,70 @@ fn test_jmap_danger_accept_invalid_certs_is_rejected() {
         assert!(err.summary.contains("trust store"), "{err}");
     }
 }
+
+/// `USING_CONTACTS` advertises the Core + Contacts capabilities. The
+/// `Request::new_with_using` constructor must emit the chosen `using` clause
+/// verbatim into the serialized form.
+#[test]
+fn test_jmap_contacts_using_clause() {
+    use std::sync::Arc;
+
+    use futures::lock::Mutex as FutureMutex;
+    use serde_json::json;
+
+    use crate::jmap::protocol::Request;
+    let mut req = Request::new_with_using(
+        Arc::new(FutureMutex::new(0)),
+        crate::jmap::protocol::USING_CONTACTS,
+    );
+    futures::executor::block_on(req.add_call(&crate::jmap::contacts::AddressBookGet::new(
+        crate::jmap::methods::Get::<crate::jmap::contacts::AddressBookObject>::new()
+            .account_id("A1".to_string().into()),
+    )));
+    assert_eq!(
+        json! {&req},
+        json! {{
+            "using": [
+                "urn:ietf:params:jmap:core",
+                "urn:ietf:params:jmap:contacts"
+            ],
+            "methodCalls": [
+                [
+                    "AddressBook/get",
+                    { "accountId": "A1" },
+                    "m0"
+                ]
+            ]
+        }}
+    );
+}
+
+/// `AddressBookObject` round-trips through serde with the documented shape.
+#[test]
+fn test_jmap_contacts_address_book_object_serde() {
+    use serde_json::json;
+
+    use crate::jmap::contacts::AddressBookObject;
+    use crate::jmap::objects::Id;
+    let raw = json!({
+        "id": "ab-1",
+        "name": "Personal",
+        "description": "friends and family",
+        "sortOrder": 5,
+        "isDefault": true,
+        "isSubscribed": true,
+        "myRights": {
+            "mayRead": true,
+            "mayWrite": false,
+            "mayShare": false,
+            "mayDelete": false
+        }
+    });
+    let parsed: AddressBookObject = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(parsed.id, Id::<AddressBookObject>::from("ab-1"));
+    assert_eq!(parsed.name, "Personal");
+    assert_eq!(parsed.my_rights.may_write, false);
+    let emitted = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(emitted["name"], raw["name"]);
+    assert_eq!(emitted["sortOrder"], raw["sortOrder"]);
+}

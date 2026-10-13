@@ -660,6 +660,15 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
             .set_kind(ErrorKind::NotSupported))
     }
 
+    /// Return a contact backend that talks to the same server as this mail
+    /// backend, or an error/None if the account type does not provide one.
+    fn contact_backend(
+        &mut self,
+    ) -> ResultFuture<Option<Box<dyn crate::contacts::backend::ContactBackend>>> {
+        Err(Error::new("Contacts are not supported in this backend.")
+            .set_kind(ErrorKind::NotSupported))
+    }
+
     fn submit_batch(
         &mut self,
         batch: Vec<(Vec<u8>, Option<MailboxHash>)>,

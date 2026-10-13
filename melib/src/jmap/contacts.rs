@@ -20,17 +20,15 @@
 //
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 
-//! JMAP Contacts (`urn:ietf:params:jmap:contacts`) contact backend.
-//!
-//! Implements the [`ContactBackend`] trait on top of the `AddressBook/get`,
-//! `ContactCard/get`, `ContactCard/query` and `ContactCard/set` JMAP methods,
-//! so address books stored on a JMAP server behave like any other contact
-//! backend in `melib`.
+//! JMAP Contacts backend. Implements the [`ContactBackend`] contract against a
+//! server that exposes the `urn:ietf:params:jmap:contacts` capability.
 
-use std::sync::Arc;
+use std::{convert::TryFrom, sync::Arc};
 
 use futures::lock::Mutex as FutureMutex;
+use indexmap::IndexMap;
 use isahc::AsyncReadResponseExt as _;
+use serde_json::{json, Value};
 
 use crate::{
     backends::prelude::*,
@@ -39,8 +37,10 @@ use crate::{
         jscontact::{JSContact, JSContactVersion1},
         AddressBook, AddressBookName, Card,
     },
+    error::{Error, ErrorKind, Result},
     jmap::{
         argument::Argument,
+        connection::JmapConnection,
         deserialize_from_str,
         filters::{Filter, FilterTrait},
         methods::{
@@ -48,13 +48,14 @@ use crate::{
         },
         objects::{Account, Id, Object},
         protocol::{Method, Request, UtcDate, USING_CONTACTS as USING},
-        JmapConnection, JmapServerConf, Store,
+        CapabilitiesObject, JmapServerConf, Store,
     },
     utils::futures::timeout,
 };
 
-/// The JMAP Contacts capability object as defined by
-/// *draft-ietf-calext-jmap-jscontact-07, Section 3.3*.
+/// Per-account Contacts capabilities. Mirrors the JMAP Contacts capability
+/// object's known fields; the raw blob is preserved as `extra_properties` for
+/// any future fields added by the spec.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContactsCapabilitiesObject {
@@ -62,6 +63,8 @@ pub struct ContactsCapabilitiesObject {
     pub may_create_address_book: bool,
     #[serde(default)]
     pub max_address_books_per_card: Option<u64>,
+    #[serde(flatten)]
+    pub extra_properties: IndexMap<String, Value>,
 }
 
 #[derive(Debug)]
@@ -73,17 +76,33 @@ pub struct JmapContacts {
     pub store: Arc<Store>,
 }
 
+impl JmapContacts {
+    pub fn new(
+        capabilities: ContactsCapabilitiesObject,
+        account_id: Id<Account>,
+        server_conf: JmapServerConf,
+        connection: Arc<FutureMutex<JmapConnection>>,
+        store: Arc<Store>,
+    ) -> Self {
+        Self {
+            capabilities,
+            account_id,
+            server_conf,
+            connection,
+            store,
+        }
+    }
+}
+
 impl ContactBackend for JmapContacts {
     fn capabilities(&mut self) -> ContactBackendCapabilities {
-        let can_create_address_book = self.capabilities.may_create_address_book;
-        let max_address_books_per_card = self.capabilities.max_address_books_per_card;
         ContactBackendCapabilities {
             is_async: true,
             is_remote: true,
             supports_search: true,
-            can_create_address_book,
-            max_address_books_per_card,
-            ..Default::default()
+            can_create_address_book: self.capabilities.may_create_address_book,
+            max_address_books_per_card: self.capabilities.max_address_books_per_card,
+            ..ContactBackendCapabilities::default()
         }
     }
 
@@ -100,21 +119,19 @@ impl ContactBackend for JmapContacts {
 
     fn address_books(&mut self) -> ResultFuture<Vec<AddressBookName>> {
         let store = self.store.clone();
-        let connection = self.connection.clone();
         let account_id = self.account_id.clone();
+        let connection = self.connection.clone();
         Ok(Box::pin(async move {
-            let conn = connection.lock().await;
+            let mut conn = connection.lock().await;
+            conn.connect().await?;
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
             let get_call = AddressBookGet::new(Get::new().account_id(account_id));
-
             req.add_call(&get_call).await;
-
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -132,25 +149,26 @@ impl ContactBackend for JmapContacts {
         }))
     }
 
-    fn fetch_book(&mut self, address_book: &AddressBookName) -> ResultFuture<AddressBook> {
+    fn fetch_book(
+        &mut self,
+        address_book: &AddressBookName,
+    ) -> ResultFuture<AddressBook> {
         let store = self.store.clone();
-        let connection = self.connection.clone();
         let account_id = self.account_id.clone();
+        let connection = self.connection.clone();
         let address_book = address_book.clone();
         Ok(Box::pin(async move {
-            let conn = connection.lock().await;
+            let mut conn = connection.lock().await;
+            conn.connect().await?;
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
-            let get_call = AddressBookGet::new(Get::new().account_id(account_id.clone()));
-
+            let get_call =
+                AddressBookGet::new(Get::new().account_id(account_id.clone()));
             req.add_call(&get_call).await;
-
-            // [ref:FIXME]: make one roundtrip with a Query request instead of two
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -169,7 +187,8 @@ impl ContactBackend for JmapContacts {
                 ))
                 .set_kind(ErrorKind::ValueError));
             };
-            let get_call: ContactCardGet = ContactCardGet::new(Get::new().account_id(account_id));
+            let get_call: ContactCardGet =
+                ContactCardGet::new(Get::new().account_id(account_id));
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
             req.add_call(&get_call).await;
             let res_text = conn
@@ -177,7 +196,6 @@ impl ContactBackend for JmapContacts {
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -202,28 +220,23 @@ impl ContactBackend for JmapContacts {
         }))
     }
 
-    fn search(&self, _term: &str, _address_book: Option<&AddressBookName>) -> ResultFuture<Vec<Card>> {
-        Err(Error::new("").set_kind(ErrorKind::NotImplemented))
-    }
-
     fn add(&mut self, address_book: &AddressBookName, new_card: Card) -> ResultFuture<Card> {
         let store = self.store.clone();
-        let connection = self.connection.clone();
         let account_id = self.account_id.clone();
+        let connection = self.connection.clone();
         let address_book = address_book.clone();
         Ok(Box::pin(async move {
-            let conn = connection.lock().await;
+            let mut conn = connection.lock().await;
+            conn.connect().await?;
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
-            let get_call = AddressBookGet::new(Get::new().account_id(account_id.clone()));
-
+            let get_call =
+                AddressBookGet::new(Get::new().account_id(account_id.clone()));
             req.add_call(&get_call).await;
-
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -245,12 +258,12 @@ impl ContactBackend for JmapContacts {
             let mut new_obj: ContactCardObject = new_card.into();
             new_obj.address_book_ids.insert(book.id.clone(), true);
             let create_id = new_obj.id.clone();
-            let set_call: ContactCardSet = ContactCardSet::new(
-                Set::new(/* TODO */ None)
+            let set_call = ContactCardSet::new(
+                Set::<ContactCardObject>::new(None)
                     .account_id(account_id.clone())
-                    .create(Some(
-                        indexmap::indexmap! { Argument::Value(create_id.clone()) => new_obj.clone() },
-                    )),
+                    .create(Some(indexmap::indexmap! {
+                        Argument::Value(create_id.clone()) => new_obj.clone()
+                    })),
             );
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
             req.add_call(&set_call).await;
@@ -259,7 +272,6 @@ impl ContactBackend for JmapContacts {
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -267,7 +279,8 @@ impl ContactBackend for JmapContacts {
                 }
                 Ok(s) => s,
             };
-            let set_resp = SetResponse::<ContactCardObject>::try_from(v.take_first()?)?;
+            let set_resp =
+                SetResponse::<ContactCardObject>::try_from(v.take_first()?)?;
             let SetResponse {
                 not_created,
                 created,
@@ -282,7 +295,9 @@ impl ContactBackend for JmapContacts {
                 .swap_remove(&create_id)
                 .ok_or_else(|| {
                     Error::new("Could not create contact card")
-                        .set_details("ContactCard/Set server response had an empty `created` field")
+                        .set_details(
+                            "ContactCard/Set server response had an empty `created` field",
+                        )
                         .set_kind(ErrorKind::Bug)
                 })?;
             new_obj.id = serde_json::from_value(created_card["id"].clone()).unwrap();
@@ -296,22 +311,21 @@ impl ContactBackend for JmapContacts {
 
     fn edit(&mut self, address_book: &AddressBookName, card: Card) -> ResultFuture<Card> {
         let store = self.store.clone();
-        let connection = self.connection.clone();
         let account_id = self.account_id.clone();
+        let connection = self.connection.clone();
         let address_book = address_book.clone();
         Ok(Box::pin(async move {
-            let conn = connection.lock().await;
+            let mut conn = connection.lock().await;
+            conn.connect().await?;
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
-            let get_call = AddressBookGet::new(Get::new().account_id(account_id.clone()));
-
+            let get_call =
+                AddressBookGet::new(Get::new().account_id(account_id.clone()));
             req.add_call(&get_call).await;
-
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -338,12 +352,12 @@ impl ContactBackend for JmapContacts {
             let mut obj: ContactCardObject = card.into();
             obj.address_book_ids.insert(book.id.clone(), true);
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
-
             req.add_call(&ContactCardQuery::new(
                 Query::new()
                     .account_id(account_id.clone())
                     .filter(Some(Filter::Condition(
-                        ContactCardFilterCondition::new().uid(uid.hyphenated().to_string()),
+                        ContactCardFilterCondition::new()
+                            .uid(uid.hyphenated().to_string()),
                     )))
                     .position(0)
                     .limit(None),
@@ -354,7 +368,6 @@ impl ContactBackend for JmapContacts {
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -371,27 +384,27 @@ impl ContactBackend for JmapContacts {
                 );
             };
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
-
             let mut updated_properties = serde_json::json!(obj.clone());
             if let Some(map) = updated_properties.as_object_mut() {
                 map.remove("uid");
                 map.remove("addressBookIds");
                 map.remove("id");
             }
-            req.add_call(&ContactCardSet::new(
-                Set::new(/* TODO */ None)
-                    .account_id(account_id.clone())
-                    .update(Some(
-                        indexmap::indexmap! { Argument::value(card_id.clone()) => updated_properties },
-                    )),
-            ))
+            req.add_call(
+                &ContactCardSet::new(
+                    Set::<ContactCardObject>::new(None)
+                        .account_id(account_id.clone())
+                        .update(Some(
+                            indexmap::indexmap! { Argument::Value(card_id.clone()) => updated_properties },
+                        )),
+                ),
+            )
             .await;
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -399,7 +412,8 @@ impl ContactBackend for JmapContacts {
                 }
                 Ok(s) => s,
             };
-            let set_resp = SetResponse::<ContactCardObject>::try_from(v.take_first()?)?;
+            let set_resp =
+                SetResponse::<ContactCardObject>::try_from(v.take_first()?)?;
             let SetResponse {
                 not_updated,
                 updated,
@@ -416,7 +430,9 @@ impl ContactBackend for JmapContacts {
                 .swap_remove(&card_id)
                 .ok_or_else(|| {
                     Error::new("Could not update contact card")
-                        .set_details("ContactCard/Set server response had an empty `updated` field")
+                        .set_details(
+                            "ContactCard/Set server response had an empty `updated` field",
+                        )
                         .set_kind(ErrorKind::Bug)
                 })?
             {
@@ -438,22 +454,21 @@ impl ContactBackend for JmapContacts {
 
     fn delete(&mut self, address_book: &AddressBookName, card: Card) -> ResultFuture<()> {
         let store = self.store.clone();
-        let connection = self.connection.clone();
         let account_id = self.account_id.clone();
+        let connection = self.connection.clone();
         let address_book = address_book.clone();
         Ok(Box::pin(async move {
-            let conn = connection.lock().await;
+            let mut conn = connection.lock().await;
+            conn.connect().await?;
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
-            let get_call = AddressBookGet::new(Get::new().account_id(account_id.clone()));
-
+            let get_call =
+                AddressBookGet::new(Get::new().account_id(account_id.clone()));
             req.add_call(&get_call).await;
-
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -478,37 +493,38 @@ impl ContactBackend for JmapContacts {
                     .set_kind(ErrorKind::ValueError));
             };
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
-
             let query_call = req
                 .add_call(&ContactCardQuery::new(
                     Query::new()
                         .account_id(account_id.clone())
                         .filter(Some(Filter::Condition(
-                            ContactCardFilterCondition::new().uid(uid.hyphenated().to_string()),
+                            ContactCardFilterCondition::new()
+                                .uid(uid.hyphenated().to_string()),
                         )))
                         .position(0)
                         .limit(None),
                 ))
                 .await;
-            req.add_call(&ContactCardGet::new(
-                Get::new()
-                    .account_id(account_id.clone())
-                    .ids(Some(Argument::reference::<
-                        ContactCardQuery,
-                        ContactCardObject,
-                        ContactCardObject,
-                    >(
-                        query_call,
-                        ResultField::<ContactCardQuery, ContactCardObject>::new("/ids"),
-                    ))),
-            ))
+            req.add_call(
+                &ContactCardGet::new(
+                    Get::new()
+                        .account_id(account_id.clone())
+                        .ids(Some(Argument::reference::<
+                            ContactCardQuery,
+                            ContactCardObject,
+                            ContactCardObject,
+                        >(
+                            query_call,
+                            ResultField::<ContactCardQuery, ContactCardObject>::new("/ids"),
+                        ))),
+                ),
+            )
             .await;
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -526,7 +542,6 @@ impl ContactBackend for JmapContacts {
             }
             let GetResponse { list, .. } =
                 GetResponse::<ContactCardObject>::try_from(v.take_first()?)?;
-
             let Some(mut obj) = list.first().cloned() else {
                 return Err(
                     Error::new(format!("Contact card {uid} not found on server"))
@@ -534,16 +549,17 @@ impl ContactBackend for JmapContacts {
                 );
             };
             let mut req = Request::new_with_using(conn.request_no.clone(), USING);
-
             let card_id = obj.id.clone();
             obj.address_book_ids.shift_remove(&book.id);
             let destroy = obj.address_book_ids.is_empty();
             if destroy {
-                req.add_call(&ContactCardSet::new(
-                    Set::new(/* TODO */ None)
-                        .account_id(account_id.clone())
-                        .destroy(Some(vec![Argument::value(card_id.clone())])),
-                ))
+                req.add_call(
+                    &ContactCardSet::new(
+                        Set::<ContactCardObject>::new(None)
+                            .account_id(account_id.clone())
+                            .destroy(Some(vec![Argument::Value(card_id.clone())])),
+                    ),
+                )
                 .await;
             } else {
                 let mut updated_properties = serde_json::json!(obj.clone());
@@ -551,13 +567,15 @@ impl ContactBackend for JmapContacts {
                     map.remove("uid");
                     map.remove("id");
                 }
-                req.add_call(&ContactCardSet::new(
-                    Set::new(/* TODO */ None)
-                        .account_id(account_id.clone())
-                        .update(Some(
-                            indexmap::indexmap! { Argument::value(card_id.clone()) => updated_properties },
-                        )),
-                ))
+                req.add_call(
+                    &ContactCardSet::new(
+                        Set::<ContactCardObject>::new(None)
+                            .account_id(account_id.clone())
+                            .update(Some(
+                                indexmap::indexmap! { Argument::Value(card_id.clone()) => updated_properties },
+                            )),
+                    ),
+                )
                 .await;
             }
             let res_text = conn
@@ -565,7 +583,6 @@ impl ContactBackend for JmapContacts {
                 .await?
                 .text()
                 .await?;
-
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
                     _ = conn.store.online_status.set(None, Err(err.clone())).await;
@@ -573,7 +590,8 @@ impl ContactBackend for JmapContacts {
                 }
                 Ok(s) => s,
             };
-            let set_resp = SetResponse::<ContactCardObject>::try_from(v.take_first()?)?;
+            let set_resp =
+                SetResponse::<ContactCardObject>::try_from(v.take_first()?)?;
             let SetResponse {
                 not_updated,
                 not_destroyed,
@@ -596,6 +614,14 @@ impl ContactBackend for JmapContacts {
             }
             Ok(())
         }))
+    }
+
+    fn search(
+        &self,
+        _term: &str,
+        _address_book: Option<&AddressBookName>,
+    ) -> ResultFuture<Vec<Card>> {
+        Err(Error::new("").set_kind(ErrorKind::NotImplemented))
     }
 }
 
@@ -787,7 +813,8 @@ impl FilterTrait<ContactCardObject> for ContactCardFilterCondition {}
 #[serde(rename_all = "camelCase")]
 pub struct ContactCardQuery {
     #[serde(flatten)]
-    pub query_call: Query<Filter<ContactCardFilterCondition, ContactCardObject>, ContactCardObject>,
+    pub query_call:
+        Query<Filter<ContactCardFilterCondition, ContactCardObject>, ContactCardObject>,
 }
 
 impl Method<ContactCardObject> for ContactCardQuery {
@@ -796,7 +823,10 @@ impl Method<ContactCardObject> for ContactCardQuery {
 
 impl ContactCardQuery {
     pub fn new(
-        query_call: Query<Filter<ContactCardFilterCondition, ContactCardObject>, ContactCardObject>,
+        query_call: Query<
+            Filter<ContactCardFilterCondition, ContactCardObject>,
+            ContactCardObject,
+        >,
     ) -> Self {
         Self { query_call }
     }
@@ -809,4 +839,17 @@ pub struct AddressBookRights {
     pub may_write: bool,
     pub may_share: bool,
     pub may_delete: bool,
+}
+
+/// Look up the per-account Contacts capability object from a session.
+pub fn extract_contacts_capabilities(
+    account_capabilities: &CapabilitiesObject,
+) -> Result<ContactsCapabilitiesObject> {
+    serde_json::from_value(json!(account_capabilities)).map_err(|err| {
+        Error::new(format!(
+            "Could not deserialize contacts Capabilities object: {account_capabilities:?}"
+        ))
+        .set_kind(ErrorKind::Bug)
+        .set_source(Some(std::sync::Arc::new(err)))
+    })
 }

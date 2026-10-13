@@ -54,6 +54,16 @@ pub enum CardId {
     Hash(u64),
 }
 
+impl CardId {
+    /// Return the inner `Uuid` if this id is a UUID-backed JMAP contact card.
+    pub const fn as_uuid(&self) -> Option<Uuid> {
+        let Self::Uuid(u) = self else {
+            return None;
+        };
+        Some(*u)
+    }
+}
+
 impl std::fmt::Display for CardId {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
