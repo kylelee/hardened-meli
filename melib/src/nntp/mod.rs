@@ -237,6 +237,7 @@ impl MailBackend for NntpType {
             is_remote: true,
             extensions: Some(extensions),
             supports_submission,
+            supports_contacts: false,
             extra_submission_headers: &[HeaderName::NEWSGROUPS],
             metadata,
             ..MailBackendCapabilities::default()

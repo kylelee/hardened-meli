@@ -514,6 +514,8 @@ impl MailBackend for ImapType {
             extensions: Some(extensions),
             supports_tags: true,
             supports_submission: false,
+            supports_contacts: false,
+            extra_submission_headers: &[],
             metadata,
             ..MailBackendCapabilities::default()
         }
