@@ -32,7 +32,6 @@ use serde::{
 use crate::conf::{default_values::*, DotAddressable};
 
 const GPGME_KEY: &str = "gpgme";
-const SEQUOIA_KEY: &str = "sequoia";
 
 /// Settings for digital signing and encryption
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -153,9 +152,6 @@ impl DotAddressable for PGPBackendChoice {
             (Self::GpgME, _) => Err(Error::new(format!(
                 "{parent_field}.{field}: gpgme backend has no sub-fields"
             ))),
-            (Self::Sequoia, _) => Err(Error::new(format!(
-                "{parent_field}.{field}: sequoia backend has no sub-fields"
-            ))),
             (Self::CLI(cli), "display_name") => cli.display_name.lookup(field, tail),
             (Self::CLI(cli), "scan_command") => cli.scan_command.lookup(field, tail),
             (Self::CLI(cli), "auto_key_locate") => cli.auto_key_locate.lookup(field, tail),
@@ -205,10 +201,6 @@ pub enum PGPBackendChoice {
     #[cfg_attr(not(feature = "gpgme"), allow(dead_code))]
     /// The default GPGME backend (libgpgme).
     GpgME,
-    #[cfg_attr(not(feature = "sequoia"), allow(dead_code))]
-    /// The Sequoia backend; requires the opt-in `sequoia` compile-time
-    /// feature.
-    Sequoia,
     /// A user-defined command-line script backend.
     CLI(PGPBackendCLI),
 }
@@ -243,7 +235,7 @@ impl From<PGPBackendCLI> for PGPBackendChoice {
 ///
 /// See the `contrib/pgp-cli-backends/gpg/*.py` scripts for a ready-to-use
 /// `GnuPG` reference implementation.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PGPBackendCLI {
     pub display_name: String,
@@ -297,11 +289,6 @@ impl Serialize for PGPBackendChoice {
                 s.serialize_field(GPGME_KEY, &true)?;
                 s.end()
             }
-            Self::Sequoia => {
-                let mut s = serializer.serialize_struct("PGPBackendChoice", 1)?;
-                s.serialize_field(SEQUOIA_KEY, &true)?;
-                s.end()
-            }
             Self::CLI(cli) => cli.serialize(serializer),
         }
     }
@@ -318,7 +305,7 @@ impl<'de> Deserialize<'de> for PGPBackendChoice {
             type Value = PGPBackendChoice;
 
             fn expecting(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                fmt.write_str(r#"either string "gpgme", "sequoia", or a CLI backend table"#)
+                fmt.write_str(r#"either string "gpgme" or a CLI backend table"#)
             }
 
             fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
@@ -338,18 +325,9 @@ impl<'de> Deserialize<'de> for PGPBackendChoice {
                          time; configure a CLI backend instead",
                     ));
                 }
-                if value.eq_ignore_ascii_case(SEQUOIA_KEY) {
-                    #[cfg(feature = "sequoia")]
-                    return Ok(PGPBackendChoice::Sequoia);
-                    #[cfg(not(feature = "sequoia"))]
-                    return Err(de::Error::custom(
-                        "value `sequoia` requires the `sequoia` feature to be enabled at compile \
-                         time; configure a CLI backend instead",
-                    ));
-                }
                 Err(de::Error::invalid_value(
                     de::Unexpected::Str(&value),
-                    &"`gpgme` or `sequoia`",
+                    &"`gpgme`",
                 ))
             }
 

@@ -19,8 +19,6 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::sync::Arc;
-
 use imap_codec::imap_types::{
     command::error::{AppendError, CopyError, ListError},
     error::ValidationError,
@@ -39,8 +37,7 @@ impl From<ValidationError> for Error {
             source: None,
             related_path: None,
             kind: ErrorKind::Bug,
-        }
-        .set_source(Some(Arc::new(error)))
+        }.set_source(Some(Box::new(error)))
     }
 }
 
@@ -57,8 +54,7 @@ where
             source: None,
             related_path: None,
             kind: ErrorKind::Bug,
-        }
-        .set_source(Some(Arc::new(error)))
+        }.set_source(Some(Box::new(error)))
     }
 }
 
@@ -75,8 +71,7 @@ where
             source: None,
             related_path: None,
             kind: ErrorKind::Bug,
-        }
-        .set_source(Some(Arc::new(error)))
+        }.set_source(Some(Box::new(error)))
     }
 }
 
@@ -93,8 +88,7 @@ where
             inner: None,
             related_path: None,
             kind: ErrorKind::Bug,
-        }
-        .set_source(Some(Arc::new(error)))
+        }.set_source(Some(Box::new(error)))
     }
 }
 
@@ -111,7 +105,6 @@ where
             source: None,
             related_path: None,
             kind: ErrorKind::Bug,
-        }
-        .set_source(Some(Arc::new(error)))
+        }.set_source(Some(Box::new(error)))
     }
 }

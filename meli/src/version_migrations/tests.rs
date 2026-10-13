@@ -129,7 +129,7 @@ fn test_calculate_migrations_unrecognized_version() {
     );
     // A valid version newer than every known one has no migrations left to
     // perform.
-    assert_eq!(ids(Some("0.13.0")), Vec::<&str>::new());
+    assert_eq!(ids(Some("0.10.5")), Vec::<&str>::new());
 }
 
 #[test]
@@ -314,17 +314,13 @@ fn test_version_migrations_unrecognized_version_performs_migrations() {
         // migration also applies because the test config contains
         // `server_password_command`, but `is_applicable` returns false when
         // stdin is empty / no work was attempted — actually it returns true,
-        // so we provide decline inputs for the applicable migrations.) The
-        // v0.12.0 ContactBackendRefactor migration is listed as well because
-        // `calculate_migrations` returns every migration in the version range;
-        // it is not applicable here since the config has no legacy
-        // `notmuch_address_book_query`/`mutt_alias_file`/`vcard_folder` keys.
+        // so we provide decline inputs for both migrations.)
         let addressbook = tempdir.path().join("meli").join("imap").join("addressbook");
         std::fs::create_dir_all(addressbook.parent().unwrap()).unwrap();
         std::fs::write(&addressbook, "addressbook contents\n").unwrap();
 
         let mut stdout = vec![];
-        // Decline performing the migrations, then accept updating the
+        // Decline performing both migrations, then accept updating the
         // `.version` file anyway.
         let mut stdin = &b"n\ny\n"[..];
         let mut stdin_buf_reader = std::io::BufReader::new(&mut stdin);
@@ -333,17 +329,15 @@ fn test_version_migrations_unrecognized_version_performs_migrations() {
             "warning: version file {vf} contains an unrecognized value {prev:?}; treating it as \
              predating {latest} and checking for applicable migrations\nYou might need to migrate \
              your configuration data for the new version to work.\nYou can skip any changes you \
-             don't want to happen and you can quit at any time.\n3 migrations are about to be \
+             don't want to happen and you can quit at any time.\n2 migrations are about to be \
              performed:\nv0.8.8/AddressbookRename: {desc}\nv0.10.0/ServerPasswordCommand: \
-             Transform `server_password_command` to new syntax: `server_password = {{ command = \"...\" }}`\nv0.12.0/ContactBackendRefactor: {desc2}\nPerform 3 migrations? [Y/n] Update \
+             Transform `server_password_command` to new syntax: `server_password = {{ command = \"...\" }}`\nPerform 2 migrations? [Y/n] Update \
              .version file despite not attempting migrations? [y/N] ",
             vf = version_file.display(),
             prev = "meli-git",
             latest = LATEST.as_str(),
             desc = "The storage file for contacts, stored in the application's data folder, was \
-                    renamed from `addressbook` to `contacts` to better reflect its purpose.",
-            desc2 = "`notmuch_address_book_query`, `mutt_alias_file`, `vcard_folder` are moved \
-                     into a single `contacts` configuration value"
+                    renamed from `addressbook` to `contacts` to better reflect its purpose."
         );
         assert_eq!(String::from_utf8_lossy(&stdout).as_ref(), &expected_output);
         assert_eq!(stdin_buf_reader.buffer(), b"");

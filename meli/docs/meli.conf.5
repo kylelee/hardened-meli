@@ -292,6 +292,24 @@ and
 .Qq Li sqlite3 Ns
 \&.
 .Pq Qq sqlite3
+.It Ic vcard_folder Ar String
+.Pq Em optional
+Folder that contains
+.Sy .vcf
+files.
+They are parsed and imported read-only.
+.It Ic mutt_alias_file Ar String
+.Pq Em optional
+Path of
+.Xr mutt 1
+compatible alias file in the option
+They are parsed and imported read-only.
+.It Ic notmuch_address_book_query Ar String
+.Pq Em optional
+Query passed to
+.Qq Li notmuch address
+to import contacts into meli. Contacts are parsed and imported read-only.
+.Pp
 .It Ic contacts Ar Map[String, ContactBackendConf]
 .Pq Em optional
 A map of named contact backends for this account.
@@ -352,7 +370,10 @@ contacts = { "vcards" = { type = "VCard", value = "~/.contacts/" } }
 .It Ic CardDAV
 and
 .Li value
-is a map including the CardDAV server configuration.
+is a map including the CardDAV server configuration
+(only available when meli is built with the
+.Qq Li webdav
+cargo feature).
 .Bl -tag -width 36n
 .It Ic url Ar String
 Server url.
@@ -376,19 +397,14 @@ contacts = { "my_carddav" =
 .Ed
 .El
 You can include as many contact backends as you wish.
-.sp
-The standalone
-.Ic notmuch_address_book_query Ns ,
-.Ic mutt_alias_file Ns ,
+The backends configured here are loaded in addition to the legacy
+.Ic vcard_folder ,
+.Ic mutt_alias_file
 and
-.Ic vcard_folder
-options of older versions were consolidated into the
+.Ic notmuch_address_book_query
+options described above; when no
 .Ic contacts
-field.
-Existing configuration files can be migrated with:
-.Bd -literal
-meli tools migration apply ContactBackendRefactor
-.Ed
+map is configured, only those legacy sources load, exactly as before.
 .It Ic mailboxes Ar mailbox
 .Pq Em optional
 Configuration for each mailbox.
@@ -461,13 +477,12 @@ If you wish to build a mailbox hierarchy, define the name of a parent mailbox
 you have used in your configuration.
 .Pq Em optional
 .It Ic save_to Ar SaveTo
-If you wish to be able to save e-mails to your filesystem by copying to a
-mailbox or when sending a copy of sent e-mails to your Sent folder, you can
-specify a path that will be used to store a Maildir file copy and optionally
-tags to add.
+If you wish to be able to save e-mails to your filesystem by copying to a mailbox or when sending a copy of sent e-mails to your Sent folder, you can specify a path that will be used to store a Maildir file copy and optionally tags to add.
 The path must point to a valid Maildir directory, and not to one of its
-.Li cur Ns ,
-.Li new Ns ,
+.Li cur Ns
+,
+.Li new Ns
+,
 .Li tmp
 subdirectories.
 The
@@ -2474,26 +2489,6 @@ repository under the
 directory you can find python scripts that work with the
 .Xr gpg 1
 binary.
-.It
-sequoia backend
-.Po
-requires that
-.Xr meli 1
-has been compiled with the opt-in
-.Cm sequoia
-feature,
-check output of
-.Cm compiled-with
-CLI subcommand
-.Pc Ns
-:
-.Bd -literal
-backend = "sequoia"
-.Ed
-Note: the Sequoia backend cannot hide recipient key IDs; requesting
-hidden-recipient encryption for a draft with
-.Sy Bcc
-recipients fails instead of leaking them.
 .El
 .El
 .\"

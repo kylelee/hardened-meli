@@ -106,6 +106,33 @@ mod cve_2005_2512;
 #[cfg(test)]
 pub(crate) static GNUPGHOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The calling thread's accumulated CPU time, measured with
+/// `CLOCK_THREAD_CPUTIME_ID`.
+///
+/// The perf-budget regressions (`assert_bounded` drives) lock out
+/// algorithmic regressions — quadratic rescans, unbounded retry loops —
+/// which burn *CPU*, not wall-clock. A wall-clock budget flakes when the
+/// full test suite saturates every core (a sub-second drive measured
+/// 7.5–8.7 s under `cargo test --workspace` parallelism, against a 5 s
+/// budget); thread CPU time measures only the drive's own compute, so the
+/// budget holds under any suite load, in both the default thread-per-test
+/// harness and cargo-nextest's process-per-test runs.
+#[cfg(all(test, unix))]
+pub(crate) fn thread_cpu_time() -> std::time::Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `clock_gettime` only reads the clock id and writes through
+    // the valid `&mut timespec` pointer.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    assert_eq!(
+        rc, 0,
+        "clock_gettime(CLOCK_THREAD_CPUTIME_ID) cannot fail on a live thread"
+    );
+    std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
 /// CVE-2006-1045 (Mozilla Thunderbird 1.5) tracking-pixel regression
 /// (issue #15): the "block remote images in HTML mail" preference was
 /// bypassed and externally linked resources loaded anyway. This corpus

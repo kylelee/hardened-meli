@@ -52,13 +52,15 @@ pub trait Method<OBJ: Object>: Serialize + Send + Sync {
     const NAME: &'static str;
 }
 
-const USING: &[&str] = &[
+static USING: &[&str] = &[
     JmapCoreCapability::uri(),
     JmapMailCapability::uri(),
     JmapSubmissionCapability::uri(),
 ];
 
-pub const USING_CONTACTS: &[&str] = &[JmapCoreCapability::uri(), JmapContactsCapability::uri()];
+/// `using` clause for the JMAP Contacts method set.
+pub const USING_CONTACTS: &[&str] =
+    &[JmapCoreCapability::uri(), JmapContactsCapability::uri()];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +96,9 @@ impl Request {
         }
     }
 
+    /// Build a request that advertises a different `using` clause than the
+    /// default mail/submission set. Used for the JMAP Contacts method set,
+    /// which lives in a separate `using` from mail.
     pub fn new_with_using(
         request_no: Arc<FutureMutex<usize>>,
         using: &'static [&'static str],

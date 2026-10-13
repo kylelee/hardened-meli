@@ -27,7 +27,7 @@ use crate::{
         AddressBook, AddressBookName, Card,
     },
     error::{Error, ErrorKind, Result},
-    text::Truncate,
+    text::Truncate as _,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -100,7 +100,7 @@ impl ContactBackend for NotmuchContacts {
                                             "Unable to parse notmuch contact result into cards: {}",
                                             notmuch_address_out.trim_at_boundary(100),
                                         ))
-                                        .set_source(Some(crate::src_err_arc_wrap!(err))));
+                                        .set_source(Some(Box::new(err))));
                                     }
                                 }
                             }
@@ -108,7 +108,7 @@ impl ContactBackend for NotmuchContacts {
                                 return Err(Error::new(format!(
                                     "Unable to read from notmuch address query: {query}",
                                 ))
-                                .set_source(Some(crate::src_err_arc_wrap!(err))));
+                                .set_source(Some(Box::new(err))));
                             }
                         }
                     } else {
@@ -124,16 +124,25 @@ impl ContactBackend for NotmuchContacts {
                 Err(err) => {
                     return Err(Error::new("Unable to run notmuch address command")
                         .set_kind(ErrorKind::External)
-                        .set_source(Some(crate::src_err_arc_wrap!(err))));
+                        .set_source(Some(Box::new(err))));
                 }
             };
+            let cards = cards.into_iter().map(|c| (c.id, c)).collect();
 
-            let mut book = AddressBook::new(name, true);
-            for c in cards {
-                book.add_card(c);
-            }
-            Ok(book)
+            Ok(AddressBook {
+                name,
+                cards,
+                read_only: true,
+            })
         }))
+    }
+
+    fn search(
+        &self,
+        _term: &str,
+        _address_book: Option<&AddressBookName>,
+    ) -> ResultFuture<Vec<Card>> {
+        Err(Error::new("").set_kind(ErrorKind::NotSupported))
     }
 
     fn add(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<Card> {
@@ -145,14 +154,6 @@ impl ContactBackend for NotmuchContacts {
     }
 
     fn delete(&mut self, _: &AddressBookName, _: Card) -> ResultFuture<()> {
-        Err(Error::new("").set_kind(ErrorKind::NotSupported))
-    }
-
-    fn search(
-        &self,
-        _term: &str,
-        _address_book: Option<&AddressBookName>,
-    ) -> ResultFuture<Vec<Card>> {
         Err(Error::new("").set_kind(ErrorKind::NotSupported))
     }
 }

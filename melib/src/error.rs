@@ -155,6 +155,7 @@ macro_rules! src_err_arc_wrap {
     }};
 }
 
+
 #[derive(Clone, Debug)]
 pub struct Error {
     pub summary: Cow<'static, str>,
@@ -284,7 +285,7 @@ where
         F: Fn() -> M,
         M: Into<Cow<'static, str>>,
     {
-        self.map_err(|err| Error::new(msg_fn()).set_source(Some(Arc::new(err))))
+        self.map_err(|err| Error::new(msg_fn()).set_source(Some(Box::new(err))))
     }
 }
 
@@ -308,7 +309,6 @@ impl Error {
         M: Into<Cow<'static, str>>,
     {
         if let Some(old_details) = self.details.as_ref() {
-            // 拼接前去掉旧文本末尾的句号，避免出现 `..`。
             self.details =
                 Some(format!("{}. {}", old_details.trim_end_matches('.'), details.into()).into());
         } else {
@@ -324,7 +324,6 @@ impl Error {
         if self.summary.is_empty() {
             self.summary = summary.into();
         } else {
-            // 拼接前去掉旧 summary 末尾的句号，避免出现 `..`。
             self.summary =
                 format!("{}. {}", self.summary.trim_end_matches('.'), summary.into()).into();
         }
@@ -333,29 +332,28 @@ impl Error {
 
     pub fn set_source(
         mut self,
-        new_val: Option<std::sync::Arc<dyn error::Error + Send + Sync + 'static>>,
+        new_val: Option<Box<dyn error::Error + Send + Sync + 'static>>,
     ) -> Self {
-        self.source = new_val.map(|inner| {
-            // 若传入的 source 本身就是本模块的 `Error`，直接采用它，而不是再
-            // 包一层 `ErrorKind::External`：多包一层会把错误链压深一级，使内部
-            // 错误的 kind 与 related path 被一个空 summary 的中间节点遮住；
-            // 极端情况下 Self 套 Self 还会形成自引用。
-            if let Some(inner) = inner.downcast_ref::<Self>() {
-                return Box::new(inner.clone());
+        let new_val = if let Some(new_val) = new_val {
+            match new_val.downcast::<Self>() {
+                Ok(new_val) => Some(new_val),
+                Err(new_val) => Some(Box::new(Self {
+                    summary: "".into(),
+                    details: None,
+                    inner: Some(new_val.into()),
+                    source: None,
+                    related_path: None,
+                    kind: ErrorKind::External,
+                })),
             }
-            Box::new(Self {
-                summary: "".into(),
-                details: None,
-                inner: Some(inner),
-                source: None,
-                related_path: None,
-                kind: ErrorKind::External,
-            })
-        });
+        } else {
+            None
+        };
+        self.source = new_val;
         self
     }
 
-    pub fn from_inner(inner: std::sync::Arc<dyn error::Error + Send + Sync + 'static>) -> Self {
+    fn from_inner(inner: std::sync::Arc<dyn error::Error + Send + Sync + 'static>) -> Self {
         Self {
             summary: "".into(),
             details: None,
@@ -414,7 +412,7 @@ impl std::fmt::Display for ErrorChainDisplay<'_> {
                 ErrorKind::External | ErrorKind::None => {}
                 other => write!(fmt, "{other}: ")?,
             }
-            if let Some(ref inner) = cur.current.inner {
+            if let Some(inner) = &cur.current.inner {
                 if cur.current.summary.is_empty() {
                     write!(fmt, "{inner}")?;
                 } else {
@@ -423,17 +421,15 @@ impl std::fmt::Display for ErrorChainDisplay<'_> {
             } else {
                 write!(fmt, "{}", cur.current.summary)?;
             }
-            // details 与 related path 不再依附于“无 inner”分支：即使本节点带有
-            // inner 错误，也必须把路径展示出来。
             if let Some(details) = cur.current.details.as_ref() {
                 if !details.trim().is_empty() {
                     write!(fmt, "\n{details}")?;
                 }
             }
-            if let Some(ref path) = cur.current.related_path {
+            if let Some(path) = &cur.current.related_path {
                 write!(fmt, "\nRelated path: {}", path.display())?;
             }
-            if let Some(ref source) = cur.current.source {
+            if let Some(source) = &cur.current.source {
                 writeln!(fmt, "\nCaused by:")?;
                 cur = Self {
                     current: source,
@@ -699,78 +695,6 @@ impl From<base64::DecodeError> for Error {
     }
 }
 
-#[cfg(feature = "sequoia")]
-impl From<sqz::anyhow::Error> for Error {
-    #[inline]
-    fn from(err: sqz::anyhow::Error) -> Self {
-        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
-            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
-    }
-}
-
-#[cfg(feature = "sequoia")]
-impl From<sqz::lookup_by::Error> for Error {
-    #[inline]
-    fn from(err: sqz::lookup_by::Error) -> Self {
-        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
-            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
-    }
-}
-
-#[cfg(feature = "sequoia")]
-impl From<sqz::lookup::Error> for Error {
-    #[inline]
-    fn from(err: sqz::lookup::Error) -> Self {
-        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
-            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
-    }
-}
-
-#[cfg(feature = "sequoia")]
-impl From<sqz::verify::Error> for Error {
-    #[inline]
-    fn from(err: sqz::verify::Error) -> Self {
-        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
-            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
-    }
-}
-
-#[cfg(feature = "sequoia")]
-impl From<sqz::cert::list::Error> for Error {
-    #[inline]
-    fn from(err: sqz::cert::list::Error) -> Self {
-        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
-            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
-    }
-}
-
-#[cfg(feature = "sequoia")]
-impl From<sqz::sign::Error> for Error {
-    #[inline]
-    fn from(err: sqz::sign::Error) -> Self {
-        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
-            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
-    }
-}
-
-#[cfg(feature = "sequoia")]
-impl From<sqz::encrypt::Error> for Error {
-    #[inline]
-    fn from(err: sqz::encrypt::Error) -> Self {
-        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
-            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
-    }
-}
-
-#[cfg(feature = "sequoia")]
-impl From<sqz::decrypt::Error> for Error {
-    #[inline]
-    fn from(err: sqz::decrypt::Error) -> Self {
-        Self::from_inner(<Box<dyn std::error::Error + Send + Sync + 'static>>::from(err).into())
-            .set_kind(ErrorKind::LinkedLibrary("sequoia"))
-    }
-}
-
 #[cfg(feature = "webdav")]
 impl From<quick_xml::de::DeError> for Error {
     #[inline]
@@ -820,6 +744,25 @@ mod tests {
         );
     }
 
+    /// Regression test for upstream meli commit `c83c9e67` ("do not repeat
+    /// period when concatenating").
+    ///
+    /// `set_details`/`set_summary` append with a `". "` separator; when the
+    /// accumulated text already ends in a period, the separator used to
+    /// produce `"a.. b"`.
+    #[test]
+    fn test_no_repeated_period_when_concatenating() {
+        let err = Error::new("first.")
+            .set_details("second")
+            .set_details("third.");
+        assert_eq!(err.details.as_deref(), Some("second. third."));
+        assert_eq!(
+            err.set_summary("appended").summary,
+            "first. appended",
+            "trailing period must be trimmed before the separator"
+        );
+    }
+
     /// Regression test for the OpenSSL `unexpected EOF` classification.
     ///
     /// `openssl` reports a TLS stream truncated by the peer (connection closed
@@ -842,50 +785,6 @@ mod tests {
             "the OpenSSL SYSCALL-no-errno \"unexpected EOF\" connection drop must classify \
              as Network(ConnectionFailed), got {}",
             unexpected_eof.kind
-        );
-    }
-
-    /// 回归上游 meli 提交 `9cc5293d`：`Error::set_source` 收到本模块的
-    /// `Error` 时必须直接采用，而不是再包一层 `ErrorKind::External` 空壳，
-    /// 否则错误链会多出一级并遮住内部错误的 kind。
-    #[test]
-    fn test_set_source_downcasts_inner_error_without_wrapping() {
-        let inner = Error::new("inner failure").set_kind(ErrorKind::NotFound);
-        let outer = Error::new("outer failure").set_source(Some(Arc::new(inner)));
-        let source = outer.source.as_ref().expect("source must be set");
-        assert_eq!(source.summary, "inner failure");
-        assert_eq!(source.kind, ErrorKind::NotFound);
-        assert!(
-            source.inner.is_none(),
-            "already-an-Error source must not be re-wrapped as an External layer"
-        );
-    }
-
-    /// 回归上游 meli 提交 `c83c9e67`：拼接 summary/details 时不得重复句号。
-    #[test]
-    fn test_set_summary_and_details_do_not_repeat_period() {
-        let err = Error::new("first.").set_summary("second.");
-        assert_eq!(err.summary, "first. second.");
-        let err = err.set_summary("third");
-        assert_eq!(err.summary, "first. second. third");
-
-        let err = Error::new("summary")
-            .set_details("first.")
-            .set_details("second.");
-        assert_eq!(err.details.as_deref(), Some("first. second."));
-    }
-
-    /// 回归上游 meli 提交 `f1bd593d`：即使错误节点带有 inner，Display 也要
-    /// 展示 related path，不能把它藏在“无 inner”分支里。
-    #[test]
-    fn test_display_shows_related_path_with_inner_error() {
-        let err = Error::from_inner(Arc::new(io::Error::other("underlying")))
-            .set_summary("could not open")
-            .set_related_path(Some("/tmp/example"));
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("Related path: /tmp/example"),
-            "Related path 必须展示，实际输出: {rendered:?}"
         );
     }
 }

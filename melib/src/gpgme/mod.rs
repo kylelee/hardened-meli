@@ -27,7 +27,6 @@ use std::{
     borrow::Cow,
     ffi::{CStr, CString},
     future::Future,
-    hash::{Hash, Hasher},
     io::Seek,
     ptr::NonNull,
     sync::Arc,
@@ -40,7 +39,7 @@ use smol::{
 };
 
 use crate::{
-    email::pgp::{LocateKey, SignaturesMetadata},
+    email::pgp::{DecryptionMetadata, LocateKey, Recipient, SignaturesMetadata},
     error::{Error, ErrorKind, Result, ResultIntoError},
 };
 
@@ -60,6 +59,8 @@ macro_rules! call {
     non_camel_case_types,
     non_upper_case_globals,
     non_snake_case,
+    // [ref:msrv] unnecessary_transmutes is introduced in 1.88.0
+    unknown_lints,
     unnecessary_transmutes,
     unpredictable_function_pointer_comparisons,
     clippy::useless_transmute,
@@ -118,11 +119,10 @@ impl Context {
             "libgpgme.so.11".into(),
         ];
         let lib = Arc::new(
-            // SAFETY: it's safe to load libgpgme.
+            // SAFETY: it is safe to load libgpgme.
             match unsafe { libloading::Library::new(names[0].clone()) } {
                 Ok(v) => v,
                 Err(err) => {
-                    // SAFETY: it's safe to load libgpgme.
                     if let Ok(v) = unsafe { libloading::Library::new(names[1].clone()) } {
                         v
                     } else {
@@ -550,19 +550,15 @@ impl Context {
         })
     }
 
-    /// Decrypt `cipher` and verify any embedded signatures in the same
-    /// operation (`gpgme_op_decrypt_verify_start`): the returned metadata is
-    /// the structured verification verdict, so a successful decrypt never
-    /// stands in for a successful signature check.
     pub fn decrypt(
         &mut self,
         mut cipher: Data,
-    ) -> Result<impl Future<Output = Result<(SignaturesMetadata, Vec<u8>)>> + Send> {
+    ) -> Result<impl Future<Output = Result<(DecryptionMetadata, Vec<u8>)>> + Send> {
         let mut plain: Data = Data::new(self.inner.lib.clone())?;
         unsafe {
             gpgme_error_try(
                 &self.inner.lib,
-                call!(&self.inner.lib, gpgme_op_decrypt_verify_start)(
+                call!(&self.inner.lib, gpgme_op_decrypt_start)(
                     self.inner.ptr.as_ptr(),
                     cipher.as_ptr(),
                     plain.as_ptr(),
@@ -574,18 +570,64 @@ impl Context {
         Ok(async move {
             let _c = cipher;
             ctx.io_state.wait_for_op().await?;
-            let Some(verify_result) = sign::VerifyResult::retrieve(&ctx.inner.lib, &ctx) else {
+            let decrypt_result =
+                unsafe { call!(&ctx.inner.lib, gpgme_op_decrypt_result)(ctx.inner.ptr.as_ptr()) };
+            if decrypt_result.is_null() {
                 return Err(Error::new(
-                    "Unspecified libgpgme error: gpgme_op_verify_result returned NULL.",
+                    "Unspecified libgpgme error: gpgme_op_decrypt_result returned NULL.",
                 )
-                .set_kind(ErrorKind::External));
-            };
-            let signatures = verify_result.signatures(false).collect::<Vec<_>>();
+                .set_kind(ErrorKind::LinkedLibrary("gpgme")));
+            }
+            let mut recipients = vec![];
+            let is_mime;
+            let file_name;
+            let session_key;
+            unsafe {
+                is_mime = (*decrypt_result).is_mime() > 0;
+                file_name = if !(*decrypt_result).file_name.is_null() {
+                    Some(
+                        CStr::from_ptr((*decrypt_result).file_name)
+                            .to_string_lossy()
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                session_key = if !(*decrypt_result).session_key.is_null() {
+                    Some(
+                        CStr::from_ptr((*decrypt_result).session_key)
+                            .to_string_lossy()
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                let mut recipient_iter = (*decrypt_result).recipients;
+                while !recipient_iter.is_null() {
+                    if !(*recipient_iter).keyid.is_null() {
+                        recipients.push(Recipient {
+                            keyid: CStr::from_ptr((*recipient_iter).keyid)
+                                .to_string_lossy()
+                                .to_string(),
+                            status: gpgme_error_try(&ctx.inner.lib, (*recipient_iter).status),
+                        });
+                    }
+                    recipient_iter = (*recipient_iter).next;
+                }
+            }
             /* Rewind cursor */
             plain
                 .seek(std::io::SeekFrom::Start(0))
                 .chain_err_summary(|| "libgpgme error: could not perform seek on plain text")?;
-            Ok((SignaturesMetadata { signatures }, plain.into_bytes()?))
+            Ok((
+                DecryptionMetadata {
+                    recipients,
+                    file_name,
+                    session_key,
+                    is_mime,
+                },
+                plain.into_bytes()?,
+            ))
         })
     }
 
@@ -606,7 +648,6 @@ impl Context {
     pub fn encrypt(
         &mut self,
         encrypt_keys: Vec<Key>,
-        sign_keys: Vec<Key>,
         mut plain: Data,
         hidden_recipients: bool,
     ) -> Result<impl Future<Output = Result<Vec<u8>>> + Send> {
@@ -614,6 +655,9 @@ impl Context {
             return Err(
                 Error::new("gpgme: Call to encrypt() with zero keys.").set_kind(ErrorKind::Bug)
             );
+        }
+        unsafe {
+            call!(&self.inner.lib, gpgme_signers_clear)(self.inner.ptr.as_ptr());
         }
 
         let mut flags = gpgme_encrypt_flags_t::GPGME_ENCRYPT_NO_ENCRYPT_TO
@@ -628,42 +672,17 @@ impl Context {
         raw_keys.extend(encrypt_keys.iter().map(|k| k.inner.ptr.as_ptr()));
         raw_keys.push(std::ptr::null_mut());
         debug_assert_eq!(raw_keys.len(), encrypt_keys.len() + 1);
-
         unsafe {
-            call!(&self.inner.lib, gpgme_signers_clear)(self.inner.ptr.as_ptr());
-        }
-
-        let op_start_result = if !sign_keys.is_empty() {
-            for k in sign_keys {
-                gpgme_error_try(&self.inner.lib, unsafe {
-                    call!(&self.inner.lib, gpgme_signers_add)(
-                        self.inner.ptr.as_ptr(),
-                        k.inner.ptr.as_ptr(),
-                    )
-                })?;
-            }
-            unsafe {
-                call!(&self.inner.lib, gpgme_op_encrypt_sign_start)(
-                    self.inner.ptr.as_ptr(),
-                    raw_keys.as_mut_slice().as_mut_ptr(),
-                    flags,
-                    plain.as_ptr(),
-                    cipher.as_ptr(),
-                )
-            }
-        } else {
-            unsafe {
+            if let Err(mut err) = gpgme_error_try(
+                &self.inner.lib,
                 call!(&self.inner.lib, gpgme_op_encrypt_start)(
                     self.inner.ptr.as_ptr(),
                     raw_keys.as_mut_slice().as_mut_ptr(),
                     flags,
                     plain.as_ptr(),
                     cipher.as_ptr(),
-                )
-            }
-        };
-        unsafe {
-            if let Err(mut err) = gpgme_error_try(&self.inner.lib, op_start_result) {
+                ),
+            ) {
                 let result =
                     call!(&self.inner.lib, gpgme_op_encrypt_result)(self.inner.ptr.as_ptr());
                 if let Some(ptr) = NonNull::new(result) {
@@ -901,12 +920,6 @@ fn gpgme_error_try(lib: &libloading::Library, error_code: gpgme_error_t) -> Resu
 use futures::future::BoxFuture;
 type ResultFuture<T> = crate::Result<BoxFuture<'static, crate::Result<T>>>;
 
-impl Hash for Context {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        "gpgme".hash(state)
-    }
-}
-
 impl crate::email::pgp::PGPBackend for Context {
     fn set_auto_key_locate(&mut self, val: LocateKey) -> Result<()> {
         self.set_auto_key_locate(val)?;
@@ -973,7 +986,6 @@ impl crate::email::pgp::PGPBackend for Context {
     fn encrypt(
         &mut self,
         encrypt_keys: Vec<crate::email::pgp::Key>,
-        sign_keys: Vec<crate::email::pgp::Key>,
         plain: &[u8],
         hidden_recipients: bool,
     ) -> ResultFuture<Vec<u8>> {
@@ -982,18 +994,14 @@ impl crate::email::pgp::PGPBackend for Context {
         Ok(Box::pin(async move {
             let mut gpg_encrypt_keys = vec![];
             for encrypt_key in encrypt_keys {
-                gpg_encrypt_keys.push(ctx.get_key(false, &encrypt_key.fingerprint)?);
+                gpg_encrypt_keys.push(ctx.get_key(true, &encrypt_key.fingerprint)?);
             }
-            let mut gpg_sign_keys = vec![];
-            for sign_key in sign_keys {
-                gpg_sign_keys.push(ctx.get_key(true, &sign_key.fingerprint)?);
-            }
-            ctx.encrypt(gpg_encrypt_keys, gpg_sign_keys, plain, hidden_recipients)?
+            ctx.encrypt(gpg_encrypt_keys, plain, hidden_recipients)?
                 .await
         }))
     }
 
-    fn decrypt(&mut self, cipher: &[u8]) -> ResultFuture<(SignaturesMetadata, Vec<u8>)> {
+    fn decrypt(&mut self, cipher: &[u8]) -> ResultFuture<(DecryptionMetadata, Vec<u8>)> {
         let cipher = self.new_data_mem(cipher)?;
         let fut = self.decrypt(cipher)?;
         Ok(Box::pin(fut))

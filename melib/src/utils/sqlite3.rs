@@ -24,7 +24,6 @@ use std::{
     borrow::Cow,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput};
@@ -123,8 +122,7 @@ impl DatabaseDescription {
                 if self.identifier.is_none() { "" } else { ":" },
                 self.name,
             ))
-            .set_kind(ErrorKind::Platform)
-            .set_source(Some(Arc::new(err)))
+            .set_kind(ErrorKind::Platform).set_source(Some(Box::new(err)))
         })
     }
 
@@ -197,8 +195,7 @@ impl DatabaseDescription {
                     return Err(Error::new(format!(
                         "{}: Could not open or create database",
                         db_path.display()
-                    ))
-                    .set_source(Some(Arc::new(err))))
+                    )).set_source(Some(Box::new(err))))
                 }
             }
         }
@@ -213,8 +210,7 @@ impl DatabaseDescription {
         tracing::info!("Resetting {} database in {}", self.name, db_path.display());
         std::fs::remove_file(&db_path).map_err(|err| {
             Error::new(format!("{}: could not remove file", db_path.display()))
-                .set_kind(ErrorKind::from(err.kind()))
-                .set_source(Some(Arc::new(err)))
+                .set_kind(ErrorKind::from(err.kind())).set_source(Some(Box::new(err)))
         })?;
         tracing::info!(
             "{} {} database reset successful",

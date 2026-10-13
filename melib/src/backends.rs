@@ -565,13 +565,27 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        flags: Option<(Flag, Vec<String>)>,
+        flags: Option<Flag>,
     ) -> ResultFuture<()>;
 
-    #[allow(clippy::type_complexity)]
+    /// Save a message like [`MailBackend::save`], additionally applying
+    /// `tags` when the backend supports storing them at save time.
+    ///
+    /// Backends that cannot store tags at save time ignore `tags` and
+    /// fall back to [`MailBackend::save`].
+    fn save_with_tags(
+        &mut self,
+        bytes: Vec<u8>,
+        mailbox_hash: MailboxHash,
+        flags: Option<Flag>,
+        _tags: Option<Vec<String>>,
+    ) -> ResultFuture<()> {
+        self.save(bytes, mailbox_hash, flags)
+    }
+
     fn save_batch(
         &mut self,
-        batch: Vec<(Vec<u8>, MailboxHash, Option<(Flag, Vec<String>)>)>,
+        batch: Vec<(Vec<u8>, MailboxHash, Option<Flag>)>,
     ) -> ResultStream<Result<()>> {
         let mut futures = batch
             .into_iter()
@@ -660,6 +674,15 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
             .set_kind(ErrorKind::NotSupported))
     }
 
+    /// Return a contact backend that talks to the same server as this mail
+    /// backend, or an error/None if the account type does not provide one.
+    fn contact_backend(
+        &mut self,
+    ) -> ResultFuture<Option<Box<dyn crate::contacts::backend::ContactBackend>>> {
+        Err(Error::new("Contacts are not supported in this backend.")
+            .set_kind(ErrorKind::NotSupported))
+    }
+
     fn submit_batch(
         &mut self,
         batch: Vec<(Vec<u8>, Option<MailboxHash>)>,
@@ -676,15 +699,6 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
             }
             Ok(())
         })))
-    }
-
-    fn contact_backend(
-        &mut self,
-    ) -> ResultFuture<Box<dyn crate::contacts::backend::ContactBackend>> {
-        Err(
-            Error::new("Contact support not implemented in this backend.")
-                .set_kind(ErrorKind::NotImplemented),
-        )
     }
 }
 

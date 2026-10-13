@@ -539,8 +539,7 @@ impl MaildirMailboxPathExt for Path {
         match path.try_exists() {
             Err(err) => {
                 return Err(Error::new("Invalid maildir mailbox")
-                    .set_details("Could not access filesystem.")
-                    .set_source(Some(std::sync::Arc::new(Box::new(err))))
+                    .set_details("Could not access filesystem.").set_source(Some(Box::new(Box::new(err))))
                     .set_related_path(Some(path)));
             }
             Ok(false) => {

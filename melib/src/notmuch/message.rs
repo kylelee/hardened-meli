@@ -37,8 +37,6 @@ pub struct Message<'m> {
 
 impl<'m> std::fmt::Debug for Message<'m> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // The `identify!` macro is not usable here: its `const fn` probe
-        // cannot mention the impl's generic lifetime parameter.
         fmt.debug_struct("Message")
             .field("freezes", &self.freezes)
             .field("env_hash", &self.env_hash())
@@ -229,7 +227,7 @@ impl<'m> Message<'m> {
                 (self.lib.message_add_tag())(self.message.as_ptr(), tag.as_ptr())
             )
         } {
-            return Err(Error::new("Could not set tag.").set_source(Some(Arc::new(err))));
+            return Err(Error::new("Could not set tag.").set_source(Some(Box::new(err))));
         }
         Ok(())
     }
@@ -242,7 +240,7 @@ impl<'m> Message<'m> {
                 (self.lib.message_remove_tag())(self.message.as_ptr(), tag.as_ptr())
             )
         } {
-            return Err(Error::new("Could not set tag.").set_source(Some(Arc::new(err))));
+            return Err(Error::new("Could not set tag.").set_source(Some(Box::new(err))));
         }
         Ok(())
     }
@@ -259,7 +257,7 @@ impl<'m> Message<'m> {
                 (self.lib.message_tags_to_maildir_flags())(self.message.as_ptr())
             )
         } {
-            return Err(Error::new("Could not set flags.").set_source(Some(Arc::new(err))));
+            return Err(Error::new("Could not set flags.").set_source(Some(Box::new(err))));
         }
         Ok(())
     }

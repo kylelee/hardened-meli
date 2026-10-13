@@ -77,7 +77,7 @@ macro_rules! get_conf_val {
                         $s.name.as_str(),
                     ))
                     .set_kind(ErrorKind::Configuration)
-                    .set_source(Some(Arc::new(
+                    .set_source(Some(Box::new(
                         Error::new(format!("Invalid value for field `{v}`: {e}\n{}", $var))
                             .set_kind(ErrorKind::ValueError),
                     )))
@@ -237,6 +237,7 @@ impl MailBackend for NntpType {
             is_remote: true,
             extensions: Some(extensions),
             supports_submission,
+            supports_contacts: false,
             extra_submission_headers: &[HeaderName::NEWSGROUPS],
             metadata,
             ..MailBackendCapabilities::default()
@@ -464,7 +465,7 @@ impl MailBackend for NntpType {
         &mut self,
         _bytes: Vec<u8>,
         _mailbox_hash: MailboxHash,
-        _flags: Option<(Flag, Vec<String>)>,
+        _flags: Option<Flag>,
     ) -> ResultFuture<()> {
         Err(Error::new("NNTP doesn't support saving.").set_kind(ErrorKind::NotSupported))
     }
@@ -924,7 +925,7 @@ impl NntpType {
                                 $s.name.as_str(),
                             ))
                             .set_kind(ErrorKind::Configuration)
-                            .set_source(Some(Arc::new(
+                            .set_source(Some(Box::new(
                                 Error::new(format!("Invalid value for field `{}`: {v}\n{e}", $var))
                                     .set_kind(ErrorKind::ValueError),
                             )))
@@ -1214,7 +1215,7 @@ mod tests {
                 "example.test".to_string() => MailboxConf::default(),
             },
             manual_refresh: false,
-            contacts: Default::default(),
+            contacts: None,
             extra,
         };
         let base = || {
@@ -1283,7 +1284,7 @@ mod tests {
                 "example.test".to_string() => MailboxConf::default(),
             },
             manual_refresh: false,
-            contacts: Default::default(),
+            contacts: None,
             extra,
         };
         let base = || {

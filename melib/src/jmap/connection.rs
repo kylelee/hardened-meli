@@ -27,6 +27,7 @@ use std::{
 };
 
 use futures::lock::{MappedMutexGuard as FutureMappedMutexGuard, Mutex as FutureMutex};
+use indexmap::IndexMap;
 use isahc::{
     config::{Configurable, RedirectPolicy},
     http, AsyncReadResponseExt, HttpClient,
@@ -57,6 +58,9 @@ pub struct JmapConnection {
     pub client: Arc<HttpClient>,
     pub server_conf: JmapServerConf,
     pub store: Arc<Store>,
+    /// Identities fetched with `Identity/get`; kept out of the `Session`
+    /// object because a session refresh replaces it wholesale.
+    pub identities: IndexMap<Id<Identity>, Identity>,
 }
 
 /// Maximum number of redirects followed manually per request before giving
@@ -122,6 +126,7 @@ impl JmapConnection {
             client: Arc::new(client),
             server_conf,
             store,
+            identities: IndexMap::default(),
         })
     }
 
@@ -171,7 +176,7 @@ impl JmapConnection {
                      supported)\n\nError connecting to server: {err}",
                     self.server_conf.server_url
                 ))
-                .set_source(Some(Arc::new(err)));
+                .set_source(Some(Box::new(err)));
                 _ = self.store.online_status.set(None, Err(err.clone())).await;
                 return Err(err);
             }
@@ -265,7 +270,7 @@ impl JmapConnection {
                      supported)\n\nReply from server: {err}",
                     self.server_conf.server_url
                 ))
-                .set_source(Some(Arc::new(err)));
+                .set_source(Some(Box::new(err)));
                 _ = self
                     .store
                     .online_status
@@ -285,7 +290,7 @@ impl JmapConnection {
                      supported)\n\nReply from server: {res_text}",
                     self.server_conf.server_url
                 ))
-                .set_source(Some(Arc::new(err)));
+                .set_source(Some(Box::new(err)));
                 _ = self
                     .store
                     .online_status
@@ -448,10 +453,14 @@ impl JmapConnection {
                 GetResponse::<Identity>::try_from(v.take_first()?)?;
             id_list = list;
         }
-        *self.store.identities.lock().await =
-            id_list.into_iter().map(|id| (id.id.clone(), id)).collect();
+        self.identities = id_list.into_iter().map(|id| (id.id.clone(), id)).collect();
 
         Ok(())
+    }
+
+    /// Return the first identity.
+    pub fn mail_identity_id(&self) -> Option<Id<Identity>> {
+        self.identities.keys().next().cloned()
     }
 
     #[inline]

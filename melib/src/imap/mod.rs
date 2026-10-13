@@ -247,6 +247,20 @@ pub struct UIDStore {
     pub account_name: Arc<str>,
     pub server_id: Arc<Mutex<Option<IDResponse>>>,
     pub keep_offline_cache: AtomicBool,
+    /// Whether the synchronizing-literal `SEARCH` workaround for this
+    /// account has already failed once.
+    ///
+    /// Some servers (observed: QQ Mail) complete a `UID SEARCH CHARSET
+    /// UTF-8 ... {n}` command without reading its literal octets, so the
+    /// client drops the literal exchange and resends the query as an 8-bit
+    /// quoted string. Other servers (observed: imap.exmail.qq.com hangs,
+    /// imap.163.com replies `BAD`) do not accept that non-standard quoted
+    /// retry either. Retrying it on every search would cost one full command
+    /// timeout per search with no progress, so after the first failure the
+    /// retry is disabled for the rest of the account's session and the
+    /// search returns a protocol error immediately, letting the caller fall
+    /// back to a local search. (issue #100)
+    pub quoted_search_retry_failed: AtomicBool,
     pub offline_cache: Arc<Mutex<Option<Box<dyn ImapCache>>>>,
     pub capabilities: Arc<Mutex<Capabilities>>,
     pub hash_index: Arc<Mutex<HashMap<EnvelopeHash, (UID, MailboxHash)>>>,
@@ -300,6 +314,7 @@ impl UIDStore {
             is_subscribed,
             server_id: Default::default(),
             keep_offline_cache: AtomicBool::new(keep_offline_cache),
+            quoted_search_retry_failed: AtomicBool::new(false),
             offline_cache: Arc::new(Mutex::new(None)),
             capabilities: Default::default(),
             uidvalidity: Default::default(),
@@ -760,7 +775,7 @@ impl MailBackend for ImapType {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        flags: Option<(Flag, Vec<String>)>,
+        flags: Option<Flag>,
     ) -> ResultFuture<()> {
         let connection = self.connection.clone();
         Ok(Box::pin(async move {
@@ -2119,7 +2134,7 @@ mod tests {
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
-            contacts: Default::default(),
+            contacts: None,
             extra,
         };
         let base = || {
@@ -2183,7 +2198,7 @@ mod tests {
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
-            contacts: Default::default(),
+            contacts: None,
             extra,
         };
         // `use_tls`/`use_starttls` are deliberately absent: their defaults
@@ -2345,7 +2360,7 @@ mod tests {
             subscribed_mailboxes: vec![],
             mailboxes: indexmap::indexmap! {},
             manual_refresh: false,
-            contacts: Default::default(),
+            contacts: None,
             extra,
         };
         let base = || {

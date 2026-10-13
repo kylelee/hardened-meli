@@ -136,8 +136,6 @@ pub mod mbox;
 pub mod nntp;
 #[cfg(feature = "notmuch")]
 pub mod notmuch;
-#[cfg(feature = "sequoia")]
-pub mod sequoia;
 #[cfg(feature = "smtp")]
 pub mod smtp;
 

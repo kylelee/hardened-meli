@@ -16,7 +16,7 @@
 // GNU General Public License for more details.
 //
 // You should have received a copy of the GNU General Public License
-// along with meli. If not, see <http://www.gnu.org/licenses/>.
+// along with meli.  If not, see <http://www.gnu.org/licenses/>.
 //
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 
@@ -58,28 +58,28 @@ use futures::lock::{
     MappedMutexGuard as FutureMappedMutexGuard, Mutex as FutureMutex,
     MutexGuard as FutureMutexGuard,
 };
-use http::{status::StatusCode, Request};
 use indexmap::IndexSet;
 use isahc::{
-    config::{Configurable, RedirectPolicy},
-    AsyncBody, AsyncReadResponseExt, HttpClient,
+    config::{Configurable as _, RedirectPolicy},
+    http::{self, header, status::StatusCode, Request},
+    AsyncBody, AsyncReadResponseExt as _, HttpClient,
 };
 use url::Url;
 
 use crate::{
     conf::Secret,
-    email::parser::BytesExt,
-    error::{Error, ErrorKind, NetworkErrorKind, Result, ResultIntoError},
+    email::parser::BytesExt as _,
+    error::{Error, ErrorKind, NetworkErrorKind, Result, ResultIntoError as _},
 };
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum WebDAVAuthentication {
     Basic,
     BearerToken,
     None,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebDAVServerConf {
     pub url: Url,
     pub username: Secret,
@@ -89,6 +89,103 @@ pub struct WebDAVServerConf {
     pub danger_accept_invalid_certs: bool,
     #[serde(default)]
     pub timeout: Option<Duration>,
+}
+
+/// Whether `url`'s host is a loopback host: the `localhost` domain (RFC 6761
+/// semantics — it never leaves the machine), or a loopback IPv4/IPv6 address.
+///
+/// Same policy as the JMAP `CVE-2024-50624` hardening in
+/// [`crate::jmap`]; duplicated here because the `jmap` module is
+/// feature-gated independently from `webdav`.
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Fork hardening (mirrors the JMAP `CVE-2024-50624` TLS-only policy):
+/// every WebDAV/CardDAV transport URL must use `https`.
+///
+/// The connection sends authentication material (HTTP Basic credentials or a
+/// Bearer token) with every request, so plaintext `http` is only tolerated
+/// for loopback hosts, where the traffic never leaves the machine (local
+/// development and test servers). A plaintext connection to a remote host
+/// would hand the credentials to any man-in-the-middle on the path.
+fn validate_transport_url(url: &Url, what: &str) -> Result<()> {
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(url) => Ok(()),
+        scheme => Err(Error::new(format!(
+            "Configuration error: {what} must use `https` (plaintext `http` is only allowed \
+             for loopback hosts such as 127.0.0.1 or localhost), got scheme `{scheme}` in \
+             `{url}`: over a plaintext connection a man-in-the-middle can steal the WebDAV \
+             authentication credentials (username/password or bearer token) sent with every \
+             request."
+        ))
+        .set_kind(ErrorKind::Configuration)),
+    }
+}
+
+/// Fork hardening: validate a server-issued redirect target before adopting
+/// it as the new endpoint URL.
+///
+/// Mirrors `JmapConnection::redirect_target`:
+///
+/// - credentials embedded in the redirect target itself are never honored;
+/// - cross-origin targets (different scheme/host/port) are refused, so the
+///   connection's authentication material cannot be leaked to another host
+///   (a `https` → `http` downgrade is also an origin change and is refused).
+fn redirect_target(
+    original_url: &Url,
+    request_url: &Url,
+    response: &http::Response<AsyncBody>,
+) -> Result<Option<Url>> {
+    if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+        return Ok(None);
+    }
+    let Some(location) = response.headers().get(header::LOCATION) else {
+        return Ok(None);
+    };
+    let location = String::from_utf8_lossy(location.as_bytes());
+    let mut target = match Url::parse(&location) {
+        Ok(url) => url,
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            request_url.join(&location).map_err(|err| {
+                redirect_error(request_url, &location, &err.to_string(), original_url)
+            })?
+        }
+        Err(err) => {
+            return Err(redirect_error(
+                request_url,
+                &location,
+                &err.to_string(),
+                original_url,
+            ))
+        }
+    };
+    // Never honor credentials embedded in the redirect target itself.
+    _ = target.set_username("");
+    _ = target.set_password(None);
+    if target.origin() != original_url.origin() {
+        return Err(Error::new(format!(
+            "WebDAV request to {request_url} was redirected to {target}, which is of a \
+             different origin (scheme/host/port) than {original_url}. Refusing to follow the \
+             redirect in order to protect authentication credentials.",
+        ))
+        .set_kind(ErrorKind::Network(NetworkErrorKind::ProtocolViolation)));
+    }
+    Ok(Some(target))
+}
+
+fn redirect_error(request_url: &Url, location: &str, err: &str, original_url: &Url) -> Error {
+    Error::new(format!(
+        "Could not resolve redirect location {location:?} of URL {request_url} when \
+         connecting to WebDAV server {original_url}: {err}"
+    ))
+    .set_kind(ErrorKind::Network(NetworkErrorKind::ProtocolViolation))
 }
 
 #[derive(Debug)]
@@ -171,7 +268,7 @@ impl OnlineStatus {
         &'_ self,
     ) -> Result<FutureMappedMutexGuard<'_, (Instant, Result<WebDAVSession>), WebDAVSession>> {
         let guard = self.0.lock().await;
-        if let Err(ref err) = guard.1 {
+        if let Err(err) = &guard.1 {
             return Err(err.clone());
         }
         Ok(FutureMutexGuard::map(guard, |status| {
@@ -185,20 +282,33 @@ impl OnlineStatus {
 
 impl WebDAVConnection {
     pub async fn new(server_conf: &WebDAVServerConf) -> Result<Self> {
+        // Fork hardening: reject plaintext non-loopback URLs before any
+        // credentials are configured on the client.
+        validate_transport_url(&server_conf.url, "`url`")?;
         let client = HttpClient::builder()
             .dns_cache(isahc::net::dns::DnsCache::Forever)
             .connection_cache_size(8)
             .connection_cache_ttl(Duration::from_secs(30 * 60))
-            // .default_header(http::header::CONTENT_TYPE, "application/json")
+            // Fork policy: only disable the certificate-chain verifier
+            // under the user-opted danger flag. The two other isahc TLS
+            // relaxation knobs are scoped to the JMAP client by the fork's
+            // cve/ audit suite (frozen), so the WebDAV client leaves hostname
+            // verification and revocation checks on unconditionally —
+            // strictly stronger than upstream, and a smaller blast radius
+            // for the danger flag.
             .tls_config(
                 isahc::tls::TlsConfig::builder()
                     .danger_accept_invalid_certs(server_conf.danger_accept_invalid_certs)
-                    .danger_accept_invalid_hosts(server_conf.danger_accept_invalid_certs)
-                    .danger_accept_revoked_certs(server_conf.danger_accept_invalid_certs)
                     .build(),
             )
             .tcp_nodelay()
             .tcp_keepalive(Duration::new(60 * 9, 0))
+            // Fork hardening (same policy as the fork's JMAP client):
+            // automatic redirect following must stay disabled because it
+            // re-sends credentials to cross-origin redirect targets; the
+            // only redirect followed manually (the `/.well-known/carddav`
+            // discovery recovery in [`WebDAVConnection::connect`]) validates
+            // the target origin first, see [`redirect_target`].
             .redirect_policy(RedirectPolicy::None);
         let client = if let Some(dur) = server_conf.timeout.filter(|dur| *dur != Duration::ZERO) {
             client
@@ -207,6 +317,8 @@ impl WebDAVConnection {
         } else {
             client
         };
+        // Resolve Secret -> plaintext only at the moment we need it, right
+        // before assembling the auth credentials; never log it.
         let username = server_conf
             .username
             .value_with_timeout(Duration::from_millis(100))
@@ -218,7 +330,7 @@ impl WebDAVConnection {
         let client = match server_conf.auth {
             WebDAVAuthentication::BearerToken => client
                 .authentication(isahc::auth::Authentication::none())
-                .default_header(http::header::AUTHORIZATION, format!("Bearer {password}")),
+                .default_header(header::AUTHORIZATION, format!("Bearer {password}")),
             WebDAVAuthentication::Basic => client
                 .authentication(isahc::auth::Authentication::basic())
                 .credentials(isahc::auth::Credentials::new(&username, &password)),
@@ -276,7 +388,7 @@ impl WebDAVConnection {
                      server: {}",
                     self.server_conf.url, err
                 ))
-                .set_source(Some(Arc::new(err)));
+                .set_source(Some(Box::new(err)));
                 _ = self.online_status.set(None, Err(err.clone())).await;
                 return Err(err);
             }
@@ -296,17 +408,19 @@ impl WebDAVConnection {
             let mut retry = false;
             if resp.status() == 404 && self.server_conf.url.path() == "/" {
                 // attempt recovery by trying "/.well-known/carddav"
-                self.server_conf.url.set_path("/.well-known/carddav");
+                let mut well_known = self.server_conf.url.clone();
+                well_known.set_path("/.well-known/carddav");
                 let request = Request::builder()
                     .method("PROPFIND")
-                    .uri(self.server_conf.url.as_str())
+                    .uri(well_known.as_str())
                     .body(())
                     .unwrap();
                 if let Ok(s) = self.client.send_async(request).await {
-                    if let Some(redirect) = s
-                        .headers()
-                        .get("location")
-                        .and_then(|r| r.to_str().ok()?.try_into().ok())
+                    // Fork hardening: only follow the redirect if the target
+                    // passes the origin/scheme validation, see
+                    // [`redirect_target`].
+                    if let Ok(Some(redirect)) =
+                        redirect_target(&self.server_conf.url.clone(), &well_known, &s)
                     {
                         self.server_conf.url = redirect;
                         let request = Request::builder()
@@ -323,11 +437,7 @@ impl WebDAVConnection {
             } else if resp.status() == 401 {
                 let mut supports_bearer = false;
                 let mut supports_basic = false;
-                for val in resp
-                    .headers()
-                    .get_all(http::header::WWW_AUTHENTICATE)
-                    .iter()
-                {
+                for val in resp.headers().get_all(header::WWW_AUTHENTICATE).iter() {
                     supports_bearer |= val.as_bytes().contains_subsequence(b"Bearer".as_slice());
                     supports_basic |= val.as_bytes().contains_subsequence(b"Basic".as_slice());
                 }
@@ -355,7 +465,7 @@ impl WebDAVConnection {
                     (auth_method, false, false) => {
                         let schemes = resp
                             .headers()
-                            .get_all(http::header::WWW_AUTHENTICATE)
+                            .get_all(header::WWW_AUTHENTICATE)
                             .iter()
                             .map(|val| String::from_utf8_lossy(val.as_bytes()))
                             .collect::<Vec<_>>();
@@ -427,7 +537,7 @@ impl WebDAVConnection {
                     "Could not connect to WebDAV server endpoint for {}\nReply from server: {}",
                     self.server_conf.url, err
                 ))
-                .set_source(Some(Arc::new(err)));
+                .set_source(Some(Box::new(err)));
                 _ = self
                     .online_status
                     .set(Some(req_instant), Err(err.clone()))
@@ -478,10 +588,7 @@ impl WebDAVConnection {
         let request = Request::builder()
             .method("PROPFIND")
             .uri(self.server_conf.url.as_str())
-            .header(
-                http::header::CONTENT_TYPE,
-                "application/xml; content-type=utf-8",
-            )
+            .header(header::CONTENT_TYPE, "application/xml; content-type=utf-8")
             .header("Depth", "0")
             .body(
                 r#"<d:propfind xmlns:d="DAV:">
@@ -588,13 +695,13 @@ impl WebDAVConnection {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Multistatus<Prop: std::fmt::Debug> {
     #[serde(rename = "response")]
     pub response: Vec<Response<Prop>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Response<Prop: std::fmt::Debug> {
     #[serde(rename = "href")]
     pub href: Box<str>,
@@ -602,7 +709,7 @@ pub struct Response<Prop: std::fmt::Debug> {
     pub propstat: Vec<Propstat<Prop>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Propstat<Prop: std::fmt::Debug> {
     #[serde(rename = "status")]
     pub status: Box<str>,
@@ -610,13 +717,13 @@ pub struct Propstat<Prop: std::fmt::Debug> {
     pub prop: Prop,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CurrentUserPrincipalProp {
     #[serde(rename = "current-user-principal")]
     pub current_user_principal: HrefValue,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HrefValue {
     #[serde(rename = "href")]
     pub href: Box<str>,
@@ -630,7 +737,7 @@ mod private {
 /// `http::status::StatusCode`.
 ///
 /// ```rust
-/// use http::status::StatusCode;
+/// use isahc::http::status::StatusCode;
 /// use melib::utils::webdav::FromStatusLine;
 ///
 /// assert_eq!(
@@ -659,9 +766,9 @@ pub trait FromStatusLine: private::Sealed + Sized {
     fn from_status_line(_: &str) -> Option<Self>;
 }
 
-impl private::Sealed for http::status::StatusCode {}
+impl private::Sealed for StatusCode {}
 
-impl FromStatusLine for http::status::StatusCode {
+impl FromStatusLine for StatusCode {
     fn from_status_line(mut val: &str) -> Option<Self> {
         // Example value: "HTTP/1.1 200 OK"
         if !val.is_ascii() {
@@ -676,5 +783,220 @@ impl FromStatusLine for http::status::StatusCode {
         // Ignore Reason-Phrase
         // _ = split_iter.next()?;
         Self::from_bytes(status_code_s.as_bytes()).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_status_line() {
+        assert_eq!(
+            StatusCode::from_status_line("HTTP/1.1 200 OK").unwrap(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            StatusCode::from_status_line("HTTP/1.1 404 Not Found").unwrap(),
+            StatusCode::NOT_FOUND
+        );
+        // Trailing CRLF is tolerated.
+        assert_eq!(
+            StatusCode::from_status_line("HTTP/1.1 207 Multi-Status\r\n").unwrap(),
+            StatusCode::MULTI_STATUS
+        );
+        // Non-ASCII or malformed lines are rejected.
+        assert!(StatusCode::from_status_line("HTTP/1.1").is_none());
+        assert!(StatusCode::from_status_line("garbage").is_none());
+        assert!(StatusCode::from_status_line("HTTP/1.1 δ.getDay").is_none());
+    }
+
+    /// Fork hardening regression tests: credentials must never be sent over
+    /// plaintext `http` to non-loopback hosts.
+    #[test]
+    fn test_transport_url_policy() {
+        for url in ["https://dav.example.com", "https://dav.example.com:8443/"] {
+            validate_transport_url(&Url::parse(url).unwrap(), "`url`").unwrap();
+        }
+        for url in [
+            "http://localhost:8081",
+            "http://127.0.0.1",
+            "http://[::1]:8080/",
+            "http://LOCALHOST/dav",
+        ] {
+            validate_transport_url(&Url::parse(url).unwrap(), "`url`").unwrap();
+        }
+        for url in [
+            "http://dav.example.com",
+            "http://dav.example.com:8080/",
+            "ftp://dav.example.com",
+        ] {
+            let err = validate_transport_url(&Url::parse(url).unwrap(), "`url`").unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Configuration, "for url {url}: {err}");
+        }
+    }
+
+    /// Fork hardening regression tests: server-issued redirects are only
+    /// followed when they stay same-origin and do not carry credentials.
+    fn redirect_response(status: u16, location: Option<&str>) -> http::Response<AsyncBody> {
+        let mut builder = http::Response::builder().status(status);
+        if let Some(location) = location {
+            builder = builder.header(header::LOCATION, location);
+        }
+        builder.body(AsyncBody::from(())).unwrap()
+    }
+
+    #[test]
+    fn test_redirect_target_same_origin() {
+        let original = Url::parse("https://dav.example.com/").unwrap();
+        let request = Url::parse("https://dav.example.com/.well-known/carddav").unwrap();
+        // Absolute and relative same-origin targets are followed.
+        assert_eq!(
+            redirect_target(
+                &original,
+                &request,
+                &redirect_response(301, Some("https://dav.example.com/dav/user/"))
+            )
+            .unwrap()
+            .unwrap(),
+            Url::parse("https://dav.example.com/dav/user/").unwrap()
+        );
+        assert_eq!(
+            redirect_target(
+                &original,
+                &request,
+                &redirect_response(302, Some("/dav/user/"))
+            )
+            .unwrap()
+            .unwrap(),
+            Url::parse("https://dav.example.com/dav/user/").unwrap()
+        );
+        // Credentials embedded in the redirect target are stripped.
+        assert_eq!(
+            redirect_target(
+                &original,
+                &request,
+                &redirect_response(301, Some("https://user:pass@dav.example.com/dav/user/"))
+            )
+            .unwrap()
+            .unwrap(),
+            Url::parse("https://dav.example.com/dav/user/").unwrap()
+        );
+        // Non-redirect statuses are ignored.
+        assert!(
+            redirect_target(&original, &request, &redirect_response(404, None))
+                .unwrap()
+                .is_none()
+        );
+        assert!(redirect_target(
+            &original,
+            &request,
+            &redirect_response(200, Some("/dav/user/"))
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn test_redirect_target_cross_origin_rejected() {
+        let original = Url::parse("https://dav.example.com/").unwrap();
+        let request = Url::parse("https://dav.example.com/.well-known/carddav").unwrap();
+        // Different host.
+        let err = redirect_target(
+            &original,
+            &request,
+            &redirect_response(301, Some("https://evil.example/dav/")),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+        ));
+        // https -> http downgrade on the same host is an origin change too.
+        let err = redirect_target(
+            &original,
+            &request,
+            &redirect_response(302, Some("http://dav.example.com/dav/")),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+        ));
+        // Different port.
+        redirect_target(
+            &original,
+            &request,
+            &redirect_response(301, Some("https://dav.example.com:8443/dav/")),
+        )
+        .unwrap_err();
+    }
+
+    /// `WebDAV` `PROPFIND` multistatus XML parsing, offline (no network).
+    #[test]
+    fn test_current_user_principal_propfind_deserialization() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/.well-known/carddav</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal>
+          <D:href>/dav/user@example.com/</D:href>
+        </D:current-user-principal>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+        let multistatus: Multistatus<CurrentUserPrincipalProp> =
+            quick_xml::de::from_str(xml).unwrap();
+        assert_eq!(multistatus.response.len(), 1);
+        let mut principals = vec![];
+        for response in multistatus.response {
+            for propstat in response.propstat {
+                if let (data, Some(StatusCode::OK)) = (
+                    propstat.prop.current_user_principal.href,
+                    StatusCode::from_status_line(&propstat.status),
+                ) {
+                    if !data.is_empty() {
+                        principals.push(data);
+                    }
+                }
+            }
+        }
+        assert_eq!(principals, vec![Box::from("/dav/user@example.com/")]);
+    }
+
+    /// `CardDAV` `addressbook-home-set` `PROPFIND` multistatus XML parsing,
+    /// offline (no network).
+    #[test]
+    fn test_addressbook_home_set_propfind_deserialization() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/dav/user@example.com/</D:href>
+    <D:propstat>
+      <D:prop>
+        <card:addressbook-home-set>
+          <D:href>/dav/user@example.com/addressbooks/</D:href>
+        </card:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+        let multistatus: Multistatus<crate::contacts::carddav::AddressBookHomeSetProp> =
+            quick_xml::de::from_str(xml).unwrap();
+        assert_eq!(multistatus.response.len(), 1);
+        let propstat = &multistatus.response[0].propstat[0];
+        assert_eq!(
+            propstat.prop.addressbook_home_set.href.as_ref(),
+            "/dav/user@example.com/addressbooks/"
+        );
+        assert_eq!(
+            StatusCode::from_status_line(&propstat.status),
+            Some(StatusCode::OK)
+        );
     }
 }

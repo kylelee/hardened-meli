@@ -152,14 +152,19 @@ mod tests {
         library_file_path: Option<PathBuf>,
         acc_name: &str,
         event_consumer: BackendEventConsumer,
+        with_root_mailbox: bool,
     ) -> Result<(PathBuf, AccountSettings, Box<NotmuchDb>)> {
         let root_mailbox = temp_dir.path().join("INBOX");
         let sent_mailbox = temp_dir.path().join("INBOX").join("Sent");
-        for mbox in [&root_mailbox, &sent_mailbox] {
-            std::fs::create_dir(mbox).expect("Could not create mailbox directory.");
-            for d in &["cur", "new", "tmp"] {
-                std::fs::create_dir(mbox.join(d))
-                    .expect("Could not create mailbox directory contents.");
+        {
+            std::fs::create_dir(&root_mailbox).expect("Could not create root mailbox directory.");
+            if with_root_mailbox {
+                for mbox in [&root_mailbox, &sent_mailbox] {
+                    for d in &["cur", "new", "tmp"] {
+                        std::fs::create_dir(mbox.join(d))
+                            .expect("Could not create mailbox directory contents.");
+                    }
+                }
             }
         }
         std::env::set_var("NOTMUCH_CONFIG", temp_dir.path().join("notmuch-config"));
@@ -179,32 +184,39 @@ other_email=test2@example.com;test3@example.com
         )
         .unwrap();
         notmuch_new(true);
-        let subscribed_mailboxes = vec!["INBOX".into(), "Sent".into()];
-        let mailboxes = indexmap::indexmap! {
-            "INBOX".into() => melib::conf::MailboxConf {
-                extra: indexmap::indexmap! {
-                    "query".into() => serde_json::Value::String("not tag:sent".to_string()),
+        let subscribed_mailboxes = if with_root_mailbox {
+            vec!["INBOX".into(), "Sent".into()]
+        } else {
+            vec![]
+        };
+        let mailboxes = if with_root_mailbox {
+            indexmap::indexmap! {
+                "INBOX".into() => melib::conf::MailboxConf {
+                    extra: indexmap::indexmap! {
+                        "query".into() => "not tag:sent".to_string().into(),
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-            "Sent".into() => melib::conf::MailboxConf {
-                extra: indexmap::indexmap! {
-                    "query".into() => serde_json::Value::String("tag:sent".to_string()),
-                    "parent".into() => serde_json::Value::String("INBOX".to_string()),
-                    "save_to".into() => serde_json::json! {{
-                        "path": &sent_mailbox,
-                        "add_tags": ["sent"]
-                    }},
+                "Sent".into() => melib::conf::MailboxConf {
+                    extra: indexmap::indexmap! {
+                        "query".into() => "tag:sent".to_string().into(),
+                        "parent".into() => "INBOX".to_string().into(),
+                        "save_to".into() => serde_json::json! {{ "path":  &sent_mailbox, "add_tags": ["sent"] }},
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
+            }
+        } else {
+            indexmap::indexmap! {}
         };
         let mut extra: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
 
-        extra.insert(
-            "root_mailbox".into(),
-            serde_json::Value::String(root_mailbox.display().to_string()),
-        );
+        if with_root_mailbox {
+            extra.insert(
+                "root_mailbox".into(),
+                serde_json::Value::String(root_mailbox.display().to_string()),
+            );
+        }
         if let Some(library_file_path) = library_file_path {
             extra.insert(
                 "library_file_path".into(),
@@ -213,19 +225,19 @@ other_email=test2@example.com;test3@example.com
         }
 
         let account_conf = AccountSettings {
-            name: acc_name.to_string(),
-            root_mailbox: root_mailbox.display().to_string(),
-            format: "notmuch".to_string(),
-            identity: "user@localhost".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes,
-            mailboxes,
-            manual_refresh: true,
-            contacts: Default::default(),
-            extra,
-        };
+                    name: acc_name.to_string(),
+                    contacts: None,
+                    root_mailbox: root_mailbox.display().to_string(),
+                    format: "notmuch".to_string(),
+                    identity: "user@localhost".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes,
+                    mailboxes,
+                    manual_refresh: true,
+                    extra,
+                };
 
         let notmuch = NotmuchDb::new(&account_conf, Default::default(), event_consumer)?;
         Ok((root_mailbox, account_conf, notmuch))
@@ -281,6 +293,7 @@ other_email=test2@example.com;test3@example.com
             library_file_path,
             "notmuch",
             backend_event_consumer.clone(),
+            true,
         )
         .unwrap();
 
@@ -429,6 +442,7 @@ hello world.
             library_file_path,
             "notmuch",
             backend_event_consumer.clone(),
+            true,
         )
         .unwrap();
 
@@ -590,6 +604,7 @@ hello world 2.
             library_file_path,
             "notmuch",
             backend_event_consumer.clone(),
+            true,
         )
         .unwrap();
 
@@ -597,11 +612,11 @@ hello world 2.
         block_on(is_online_fut).unwrap();
         let mut mailboxes_fut = notmuch.mailboxes().unwrap();
         let mailboxes = block_on(mailboxes_fut.as_mut()).unwrap();
-        let inbox_hash: MailboxHash = mailboxes
+        let inbox_hash = mailboxes
             .iter()
             .find_map(|(h, m)| (m.name() == "INBOX").then_some(*h))
             .unwrap();
-        let sent_hash: MailboxHash = mailboxes
+        let sent_hash = mailboxes
             .iter()
             .find_map(|(h, m)| (m.name() == "Sent").then_some(*h))
             .unwrap();
@@ -625,7 +640,8 @@ hello world.
         )
         .unwrap();
         let mail_path =
-            MaildirType::save_to_mailbox(root_mailbox, new_mail.bytes.clone(), None).unwrap();
+            MaildirType::save_to_mailbox(root_mailbox.clone(), new_mail.bytes.clone(), None)
+                .unwrap();
         notmuch_new(true);
         block_on(notmuch.refresh(inbox_hash).unwrap()).unwrap();
         backend_events.push(backend_event_queue.lock().unwrap().pop_back().unwrap().1);
@@ -680,10 +696,11 @@ hello world.
         backend_events.clear();
         block_on(
             notmuch
-                .save(
+                .save_with_tags(
                     new_mail.bytes,
                     sent_hash,
-                    Some((Flag::SEEN, vec!["sent".to_string()])),
+                    Some(Flag::SEEN),
+                    Some(vec!["sent".to_string()]),
                 )
                 .unwrap(),
         )
@@ -699,7 +716,7 @@ hello world.
                 refresh_event.mailbox_hash, sent_hash,
                 "expected Create event in Sent mailbox, found: {refresh_event:?}"
             );
-            let RefreshEventKind::Create(ref env) = refresh_event.kind else {
+            let RefreshEventKind::Create(env) = &refresh_event.kind else {
                 panic!("Expected Create event, got: {refresh_event:#?}");
             };
             assert_eq!(env.subject(), "RE: your e-mail");

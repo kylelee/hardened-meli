@@ -23,7 +23,7 @@
 //! Basic mail account configuration to use with
 //! [`backends`](./backends/index.html)
 
-use std::borrow::Cow;
+use std::{borrow::Cow, path::Path};
 
 use indexmap::IndexMap;
 
@@ -31,6 +31,7 @@ use crate::{
     backends::SpecialUsageMailbox,
     email::Address,
     error::{Error, ErrorKind, Result},
+    ShellExpandTrait,
 };
 
 mod field_types;
@@ -55,7 +56,7 @@ pub trait ExtraSetting: serde::de::DeserializeOwned {
                 "could not deserialize value as {}",
                 std::any::type_name::<Self>()
             ))
-            .set_source(Some(crate::src_err_arc_wrap! { err }))
+            .set_source(Some(Box::new(err)))
             .set_kind(ErrorKind::Configuration)
         })
     }
@@ -63,6 +64,7 @@ pub trait ExtraSetting: serde::de::DeserializeOwned {
 
 impl<'a> ExtraSetting for Cow<'a, str> {}
 impl ExtraSetting for String {}
+impl ExtraSetting for std::path::PathBuf {}
 impl ExtraSetting for field_types::Secret {}
 impl ExtraSetting for bool {}
 
@@ -85,7 +87,7 @@ macro_rules! impl_extra_setting_from_str {
                             "could not deserialize value as {}",
                             std::any::type_name::<Self>()
                         ))
-                        .set_source(Some(crate::src_err_arc_wrap! { err }))
+                        .set_source(Some(Box::new(err)))
                         .set_kind(ErrorKind::Configuration)
                     })
             }
@@ -93,24 +95,35 @@ macro_rules! impl_extra_setting_from_str {
     };
 }
 
-impl_extra_setting_from_str! { u16, u64 }
+impl_extra_setting_from_str! { u16, u64, i64 }
 
-/// 账户联系人后端的配置。
+/// Configuration of one named contact backend of an account
+/// (semantically ported from upstream meli `db9f7f93`).
 ///
-/// 账户的 `contacts` 映射把后端名称映射到一个后端配置：
+/// The map key of [`AccountSettings::contacts`] is an arbitrary name the
+/// user picks for reference; the value selects a
+/// [`crate::contacts::backend::ContactBackend`] implementation and carries
+/// its settings. The map is serialized as adjacently tagged values, e.g.
+/// `mutt = { type = "MuttAlias", value = "~/.mutt/aliases" }`.
 ///
-/// ```toml
-/// contacts = { mutt = { type = "MuttAlias", value = "~/.mutt/aliases" } }
-/// ```
-///
-/// `type` 取值为变体名，`value` 为该后端的路径或查询串。`CardDAV` 变体只在
-/// 启用 `webdav` 特性时可用。
+/// Fork deviation: upstream made this the replacement for the legacy
+/// `vcard_folder`/`mutt_alias_file`/`notmuch_address_book_query` extra keys.
+/// The fork keeps those legacy loaders (see
+/// [`crate::contacts::Contacts::with_account`]) as the fallback when no
+/// `contacts` map is configured, and layers the backends configured here on
+/// top of them.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "value")]
 pub enum ContactBackendConf {
+    /// Query string passed to `notmuch address --format=json
+    /// --output=recipients` to import contacts read-only.
     NotmuchAddress(String),
+    /// Path of a mutt-compatible alias file, imported read-only.
     MuttAlias(String),
+    /// Path of a folder containing `.vcf` files, imported read-only.
     VCard(String),
+    /// `CardDAV` server configuration. Only available when melib is built
+    /// with the `webdav` cargo feature.
     #[cfg(feature = "webdav")]
     CardDAV(crate::utils::webdav::WebDAVServerConf),
 }
@@ -137,8 +150,11 @@ pub struct AccountSettings {
     pub mailboxes: IndexMap<String, MailboxConf>,
     #[serde(default)]
     pub manual_refresh: bool,
+    /// Named contact backends for this account (see
+    /// [`ContactBackendConf`]). `None` when the account does not configure
+    /// any, in which case only the legacy implicit contact sources load.
     #[serde(default)]
-    pub contacts: IndexMap<String, ContactBackendConf>,
+    pub contacts: Option<IndexMap<String, ContactBackendConf>>,
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
 }
@@ -168,6 +184,16 @@ impl AccountSettings {
             .iter()
             .map(|i| Address::new(None::<&str>, i.clone()))
             .collect()
+    }
+
+    pub fn vcard_folder(&self) -> Option<&str> {
+        self.extra.get("vcard_folder").and_then(|v| v.as_str())
+    }
+
+    pub fn notmuch_address_book_query(&self) -> Option<&str> {
+        self.extra
+            .get("notmuch_address_book_query")
+            .and_then(|v| v.as_str())
     }
 
     /// Look up an `extra` value as a string slice.
@@ -221,7 +247,7 @@ impl AccountSettings {
                         "({}) could not parse `server_password` object as a Secret",
                         self.name,
                     ))
-                    .set_source(Some(crate::src_err_arc_wrap! { err }))
+                    .set_source(Some(Box::new(err)))
                     .set_kind(ErrorKind::Configuration)
                 })
             }
@@ -235,6 +261,74 @@ impl AccountSettings {
                  `{ command = \"...\" }` table)",
             )),
         }
+    }
+
+    pub fn validate_config(&mut self) -> Result<()> {
+        {
+            if let Some(folder) = self
+                .extra
+                .swap_remove("vcard_folder")
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    serde_json::Value::Bool(b) => Some(b.to_string()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                })
+            {
+                let path = Path::new(&folder).expand();
+
+                if !matches!(path.try_exists(), Ok(true)) {
+                    return Err(Error::new(format!(
+                        "`vcard_folder` path {} does not exist",
+                        path.display()
+                    ))
+                    .set_details("`vcard_folder` must be a path of a folder containing .vcf files")
+                    .set_kind(ErrorKind::Configuration));
+                }
+                if !path.is_dir() {
+                    return Err(Error::new(format!(
+                        "`vcard_folder` path {} is not a directory",
+                        path.display()
+                    ))
+                    .set_details("`vcard_folder` must be a path of a folder containing .vcf files")
+                    .set_kind(ErrorKind::Configuration));
+                }
+            }
+            _ = self.extra.swap_remove("notmuch_address_book_query");
+        }
+        {
+            if let Some(mutt_alias_file) =
+                self.extra
+                    .swap_remove("mutt_alias_file")
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        serde_json::Value::Bool(b) => Some(b.to_string()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    })
+            {
+                let path = Path::new(&mutt_alias_file).expand();
+
+                if !matches!(path.try_exists(), Ok(true)) {
+                    return Err(Error::new(format!(
+                        "`mutt_alias_file` path {} does not exist",
+                        path.display()
+                    ))
+                    .set_details("`mutt_alias_file` must be an existing path of a mutt alias file")
+                    .set_kind(ErrorKind::Configuration));
+                }
+                if !path.is_file() {
+                    return Err(Error::new(format!(
+                        "`mutt_alias_file` path {} is not a file",
+                        path.display()
+                    ))
+                    .set_details("`mutt_alias_file` must be a path of a mutt alias file")
+                    .set_kind(ErrorKind::Configuration));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -304,7 +398,7 @@ impl MailboxConf {
         self.alias.as_deref()
     }
 
-    /// Deserialize an [`Self::extra`] field as an [`ExtraSetting`] type.
+    /// Deserialize a single `extra` field as an [`ExtraSetting`]-typed value.
     pub fn deserialize_extra_field<'de, 'a: 'de, D: ExtraSetting>(
         &'a self,
         extra_field: &str,
@@ -312,16 +406,16 @@ impl MailboxConf {
         let Some(v) = self.extra.get(extra_field) else {
             return Ok(None);
         };
-        <D>::deserialize_extra(v)
+        D::deserialize_extra(v)
             .map_err(|err| {
                 Error::new(format!(
                     "Could not deserialize {extra_field} as {type_name}",
                     type_name = std::any::type_name::<D>()
                 ))
-                .set_source(Some(crate::src_err_arc_wrap! { err }))
+                .set_source(Some(Box::new(err)))
                 .set_kind(ErrorKind::Configuration)
             })
-            .map(Some)
+            .map(|v| Some(v))
     }
 }
 

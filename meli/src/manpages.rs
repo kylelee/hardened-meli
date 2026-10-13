@@ -25,7 +25,6 @@ use std::{
     env, fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use flate2::bufread::GzDecoder;
@@ -151,14 +150,12 @@ impl ManPages {
             let text = crate::subcommands::man(p, true)?;
             path.push(dir);
             std::fs::create_dir_all(&path).map_err(|err| {
-                Error::new(format!("Could not create {} directory.", path.display()))
-                    .set_source(Some(Arc::new(err)))
+                Error::new(format!("Could not create {} directory.", path.display())).set_source(Some(Box::new(err)))
             })?;
             path.push(p.to_string());
 
             fs::write(&path, text.as_bytes()).map_err(|err| {
-                Error::new(format!("Could not write to {}", path.display()))
-                    .set_source(Some(Arc::new(err)))
+                Error::new(format!("Could not write to {}", path.display())).set_source(Some(Box::new(err)))
             })?;
             tracing::trace!("Installed {} to {}", p, path.display());
             path.pop();

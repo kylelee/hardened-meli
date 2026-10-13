@@ -27,7 +27,6 @@ use std::{
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
 };
 
 use melib::{
@@ -252,8 +251,7 @@ changequote(`"', `"')dnl
                     .set_kind(ErrorKind::Platform))
                 }
                 _ => {
-                    return Err(Error::new("Could not process configuration with `m4`")
-                        .set_source(Some(Arc::new(err)))
+                    return Err(Error::new("Could not process configuration with `m4`").set_source(Some(Box::new(err)))
                         .set_kind(ErrorKind::Platform))
                 }
             },

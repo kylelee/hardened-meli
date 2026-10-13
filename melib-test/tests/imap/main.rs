@@ -93,6 +93,44 @@ fn test_imap_search_qq_quoted_retry() {
     });
 }
 
+/// imap.exmail.qq.com emulation (`ServerState::search_retry_hang`): after the
+/// server skips the literal continuation it hangs on the quoted-string retry.
+/// The search must fail within the account timeout and the retry must not be
+/// resent on the next search. See
+/// `tests::run_imap_search_quoted_retry_hang`.
+#[test]
+fn test_imap_search_quoted_retry_hang() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_search_quoted_retry_hang();
+    });
+}
+
+/// imap.163.com emulation (`ServerState::search_retry_bad`): after the server
+/// skips the literal continuation it answers the quoted-string retry with a
+/// tagged `BAD`. The failure must be remembered and the retry skipped on the
+/// next search. See `tests::run_imap_search_quoted_retry_bad`.
+#[test]
+fn test_imap_search_quoted_retry_bad() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_search_quoted_retry_bad();
+    });
+}
+
+/// Silent literal-announcement emulation
+/// (`ServerState::search_ignore_literal_announcement`): the server never
+/// answers the `{n}` announcement, so the literal wait must time out and the
+/// connection must be poisoned rather than reused desynchronized. See
+/// `tests::run_imap_search_literal_announcement_silent`.
+#[test]
+fn test_imap_search_literal_announcement_silent() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_search_literal_announcement_silent();
+    });
+}
+
 /// A `LITERAL+` server receives the whole non-ASCII `SEARCH` command in
 /// one write (`{N+}`, no continuation request). It must parse the
 /// `* SEARCH` result. See `tests::run_imap_search_literal_plus`.
@@ -837,6 +875,31 @@ pub mod server {
         /// client sends after a server skipped a literal continuation),
         /// for assertions on the retry path.
         pub search_quoted_terms: Vec<String>,
+        /// When `true`, the mock stalls on the quoted-string retry of a
+        /// `SEARCH` whose synchronizing literal was skipped (see
+        /// [`Self::search_ignore_literal_continuation`]): it records the
+        /// quoted term but sends no response at all, emulating
+        /// imap.exmail.qq.com hanging on the non-standard 8-bit quoted
+        /// string. The client must time out the retry read, disable the
+        /// retry for the account and fail the search promptly instead of
+        /// waiting on the connection again (issue #100).
+        pub search_retry_hang: bool,
+        /// When `true`, the mock answers the quoted-string retry of a
+        /// `SEARCH` whose synchronizing literal was skipped (see
+        /// [`Self::search_ignore_literal_continuation`]) with a tagged
+        /// `BAD`, emulating imap.163.com rejecting the non-standard 8-bit
+        /// quoted string. The client must record the failure and fail the
+        /// search promptly without retrying (issue #100).
+        pub search_retry_bad: bool,
+        /// When `true`, the mock never answers a `UID SEARCH CHARSET UTF-8
+        /// ... {n}` synchronizing-literal announcement: it sends neither a
+        /// `+ ` continuation request nor a tagged completion, and does not
+        /// read the literal octets. Emulates a server that accepted the
+        /// command line but left the literal pending (the client-side
+        /// hazard of issue #100). The client's literal wait must time out
+        /// and poison the connection so the next command fails instead of
+        /// hanging on a desynchronized stream.
+        pub search_ignore_literal_announcement: bool,
         /// The raw bytes of the RFC 2971 `ID` command line received at the
         /// `M4` handshake stage, for assertions on `imap_id_name` (the
         /// client name). `None` when the client sent no `ID` at all
@@ -951,6 +1014,9 @@ pub mod server {
                 x_gm_raw_literals: Vec::new(),
                 search_literals: Vec::new(),
                 search_quoted_terms: Vec::new(),
+                search_retry_hang: false,
+                search_retry_bad: false,
+                search_ignore_literal_announcement: false,
                 id_handshake_line: None,
                 omit_uidnext: false,
                 fetch_underdelivers: None,
@@ -2155,6 +2221,17 @@ pub mod server {
                                 tcp_stream.flush().await.unwrap();
                                 continue 'main;
                             }
+                            if state.lock().unwrap().search_ignore_literal_announcement {
+                                // Emulates a server that accepted the
+                                // synchronizing-literal command line but
+                                // never answers the `{n}` announcement (no
+                                // `+ ` continuation, no tagged completion)
+                                // and never reads the literal octets. The
+                                // client's literal wait must time out and
+                                // poison the connection. Do not send
+                                // anything; just wait for the next line.
+                                continue 'main;
+                            }
                             if state.lock().unwrap().search_ignore_literal_continuation {
                                 // QQ Mail emulation: the server never answers
                                 // the literal with a `+ ` continuation; it
@@ -2303,6 +2380,23 @@ pub mod server {
                                 .unwrap()
                                 .search_quoted_terms
                                 .push(query.clone());
+                            if state.lock().unwrap().search_retry_bad {
+                                // Emulates imap.163.com rejecting the
+                                // non-standard 8-bit quoted string.
+                                tcp_stream.write_all(id.as_bytes()).await.unwrap();
+                                tcp_stream
+                                    .write_all(b" BAD invalid search criteria\r\n")
+                                    .await
+                                    .unwrap();
+                                tcp_stream.flush().await.unwrap();
+                                continue 'main;
+                            }
+                            if state.lock().unwrap().search_retry_hang {
+                                // Emulates imap.exmail.qq.com hanging on the
+                                // non-standard 8-bit quoted string: record
+                                // the retry but never answer it.
+                                continue 'main;
+                            }
                             let uids = state
                                 .lock()
                                 .unwrap()
@@ -3433,58 +3527,58 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_hostname".to_string(),
-                    serde_json::Value::String(local_addr.ip().to_string()),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "server_port".to_string(),
-                    serde_json::Value::String(local_addr.port().to_string()),
-                );
-                m.insert(
-                    "use_starttls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_tls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                // Important for testing, because we expect only one connection to be used.
-                m.insert(
-                    "use_connection_pool".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "timeout".to_string(),
-                    serde_json::Value::String(1_u64.to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_hostname".to_string(),
+                            serde_json::Value::String(local_addr.ip().to_string()),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "server_port".to_string(),
+                            serde_json::Value::String(local_addr.port().to_string()),
+                        );
+                        m.insert(
+                            "use_starttls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_tls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        // Important for testing, because we expect only one connection to be used.
+                        m.insert(
+                            "use_connection_pool".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "timeout".to_string(),
+                            serde_json::Value::String(1_u64.to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         let mut imap =
             ImapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
@@ -3969,58 +4063,58 @@ hello world 3.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_hostname".to_string(),
-                    serde_json::Value::String(local_addr.ip().to_string()),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "server_port".to_string(),
-                    serde_json::Value::String(local_addr.port().to_string()),
-                );
-                m.insert(
-                    "use_starttls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_tls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                // Important for testing, because we expect only one connection to be used.
-                m.insert(
-                    "use_connection_pool".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "timeout".to_string(),
-                    serde_json::Value::String(1_u64.to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_hostname".to_string(),
+                            serde_json::Value::String(local_addr.ip().to_string()),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "server_port".to_string(),
+                            serde_json::Value::String(local_addr.port().to_string()),
+                        );
+                        m.insert(
+                            "use_starttls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_tls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        // Important for testing, because we expect only one connection to be used.
+                        m.insert(
+                            "use_connection_pool".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "timeout".to_string(),
+                            serde_json::Value::String(1_u64.to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         let mut imap =
             ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
@@ -4926,59 +5020,59 @@ hello world 4.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_hostname".to_string(),
-                    serde_json::Value::String(local_addr.ip().to_string()),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "server_port".to_string(),
-                    serde_json::Value::String(local_addr.port().to_string()),
-                );
-                m.insert(
-                    "use_starttls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_tls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                // Important for testing, because we expect only one connection to be used.
-                m.insert(
-                    "use_connection_pool".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                // Must exceed the SELECT reply delay set below.
-                m.insert(
-                    "timeout".to_string(),
-                    serde_json::Value::String(10_u64.to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_hostname".to_string(),
+                            serde_json::Value::String(local_addr.ip().to_string()),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "server_port".to_string(),
+                            serde_json::Value::String(local_addr.port().to_string()),
+                        );
+                        m.insert(
+                            "use_starttls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_tls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        // Important for testing, because we expect only one connection to be used.
+                        m.insert(
+                            "use_connection_pool".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        // Must exceed the SELECT reply delay set below.
+                        m.insert(
+                            "timeout".to_string(),
+                            serde_json::Value::String(10_u64.to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         let mut imap =
             ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
@@ -5518,62 +5612,62 @@ hello world 3.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_hostname".to_string(),
-                    serde_json::Value::String(local_addr.ip().to_string()),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "server_port".to_string(),
-                    serde_json::Value::String(local_addr.port().to_string()),
-                );
-                m.insert(
-                    "use_starttls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_tls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                // Important for testing, because we expect only one connection to be used.
-                m.insert(
-                    "use_connection_pool".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "timeout".to_string(),
-                    serde_json::Value::String(10_u64.to_string()),
-                );
-                m.insert(
-                    "fetch_body_structure".to_string(),
-                    serde_json::Value::String(if enabled { "true" } else { "false" }.to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_hostname".to_string(),
+                            serde_json::Value::String(local_addr.ip().to_string()),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "server_port".to_string(),
+                            serde_json::Value::String(local_addr.port().to_string()),
+                        );
+                        m.insert(
+                            "use_starttls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_tls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        // Important for testing, because we expect only one connection to be used.
+                        m.insert(
+                            "use_connection_pool".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "timeout".to_string(),
+                            serde_json::Value::String(10_u64.to_string()),
+                        );
+                        m.insert(
+                            "fetch_body_structure".to_string(),
+                            serde_json::Value::String(if enabled { "true" } else { "false" }.to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         let mut imap =
             ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
@@ -5830,58 +5924,58 @@ hello world 4.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_hostname".to_string(),
-                    serde_json::Value::String(local_addr.ip().to_string()),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "server_port".to_string(),
-                    serde_json::Value::String(local_addr.port().to_string()),
-                );
-                m.insert(
-                    "use_starttls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_tls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                // Important for testing, because we expect only one connection to be used.
-                m.insert(
-                    "use_connection_pool".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "timeout".to_string(),
-                    serde_json::Value::String(1_u64.to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_hostname".to_string(),
+                            serde_json::Value::String(local_addr.ip().to_string()),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "server_port".to_string(),
+                            serde_json::Value::String(local_addr.port().to_string()),
+                        );
+                        m.insert(
+                            "use_starttls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_tls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        // Important for testing, because we expect only one connection to be used.
+                        m.insert(
+                            "use_connection_pool".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "timeout".to_string(),
+                            serde_json::Value::String(1_u64.to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         // Session 1: fresh cache, full sync. The MSN index is built with
         // `UID SEARCH 1:*` and must be persisted in the sqlite cache.
@@ -6088,61 +6182,61 @@ hello world 4.
             listener.local_addr().unwrap().port()
         };
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_hostname".to_string(),
-                    serde_json::Value::String("127.0.0.1".to_string()),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "server_port".to_string(),
-                    serde_json::Value::String(dead_port.to_string()),
-                );
-                m.insert(
-                    "use_starttls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_tls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_connection_pool".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "offline_cache".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "timeout".to_string(),
-                    serde_json::Value::String(3_u64.to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_hostname".to_string(),
+                            serde_json::Value::String("127.0.0.1".to_string()),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "server_port".to_string(),
+                            serde_json::Value::String(dead_port.to_string()),
+                        );
+                        m.insert(
+                            "use_starttls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_tls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_connection_pool".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "offline_cache".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "timeout".to_string(),
+                            serde_json::Value::String(3_u64.to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         std::thread::spawn(move || {
             block_on(async move {
@@ -6214,59 +6308,59 @@ hello world 4.
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let local_addr = listener.local_addr().unwrap();
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_hostname".to_string(),
-                    serde_json::Value::String(local_addr.ip().to_string()),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "server_port".to_string(),
-                    serde_json::Value::String(local_addr.port().to_string()),
-                );
-                m.insert(
-                    "use_starttls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_tls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                // Important for testing, because we expect only one
-                // connection to be used.
-                m.insert(
-                    "use_connection_pool".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "timeout".to_string(),
-                    serde_json::Value::String(1_u64.to_string()),
-                );
-
-                m
-            },
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_hostname".to_string(),
+                            serde_json::Value::String(local_addr.ip().to_string()),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "server_port".to_string(),
+                            serde_json::Value::String(local_addr.port().to_string()),
+                        );
+                        m.insert(
+                            "use_starttls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_tls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        // Important for testing, because we expect only one
+                        // connection to be used.
+                        m.insert(
+                            "use_connection_pool".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "timeout".to_string(),
+                            serde_json::Value::String(1_u64.to_string()),
+                        );
+        
+                        m
+                    },
+                };
 
         let mut imap =
             ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
@@ -6594,58 +6688,58 @@ sent body {i}.
     #[cfg(feature = "sqlite3")]
     fn imap_account_conf(port: u16) -> AccountSettings {
         AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_hostname".to_string(),
-                    serde_json::Value::String("127.0.0.1".to_string()),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "server_port".to_string(),
-                    serde_json::Value::String(port.to_string()),
-                );
-                m.insert(
-                    "use_starttls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "use_tls".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                // Important for testing, because we expect only one connection to be used.
-                m.insert(
-                    "use_connection_pool".to_string(),
-                    serde_json::Value::String("false".to_string()),
-                );
-                m.insert(
-                    "timeout".to_string(),
-                    serde_json::Value::String(1_u64.to_string()),
-                );
-
-                m
-            },
-        }
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                            indexmap::IndexMap::new();
+        
+                        m.insert(
+                            "server_hostname".to_string(),
+                            serde_json::Value::String("127.0.0.1".to_string()),
+                        );
+                        m.insert(
+                            "server_username".to_string(),
+                            serde_json::Value::String("user".to_string()),
+                        );
+                        m.insert(
+                            "server_password".to_string(),
+                            serde_json::Value::String("password".to_string()),
+                        );
+                        m.insert(
+                            "server_port".to_string(),
+                            serde_json::Value::String(port.to_string()),
+                        );
+                        m.insert(
+                            "use_starttls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "use_tls".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        // Important for testing, because we expect only one connection to be used.
+                        m.insert(
+                            "use_connection_pool".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        m.insert(
+                            "timeout".to_string(),
+                            serde_json::Value::String(1_u64.to_string()),
+                        );
+        
+                        m
+                    },
+                }
     }
 
     /// The `(hash, (path, name))` identity of a mailbox list, for
@@ -7496,19 +7590,19 @@ hello world 3.
             );
         }
         let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra,
-        };
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra,
+                };
 
         let mut imap =
             ImapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
@@ -8933,6 +9027,362 @@ hello exmail expunge {i}.
         loops_handle.join().unwrap();
     }
 
+    /// Regression for issue #100 on imap.exmail.qq.com (the `work` account):
+    /// the server completes a synchronizing-literal `SEARCH` without reading
+    /// the literal, then hangs forever on the quoted-string retry instead of
+    /// answering it. The first search must fail within a bounded wait (the
+    /// account timeout, not the 90s UI timeout) and the second search must
+    /// fail fast without sending a second quoted-string retry. See
+    /// `ServerState::search_retry_hang`.
+    pub(crate) fn run_imap_search_quoted_retry_hang() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            search_ignore_literal_continuation: true,
+            search_retry_hang: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(t3_test_mail("网易邮箱账号安全", "exmail-hang@example.com"));
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            let server_state = &server_state;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(seed_envs.len(), 1, "initial fetch must load the seed mail");
+                            let first = match melib::utils::futures::timeout(
+                                Some(Duration::from_secs(10)),
+                                imap.search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                    .unwrap(),
+                            )
+                            .await
+                            {
+                                Ok(res) => res,
+                                Err(_) => panic!(
+                                    "the hung quoted retry must fail within the account timeout, \
+                                     not hang"
+                                ),
+                            };
+                            let first_err = first.expect_err(
+                                "the hung quoted-string retry must surface an error, not a result",
+                            );
+                            assert!(
+                                first_err.kind.is_timeout(),
+                                "the hung retry must fail with a timeout error, got {:?}",
+                                first_err.kind
+                            );
+                            assert_eq!(
+                                server_state.lock().unwrap().search_quoted_terms,
+                                vec!["账号".to_string()],
+                                "the first search must send the quoted-string retry once"
+                            );
+
+                            let retries_before =
+                                server_state.lock().unwrap().search_quoted_terms.len();
+                            let second = match melib::utils::futures::timeout(
+                                Some(Duration::from_secs(10)),
+                                imap.search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                    .unwrap(),
+                            )
+                            .await
+                            {
+                                Ok(res) => res,
+                                Err(_) => panic!(
+                                    "the second search must fail fast on the poisoned connection, \
+                                     not hang"
+                                ),
+                            };
+                            assert!(
+                                second.is_err(),
+                                "the second search must fail, got {second:?}"
+                            );
+                            assert_eq!(
+                                server_state.lock().unwrap().search_quoted_terms.len(),
+                                retries_before,
+                                "the second search must not resend the quoted-string retry"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // The hung retry poisoned (and closed) the stream, so the mock's loop
+        // handler may already have seen EOF and exited; best-effort quit.
+        let _ = main_conn_sender.unbounded_send(ServerEvent::Quit);
+        loops_handle.join().unwrap();
+    }
+
+    /// Regression for issue #100 on imap.163.com: the server completes a
+    /// synchronizing-literal `SEARCH` without reading the literal and then
+    /// answers the quoted-string retry with a tagged `BAD`. The first search
+    /// must fail promptly; the client must remember that the quoted retry
+    /// failed and the second search must skip it (no second quoted-string
+    /// command) and fail fast. See `ServerState::search_retry_bad`.
+    pub(crate) fn run_imap_search_quoted_retry_bad() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            search_ignore_literal_continuation: true,
+            search_retry_bad: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(t3_test_mail("网易邮箱账号安全", "163-bad@example.com"));
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            let server_state = &server_state;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(seed_envs.len(), 1, "initial fetch must load the seed mail");
+                            let first = match melib::utils::futures::timeout(
+                                Some(Duration::from_secs(10)),
+                                imap.search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                    .unwrap(),
+                            )
+                            .await
+                            {
+                                Ok(res) => res,
+                                Err(_) => panic!(
+                                    "the BAD quoted retry must fail within the account timeout, \
+                                     not hang"
+                                ),
+                            };
+                            let _ = first.expect_err(
+                                "the BAD quoted-string retry must surface an error, not a result",
+                            );
+                            assert_eq!(
+                                server_state.lock().unwrap().search_quoted_terms,
+                                vec!["账号".to_string()],
+                                "the first search must send the quoted-string retry once"
+                            );
+
+                            // A tagged BAD is a complete response, so the
+                            // stream stays usable and the second search
+                            // reaches the literal branch again; it must skip
+                            // the quoted retry from the remembered failure.
+                            let second = match melib::utils::futures::timeout(
+                                Some(Duration::from_secs(10)),
+                                imap.search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                    .unwrap(),
+                            )
+                            .await
+                            {
+                                Ok(res) => res,
+                                Err(_) => panic!(
+                                    "the second search must fail fast after the remembered \
+                                     retry failure, not hang"
+                                ),
+                            };
+                            let second_err = second.expect_err(
+                                "the second search must fail without retrying the quoted string",
+                            );
+                            assert_eq!(
+                                second_err.kind,
+                                ErrorKind::ProtocolError,
+                                "skipping the retry must surface a protocol error, got {:?}",
+                                second_err.kind
+                            );
+                            assert_eq!(
+                                server_state.lock().unwrap().search_quoted_terms.len(),
+                                1,
+                                "the second search must not resend the quoted-string retry"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Regression for issue #100: the server accepts the synchronizing
+    /// `UID SEARCH CHARSET UTF-8 ... {n}` line but never answers the literal
+    /// announcement (no `+ ` continuation and no tagged completion), leaving
+    /// the client's literal state unknown. The literal wait must time out,
+    /// the search must return an error and the connection must be poisoned
+    /// so the next command fails promptly from the stored error instead of
+    /// hanging on a desynchronized stream. See
+    /// `ServerState::search_ignore_literal_announcement`.
+    pub(crate) fn run_imap_search_literal_announcement_silent() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            search_ignore_literal_announcement: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(t3_test_mail(
+                "网易邮箱账号安全",
+                "silent-literal@example.com",
+            ));
+        }
+
+        let (mut imap, _listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            let main_commands = &main_commands;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(seed_envs.len(), 1, "initial fetch must load the seed mail");
+                            let first = match melib::utils::futures::timeout(
+                                Some(Duration::from_secs(10)),
+                                imap.search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                    .unwrap(),
+                            )
+                            .await
+                            {
+                                Ok(res) => res,
+                                Err(_) => panic!(
+                                    "the silent literal announcement must be bounded by the \
+                                     account timeout, not hang"
+                                ),
+                            };
+                            let first_err = first.expect_err(
+                                "a literal announcement that is never answered must fail the \
+                                 search",
+                            );
+                            assert!(
+                                first_err.kind.is_timeout(),
+                                "the silent literal announcement must fail with a timeout, \
+                                 got {:?}",
+                                first_err.kind
+                            );
+
+                            // The literal state on the server is unknown, so
+                            // the stream must be poisoned: the next search
+                            // fails from the stored error without sending any
+                            // command (no hang and no desynchronized write).
+                            let commands_before = main_commands.lock().unwrap().len();
+                            let second = match melib::utils::futures::timeout(
+                                Some(Duration::from_secs(5)),
+                                imap.search(Query::Subject("账号".to_string()), Some(inbox_hash))
+                                    .unwrap(),
+                            )
+                            .await
+                            {
+                                Ok(res) => res,
+                                Err(_) => panic!(
+                                    "the poisoned connection must fail fast, not hang on the \
+                                     stored error"
+                                ),
+                            };
+                            assert!(
+                                second.is_err(),
+                                "reusing the poisoned connection must fail, got {second:?}"
+                            );
+                            assert_eq!(
+                                main_commands.lock().unwrap().len(),
+                                commands_before,
+                                "the poisoned connection must not send another command"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        // The literal timeout poisoned (and closed) the stream, so the mock's
+        // loop handler may already have seen EOF and exited; best-effort quit.
+        let _ = main_conn_sender.unbounded_send(ServerEvent::Quit);
+        loops_handle.join().unwrap();
+    }
+
     /// `LITERAL+` server emulation (`ServerState::advertise_literal_plus`):
     /// the client sends the whole non-ASCII `SEARCH` command in one write
     /// (`{N+}`, no continuation request) and still parses the `* SEARCH`
@@ -9337,6 +9787,9 @@ hello new world b.
             x_gm_raw_literals: vec![],
             search_literals: vec![],
             search_quoted_terms: vec![],
+            search_retry_hang: false,
+            search_retry_bad: false,
+            search_ignore_literal_announcement: false,
             id_handshake_line: None,
             omit_uidnext: false,
             fetch_underdelivers: None,
@@ -10935,66 +11388,66 @@ hello new world.
         let local_addr = listener.local_addr().unwrap();
         drop(listener);
         let make_account_conf = |watch_sweep_interval: Option<u64>| AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "imap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut extra: indexmap::IndexMap<String, serde_json::Value> = {
-                    let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                        indexmap::IndexMap::new();
-
-                    m.insert(
-                        "server_hostname".to_string(),
-                        serde_json::Value::String(local_addr.ip().to_string()),
-                    );
-                    m.insert(
-                        "server_username".to_string(),
-                        serde_json::Value::String("user".to_string()),
-                    );
-                    m.insert(
-                        "server_password".to_string(),
-                        serde_json::Value::String("password".to_string()),
-                    );
-                    m.insert(
-                        "server_port".to_string(),
-                        serde_json::Value::String(local_addr.port().to_string()),
-                    );
-                    m.insert(
-                        "use_starttls".to_string(),
-                        serde_json::Value::String("false".to_string()),
-                    );
-                    m.insert(
-                        "use_tls".to_string(),
-                        serde_json::Value::String("false".to_string()),
-                    );
-                    m.insert(
-                        "use_connection_pool".to_string(),
-                        serde_json::Value::String("false".to_string()),
-                    );
-                    m.insert(
-                        "timeout".to_string(),
-                        serde_json::Value::String(1_u64.to_string()),
-                    );
-
-                    m
+                    name: "test".to_string(),
+                    contacts: None,
+                    root_mailbox: "INBOX".to_string(),
+                    format: "imap".to_string(),
+                    identity: "user@example.com".to_string(),
+                    extra_identities: vec![],
+                    read_only: false,
+                    display_name: None,
+                    subscribed_mailboxes: vec![],
+                    mailboxes: indexmap::indexmap! {},
+                    manual_refresh: false,
+                    extra: {
+                        let mut extra: indexmap::IndexMap<String, serde_json::Value> = {
+                            let mut m: indexmap::IndexMap<String, serde_json::Value> =
+                                indexmap::IndexMap::new();
+        
+                            m.insert(
+                                "server_hostname".to_string(),
+                                serde_json::Value::String(local_addr.ip().to_string()),
+                            );
+                            m.insert(
+                                "server_username".to_string(),
+                                serde_json::Value::String("user".to_string()),
+                            );
+                            m.insert(
+                                "server_password".to_string(),
+                                serde_json::Value::String("password".to_string()),
+                            );
+                            m.insert(
+                                "server_port".to_string(),
+                                serde_json::Value::String(local_addr.port().to_string()),
+                            );
+                            m.insert(
+                                "use_starttls".to_string(),
+                                serde_json::Value::String("false".to_string()),
+                            );
+                            m.insert(
+                                "use_tls".to_string(),
+                                serde_json::Value::String("false".to_string()),
+                            );
+                            m.insert(
+                                "use_connection_pool".to_string(),
+                                serde_json::Value::String("false".to_string()),
+                            );
+                            m.insert(
+                                "timeout".to_string(),
+                                serde_json::Value::String(1_u64.to_string()),
+                            );
+        
+                            m
+                        };
+                        if let Some(secs) = watch_sweep_interval {
+                            extra.insert(
+                                "watch_sweep_interval".to_string(),
+                                serde_json::Value::String(secs.to_string()),
+                            );
+                        }
+                        extra
+                    },
                 };
-                if let Some(secs) = watch_sweep_interval {
-                    extra.insert(
-                        "watch_sweep_interval".to_string(),
-                        serde_json::Value::String(secs.to_string()),
-                    );
-                }
-                extra
-            },
-        };
 
         // No key: the default must preserve the historical fixed
         // 5-minute sweep cadence exactly.

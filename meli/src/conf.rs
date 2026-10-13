@@ -32,7 +32,6 @@ use std::{
     io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use crate::{conf::deserializers::non_empty_opt_string, terminal::Color};
@@ -216,10 +215,13 @@ pub struct FileAccount {
     pub search_backend: data_types::SearchBackend,
     #[serde(default = "false_val")]
     pub manual_refresh: bool,
+    /// Named contact backends for this account; see
+    /// [`melib::conf::ContactBackendConf`]. The map key is an arbitrary
+    /// user-chosen name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contacts: Option<IndexMap<String, melib::conf::ContactBackendConf>>,
     #[serde(default = "none", skip_serializing_if = "Option::is_none")]
     pub refresh_command: Option<String>,
-    #[serde(default)]
-    pub contacts: IndexMap<String, melib::conf::ContactBackendConf>,
     #[serde(flatten)]
     pub conf_override: MailUIConf,
     #[serde(flatten)]
@@ -628,24 +630,20 @@ impl FileSettings {
     pub fn validate_string(s: String, clear_extras: bool) -> Result<Self> {
         let s = strip_legacy_listing_keys(s);
         let de = toml::Deserializer::parse(&s).map_err(|err| {
-            Error::new("Config file is invalid TOML")
-                .set_source(Some(Arc::new(err)))
+            Error::new("Config file is invalid TOML").set_source(Some(Box::new(err)))
                 .set_kind(ErrorKind::ValueError)
         })?;
         let _: toml::value::Table = melib::serde_path_to_error::deserialize(de).map_err(|err| {
-            Error::new("Config file is invalid TOML")
-                .set_source(Some(Arc::new(err)))
+            Error::new("Config file is invalid TOML").set_source(Some(Box::new(err)))
                 .set_kind(ErrorKind::ValueError)
         })?;
 
         let de = toml::Deserializer::parse(&s).map_err(|err| {
-            Error::new("Config file is invalid TOML")
-                .set_source(Some(Arc::new(err)))
+            Error::new("Config file is invalid TOML").set_source(Some(Box::new(err)))
                 .set_kind(ErrorKind::ValueError)
         })?;
         let mut s: Self = melib::serde_path_to_error::deserialize(de).map_err(|err| {
-            Error::new("Input contains errors")
-                .set_source(Some(Arc::new(err)))
+            Error::new("Input contains errors").set_source(Some(Box::new(err)))
                 .set_kind(ErrorKind::Configuration)
         })?;
         s.fixup_non_fatal();
@@ -720,6 +718,7 @@ impl FileSettings {
                     .collect(),
                 extra: extra.into_iter().collect(),
             };
+            s.validate_config()?;
             backends.validate_config(&lowercase_format, &mut s)?;
             // Refuse to start if the account's SMTP mailer disables TLS
             // certificate/hostname validation (CVE-2009-3765 hardening).
@@ -759,8 +758,7 @@ impl FileSettings {
         })?;
 
         let mut s: Self = toml::from_str(&s).map_err(|err| {
-            Error::new(format!("{}: Config file contains errors", path.display()))
-                .set_source(Some(Arc::new(err)))
+            Error::new(format!("{}: Config file contains errors", path.display())).set_source(Some(Box::new(err)))
                 .set_kind(ErrorKind::Configuration)
         })?;
         s.fixup_non_fatal();
@@ -835,6 +833,7 @@ impl FileSettings {
                     .collect(),
                 extra: extra.into_iter().collect(),
             };
+            s.validate_config()?;
             backends.validate_config(&lowercase_format, &mut s)?;
             // Refuse to start if the account's SMTP mailer disables TLS
             // certificate/hostname validation (CVE-2009-3765 hardening).

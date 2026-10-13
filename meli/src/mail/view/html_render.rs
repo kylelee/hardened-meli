@@ -31,7 +31,6 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    sync::Arc,
 };
 
 use melib::{Error, Result};
@@ -584,7 +583,7 @@ pub fn render(bytes: &[u8], width: usize) -> Result<String> {
     let mut rendered = html2text::config::plain()
         .string_from_read(html.as_bytes(), width)
         .map_err(|err| {
-            Error::new("Could not render html to text").set_source(Some(Arc::new(err)))
+            Error::new("Could not render html to text").set_source(Some(Box::new(err)))
         })?;
     if byte_truncated {
         rendered.push_str(HTML_INPUT_TRUNCATED_NOTICE);

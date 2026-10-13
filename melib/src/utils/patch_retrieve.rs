@@ -96,7 +96,7 @@ mod nttp {
                 subscribed_mailboxes: vec![groupname.clone()],
                 mailboxes: vec![(groupname, Default::default())].into_iter().collect(),
                 manual_refresh: true,
-                contacts: Default::default(),
+                contacts: None,
                 extra,
             };
 
