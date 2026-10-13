@@ -651,7 +651,7 @@ impl MailBackend for JmapType {
                              object: {account_caps:?}"
                         ))
                         .set_kind(ErrorKind::Bug)
-                        .set_source(Some(std::sync::Arc::new(err)))
+                        .set_source(Some(Box::new(err)))
                     })?;
                 (account_id, account_caps)
             };
