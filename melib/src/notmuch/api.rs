@@ -84,7 +84,6 @@ declare_api! {
     database_find_message_by_filename: crate::notmuch::ffi::notmuch_database_find_message_by_filename,
     database_get_directory: crate::notmuch::ffi::notmuch_database_get_directory,
     database_get_revision: crate::notmuch::ffi::notmuch_database_get_revision,
-    database_index_file: crate::notmuch::ffi::notmuch_database_index_file,
     database_open: crate::notmuch::ffi::notmuch_database_open,
     directory_destroy: crate::notmuch::ffi::notmuch_directory_destroy,
     directory_get_child_directories: crate::notmuch::ffi::notmuch_directory_get_child_directories,
