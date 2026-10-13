@@ -233,6 +233,16 @@ impl File {
                     delete_on_drop,
                 })
             }
+            // Reset the extension before retrying: when the caller supplies a
+            // `path` (not a generated `dir`), the previous iteration's retry
+            // appended the literal extension to a stem like `name_3`, so the
+            // second conflict would land on a now-stale `.ext` suffix. Strip
+            // it so the next attempt rebuilds the path from the original
+            // stem + extension.
+            let path_already_existed = path.metadata().is_ok();
+            if path_already_existed && extension.is_some() {
+                path.set_extension("");
+            }
             match (inner(path, bytes, delete_on_drop), filename) {
                 (Err(err), Some(ref mut val))
                     if matches!(
