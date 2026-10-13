@@ -22,8 +22,7 @@
 
 use std::{convert::TryInto, sync::Arc};
 
-use http::{header, status::StatusCode, Request};
-use isahc::AsyncReadResponseExt as _;
+use isahc::{http::header, AsyncReadResponseExt as _};
 
 use crate::{
     backends::prelude::ResultFuture,
@@ -71,7 +70,7 @@ impl CardDAVConnection {
             let mut uri = webdav_connection.server_conf.url.clone();
             uri.set_path(&session_guard.principal);
             drop(session_guard);
-            let request = Request::builder()
+            let request = isahc::http::Request::builder()
                 .method("PROPFIND")
                 .uri(uri.as_str())
                 .header(header::CONTENT_TYPE, "application/xml; content-type=utf-8")
@@ -101,9 +100,9 @@ impl CardDAVConnection {
             let mut addressbook_home_sets = vec![];
             for response in multistatus.response {
                 for propstat in response.propstat {
-                    if let (data, Some(StatusCode::OK)) = (
+                    if let (data, Some(isahc::http::StatusCode::OK)) = (
                         propstat.prop.addressbook_home_set.href,
-                        StatusCode::from_status_line(&propstat.status),
+                        isahc::http::StatusCode::from_status_line(&propstat.status),
                     ) {
                         if !data.is_empty() {
                             addressbook_home_sets.push(data.into());
@@ -140,7 +139,7 @@ impl CardDAVConnection {
                 ".vcf"
             }
         ));
-        let request = Request::builder()
+        let request = isahc::http::Request::builder()
             .method("PUT")
             .uri(uri.as_str())
             .body(vcard)
@@ -163,25 +162,19 @@ impl CardDAVConnection {
         let mut uri = self.webdav_connection.server_conf.url.clone();
         uri.set_path(&addressbook_home_set);
 
-        let request = Request::builder()
+        let request = isahc::http::Request::builder()
             .method("REPORT")
             .uri(uri.as_str())
-                .header(
-                    header::CONTENT_TYPE,
-                    "application/xml; content-type=utf-8",
-                )
-                .header(
-                    "Depth",
-                    "1",
-                )
+            .header(header::CONTENT_TYPE, "application/xml; content-type=utf-8")
+            .header("Depth", "1")
             .body(
-r#"<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+                r#"<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
     <d:prop>
         <d:getetag />
         <card:address-data />
     </d:prop>
-</card:addressbook-query>"#
-)
+</card:addressbook-query>"#,
+            )
             .unwrap();
 
         let mut resp = self.webdav_connection.send_async(request).await?;
@@ -190,9 +183,9 @@ r#"<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:car
         let mut cards = vec![];
         for response in multistatus.response {
             for propstat in response.propstat {
-                if let (Some(data), Some(StatusCode::OK)) = (
+                if let (Some(data), Some(isahc::http::StatusCode::OK)) = (
                     propstat.prop.address_data.as_deref(),
-                    StatusCode::from_status_line(&propstat.status),
+                    isahc::http::StatusCode::from_status_line(&propstat.status),
                 ) {
                     if !data.is_empty() {
                         let card: Card = vcard::CardDeserializer::try_from_str(data)
@@ -226,7 +219,7 @@ r#"<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:car
     </C:filter>
 </card:addressbook-query>"#
         );
-        let request = Request::builder()
+        let request = isahc::http::Request::builder()
             .method("REPORT")
             .uri(uri.as_str())
             .header(header::CONTENT_TYPE, "application/xml; content-type=utf-8")
@@ -241,9 +234,9 @@ r#"<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:car
         let mut cards = vec![];
         for response in multistatus.response {
             for propstat in response.propstat {
-                if let (Some(data), Some(StatusCode::OK)) = (
+                if let (Some(data), Some(isahc::http::StatusCode::OK)) = (
                     propstat.prop.address_data.as_deref(),
-                    StatusCode::from_status_line(&propstat.status),
+                    isahc::http::StatusCode::from_status_line(&propstat.status),
                 ) {
                     if !data.is_empty() {
                         let card: Card = vcard::CardDeserializer::try_from_str(data)
@@ -258,7 +251,7 @@ r#"<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:car
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AddressDataProp {
     #[serde(rename = "address-data")]
     pub address_data: Option<String>,
@@ -266,7 +259,7 @@ pub struct AddressDataProp {
     pub getetag: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AddressBookHomeSetProp {
     #[serde(rename = "addressbook-home-set")]
     pub addressbook_home_set: HrefValue,
@@ -275,18 +268,6 @@ pub struct AddressBookHomeSetProp {
 #[derive(Debug)]
 pub struct CardDAVContacts {
     pub connection: Arc<CardDAVConnection>,
-}
-
-impl CardDAVContacts {
-    /// 建立 `WebDAV` 连接并构造 `CardDAV` 通讯录后端。
-    pub async fn new(server_conf: &WebDAVServerConf) -> Result<Self> {
-        let mut webdav_connection = WebDAVConnection::new(server_conf).await?;
-        webdav_connection.connect().await?;
-        let connection = CardDAVConnection::new(webdav_connection).await?;
-        Ok(Self {
-            connection: Arc::new(connection),
-        })
-    }
 }
 
 impl ContactBackend for CardDAVContacts {
