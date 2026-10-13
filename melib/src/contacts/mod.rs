@@ -16,27 +16,32 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with meli.  If not, see <http://www.gnu.org/licenses/>.
+ * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::{
-    borrow::Borrow,
-    hash::{Hash, Hasher as _},
-    ops::Deref,
-    sync::Arc,
-};
-
-use indexmap::{IndexMap, IndexSet};
-use uuid::Uuid;
-
 pub mod backend;
-mod card;
 pub mod jscontact;
 pub mod mutt;
 pub mod notmuchcontact;
 pub mod vcard;
 
+pub use backend::{
+    AddressBook, AddressBookName, ContactBackend, ContactBackendCapabilities, ContactBackendID,
+    EMPTY_CONTACT_BACKEND_CAPABILITIES,
+};
+
+mod card;
+use std::{
+    hash::{Hash, Hasher},
+    ops::Deref,
+    path::Path,
+};
+
 pub use card::*;
+use indexmap::IndexMap;
+use uuid::Uuid;
+
+use crate::utils::{parsec::Parser, shellexpand::ShellExpandTrait};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(from = "String")]
@@ -44,15 +49,6 @@ pub use card::*;
 pub enum CardId {
     Uuid(Uuid),
     Hash(u64),
-}
-
-impl CardId {
-    pub const fn as_uuid(&self) -> Option<Uuid> {
-        let Self::Uuid(uuid) = self else {
-            return None;
-        };
-        Some(*uuid)
-    }
 }
 
 impl std::fmt::Display for CardId {
@@ -72,7 +68,7 @@ impl From<CardId> for String {
 
 impl From<String> for CardId {
     fn from(s: String) -> Self {
-        use std::{collections::hash_map::DefaultHasher, str::FromStr as _};
+        use std::{collections::hash_map::DefaultHasher, str::FromStr};
 
         if let Ok(u) = Uuid::try_parse(s.as_str()) {
             Self::Uuid(u)
@@ -86,55 +82,119 @@ impl From<String> for CardId {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct AddressBookName(pub Arc<str>);
-
-impl Deref for AddressBookName {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl From<&str> for AddressBookName {
-    fn from(s: &str) -> Self {
-        Self(s.to_string().into_boxed_str().into())
-    }
-}
-
-impl From<Arc<str>> for AddressBookName {
-    fn from(inner: Arc<str>) -> Self {
-        Self(inner)
-    }
-}
-
-impl std::fmt::Display for AddressBookName {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.0.fmt(fmt)
-    }
-}
-
-impl Borrow<str> for AddressBookName {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AddressBook {
-    pub name: AddressBookName,
-    pub read_only: bool,
+pub struct Contacts {
+    display_name: String,
     pub cards: IndexMap<CardId, Card>,
 }
 
-impl AddressBook {
-    pub fn new(name: AddressBookName, read_only: bool) -> Self {
+impl Contacts {
+    pub fn new(display_name: String) -> Self {
         Self {
-            name,
-            read_only,
+            display_name,
             cards: IndexMap::default(),
         }
+    }
+
+    pub fn with_account(s: &crate::conf::AccountSettings) -> Self {
+        let mut ret = Self::new(s.name.clone());
+        if let Some(mutt_alias_file) = s.extra.get("mutt_alias_file").and_then(|v| v.as_str()) {
+            match std::fs::read_to_string(Path::new(mutt_alias_file).expand())
+                .map_err(|err| err.to_string())
+                .and_then(|contents| {
+                    contents
+                        .lines()
+                        .map(|line| mutt::parse_mutt_contact().parse(line).map(|(_, c)| c))
+                        .collect::<Result<Vec<Card>, &str>>()
+                        .map_err(|err| err.to_string())
+                }) {
+                Ok(cards) => {
+                    for c in cards {
+                        ret.add_card(c);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Could not load mutt alias file {:?}: {}",
+                        mutt_alias_file,
+                        err
+                    );
+                }
+            }
+        }
+        if let Some(vcard_path) = s.vcard_folder() {
+            let expanded_path = Path::new(vcard_path).expand();
+            match vcard::load_cards(&expanded_path) {
+                Ok(cards) => {
+                    for c in cards {
+                        ret.add_card(c);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("Could not load vcards from {:?}: {}", vcard_path, err);
+                    if expanded_path.display().to_string() != vcard_path {
+                        tracing::warn!(
+                            "Note: vcard_folder was expanded from {} to {}",
+                            vcard_path,
+                            expanded_path.display()
+                        );
+                    }
+                }
+            }
+        }
+        use std::process::Command;
+        if let Some(notmuch_addressbook_query) = s.notmuch_address_book_query() {
+            match Command::new("sh")
+                .args([
+                    "-c",
+                    &format!("notmuch address --format=json {notmuch_addressbook_query}"),
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+            {
+                Ok(notmuch_addresses) => {
+                    if notmuch_addresses.status.success() {
+                        match std::str::from_utf8(&notmuch_addresses.stdout) {
+                            Ok(notmuch_address_out) => {
+                                match notmuchcontact::parse_notmuch_contacts(notmuch_address_out) {
+                                    Ok(contacts) => {
+                                        for c in contacts {
+                                            ret.add_card(c.clone());
+                                        }
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            "Unable to parse notmuch contact result into cards: \
+                                             {} {}",
+                                            notmuch_address_out,
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Unable to read from notmuch address query: {} {}",
+                                    notmuch_addressbook_query,
+                                    err
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Error ({}) running notmuch address: {} {}",
+                            notmuch_addresses.status,
+                            String::from_utf8_lossy(&notmuch_addresses.stdout),
+                            String::from_utf8_lossy(&notmuch_addresses.stderr)
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!("Unable to run notmuch address command: {}", e),
+            }
+        }
+        ret
     }
 
     pub fn add_card(&mut self, card: Card) {
@@ -158,61 +218,10 @@ impl AddressBook {
     }
 }
 
-impl Deref for AddressBook {
+impl Deref for Contacts {
     type Target = IndexMap<CardId, Card>;
 
     fn deref(&self) -> &IndexMap<CardId, Card> {
         &self.cards
-    }
-}
-
-#[derive(Clone, Hash, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ContactBackendID {
-    pub name: Box<str>,
-    pub format: Box<str>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Contacts {
-    name: String,
-    pub books: IndexMap<(Arc<ContactBackendID>, AddressBookName), AddressBook>,
-    pub backends: IndexSet<Arc<ContactBackendID>>,
-}
-
-impl Contacts {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            books: IndexMap::default(),
-            backends: IndexSet::default(),
-        }
-    }
-
-    pub fn add_book(&mut self, backend_id: Arc<ContactBackendID>, book: AddressBook) {
-        let id = if let Some(id) = self.backends.iter().find(|i| {
-            i.name.as_ref() == backend_id.name.as_ref()
-                && i.format.as_ref() == backend_id.format.as_ref()
-        }) {
-            Arc::clone(id)
-        } else {
-            let id = backend_id;
-            self.backends.insert(Arc::clone(&id));
-            id
-        };
-        self.books.insert((id, book.name.clone()), book);
-    }
-
-    pub fn get_book(&self, backend_id: &ContactBackendID, name: &str) -> Option<&AddressBook> {
-        let id = self.backends.iter().find(|i| {
-            i.name.as_ref() == backend_id.name.as_ref()
-                && i.format.as_ref() == backend_id.format.as_ref()
-        })?;
-        self.books.iter().find_map(|(k, v)| {
-            if k.0 == *id && (k.1).0.as_ref() == name {
-                Some(v)
-            } else {
-                None
-            }
-        })
     }
 }
