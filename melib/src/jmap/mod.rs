@@ -1658,7 +1658,7 @@ impl MailBackend for JmapType {
             let mail_account_id = conn.session_guard().await?.mail_account_id()?;
 
             // [ref:TODO] smarter identity detection based on From: ?
-            let Some(identity_id) = conn.store.mail_identity_id().await else {
+            let Some(identity_id) = conn.mail_identity_id() else {
                 return Err(Error::new(
                     "You need to setup an Identity in the JMAP server.",
                 ));
