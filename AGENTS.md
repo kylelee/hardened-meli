@@ -24,6 +24,7 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 
 - MSRV is **1.85.0** (`rust-version` in Cargo.toml; BUILD.md's "1.80" is stale).
 - Commits require a DCO sign-off: always `git commit -s` (CI enforces it via `.gitea/check_dco.sh`).
+- Commit identity: this repository is published to the public mirror `hardened-meli`, where `Kyle Lee <kylelee@users.noreply.github.com>` is the only acceptable fork-local author/committer identity (upstream contributor identities are untouched). Pass it explicitly per invocation: `git -c user.email=kylelee@users.noreply.github.com -c user.name="Kyle Lee" commit -s …` (add the same `-c` flags to `cherry-pick`/`merge` when replicating to the mirror, so committer metadata stays correct). NEVER persist it via repo-local `git config` — the owner's other projects use different identities.
 - New files need a license preamble (`"This file is part of meli"` / `"This file is part of melib"` or an `SPDX-License-Identifier` line) — enforced by `scripts/pre-commit`.
 - `derive` attributes must be sorted alphabetically (`cargo-derivefmt` lints melib and meli in CI).
 - `meli/src/conf/overrides.rs` is `@generated` by `meli/build.rs` from the settings structs in `meli/src/conf/{pager,listing,notifications,shortcuts,composing,tags,pgp}.rs`. Never hand-edit; to regenerate, touch the sentinel file `meli/src/conf/.rebuild.overrides.rs` and rebuild.
