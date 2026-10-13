@@ -19,11 +19,6 @@ all: cargo-check cargo-test-compiles cargo-test rustdoc-build rustdoc-test
 cargo-check:
 	@printf "cargo-check\n"
 	cargo check --all-features --all --tests --examples --benches --bins
-.PHONY: cargo-check-sequoia
-cargo-check-sequoia:
-	@printf "cargo-check-sequoia\n"
-	cargo check -p melib --features sequoia
-	cargo check -p meli --features sequoia
 .PHONY: cargo-test-compiles
 cargo-test-compiles:
 	@printf "cargo-test-compiles\n"

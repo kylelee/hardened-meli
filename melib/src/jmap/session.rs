@@ -29,7 +29,6 @@ use url::Url;
 use crate::jmap::{
     capabilities::{JmapContactsCapability, JmapMailCapability},
     methods::u64_zero,
-    capabilities::{JmapContactsCapability, JmapMailCapability},
     objects::{Account, Id, Object, State},
     url_template::RequestUrlTemplate,
 };

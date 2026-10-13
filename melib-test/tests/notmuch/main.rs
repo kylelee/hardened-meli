@@ -152,6 +152,7 @@ mod tests {
         library_file_path: Option<PathBuf>,
         acc_name: &str,
         event_consumer: BackendEventConsumer,
+        with_root_mailbox: bool,
     ) -> Result<(PathBuf, AccountSettings, Box<NotmuchDb>)> {
         let root_mailbox = temp_dir.path().join("INBOX");
         let sent_mailbox = temp_dir.path().join("INBOX").join("Sent");
@@ -210,10 +211,12 @@ other_email=test2@example.com;test3@example.com
         };
         let mut extra: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
 
-        extra.insert(
-            "root_mailbox".into(),
-            serde_json::Value::String(root_mailbox.display().to_string()),
-        );
+        if with_root_mailbox {
+            extra.insert(
+                "root_mailbox".into(),
+                serde_json::Value::String(root_mailbox.display().to_string()),
+            );
+        }
         if let Some(library_file_path) = library_file_path {
             extra.insert(
                 "library_file_path".into(),
@@ -290,6 +293,7 @@ other_email=test2@example.com;test3@example.com
             library_file_path,
             "notmuch",
             backend_event_consumer.clone(),
+            true,
         )
         .unwrap();
 
@@ -438,6 +442,7 @@ hello world.
             library_file_path,
             "notmuch",
             backend_event_consumer.clone(),
+            true,
         )
         .unwrap();
 
@@ -599,6 +604,7 @@ hello world 2.
             library_file_path,
             "notmuch",
             backend_event_consumer.clone(),
+            true,
         )
         .unwrap();
 

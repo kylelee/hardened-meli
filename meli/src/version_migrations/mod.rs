@@ -270,7 +270,6 @@ decl_version_mods! {
     v0_9_0::V0_9_0_ID => v0_9_0::V0_9_0,
     v0_10_0::V0_10_0_ID => v0_10_0::V0_10_0,
     v0_11_0::V0_11_0_ID => v0_11_0::V0_11_0,
-    v0_12_0::V0_12_0_ID => v0_12_0::V0_12_0,
 }
 
 use std::{
@@ -288,7 +287,7 @@ use crate::{conf::FileSettings, terminal::Ask};
 /// On compile-time if the `CARGO_PKG_VERSION` environment variable is
 /// available, the macro [`decl_version_map`] asserts that it matches the actual
 /// latest version string.
-pub const LATEST: VersionIdentifier = v0_12_0::V0_12_0_ID;
+pub const LATEST: VersionIdentifier = v0_11_0::V0_11_0_ID;
 
 /// An application version identifier with [Semantic Versioning v2.0.0]
 /// semantics.

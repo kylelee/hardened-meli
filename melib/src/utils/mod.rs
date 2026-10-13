@@ -284,26 +284,6 @@ pub mod hostname {
     }
 }
 
-/// Canonicalize line endings to `<CR><LF>` (`\r\n`).
-///
-/// RFC 5322 requires posted message data (NNTP submissions included) to use
-/// CRLF line endings; user-authored drafts may contain bare LF. Returns the
-/// input unchanged when no bare LF is present.
-pub fn canonicalize_crlf(input: &'_ [u8]) -> std::borrow::Cow<'_, [u8]> {
-    use crate::email::parser::BytesExt as _;
-
-    if input.is_empty() {
-        return std::borrow::Cow::Borrowed(input);
-    }
-    // Equivalent to the former `regex::bytes::Regex::new(r"[^\r]\n")` probe,
-    // without compiling (and `unwrap()`ing) a regex on every call; mirrors
-    // `email::pgp::convert_attachment_to_rfc_spec`.
-    if input.windows(2).any(|w| w[0] != b'\r' && w[1] == b'\n') {
-        return std::borrow::Cow::Owned(input.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"));
-    }
-    std::borrow::Cow::Borrowed(input)
-}
-
 #[macro_export]
 /// For use with `debug_struct` in `Debug` implementations to prevent stale type
 /// names after renaming or typos during compilation.

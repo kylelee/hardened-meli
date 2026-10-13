@@ -114,7 +114,6 @@ use capabilities::{
     JmapContactsCapability, JmapCoreCapability, JmapMailCapability, JmapSubmissionCapability,
 };
 use filters::Filter;
-use identity::Identity;
 
 #[cfg(test)]
 mod tests;
@@ -366,7 +365,6 @@ pub struct Store {
     pub id_store: Arc<FutureMutex<HashMap<EnvelopeHash, Id<email::EmailObject>>>>,
     pub reverse_id_store: Arc<FutureMutex<HashMap<Id<email::EmailObject>, EnvelopeHash>>>,
     pub blob_id_store: Arc<FutureMutex<HashMap<EnvelopeHash, Id<BlobObject>>>>,
-    pub identities: Arc<FutureMutex<IndexMap<Id<Identity>, Identity>>>,
     pub collection: Collection,
     pub mailboxes: Arc<RwLock<HashMap<MailboxHash, JmapMailbox>>>,
     pub mailboxes_index: Arc<RwLock<HashMap<MailboxHash, HashSet<EnvelopeHash>>>>,
@@ -380,11 +378,6 @@ pub struct Store {
 }
 
 impl Store {
-    /// Return the first identity.
-    pub async fn mail_identity_id(&self) -> Option<Id<Identity>> {
-        self.identities.lock().await.keys().next().cloned()
-    }
-
     pub async fn add_envelope(&self, obj: email::EmailObject) -> Envelope {
         let mut flags = Flag::default();
         let mut labels: IndexSet<TagHash> = IndexSet::new();
@@ -545,11 +538,6 @@ impl MailBackend for JmapType {
         let store = self.store.clone();
         let connection = self.connection.clone();
         Ok(Box::pin(try_fn_stream(|emitter| async move {
-            let mail_account_id = {
-                let conn = connection.lock().await;
-                let session_guard = conn.session_guard().await?;
-                session_guard.mail_account_id()?
-            };
             // Suggested minimum from RFC8620 Section 2 "The JMAP Session Resource" is 500.
             let batch_size: u64 = {
                 let core_capabilities = store.core_capabilities.lock().unwrap();
@@ -797,7 +785,7 @@ impl MailBackend for JmapType {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        flags: Option<(Flag, Vec<String>)>,
+        _flags: Option<Flag>,
     ) -> ResultFuture<()> {
         let store = self.store.clone();
         let connection = self.connection.clone();
@@ -846,7 +834,7 @@ impl MailBackend for JmapType {
             let creation_id: Id<email::EmailObject> = "1".to_string().into();
 
             let import_call: email::EmailImport = email::EmailImport::new()
-                .account_id(mail_account_id.clone())
+                .account_id(mail_account_id)
                 .emails(indexmap! {
                     creation_id.clone() => email::EmailImportObject::new()
                     .blob_id(upload_response.blob_id)
@@ -854,6 +842,7 @@ impl MailBackend for JmapType {
                         mailbox_id => true
                     })
                 });
+
             req.add_call(&import_call).await;
 
             let res_text = conn
@@ -869,13 +858,7 @@ impl MailBackend for JmapType {
                 }
                 Ok(s) => s,
             };
-            let email::EmailImportResponse {
-                account_id: _,
-                old_state: _,
-                new_state,
-                not_created,
-                created,
-            } = email::EmailImportResponse::try_from(v.take_first()?).map_err(|err| {
+            let m = email::EmailImportResponse::try_from(v.take_first()?).map_err(|err| {
                 let ierr: Result<email::EmailImportError> = deserialize_from_str(&res_text);
                 if let Ok(err) = ierr {
                     Error::new(format!("Could not save message: {err:?}"))
@@ -883,81 +866,9 @@ impl MailBackend for JmapType {
                     err
                 }
             })?;
-            if let Some(event) = conn.email_changed(Some(new_state)).await? {
-                conn.add_backend_event(event);
-            }
 
-            if let Some(err) = not_created.and_then(|m| m.get(&creation_id).cloned()) {
+            if let Some(err) = m.not_created.and_then(|m| m.get(&creation_id).cloned()) {
                 return Err(Error::new(format!("Could not save message: {err:?}")));
-            }
-            let Some(created_id) = created.and_then(|m| m.get_index(0).map(|(id, _)| id.clone()))
-            else {
-                return Ok(());
-            };
-            if let Some((flags, tags)) = flags {
-                let mut req = Request::new(conn.request_no.clone());
-                let mut update_map: IndexMap<Argument<Id<email::EmailObject>>, Value> =
-                    IndexMap::default();
-                let mut update_keywords: IndexMap<String, Value> = IndexMap::default();
-                for f in flags.iter() {
-                    update_keywords.insert(
-                        format!(
-                            "keywords/{}",
-                            match f {
-                                Flag::DRAFT => "$draft",
-                                Flag::FLAGGED => "$flagged",
-                                Flag::SEEN => "$seen",
-                                Flag::REPLIED => "$answered",
-                                Flag::TRASHED => "$junk",
-                                Flag::PASSED => "$passed",
-                                _ => continue, // [ref:VERIFY]
-                            }
-                        ),
-                        serde_json::json!(true),
-                    );
-                }
-                for tag in tags {
-                    update_keywords.insert(format!("keywords/{tag}"), serde_json::json!(true));
-                }
-                let state = conn.store.email_state.lock().await.clone();
-                update_map.insert(
-                    Argument::from(created_id),
-                    serde_json::json!(update_keywords.clone()),
-                );
-                let email_set_call = email::EmailSet::new(
-                    Set::<email::EmailObject>::new(state)
-                        .account_id(mail_account_id.clone())
-                        .update(Some(update_map)),
-                );
-                req.add_call(&email_set_call).await;
-                let res_text = conn
-                    .post_async(None, serde_json::to_string(&req)?)
-                    .await?
-                    .text()
-                    .await?;
-
-                let mut v: MethodResponse = match deserialize_from_str(&res_text) {
-                    Err(err) => {
-                        _ = conn.store.online_status.set(None, Err(err.clone())).await;
-                        return Err(err);
-                    }
-                    Ok(s) => s,
-                };
-                let SetResponse {
-                    not_updated,
-                    new_state,
-                    ..
-                } = SetResponse::<email::EmailObject>::try_from(v.take_first()?)?;
-                if let Some(event) = conn.email_changed(Some(new_state)).await? {
-                    conn.add_backend_event(event);
-                }
-                if let Some(ids) = not_updated {
-                    if !ids.is_empty() {
-                        tracing::error!(
-                            "Could not set flags/keywords to newly imported e-mail. This might                              be a bug."
-                        );
-                    }
-                }
             }
             Ok(())
         }))
@@ -1423,49 +1334,45 @@ impl MailBackend for JmapType {
             let mut update_keywords: IndexMap<String, Value> = IndexMap::default();
             for op in flags.iter() {
                 match op {
-                    FlagOp::Set(flags) => {
-                        for f in flags.iter() {
-                            update_keywords.insert(
-                                format!(
-                                    "keywords/{}",
-                                    match f {
-                                        Flag::DRAFT => "$draft",
-                                        Flag::FLAGGED => "$flagged",
-                                        Flag::SEEN => "$seen",
-                                        Flag::REPLIED => "$answered",
-                                        Flag::TRASHED => "$junk",
-                                        Flag::PASSED => "$passed",
-                                        _ => continue, // [ref:VERIFY]
-                                    }
-                                ),
-                                serde_json::json!(true),
-                            );
-                        }
+                    FlagOp::Set(f) => {
+                        update_keywords.insert(
+                            format!(
+                                "keywords/{}",
+                                match *f {
+                                    Flag::DRAFT => "$draft",
+                                    Flag::FLAGGED => "$flagged",
+                                    Flag::SEEN => "$seen",
+                                    Flag::REPLIED => "$answered",
+                                    Flag::TRASHED => "$junk",
+                                    Flag::PASSED => "$passed",
+                                    _ => continue, // [ref:VERIFY]
+                                }
+                            ),
+                            serde_json::json!(true),
+                        );
                     }
-                    FlagOp::UnSet(flags) => {
-                        for f in flags.iter() {
-                            update_keywords.insert(
-                                format!(
-                                    "keywords/{}",
-                                    match f {
-                                        Flag::DRAFT => "$draft",
-                                        Flag::FLAGGED => "$flagged",
-                                        Flag::SEEN => "$seen",
-                                        Flag::REPLIED => "$answered",
-                                        Flag::TRASHED => "$junk",
-                                        Flag::PASSED => "$passed",
-                                        _ => continue, // [ref:VERIFY]
-                                    }
-                                ),
-                                serde_json::json!(null),
-                            );
-                        }
+                    FlagOp::UnSet(f) => {
+                        update_keywords.insert(
+                            format!(
+                                "keywords/{}",
+                                match *f {
+                                    Flag::DRAFT => "$draft",
+                                    Flag::FLAGGED => "$flagged",
+                                    Flag::SEEN => "$seen",
+                                    Flag::REPLIED => "$answered",
+                                    Flag::TRASHED => "$junk",
+                                    Flag::PASSED => "$passed",
+                                    _ => continue, // [ref:VERIFY]
+                                }
+                            ),
+                            serde_json::json!(null),
+                        );
                     }
-                    FlagOp::SetTag(tag) => {
-                        update_keywords.insert(format!("keywords/{tag}"), serde_json::json!(true));
+                    FlagOp::SetTag(t) => {
+                        update_keywords.insert(format!("keywords/{t}"), serde_json::json!(true));
                     }
-                    FlagOp::UnSetTag(tag) => {
-                        update_keywords.insert(format!("keywords/{tag}"), serde_json::json!(null));
+                    FlagOp::UnSetTag(t) => {
+                        update_keywords.insert(format!("keywords/{t}"), serde_json::json!(null));
                     }
                 }
             }
@@ -1857,70 +1764,6 @@ impl MailBackend for JmapType {
             Ok(())
         }))
     }
-
-    fn contact_backend(
-        &mut self,
-    ) -> ResultFuture<Box<dyn crate::contacts::backend::ContactBackend>> {
-        let server_conf = self.server_conf.clone();
-        let store = self.store.clone();
-        let connection = self.connection.clone();
-        Ok(Box::pin(async move {
-            {
-                let mut conn = timeout(server_conf.timeout, connection.lock()).await?;
-                conn.connect().await?;
-            }
-            let (account_id, capabilities) = {
-                let conn = connection.lock().await;
-                let session_guard = conn.session_guard().await?;
-                let core_capabilities = store.core_capabilities.lock().unwrap();
-                if !core_capabilities.contains_key(JmapContactsCapability::uri()) {
-                    return Err(Error::new(
-                        "Server does not support JSON Meta Application Protocol (JMAP) for \
-                         Contacts",
-                    )
-                    .set_kind(ErrorKind::NotSupported));
-                }
-                let account_id = session_guard.contacts_account_id()?;
-                let account = session_guard.accounts.get(&account_id).ok_or_else(|| {
-                    Error::new(format!(
-                        "JMAP Server session does not have primary contact account {account_id} \
-                         in `accounts` field. It has: {:?}",
-                        session_guard.accounts
-                    ))
-                    .set_kind(ErrorKind::Bug)
-                })?;
-                let account_caps = account
-                    .account_capabilities
-                    .get(JmapContactsCapability::uri())
-                    .ok_or_else(|| {
-                        Error::new(format!(
-                            "JMAP Server session does not have primary contact account \
-                             {account_id} capabilities for {} in `accounts` field. It has: {:?}",
-                            JmapContactsCapability::uri(),
-                            account.account_capabilities
-                        ))
-                        .set_kind(ErrorKind::Bug)
-                    })?;
-                let account_caps =
-                    serde_json::from_value(account_caps.clone()).map_err(|err| {
-                        Error::new(format!(
-                            "Could not deserialize contacts Capabilities object from Session \
-                             object: {account_caps:?}"
-                        ))
-                        .set_kind(ErrorKind::Bug)
-                        .set_source(Some(Arc::new(err)))
-                    })?;
-                (account_id, account_caps)
-            };
-            Ok(Box::new(contacts::JmapContacts {
-                account_id,
-                capabilities,
-                server_conf,
-                connection,
-                store,
-            }) as Box<dyn crate::contacts::backend::ContactBackend>)
-        }))
-    }
 }
 
 impl JmapType {
@@ -1955,7 +1798,6 @@ impl JmapType {
             mailboxes_index: Default::default(),
             mailbox_state: Default::default(),
             email_state: Default::default(),
-            identities: Default::default(),
         });
 
         Ok(Box::new(Self {

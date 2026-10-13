@@ -23,7 +23,7 @@
 //! Basic mail account configuration to use with
 //! [`backends`](./backends/index.html)
 
-use std::borrow::Cow;
+use std::{borrow::Cow, path::Path};
 
 use indexmap::IndexMap;
 
@@ -31,6 +31,7 @@ use crate::{
     backends::SpecialUsageMailbox,
     email::Address,
     error::{Error, ErrorKind, Result},
+    ShellExpandTrait,
 };
 
 mod field_types;
@@ -185,6 +186,16 @@ impl AccountSettings {
             .collect()
     }
 
+    pub fn vcard_folder(&self) -> Option<&str> {
+        self.extra.get("vcard_folder").and_then(|v| v.as_str())
+    }
+
+    pub fn notmuch_address_book_query(&self) -> Option<&str> {
+        self.extra
+            .get("notmuch_address_book_query")
+            .and_then(|v| v.as_str())
+    }
+
     /// Look up an `extra` value as a string slice.
     ///
     /// Returns `None` if the key is absent or the value is not a string.
@@ -250,6 +261,74 @@ impl AccountSettings {
                  `{ command = \"...\" }` table)",
             )),
         }
+    }
+
+    pub fn validate_config(&mut self) -> Result<()> {
+        {
+            if let Some(folder) = self
+                .extra
+                .swap_remove("vcard_folder")
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    serde_json::Value::Bool(b) => Some(b.to_string()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                })
+            {
+                let path = Path::new(&folder).expand();
+
+                if !matches!(path.try_exists(), Ok(true)) {
+                    return Err(Error::new(format!(
+                        "`vcard_folder` path {} does not exist",
+                        path.display()
+                    ))
+                    .set_details("`vcard_folder` must be a path of a folder containing .vcf files")
+                    .set_kind(ErrorKind::Configuration));
+                }
+                if !path.is_dir() {
+                    return Err(Error::new(format!(
+                        "`vcard_folder` path {} is not a directory",
+                        path.display()
+                    ))
+                    .set_details("`vcard_folder` must be a path of a folder containing .vcf files")
+                    .set_kind(ErrorKind::Configuration));
+                }
+            }
+            _ = self.extra.swap_remove("notmuch_address_book_query");
+        }
+        {
+            if let Some(mutt_alias_file) =
+                self.extra
+                    .swap_remove("mutt_alias_file")
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s),
+                        serde_json::Value::Bool(b) => Some(b.to_string()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    })
+            {
+                let path = Path::new(&mutt_alias_file).expand();
+
+                if !matches!(path.try_exists(), Ok(true)) {
+                    return Err(Error::new(format!(
+                        "`mutt_alias_file` path {} does not exist",
+                        path.display()
+                    ))
+                    .set_details("`mutt_alias_file` must be an existing path of a mutt alias file")
+                    .set_kind(ErrorKind::Configuration));
+                }
+                if !path.is_file() {
+                    return Err(Error::new(format!(
+                        "`mutt_alias_file` path {} is not a file",
+                        path.display()
+                    ))
+                    .set_details("`mutt_alias_file` must be a path of a mutt alias file")
+                    .set_kind(ErrorKind::Configuration));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

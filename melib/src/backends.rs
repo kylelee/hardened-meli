@@ -565,7 +565,7 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        flags: Option<(Flag, Vec<String>)>,
+        flags: Option<Flag>,
     ) -> ResultFuture<()>;
 
     /// Save a message like [`MailBackend::save`], additionally applying
@@ -585,7 +585,7 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
 
     fn save_batch(
         &mut self,
-        batch: Vec<(Vec<u8>, MailboxHash, Option<(Flag, Vec<String>)>)>,
+        batch: Vec<(Vec<u8>, MailboxHash, Option<Flag>)>,
     ) -> ResultStream<Result<()>> {
         let mut futures = batch
             .into_iter()
@@ -699,15 +699,6 @@ pub trait MailBackend: ::std::fmt::Debug + Send + Sync {
             }
             Ok(())
         })))
-    }
-
-    fn contact_backend(
-        &mut self,
-    ) -> ResultFuture<Box<dyn crate::contacts::backend::ContactBackend>> {
-        Err(
-            Error::new("Contact support not implemented in this backend.")
-                .set_kind(ErrorKind::NotImplemented),
-        )
     }
 }
 

@@ -222,8 +222,6 @@ pub struct FileAccount {
     pub contacts: Option<IndexMap<String, melib::conf::ContactBackendConf>>,
     #[serde(default = "none", skip_serializing_if = "Option::is_none")]
     pub refresh_command: Option<String>,
-    #[serde(default)]
-    pub contacts: IndexMap<String, melib::conf::ContactBackendConf>,
     #[serde(flatten)]
     pub conf_override: MailUIConf,
     #[serde(flatten)]
@@ -720,6 +718,7 @@ impl FileSettings {
                     .collect(),
                 extra: extra.into_iter().collect(),
             };
+            s.validate_config()?;
             backends.validate_config(&lowercase_format, &mut s)?;
             // Refuse to start if the account's SMTP mailer disables TLS
             // certificate/hostname validation (CVE-2009-3765 hardening).
@@ -834,6 +833,7 @@ impl FileSettings {
                     .collect(),
                 extra: extra.into_iter().collect(),
             };
+            s.validate_config()?;
             backends.validate_config(&lowercase_format, &mut s)?;
             // Refuse to start if the account's SMTP mailer disables TLS
             // certificate/hostname validation (CVE-2009-3765 hardening).

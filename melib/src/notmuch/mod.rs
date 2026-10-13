@@ -161,19 +161,6 @@ impl DbConnection {
         Ok(ret)
     }
 
-    /// Return revision and UUID of database.
-    pub fn get_revision(&self) -> (::std::os::raw::c_ulong, CString) {
-        let mut uuid = std::ptr::null();
-        let revision = unsafe {
-            (self.lib.database_get_revision())(self.inner.lock().unwrap().as_mut(), &raw mut uuid)
-        };
-        assert!(!uuid.is_null());
-        // SAFETY: libnotmuch guarantees this is a NUL-terminated opaque string.
-        let uuid = unsafe { std::ffi::CStr::from_ptr(uuid).into() };
-
-        (revision, uuid)
-    }
-
     pub fn reopen(&mut self, write: bool) -> Result<()> {
         unsafe {
             try_call!(

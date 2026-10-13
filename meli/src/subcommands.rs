@@ -30,9 +30,9 @@ use crossbeam::channel::{Receiver, Sender};
 use melib::{utils::futures::timeout, Result, ShellExpandTrait};
 
 use crate::{
-    args::{MigrationOpt, PathOrStdio, ToolOpt},
+    args::{PathOrStdio, ToolOpt},
     conf::preprocessing::get_included_configs,
-    version_migrations, *,
+    *,
 };
 
 pub fn create_config(path: Option<PathOrStdio>) -> Result<()> {
@@ -122,8 +122,6 @@ pub fn compiled_with() -> Result<()> {
     println!("cli-docs");
     #[cfg(feature = "gpgme")]
     println!("gpgme");
-    #[cfg(feature = "sequoia")]
-    println!("sequoia");
     Ok(())
 }
 

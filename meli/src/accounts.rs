@@ -334,6 +334,23 @@ impl Account {
             event_consumer,
         )?;
 
+        let data_dir = xdg::BaseDirectories::with_profile("meli", name.as_ref());
+        let mut contacts = Contacts::with_account(settings.account());
+
+        if let Ok(data) = data_dir.place_data_file("contacts") {
+            if data.exists() {
+                let reader = std::io::BufReader::new(std::fs::File::open(data).unwrap());
+                let result: std::result::Result<Contacts, _> = serde_json::from_reader(reader);
+                if let Ok(data_t) = result {
+                    for (id, c) in data_t.cards {
+                        if !contacts.card_exists(id) && !c.external_resource() {
+                            contacts.add_card(c);
+                        }
+                    }
+                }
+            }
+        };
+
         if settings.conf.search_backend == SearchBackend::Auto {
             if backend.capabilities().supports_search {
                 settings.conf.search_backend = SearchBackend::None;
@@ -1143,7 +1160,7 @@ impl Account {
         &mut self,
         bytes: &[u8],
         mailbox_type: SpecialUsageMailbox,
-        flags: (Flag, Vec<String>),
+        flags: Flag,
     ) -> Result<MailboxHash> {
         let mut saved_at: Option<MailboxHash> = None;
         for mailbox in &[
@@ -1152,7 +1169,7 @@ impl Account {
             self.special_use_mailbox(SpecialUsageMailbox::Normal),
         ] {
             if let Some(mailbox_hash) = mailbox {
-                if let Err(err) = self.save(bytes, *mailbox_hash, Some(flags.clone())) {
+                if let Err(err) = self.save(bytes, *mailbox_hash, Some(flags)) {
                     tracing::error!("Could not save in '{}' mailbox: {}.", *mailbox_hash, err);
                 } else {
                     saved_at = Some(*mailbox_hash);
@@ -1184,7 +1201,7 @@ impl Account {
         &mut self,
         bytes: &[u8],
         mailbox_hash: MailboxHash,
-        flags: Option<(Flag, Vec<String>)>,
+        flags: Option<Flag>,
     ) -> Result<()> {
         if self.settings.account.read_only {
             return Err(Error::new(format!("Account {} is read-only.", self.name)));
@@ -2202,9 +2219,6 @@ impl Account {
                                 on_finish.take().unwrap(),
                             )));
                     }
-                }
-                JobRequest::Contacts(job) => {
-                    return self.process_contact_event(job_id, job);
                 }
             }
             true

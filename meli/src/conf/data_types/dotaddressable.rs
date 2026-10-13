@@ -57,7 +57,6 @@ impl DotAddressable for usize {}
 impl DotAddressable for Query {}
 impl DotAddressable for LogLevel {}
 impl DotAddressable for PathBuf {}
-impl DotAddressable for serde_json::Value {}
 impl DotAddressable for melib::conf::ToggleFlag {}
 impl DotAddressable for melib::conf::ActionFlag {}
 impl DotAddressable for melib::conf::Secret {}
@@ -301,17 +300,7 @@ impl DotAddressable for melib::MailboxConf {
                     "subscribe" => self.subscribe.lookup(field, tail),
                     "ignore" => self.ignore.lookup(field, tail),
                     "usage" => self.usage.lookup(field, tail),
-                    "extra" => {
-                        // `extra` is an IndexMap<String, serde_json::Value>;
-                        // look up by key, return the raw value as TOML.
-                        let key: &str = field;
-                        match self.extra.get(key) {
-                            Some(v) => Ok(toml::Value::try_from(v)
-                                .map_err(|err| err.to_string())?
-                                .to_string()),
-                            None => Err(Error::new(format!("extra has no key named {key}"))),
-                        }
-                    }
+                    "extra" => self.extra.lookup(field, tail),
                     other => Err(Error::new(format!(
                         "{parent_field} has no field named {other}"
                     ))),

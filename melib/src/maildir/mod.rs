@@ -317,7 +317,7 @@ impl MailBackend for MaildirType {
         &mut self,
         bytes: Vec<u8>,
         mailbox_hash: MailboxHash,
-        flags: Option<(Flag, Vec<String>)>,
+        flags: Option<Flag>,
     ) -> ResultFuture<()> {
         let path = {
             let mailboxes_lck = self.cache.mailboxes.lock().unwrap();
@@ -330,7 +330,7 @@ impl MailBackend for MaildirType {
         let sender = self.event_consumer.clone();
         let mut cache = self.cache.clone();
         Ok(Box::pin(async move {
-            let path = Self::save_to_mailbox(path, bytes, flags.map(|(f, _)| f))?;
+            let path = Self::save_to_mailbox(path, bytes, flags)?;
             let (m, env) = cache.create(&path)?;
             debug_assert_eq!(m, mailbox_hash);
             (sender)(

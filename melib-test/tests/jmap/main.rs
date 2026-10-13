@@ -52,22 +52,6 @@ fn test_jmap_watch() {
     });
 }
 
-#[test]
-fn test_jmap_operations() {
-    let _env = env_lock();
-    tokio_test::block_on(async {
-        tests::run_jmap_operations();
-    });
-}
-
-#[test]
-fn test_jmap_contacts() {
-    let _env = env_lock();
-    tokio_test::block_on(async {
-        tests::run_jmap_contacts();
-    });
-}
-
 pub mod server {
     use std::{
         net::{SocketAddr, TcpListener},
@@ -125,18 +109,6 @@ pub mod server {
         Updated(Id<OBJ>),
         Destroyed(Id<OBJ>),
     }
-    /// [`Flag`] 位到 JMAP 关键字字符串的映射，供测试服务器关键字表记账。
-    fn flag_keyword(flag: Flag) -> &'static str {
-        match flag {
-            Flag::DRAFT => "$draft",
-            Flag::FLAGGED => "$flagged",
-            Flag::SEEN => "$seen",
-            Flag::REPLIED => "$answered",
-            Flag::TRASHED => "$junk",
-            Flag::PASSED => "$passed",
-            _ => unimplemented!("Flag {flag:?} 没有 JMAP 关键字映射"),
-        }
-    }
 
     /// Server state with only one mailbox (INBOX).
     pub struct ServerState {
@@ -192,8 +164,7 @@ pub mod server {
            "urn:ietf:params:jmap:mail": {{
              "maxMailboxesPerEmail": null,
              "maxMailboxDepth": 10
-           }},
-           "urn:ietf:params:jmap:contacts": {{}}
+           }}
          }}
        }}
      }},
@@ -334,7 +305,7 @@ pub mod server {
                                 eprintln!("Parsed Email/get object {get:?}");
                                 let mut not_found = vec![];
                                 eprintln!("get.ids = {:?}", get.ids);
-                                let mut list = match get.ids {
+                                let list = match get.ids {
                                     None => {
                                         // Return all.
                                         self.envelopes
@@ -461,13 +432,6 @@ pub mod server {
                                                             .clone(),
                                                         true,
                                                     );
-                                                    for (kw, on) in &self.keywords[&email_id] {
-                                                        if *on {
-                                                            email_obj
-                                                                .keywords
-                                                                .insert(kw.clone(), true);
-                                                        }
-                                                    }
                                                     Some(email_obj)
                                                 } else {
                                                     not_found.push(email_id);
@@ -477,11 +441,6 @@ pub mod server {
                                             .collect::<Vec<email::EmailObject>>()
                                     }
                                 };
-                                for email_obj in list.iter_mut() {
-                                    if let Some(keywords) = self.keywords.get(&email_obj.id) {
-                                        email_obj.keywords = keywords.clone();
-                                    }
-                                }
                                 let response: GetResponse<email::EmailObject> = GetResponse {
                                     account_id: get.account_id,
                                     state: self.email_state.clone(),
@@ -576,16 +535,16 @@ pub mod server {
                             let mut created = indexmap::indexmap! {};
                             let updated = indexmap::indexmap! {};
                             let destroyed = vec![];
-                            let old_state = self.identity_state.clone();
-                            let mut new_state = self.identity_state.clone();
+                            let mut update_state = false;
                             if let Some(ref if_in_state) = if_in_state {
                                 if *if_in_state != self.identity_state {
                                     unimplemented!();
                                 }
                             }
                             for (id, mut obj) in create.unwrap_or_default() {
+                                update_state = true;
                                 let argument::Argument::Value(id) = id else {
-                                    panic!("unimplemented");
+                                    unreachable!();
                                 };
                                 obj.id = id.clone();
                                 self.identities.insert(id.clone(), obj);
@@ -599,11 +558,15 @@ pub mod server {
                             // for _ in destroy.unwrap_or_default() {
                             //     unimplemented!();
                             // }
-                            let old_state = if new_state != old_state {
-                                Some(old_state)
+                            let old_state = if update_state {
+                                Some(std::mem::replace(
+                                    &mut self.identity_state,
+                                    State::new_random(),
+                                ))
                             } else {
                                 None
                             };
+                            let new_state = self.identity_state.clone();
                             let response: SetResponse<identity::Identity> = SetResponse {
                                 account_id,
                                 old_state,
@@ -807,134 +770,6 @@ pub mod server {
                             };
                             let new_state = self.mailbox_state.clone();
                             let response: SetResponse<mailbox::MailboxObject> = SetResponse {
-                                account_id,
-                                old_state,
-                                new_state,
-                                created: if created.is_empty() {
-                                    None
-                                } else {
-                                    Some(created)
-                                },
-                                updated: if updated.is_empty() {
-                                    None
-                                } else {
-                                    Some(updated)
-                                },
-                                destroyed: if destroyed.is_empty() {
-                                    None
-                                } else {
-                                    Some(destroyed)
-                                },
-                                not_created: None,
-                                not_updated: None,
-                                not_destroyed: None,
-                            };
-                            eprintln!("Sending {id} {type} response: {response:?}");
-                            responses
-                                .method_responses
-                                .insert(id.clone(), serde_json::json! {[r#type, response, id]});
-                        }
-                        "Email" => {
-                            let set = serde_json::value::from_value(body).unwrap();
-                            eprintln!("Parsed Email/set object {set:?}");
-                            let Set {
-                                account_id,
-                                if_in_state,
-                                create,
-                                update,
-                                destroy,
-                            }: Set<email::EmailObject> = set;
-                            let created = indexmap::indexmap! {};
-                            let mut updated = indexmap::indexmap! {};
-                            let destroyed = vec![];
-                            if let Some(ref if_in_state) = if_in_state {
-                                if *if_in_state != self.email_state {
-                                    panic!(
-                                        "if_in_state == {if_in_state} while current state is \
-                                         {:?}",
-                                        self.email_state
-                                    );
-                                }
-                            }
-                            if create.is_some() {
-                                panic!("unimplemented");
-                            }
-                            let old_state = self.email_state.clone();
-                            let mut new_state = self.email_state.clone();
-                            tracing::debug!("updates: {update:?}");
-                            for (id, obj) in update.unwrap_or_default() {
-                                let Argument::Value(id) = id else {
-                                    panic!("unimplemented");
-                                };
-                                let update: IndexMap<String, Value> =
-                                    serde_json::value::from_value(obj).unwrap();
-                                for (u, v) in update {
-                                    let Some(keyword) = u.strip_prefix("keywords/") else {
-                                        panic!("unimplemented update type: {u:?}");
-                                    };
-                                    let set: bool = serde_json::from_value(v).expect("bool");
-                                    let flag_op = match keyword {
-                                        "$draft" => {
-                                            if set {
-                                                FlagOp::Set(Flag::DRAFT)
-                                            } else {
-                                                FlagOp::UnSet(Flag::DRAFT)
-                                            }
-                                        }
-                                        "$flagged" => {
-                                            if set {
-                                                FlagOp::Set(Flag::FLAGGED)
-                                            } else {
-                                                FlagOp::UnSet(Flag::FLAGGED)
-                                            }
-                                        }
-                                        "$seen" => {
-                                            if set {
-                                                FlagOp::Set(Flag::SEEN)
-                                            } else {
-                                                FlagOp::UnSet(Flag::SEEN)
-                                            }
-                                        }
-                                        "$answered" => {
-                                            if set {
-                                                FlagOp::Set(Flag::REPLIED)
-                                            } else {
-                                                FlagOp::UnSet(Flag::REPLIED)
-                                            }
-                                        }
-                                        "$junk" => {
-                                            if set {
-                                                FlagOp::Set(Flag::TRASHED)
-                                            } else {
-                                                FlagOp::UnSet(Flag::TRASHED)
-                                            }
-                                        }
-                                        "$passed" => {
-                                            if set {
-                                                FlagOp::Set(Flag::PASSED)
-                                            } else {
-                                                FlagOp::UnSet(Flag::PASSED)
-                                            }
-                                        }
-                                        tag => {
-                                            if set {
-                                                FlagOp::SetTag(tag.to_string())
-                                            } else {
-                                                FlagOp::UnSetTag(tag.to_string())
-                                            }
-                                        }
-                                    };
-                                    new_state = self.set_flags(EmailObjRef::Id(&id), flag_op);
-                                }
-                                updated.insert(id.clone(), None);
-                            }
-                            assert_eq!(destroy.unwrap_or_default().len(), 0);
-                            let old_state = if new_state != old_state {
-                                Some(old_state)
-                            } else {
-                                None
-                            };
-                            let response: SetResponse<email::EmailObject> = SetResponse {
                                 account_id,
                                 old_state,
                                 new_state,
@@ -1712,220 +1547,6 @@ hello world.
     /// Test that `JmapType::watch` `Stream` returns the expected `Refresh`
     /// events when altering the mail store in the JMAP server, using
     /// eventSourceUrl-type instead of polling.
-    /// Test various data operations: saving an e-mail with both flags and
-    /// tags must round-trip through upload, `Email/import` and `Email/set`
-    /// keyword updates.
-    pub(crate) fn run_jmap_operations() {
-        melib_test::init_test_logging();
-        let temp_dir = TempDir::new().unwrap();
-        let backend_event_queue =
-            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
-
-        let backend_event_consumer = {
-            let backend_event_queue = Arc::clone(&backend_event_queue);
-
-            BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
-                backend_event_queue.lock().unwrap().push_back((ah, be));
-            }))
-        };
-
-        for var in [
-            "HOME",
-            "XDG_CACHE_HOME",
-            "XDG_STATE_HOME",
-            "XDG_CONFIG_DIRS",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_DIRS",
-            "XDG_DATA_HOME",
-        ] {
-            std::env::remove_var(var);
-        }
-        for (var, dir) in [
-            ("HOME", temp_dir.path().to_path_buf()),
-            ("XDG_CACHE_HOME", temp_dir.path().join(".cache")),
-            ("XDG_STATE_HOME", temp_dir.path().join(".local/state")),
-            ("XDG_CONFIG_HOME", temp_dir.path().join(".config")),
-            ("XDG_DATA_HOME", temp_dir.path().join(".local/share")),
-        ] {
-            std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
-                panic!("Could not create {} path, {}: {}", var, dir.display(), err);
-            });
-            std::env::set_var(var, &dir);
-        }
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let local_addr = listener.local_addr().unwrap();
-        let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "jmap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_url".to_string(),
-                    serde_json::Value::String(format!(
-                        "http://{}:{}",
-                        local_addr.ip(),
-                        local_addr.port()
-                    )),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "use_token".to_string(),
-                    serde_json::Value::String("true".to_string()),
-                );
-
-                m
-            },
-        };
-
-        let mut jmap =
-            JmapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
-        let (server_event_sender, server_event_receiver) = unbounded();
-        let server = JmapServerStream::new(
-            smol::Async::new(listener).unwrap(),
-            server_event_receiver,
-            local_addr,
-        );
-        std::thread::spawn(move || {
-            block_on(server.loop_handler()).unwrap();
-        });
-        eprintln!(
-            "Assert that account is not online because we have not performed any operations yet."
-        );
-        assert_eq!(
-            &block_on(jmap.is_online().unwrap()).unwrap_err().to_string(),
-            "Account is uninitialised."
-        );
-        let mailboxes = block_on(jmap.mailboxes().unwrap()).unwrap();
-        assert_eq!(
-            mailboxes.len(),
-            1,
-            "Expected one mailbox, Inbox. Got: {mailboxes:?}"
-        );
-        let inbox_hash = *mailboxes.keys().next().unwrap();
-        eprintln!("Inbox hash: {inbox_hash:?}");
-        {
-            let events = backend_event_queue
-                .lock()
-                .unwrap()
-                .drain(..)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                events.len(),
-                0,
-                "Unexpected events without having performed any changes: {events:?}"
-            );
-        }
-        eprintln!("Refresh account and assert that no events arrive.");
-        block_on(jmap.refresh(inbox_hash).unwrap()).unwrap();
-        {
-            let events = backend_event_queue
-                .lock()
-                .unwrap()
-                .drain(..)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                events.len(),
-                0,
-                "Unexpected events after refreshing without having performed any changes: \
-                 {events:?}"
-            );
-        }
-
-        eprintln!(
-            "Add new e-mail on server store and assert that a refresh results in a Refresh \
-             Create event."
-        );
-        let new_mail = Box::new(
-            Mail::new(
-                br#"From: "some name" <some@example.com>
-To: "me" <myself@example.com>
-Cc:
-Subject: RE: your e-mail
-Message-ID: <h2g7f.z0gy2pgaen5m@example.com>
-Content-Type: text/plain
-
-hello world.
-"#
-                .to_vec(),
-                None,
-            )
-            .unwrap(),
-        );
-        let fetch_result: Vec<_> = block_on(
-            jmap.fetch(inbox_hash)
-                .unwrap()
-                .collect::<Vec<Result<Vec<Envelope>>>>(),
-        );
-        for res in fetch_result {
-            let res = res.unwrap();
-            assert_eq!(res, vec![]);
-        }
-        block_on(
-            jmap.save(
-                new_mail.bytes.clone(),
-                inbox_hash,
-                Some((Flag::DRAFT, vec!["sent".to_string()])),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        block_on(jmap.refresh(inbox_hash).unwrap()).unwrap();
-        {
-            let events = backend_event_queue
-                .lock()
-                .unwrap()
-                .drain(..)
-                .collect::<Vec<_>>();
-            eprintln!("got events: {events:?}");
-        };
-        let fetch_result: Vec<_> = block_on(
-            jmap.fetch(inbox_hash)
-                .unwrap()
-                .collect::<Vec<Result<Vec<Envelope>>>>(),
-        );
-        let collection = jmap.collection();
-        let fetched = fetch_result
-            .into_iter()
-            .flat_map(|res| res.unwrap())
-            .collect::<Vec<Envelope>>();
-        assert_eq!(fetched.len(), 1);
-        {
-            let tag_index = collection.tag_index.read().unwrap();
-            assert_eq!(fetched[0].flags(), Flag::DRAFT);
-            assert_eq!(
-                fetched[0]
-                    .tags()
-                    .into_iter()
-                    .map(|t| &tag_index[t])
-                    .collect::<Vec<_>>(),
-                vec!["sent"]
-            );
-        }
-        server_event_sender
-            .unbounded_send(ServerEvent::Quit)
-            .unwrap();
-    }
-
     pub(crate) fn run_jmap_watch() {
         melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
@@ -2173,125 +1794,5 @@ hello world.
         })
         .join()
         .unwrap();
-    }
-    /// Test that `JmapType::contact_backend` wires a JMAP contacts backend
-    /// against the mock server's session object: the session advertises the
-    /// contacts capability and a primary contacts account, so
-    /// `contact_backend()` must resolve into a `JmapContacts` instance whose
-    /// reported contact capabilities match the mock server's (empty) contacts
-    /// capability object, all offline.
-    pub(crate) fn run_jmap_contacts() {
-        melib_test::init_test_logging();
-        let temp_dir = TempDir::new().unwrap();
-        let backend_event_consumer = {
-            BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
-            }))
-        };
-
-        for var in [
-            "HOME",
-            "XDG_CACHE_HOME",
-            "XDG_STATE_HOME",
-            "XDG_CONFIG_DIRS",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_DIRS",
-            "XDG_DATA_HOME",
-        ] {
-            std::env::remove_var(var);
-        }
-        for (var, dir) in [
-            ("HOME", temp_dir.path().to_path_buf()),
-            ("XDG_CACHE_HOME", temp_dir.path().join(".cache")),
-            ("XDG_STATE_HOME", temp_dir.path().join(".local/state")),
-            ("XDG_CONFIG_HOME", temp_dir.path().join(".config")),
-            ("XDG_DATA_HOME", temp_dir.path().join(".local/share")),
-        ] {
-            std::fs::create_dir_all(&dir).unwrap_or_else(|err| {
-                panic!("Could not create {} path, {}: {}", var, dir.display(), err);
-            });
-            std::env::set_var(var, &dir);
-        }
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let local_addr = listener.local_addr().unwrap();
-        let account_conf = AccountSettings {
-            name: "test".to_string(),
-            root_mailbox: "INBOX".to_string(),
-            format: "jmap".to_string(),
-            identity: "user@example.com".to_string(),
-            extra_identities: vec![],
-            read_only: false,
-            display_name: None,
-            subscribed_mailboxes: vec![],
-            mailboxes: indexmap::indexmap! {},
-            manual_refresh: false,
-            contacts: Default::default(),
-            extra: {
-                let mut m: indexmap::IndexMap<String, serde_json::Value> =
-                    indexmap::IndexMap::new();
-
-                m.insert(
-                    "server_url".to_string(),
-                    serde_json::Value::String(format!(
-                        "http://{}:{}",
-                        local_addr.ip(),
-                        local_addr.port()
-                    )),
-                );
-                m.insert(
-                    "server_username".to_string(),
-                    serde_json::Value::String("user".to_string()),
-                );
-                m.insert(
-                    "server_password".to_string(),
-                    serde_json::Value::String("password".to_string()),
-                );
-                m.insert(
-                    "use_token".to_string(),
-                    serde_json::Value::String("true".to_string()),
-                );
-
-                m
-            },
-        };
-
-        let mut jmap =
-            JmapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
-        let (server_event_sender, server_event_receiver) = unbounded();
-        let server = JmapServerStream::new(
-            smol::Async::new(listener).unwrap(),
-            server_event_receiver,
-            local_addr,
-        );
-        std::thread::spawn(move || {
-            block_on(server.loop_handler()).unwrap();
-        });
-
-        eprintln!("Assert contact_backend resolves into a JMAP contacts backend.");
-        let mut contacts = block_on(jmap.contact_backend().unwrap()).unwrap();
-        block_on(contacts.is_online().unwrap()).unwrap();
-        let contact_caps = contacts.capabilities();
-        assert!(
-            contact_caps.is_async && contact_caps.is_remote && contact_caps.supports_search,
-            "Unexpected contact backend capabilities: {contact_caps:?}"
-        );
-        assert!(
-            !contact_caps.can_create_address_book,
-            "mock server does not advertise mayCreateAddressBook: {contact_caps:?}"
-        );
-        assert_eq!(
-            contact_caps.max_address_books_per_card, None,
-            "mock server does not advertise maxAddressBooksPerCard: {contact_caps:?}"
-        );
-        eprintln!("Assert MailBackend capabilities advertise contacts support.");
-        let mail_caps = jmap.capabilities();
-        assert!(
-            mail_caps.supports_contacts,
-            "expected MailBackendCapabilities::supports_contacts after session connect:              {mail_caps:?}"
-        );
-        server_event_sender
-            .unbounded_send(ServerEvent::Quit)
-            .unwrap();
     }
 }

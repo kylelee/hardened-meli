@@ -52,7 +52,7 @@ pub trait Method<OBJ: Object>: Serialize + Send + Sync {
     const NAME: &'static str;
 }
 
-const USING: &[&str] = &[
+static USING: &[&str] = &[
     JmapCoreCapability::uri(),
     JmapMailCapability::uri(),
     JmapSubmissionCapability::uri(),

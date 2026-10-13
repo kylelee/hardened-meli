@@ -42,7 +42,7 @@ use crate::{
 pub type ResultFuture<T> = crate::Result<BoxFuture<'static, crate::Result<T>>>;
 
 /// A pluggable PGP backend.
-pub trait PGPBackend: std::hash::Hash + Send + Sync {
+pub trait PGPBackend: Send + Sync {
     fn set_auto_key_locate(&mut self, val: LocateKey) -> Result<()>;
     fn get_auto_key_locate(&self) -> Result<LocateKey>;
     fn get_key(&self, secret: bool, pattern: String) -> ResultFuture<Key>;
@@ -67,18 +67,13 @@ pub trait PGPBackend: std::hash::Hash + Send + Sync {
     /// decrypt it), but their key IDs must not be discoverable from the
     /// ciphertext. Backends that cannot hide individual recipients are
     /// expected to hide *all* of them rather than leak a partial set.
-    ///
-    /// `sign_keys`, when non-empty, requests a combined sign-then-encrypt
-    /// operation (RFC 3156 §6.2): the signature is produced inside the
-    /// encryption step instead of a separate `sign` pass by the caller.
     fn encrypt(
         &mut self,
         encrypt_keys: Vec<Key>,
-        sign_keys: Vec<Key>,
         plain: &[u8],
         hidden_recipients: bool,
     ) -> ResultFuture<Vec<u8>>;
-    fn decrypt(&mut self, cipher: &[u8]) -> ResultFuture<(SignaturesMetadata, Vec<u8>)>;
+    fn decrypt(&mut self, cipher: &[u8]) -> ResultFuture<(DecryptionMetadata, Vec<u8>)>;
 }
 
 bitflags! {
@@ -249,22 +244,15 @@ pub fn extract_unverified_signature(a: &'_ Attachment) -> Result<UnverifiedSigna
                 .set_kind(ErrorKind::ValueError));
             }
 
-            // RFC3156 says:
-            //
-            // Upon receipt of a signed message, an application MUST:
-            //
-            // Convert line endings to the canonical <CR><LF> sequence before the signature can be
-            // verified. This is necessary since the local MTA may have converted to a local end
-            // of line convention.
             let signed_part: Vec<u8> = if let Some(v) = parts
                 .iter()
                 .find(|p| {
                     p.content_type != ContentType::PGPSignature
                         && p.content_type != ContentType::CMSSignature
                 })
-                .map(|a| crate::utils::canonicalize_crlf(a.raw()))
+                .map(|a| convert_attachment_to_rfc_spec(a.raw()))
             {
-                v.into_owned()
+                v
             } else {
                 return Err(
                     Error::new("multipart/signed attachment without a signed part")
@@ -304,6 +292,17 @@ pub fn extract_unverified_signature(a: &'_ Attachment) -> Result<UnverifiedSigna
         }
         _ => Err(Error::new("Not a signed attachment").set_kind(ErrorKind::ValueError)),
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecryptionMetadata {
+    pub recipients: Vec<Recipient>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub session_key: Option<String>,
+    #[serde(default)]
+    pub is_mime: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -431,14 +430,6 @@ impl From<Signature> for Result<()> {
 pub struct SignaturesMetadata {
     #[serde(default)]
     pub signatures: Vec<Signature>,
-}
-
-impl std::ops::Deref for SignaturesMetadata {
-    type Target = [Signature];
-
-    fn deref(&self) -> &Self::Target {
-        self.signatures.as_slice()
-    }
 }
 
 bitflags::bitflags! {
@@ -620,7 +611,8 @@ struct ValidityStringRepresentation<'a>(&'a Validity);
 impl<'a> std::fmt::Display for ValidityStringRepresentation<'a> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self.0 {
-            Validity::Unknown | Validity::Undefined => write!(fmt, "q"),
+            Validity::Unknown => write!(fmt, "?"),
+            Validity::Undefined => write!(fmt, "q"),
             Validity::Never => write!(fmt, "n"),
             Validity::Marginal => write!(fmt, "m"),
             Validity::Full => write!(fmt, "f"),
@@ -753,27 +745,23 @@ impl NewSignature {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HashAlgorithm {
-    None,
-    MD5,
-    SHA1,
+    None = 0,
+    MD5 = 1,
+    SHA1 = 2,
     #[serde(rename = "RIPEMD160")]
-    RMD160,
-    MD2,
+    RMD160 = 3,
+    MD2 = 5,
     #[serde(rename = "TIGER192")]
-    TIGER,
-    HAVAL,
-    SHA256,
-    SHA384,
-    SHA512,
-    SHA224,
-    MD4,
-    CRC32,
-    CRC32RFC1510,
-    CRC24RFC2440,
-    #[serde(rename = "SHA3-256")]
-    SHA3_256,
-    #[serde(rename = "SHA3-512")]
-    SHA3_512,
+    TIGER = 6,
+    HAVAL = 7,
+    SHA256 = 8,
+    SHA384 = 9,
+    SHA512 = 10,
+    SHA224 = 11,
+    MD4 = 301,
+    CRC32 = 302,
+    CRC32RFC1510 = 303,
+    CRC24RFC2440 = 304,
 }
 
 /// Format [`HashAlgorithm`] according to RFCs
@@ -800,8 +788,6 @@ impl std::fmt::Display for HashAlgorithm {
             Self::CRC32 => write!(fmt, "CRC32"),
             Self::CRC32RFC1510 => write!(fmt, "CRC32RFC1510"),
             Self::CRC24RFC2440 => write!(fmt, "CRC24RFC2440"),
-            Self::SHA3_256 => write!(fmt, "SHA3-256"),
-            Self::SHA3_512 => write!(fmt, "SHA3-512"),
         }
     }
 }
@@ -831,8 +817,6 @@ impl std::str::FromStr for HashAlgorithm {
             v if v.eq_ignore_ascii_case("CRC32") => Self::CRC32,
             v if v.eq_ignore_ascii_case("CRC32RFC1510") => Self::CRC32RFC1510,
             v if v.eq_ignore_ascii_case("CRC24RFC2440") => Self::CRC24RFC2440,
-            v if v.eq_ignore_ascii_case("SHA3-256") => Self::SHA3_256,
-            v if v.eq_ignore_ascii_case("SHA3-512") => Self::SHA3_512,
             _ => return Err(()),
         };
         Ok(retval)

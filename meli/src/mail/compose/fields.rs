@@ -113,29 +113,17 @@ pub(super) fn generic_address_complete_fn(account_hash: AccountHash) -> AutoComp
         if rest.grapheme_len() <= 2 {
             return vec![];
         }
-        let contacts: &Contacts = &c.accounts[&account_hash].contacts;
+        let book: &Contacts = &c.accounts[&account_hash].contacts;
+        let results = book.search(&rest);
         let stripped_term = term.strip_suffix(rest.as_ref()).unwrap();
-        contacts
-            .books
-            .iter()
-            .flat_map(|(k, v)| {
-                v.search(&rest)
-                    .into_iter()
-                    .map(|card| card.as_address())
-                    .filter(|addr| !valid.contains(addr))
-                    .map(|addr| addr.to_string())
-                    .map(|r| format!("{stripped_term}{r}"))
-                    .filter(|c| c != term)
-                    .map(|entry| AutoCompleteEntry {
-                        entry,
-                        description: format!(
-                            "{name} [{backend} {format}]",
-                            name = k.1,
-                            backend = (k.0).name,
-                            format = (k.0).format,
-                        ),
-                    })
-            })
+        results
+            .into_iter()
+            .map(|card| card.as_address())
+            .filter(|addr| !valid.contains(addr))
+            .map(|addr| addr.to_string())
+            .map(|r| format!("{stripped_term}{r}"))
+            .filter(|c| c != term)
+            .map(AutoCompleteEntry::from)
             .collect::<Vec<AutoCompleteEntry>>()
     })
 }
@@ -192,9 +180,6 @@ mod tests {
             ..Card::default()
         };
         let account_hash = context.accounts[0].hash;
-        // 账户启动装载可能已从磁盘默认书预填卡片；先重置，保证本用例只断言
-        // 下面三张卡片，不受进程级 XDG 目录中残留 contacts 文件影响。
-        context.accounts[0].contacts = Contacts::new("test".to_string());
         context.accounts[0].contacts.add_card(card_a);
         context.accounts[0].contacts.add_card(card_b);
         context.accounts[0].contacts.add_card(card_c);
@@ -208,7 +193,7 @@ mod tests {
             complete_fn(&context, "foo"),
             vec![AutoCompleteEntry {
                 entry: "foo@example.com".into(),
-                description: "default [meli Card]".into()
+                description: "".into()
             }]
         );
         // Ensure first completion is not quoted if not necessary
@@ -216,7 +201,7 @@ mod tests {
             complete_fn(&context, "bar"),
             vec![AutoCompleteEntry {
                 entry: "Bar Jr <bar@example.com>".into(),
-                description: "default [meli Card]".into()
+                description: "".into()
             }]
         );
         // Ensure first completion is properly quoted if necessary
@@ -224,7 +209,7 @@ mod tests {
             complete_fn(&context, "Nightmare"),
             vec![AutoCompleteEntry {
                 entry: "\"Nightmare D. Macdonald\" <nightd@example.com>".into(),
-                description: "default [meli Card]".into()
+                description: "".into()
             }]
         );
         // Ensure a full match and adding comma, whitespace are not completed
@@ -237,7 +222,7 @@ mod tests {
             complete_fn(&context, "foo@example.com, Nightm"),
             vec![AutoCompleteEntry {
                 entry: "foo@example.com, \"Nightmare D. Macdonald\" <nightd@example.com>".into(),
-                description: "default [meli Card]".into()
+                description: "".into()
             }]
         );
         // Ensure values are not repeated

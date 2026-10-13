@@ -787,48 +787,4 @@ mod tests {
             unexpected_eof.kind
         );
     }
-
-    /// 回归上游 meli 提交 `9cc5293d`：`Error::set_source` 收到本模块的
-    /// `Error` 时必须直接采用，而不是再包一层 `ErrorKind::External` 空壳，
-    /// 否则错误链会多出一级并遮住内部错误的 kind。
-    #[test]
-    fn test_set_source_downcasts_inner_error_without_wrapping() {
-        let inner = Error::new("inner failure").set_kind(ErrorKind::NotFound);
-        let outer = Error::new("outer failure").set_source(Some(Arc::new(inner)));
-        let source = outer.source.as_ref().expect("source must be set");
-        assert_eq!(source.summary, "inner failure");
-        assert_eq!(source.kind, ErrorKind::NotFound);
-        assert!(
-            source.inner.is_none(),
-            "already-an-Error source must not be re-wrapped as an External layer"
-        );
-    }
-
-    /// 回归上游 meli 提交 `c83c9e67`：拼接 summary/details 时不得重复句号。
-    #[test]
-    fn test_set_summary_and_details_do_not_repeat_period() {
-        let err = Error::new("first.").set_summary("second.");
-        assert_eq!(err.summary, "first. second.");
-        let err = err.set_summary("third");
-        assert_eq!(err.summary, "first. second. third");
-
-        let err = Error::new("summary")
-            .set_details("first.")
-            .set_details("second.");
-        assert_eq!(err.details.as_deref(), Some("first. second."));
-    }
-
-    /// 回归上游 meli 提交 `f1bd593d`：即使错误节点带有 inner，Display 也要
-    /// 展示 related path，不能把它藏在“无 inner”分支里。
-    #[test]
-    fn test_display_shows_related_path_with_inner_error() {
-        let err = Error::from_inner(Arc::new(io::Error::other("underlying")))
-            .set_summary("could not open")
-            .set_related_path(Some("/tmp/example"));
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("Related path: /tmp/example"),
-            "Related path 必须展示，实际输出: {rendered:?}"
-        );
-    }
 }

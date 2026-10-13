@@ -32,6 +32,7 @@ use std::{convert::TryInto, path::PathBuf};
 
 use indexmap::IndexMap;
 
+use super::*;
 use crate::{
     backends::prelude::ResultFuture,
     contacts::backend::{ContactBackend, ContactBackendCapabilities},
@@ -310,50 +311,51 @@ fn parse_card<'a>() -> impl Parser<'a, Vec<&'a str>> {
 }
 
 pub fn load_cards(p: &std::path::Path) -> Result<Vec<Card>> {
-    let vcf_dir = std::fs::read_dir(p).chain_err_related_path(p)?;
+    let vcf_dir = std::fs::read_dir(p);
     let mut ret: Vec<Result<_>> = Vec::new();
     let mut is_any_valid = false;
-    let mut contents = String::with_capacity(256);
-    for f in vcf_dir {
-        if f.is_err() {
-            continue;
-        }
-        let f = f.chain_err_related_path(p)?.path();
-        if f.is_file() {
-            use std::io::Read;
-            contents.clear();
-            // One unreadable or non-UTF-8 file (a vCard is a UTF-8 text
-            // format, so binary garbage fails `read_to_string`) must cost
-            // only that file. Propagating the error with `?` used to abort
-            // the whole address book load and drop every card from every
-            // other file too (CWE-754).
-            if let Err(err) = std::fs::File::open(&f)
-                .chain_err_related_path(&f)
-                .and_then(|mut file| {
-                    file.read_to_string(&mut contents)
-                        .chain_err_related_path(&f)
-                })
-            {
-                tracing::warn!("Could not read vcard file {}: {}", f.display(), err);
+    if vcf_dir.is_ok() {
+        let mut contents = String::with_capacity(256);
+        for f in vcf_dir? {
+            if f.is_err() {
                 continue;
             }
-            match parse_card().parse(contents.as_str()) {
-                Ok((_, c)) => {
-                    for s in c {
-                        ret.push(
-                            CardDeserializer::try_from_str(s)
-                                .and_then(TryInto::try_into)
-                                .map(|mut card| {
-                                    Card::set_external_resource(&mut card, true);
-                                    is_any_valid = true;
-                                    card
-                                })
-                                .map_err(|err| err.set_related_path(Some(&f))),
-                        );
-                    }
+            let f = f?.path();
+            if f.is_file() {
+                use std::io::Read;
+                contents.clear();
+                // One unreadable or non-UTF-8 file (a vCard is a UTF-8 text
+                // format, so binary garbage fails `read_to_string`) must cost
+                // only that file. Propagating the error with `?` used to abort
+                // the whole address book load and drop every card from every
+                // other file too (CWE-754).
+                if let Err(err) = std::fs::File::open(&f)
+                    .map_err(|err| err.to_string())
+                    .and_then(|mut file| {
+                        file.read_to_string(&mut contents)
+                            .map_err(|err| err.to_string())
+                    })
+                {
+                    tracing::warn!("Could not read vcard file {}: {}", f.display(), err);
+                    continue;
                 }
-                Err(err) => {
-                    tracing::warn!("Could not parse vcard from {}: {}", f.display(), err);
+                match parse_card().parse(contents.as_str()) {
+                    Ok((_, c)) => {
+                        for s in c {
+                            ret.push(
+                                CardDeserializer::try_from_str(s)
+                                    .and_then(TryInto::try_into)
+                                    .map(|mut card| {
+                                        Card::set_external_resource(&mut card, true);
+                                        is_any_valid = true;
+                                        card
+                                    }),
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("Could not parse vcard from {}: {}", f.display(), err);
+                    }
                 }
             }
         }

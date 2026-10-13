@@ -197,7 +197,6 @@ fn test_store() -> Arc<Store> {
         reverse_id_store: Arc::new(FutureMutex::new(Default::default())),
         blob_id_store: Arc::new(FutureMutex::new(Default::default())),
         collection: Collection::default(),
-        identities: Default::default(),
         mailboxes: Default::default(),
         mailboxes_index: Default::default(),
         mailbox_state: Arc::new(FutureMutex::new(None)),
