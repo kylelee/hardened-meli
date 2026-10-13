@@ -76,8 +76,8 @@ impl MailboxEntry {
             .flatten()
         {
             None => {}
-            Some(v) if ["utf-8", "utf8"].iter().any(|e| v.eq_ignore_ascii_case(&v)) => {}
-            Some(v) if ["utf-7", "utf7"].iter().any(|e| v.eq_ignore_ascii_case(&v)) => {
+            Some(v) if ["utf-8", "utf8"].iter().any(|e| e.eq_ignore_ascii_case(&v)) => {}
+            Some(v) if ["utf-7", "utf7"].iter().any(|e| e.eq_ignore_ascii_case(&v)) => {
                 ret.name = melib::backends::utf7::decode_utf7_imap(&ret.name);
                 ret.path = melib::backends::utf7::decode_utf7_imap(&ret.path);
             }
