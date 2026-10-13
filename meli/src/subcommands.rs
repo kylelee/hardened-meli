@@ -463,10 +463,7 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
             }
         }
         ToolOpt::Migration(opt) => {
-            // 上游在 `tool` 入口初始化 `melib::utils::logging::Logger`；本 fork 已把
-            // 日志统一到 `crate::logging::init_log`（tracing 文件轮转），迁移流程的
-            // verbose 输出依赖订阅者落盘，故在此接入。
-            crate::logging::init_log();
+            use crate::args::MigrationOpt;
             let version_map = version_migrations::versions();
             match opt {
                 MigrationOpt::List => {
