@@ -1739,6 +1739,7 @@ mod tests {
             ReplyCode::_502,
             ReplyCode::_503,
             ReplyCode::_504,
+            ReplyCode::_530,
             ReplyCode::_535,
             ReplyCode::_550,
             ReplyCode::_551,
@@ -1755,13 +1756,6 @@ mod tests {
                 "reply code {s} must round-trip through TryFrom<&str>"
             );
         }
-        // 上游 b0c6bcda 起 `_530`（认证必需）补入 `TryFrom<&str>`，
-        // fork 随 2026-10-12 同步采纳——纳入往返断言。
-        assert_eq!(
-            ReplyCode::try_from("530").ok(),
-            Some(ReplyCode::_530),
-            "reply code 530 must round-trip through TryFrom<&str>"
-        );
     }
 
     #[test]
