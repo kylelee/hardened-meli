@@ -829,7 +829,7 @@ mod tests {
         let err = Error::new("first.")
             .set_details("second")
             .set_details("third.");
-        assert_eq!(err.details.as_deref(), Some("first. second. third."));
+        assert_eq!(err.details.as_deref(), Some("second. third."));
         assert_eq!(
             err.set_summary("appended").summary,
             "first. appended",
