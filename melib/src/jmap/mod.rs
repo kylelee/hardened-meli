@@ -561,6 +561,12 @@ impl MailBackend for JmapType {
                     // zero and loop forever; keep it within 1..=500.
                     .clamp(1, 500)
             };
+            let mail_account_id = {
+                let mut conn = connection.lock().await;
+                conn.connect().await?;
+                let account_id = conn.session_guard().await?.mail_account_id()?;
+                account_id
+            };
             let mut fetch_state = EmailFetcher {
                 connection,
                 mail_account_id,
