@@ -118,11 +118,10 @@ impl Context {
             "libgpgme.so.11".into(),
         ];
         let lib = Arc::new(
-            // SAFETY: it's safe to load libgpgme.
+            // SAFETY: it is safe to load libgpgme.
             match unsafe { libloading::Library::new(names[0].clone()) } {
                 Ok(v) => v,
                 Err(err) => {
-                    // SAFETY: it's safe to load libgpgme.
                     if let Ok(v) = unsafe { libloading::Library::new(names[1].clone()) } {
                         v
                     } else {
