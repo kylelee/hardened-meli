@@ -8,7 +8,17 @@ license = "EUPL-1.2 OR GPL-3.0-or-later"
 description = "terminal tui e-mail client, hardened by CVE tested, and build on Rust"
 homepage = "https://github.com/kylelee/hardened-meli"
 repository = "https://github.com/kylelee/hardened-meli"
-keywords = ["mail", "mua", "maildir", "terminal", "imap", "tui", "email", "security", "cve"]
+keywords = [
+    "mail",
+    "mua",
+    "maildir",
+    "terminal",
+    "imap",
+    "tui",
+    "email",
+    "security",
+    "cve",
+]
 categories = ["command-line-utilities", "email"]
 default-run = "meli"
 exclude = ["/docs/historical-manpages"]
