@@ -273,7 +273,7 @@ impl Account {
                     )
                     .into(),
                     v,
-                    self.is_async(),
+                    backend.capabilities().is_async.into(),
                 );
                 let job_id = handle.job_id;
                 self.active_jobs.insert(
@@ -402,8 +402,8 @@ impl Account {
             }
             ContactJobRequest::Cards {
                 backend_id,
+                book,
                 mut handle,
-                ..
             } => {
                 is_canceled! { handle };
                 match handle.chan.try_recv() {
@@ -417,7 +417,8 @@ impl Account {
                             .send(ThreadEvent::UIEvent(UIEvent::Notification {
                                 title: Some(
                                     format!(
-                                        "{account}: {name} {format} contact initialization failed",
+                                        "{account}: {name} {format} address book {book} fetch \
+                                         failed",
                                         account = self.name,
                                         name = backend_id.name,
                                         format = backend_id.format,
