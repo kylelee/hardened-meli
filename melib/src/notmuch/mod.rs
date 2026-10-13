@@ -201,8 +201,6 @@ impl DbConnection {
         let mailboxes_lck = mailboxes.read().unwrap();
         let mailbox_queries = mailboxes_lck
             .iter()
-            // Refresh only the requested mailbox, or all of them when no
-            // specific one was given (e.g. the `watch` stream).
             .filter(|(k, _)| mailbox_hash.as_ref().is_none() || mailbox_hash.as_ref() == Some(k))
             .map(|(k, v)| {
                 let total = v.counters.lock().unwrap().total.set.clone();
@@ -779,10 +777,15 @@ impl MailBackend for NotmuchDb {
         let event_consumer = self.event_consumer.clone();
         Ok(Box::pin(async move {
             let events = {
-                let mut snapshot = snapshot.write().unwrap();
-                let (revision, uuid) = new_connection.get_revision();
-                if (revision, &uuid) == (snapshot.revision, &snapshot.uuid) {
-                    return Ok(());
+                let mut snapshot_lck = snapshot.write().unwrap();
+                let events = new_connection.refresh(
+                    mailboxes.clone(),
+                    Some(mailbox_hash),
+                    &mut snapshot_lck,
+                    account_hash,
+                )?;
+                if events.is_some() {
+                    snapshot_lck.connection = new_connection;
                 }
                 let events = new_connection.refresh(
                     mailboxes.clone(),
@@ -867,7 +870,7 @@ impl MailBackend for NotmuchDb {
                     let events = new_connection.refresh(
                         mailboxes.clone(),
                         None,
-                        &mut snapshot,
+                        &mut snapshot_lck,
                         account_hash,
                     )?;
                     snapshot.connection = new_connection;
