@@ -1572,6 +1572,18 @@ impl ImapConnection {
                     let is_tagged = line.starts_with(tag);
                     let repr = String::from_utf8_lossy(line).trim_end().to_string();
                     consumed = end;
+                    if line.starts_with(b"* BYE") {
+                        // Same handling as `ImapStream::read_lines`: a `BYE`
+                        // means the server is going away, so the pending
+                        // command can never complete.
+                        imap_log!(
+                            debug,
+                            self,
+                            "server sent BYE while awaiting literal continuation: {}",
+                            repr
+                        );
+                        return Err(Error::new("Disconnected"));
+                    }
                     if is_continuation {
                         return Ok(true);
                     }
@@ -2269,19 +2281,67 @@ impl ImapConnection {
                         }
                         ImapSearchSendStep::WaitContinuation => {
                             let tag = tag.as_deref().expect("a write precedes every continuation");
-                            if !self.wait_for_literal_continuation(tag).await? {
-                                // The server completed the command without
-                                // reading the literal octets (see the method
-                                // documentation): drop the pending steps and
-                                // retry the whole command with quoted strings
-                                // below.
-                                server_skipped_literal = true;
-                                break;
+                            match self.wait_for_literal_continuation(tag).await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    // The server completed the command
+                                    // without reading the literal octets (see
+                                    // the method documentation): drop the
+                                    // pending steps and retry the whole
+                                    // command with quoted strings below.
+                                    server_skipped_literal = true;
+                                    break;
+                                }
+                                Err(err) => {
+                                    // The server's literal state is unknown:
+                                    // it may still be waiting for the literal
+                                    // octets, so the next command sent on
+                                    // this stream would be swallowed as
+                                    // literal data and the connection would
+                                    // desynchronize. Poison the stream (the
+                                    // same "force a reconnect on the next
+                                    // use" pattern this file uses for BYE and
+                                    // empty responses) before returning.
+                                    imap_log!(
+                                        debug,
+                                        self,
+                                        "connection poisoned: waiting for the literal \
+                                         continuation failed: {}",
+                                        err
+                                    );
+                                    self.stream = Err(err.clone());
+                                    return Err(err);
+                                }
                             }
                         }
                     }
                 }
                 if server_skipped_literal {
+                    if self
+                        .uid_store
+                        .quoted_search_retry_failed
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        // The quoted-string retry already failed once for
+                        // this account (some servers hang on or reject the
+                        // non-standard 8-bit quoted string): skip it so the
+                        // search fails immediately and the caller can fall
+                        // back to a local search instead of paying another
+                        // full command timeout.
+                        imap_log!(
+                            debug,
+                            self,
+                            "skipping quoted-string SEARCH retry: the server completed the \
+                             command without reading its literal and this account's quoted \
+                             retry previously failed"
+                        );
+                        return Err(Error::new(
+                            "Server completed the SEARCH command without reading its literal \
+                             octets, and this account's quoted-string retry previously failed, \
+                             so it is disabled for the rest of the session",
+                        )
+                        .set_kind(ErrorKind::ProtocolError));
+                    }
                     let Some(quoted_segments) = query.to_imap_search_segments_quoted() else {
                         return Err(Error::new(
                             "Server completed the SEARCH command without reading its literal \
@@ -2303,6 +2363,53 @@ impl ImapConnection {
                         format!("UID SEARCH CHARSET UTF-8 {}", query_str.trim()).as_bytes(),
                     )
                     .await?;
+                    // The quoted retry's response is read and parsed here
+                    // (instead of the shared read below) so a failure can
+                    // disable the retry for this account: some servers
+                    // (observed: imap.exmail.qq.com, imap.163.com) hang on
+                    // or reject the non-standard 8-bit quoted string, and
+                    // retrying it on every search would cost one timeout per
+                    // search with no progress.
+                    if let Err(err) = self
+                        .read_response(&mut response, RequiredResponses::SEARCH)
+                        .await
+                    {
+                        self.uid_store
+                            .quoted_search_retry_failed
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        imap_log!(
+                            debug,
+                            self,
+                            "quoted-string SEARCH retry failed, disabling it for this \
+                             account: {}",
+                            err
+                        );
+                        if err.kind.is_timeout() || err.kind.is_network() {
+                            self.stream = Err(err.clone());
+                        }
+                        return Err(err);
+                    }
+                    imap_log!(
+                        trace,
+                        self,
+                        "searching for {} returned: {}",
+                        query_repr,
+                        String::from_utf8_lossy(&response)
+                    );
+                    for l in response.split_rn() {
+                        if l.starts_with(b"* SEARCH") {
+                            let uid_index = self.uid_store.uid_index.lock()?;
+                            return Ok(Vec::from_iter(
+                                String::from_utf8_lossy(l[b"* SEARCH".len()..].trim())
+                                    .split_whitespace()
+                                    .map(UID::from_str)
+                                    .filter_map(std::result::Result::ok)
+                                    .filter_map(|uid| uid_index.get(&(mailbox_hash, uid)))
+                                    .copied(),
+                            ));
+                        }
+                    }
+                    return Err(Error::new(String::from_utf8_lossy(&response).to_string()));
                 }
             }
         } else {
