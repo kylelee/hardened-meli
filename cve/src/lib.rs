@@ -6888,3 +6888,66 @@ mod cve_2026_110249;
 #[cfg(test)]
 #[path = "CVE-2026-73573.rs"]
 mod cve_2026_73573;
+/// CVE-2026-73575（Zimbra Collaboration < 10.1.17，2026-08-13 发布，10.1.17
+/// 修复；CVSS 3.1，CWE-352 CSRF）**EWS 端点请求内容类型校验不当 → CSRF**
+/// 攻击模拟回归（Gitea issue #207）：EWS 端点未严格校验请求的
+/// Content-Type/来源，非预期形态的请求也被接受处理——「声明的形态」与
+/// 「接受的形态」不匹配。
+///
+/// **meli 等价面映射**：出站请求/命令的**形态**（HTTP 方法、Content-Type
+/// 头、请求端点、SMTP 命令框架与顺序）只能由客户端代码与本地配置决定，
+/// 邮件字节只作不透明载荷/显示数据；入站响应的声明形态必须与处理语义
+/// 匹配，缺失/异形/不可解码一律 fail-closed。四条攻击路径：诱导请求族
+/// （one-click 头 + 令牌 URL + HTML 自动提交表单 + EWS SOAP/JSON 方言部件
+/// 全部死成惰性数据/显示文本）、JMAP 请求构造（唯一 Content-Type 常量
+/// `application/json`、blob 上传不透明载荷、端点模板 fail-closed 实例化）、
+/// SMTP 命令序列（#123 判例正交面：AUTH 严格先于且门控 MAIL FROM，敌意
+/// 地址语料产不出带 CR/LF 的信封 spec）、入站 SSE 响应形态校验。
+///
+/// [`cve_2026_73575`] 分层锁定：L0 语料逐字到达各门（令牌 URL、EWS 方言
+/// 部件声明类型与原始体）；L1 出站形态全客户端常量（源码锚点 + 行为：
+/// 全仓恰一处 Content-Type 默认头、HTTP 客户端构造点封闭三处、
+/// `upload_request_format` 未知参数 `ProtocolError`）；L2 入站形态
+/// fail-closed（缺口回归：SSE 缺 Content-Type 头 → Err；EWS JSON/SOAP 方
+/// 言及撞库形 → Err；非 UTF-8 头值 → Err 非 panic；合法参数形 → Ok；源
+/// 码锚点：流循环消费真实响应头）；L3 SMTP（真实 socket：认证成功 wire
+/// 序列 AUTH < EHLO < MAIL FROM 单行框架；认证失败 wire 零事务字节；
+/// G-C 回归：折叠引号串信封在写出任何信封字节前 fail-closed；无网络：
+/// 敌意地址语料仅折叠引号串可产出脏 spec（如实记录），mailto `%0d%0a`
+/// 注入被 RFC 6068 门拒绝）；L4 确认门前置（退订目标惰性 verbatim、
+/// scheme 走私全拒、HTML 自动提交原料过真实 `sanitize` 全灭、EWS 方言
+/// 部件只作显示数据）。
+///
+/// 与近亲划界：CVE-2026-33372（#202）拥有授权数据**来源通道**；33373
+/// （#192）拥有确认门令牌**时序**；73572 拥有 HTML 渲染**脚本/XSS 原料**；
+/// 38173（#131）/23397（#21）拥有 scheme 白名单与启动点；38373（#123）
+/// 拥有 STARTTLS 与认证开关**正交性**；35537 拥有 JSON 响应**尾随字节**；
+/// 50624 拥有传输层 **https 强制**；110249 拥有响应体**字节上限**；6505
+/// 拥有 external-body。本文件拥有**请求/响应「形态校验」轴**。marker 域
+/// 名 `ews73575.example` 族与哨兵 `cve-2026-73575-*` 与兄弟文件逐字隔离。
+///
+/// 结论：**免疫证明 + 检出并修复三处缺口**——G-A JMAP event source 此
+/// 前对缺 Content-Type 头的响应跳过校验继续解析（fail-open）；G-B 非
+/// UTF-8 头值命中 `to_str().unwrap()` panic 流循环（新增
+/// `validate_event_source_content_type` 后缺头/异形/非 UTF-8 全部
+/// fail-closed）；G-C 邮件派生的折叠引号串信封地址携带 CR/LF 上 SMTP
+/// 命令框架（`mail_transaction` 现在在任何信封字节上线前校验全部信封
+/// 地址，含框架字节一律 fail-closed，RFC 5321 §4.1.2 合法地址零误
+/// 伤）。
+///
+/// [`cve_2026_73575`]: self::cve_2026_73575
+#[cfg(test)]
+#[path = "CVE-2026-73575.rs"]
+mod cve_2026_73575;
+
+/// CVE-2026-43859 — mutt < 2.3.2 IMAP CRAM-MD5 `strfcpy` 二进制摘要 NUL 截断
+/// （CWE-158）攻击模拟。meli 无 CRAM-MD5 面：按 issue #208 约定映射到等价
+/// 「二进制凭证经字符串边界」面（SASL-IR/续行 PLAIN、LOGIN literal、
+/// ManageSieve 引号 armor、oauth token 字节通道）；RFC 2195 向量锁定独立
+/// HMAC-MD5 预言机，mutt strfcpy 模型还原 + 真实连接逐字节免疫断言。
+/// 结论：免疫证明。
+///
+/// [`cve_2026_43859`]: self::cve_2026_43859
+#[cfg(test)]
+#[path = "CVE-2026-43859.rs"]
+mod cve_2026_43859;

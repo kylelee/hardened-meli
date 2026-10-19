@@ -184,6 +184,46 @@ impl Event {
     }
 }
 
+/// Validate the `Content-Type` of an event-source HTTP response
+/// (CVE-2026-73575 hardening).
+///
+/// The event-source endpoint speaks exactly one form, `text/event-stream`
+/// (SSE spec / JMAP RFC 8620 §7.3): a response that declares any other media
+/// type — or declines to declare one at all, or declares a value that is not
+/// valid UTF-8 — is not the form this client negotiated and is rejected
+/// fail-closed instead of being parsed as an event stream. The two
+/// pre-hardening branches this replaces were exactly the request-form
+/// validation defects of the CVE family: a *missing* header skipped the
+/// check entirely (fail-open), and a non-UTF-8 header value reached
+/// `to_str().unwrap()` and panicked the stream loop.
+///
+/// Parameters after the media type (`text/event-stream; charset=utf-8`) are
+/// accepted; the media type itself is compared case-insensitively per
+/// RFC 9110 §8.3.1.
+pub fn validate_event_source_content_type(
+    header: Option<&[u8]>,
+) -> std::result::Result<(), String> {
+    let Some(header) = header else {
+        return Err(
+            "expected Content-Type text/event-stream, got no Content-Type header at all"
+                .to_string(),
+        );
+    };
+    let value = std::str::from_utf8(header).map_err(|_| {
+        format!(
+            "expected Content-Type text/event-stream, got non-UTF-8 value {:?}",
+            header
+        )
+    })?;
+    let media_type = value.split(';').next().unwrap_or("").trim();
+    if !media_type.eq_ignore_ascii_case("text/event-stream") {
+        return Err(format!(
+            "expected Content-Type text/event-stream, got: {value:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// A client for a Server-Sent Events endpoint.
 ///
 /// Read events by iterating over the client.
@@ -275,24 +315,14 @@ impl EventSourceConnection {
                         return Err(format!("{} {}", status.as_str(), res_text).into());
                     }
 
-                    if let Some(content_type_hv) =
-                        response.headers().get(isahc::http::header::CONTENT_TYPE)
-                    {
-                        if !content_type_hv
-                            .to_str()
-                            .unwrap()
-                            .starts_with("text/event-stream")
-                        {
-                            tracing::error!(
-                                "got content-type: {}",
-                                String::from_utf8_lossy(content_type_hv.as_ref())
-                            );
-                            return Err(format!(
-                                "expectected Content-Type text/event-stream, got: {:?}",
-                                String::from_utf8_lossy(content_type_hv.as_ref())
-                            )
-                            .into());
-                        }
+                    if let Err(err) = validate_event_source_content_type(
+                        response
+                            .headers()
+                            .get(isahc::http::header::CONTENT_TYPE)
+                            .map(|header_value| header_value.as_bytes()),
+                    ) {
+                        tracing::error!("{err}");
+                        return Err(err.into());
                     }
                 }
                 let mut reader = response.into_body();

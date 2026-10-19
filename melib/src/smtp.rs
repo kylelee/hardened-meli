@@ -746,6 +746,45 @@ impl SmtpConnection {
         Ok(())
     }
 
+    /// Reject an envelope address whose spec contains SMTP command framing
+    /// bytes (CR or LF).
+    ///
+    /// A folded RFC 5322 quoted-string local part (e.g.
+    /// `"a<CRLF> b"@example.com`, legal *display* data under RFC 5322 FWS)
+    /// keeps its raw line break inside the parsed `address_spec`. Framing
+    /// such a spec into `MAIL FROM:<…>`/`RCPT TO:<…>` would split the command
+    /// line and put the remainder on the wire as if it were a separate
+    /// command. RFC 5321 §4.1.2 SMTP quoted-strings admit no CR/LF at all,
+    /// so no legitimate envelope address is excluded by this check — the
+    /// mail-provided bytes are untrusted at exactly this boundary and must
+    /// not dictate the command framing (CVE-2026-73575: fail-closed request
+    /// form validation at the wire boundary).
+    fn reject_unframeable_envelope_address(spec: &str, role: &str) -> Result<()> {
+        if spec.contains(['\r', '\n']) {
+            return Err(Error::new(format!(
+                "SMTP submission was aborted because the {role} envelope address contains line \
+                 breaks and cannot be safely framed on the wire: {spec:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Every address spec an envelope `Address` contributes to the RCPT set:
+    /// a group expands to its member mailboxes.
+    fn envelope_address_specs(address: &Address) -> Vec<&str> {
+        match address {
+            Address::Mailbox(m) => vec![m.address_spec.trim()],
+            Address::Group(g) => g
+                .mailbox_list
+                .iter()
+                .filter_map(|address| match address {
+                    Address::Mailbox(m) => Some(m.address_spec.trim()),
+                    Address::Group(_) => None,
+                })
+                .collect(),
+        }
+    }
+
     /// Sends mail
     pub async fn mail_transaction(&mut self, mail: &str, tos: Option<&[Address]>) -> Result<()> {
         let mut res = String::with_capacity(8 * 1024);
@@ -784,6 +823,22 @@ impl SmtpConnection {
             }
             envelope.from()[0].get_email().trim()
         };
+        // CVE-2026-73575: validate every envelope address *before* the first
+        // command is written — an unframeable address must abort the
+        // transaction with zero envelope bytes on the wire.
+        Self::reject_unframeable_envelope_address(mail_from_addr, "`From`")?;
+        for address in tos
+            .iter()
+            .chain(envelope.cc().iter())
+            .chain(envelope.bcc().iter())
+        {
+            for spec in Self::envelope_address_specs(address) {
+                if spec.is_empty() {
+                    continue;
+                }
+                Self::reject_unframeable_envelope_address(spec, "recipient")?;
+            }
+        }
         current_command.push(b"MAIL FROM:<");
         current_command.push(mail_from_addr.as_bytes());
         current_command.push(b">");
