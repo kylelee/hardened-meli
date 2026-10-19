@@ -4806,3 +4806,117 @@ Malformed From fallback.\r\n"
         "the visible address bytes must survive scrubbing: {text:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CVE-2026-62644（会话数据用户名伪造, issue #195）孪生单测：resent 身份面
+// 标注 + 未消费身份头不可见
+// ---------------------------------------------------------------------------
+
+/// CVE-2026-62644 语料（与 `cve/src/CVE-2026-62644.rs` 同一攻击家族的仓内
+/// 副本）：攻击者以 resend 链伪造身份——`From` 显示可信的机构账单地址，
+/// `Resent-From`/`Resent-Sender` 携带攻击者与其中继，`X-Authenticated-User`
+/// 伪造「已认证用户名」。meli 不消费任何 resent/认证身份头（发信身份与
+/// 凭据只由本地账号配置决定），本孪生锁定显示面：分叉的 resent 身份面
+/// 必须按 #134 判例画成 `From` 正下方的可见行，而从未被消费的
+/// `X-Authenticated-User` 不得进入默认头部带。
+fn cve_2026_62644_resent_spoof_mail_bytes() -> Vec<u8> {
+    "From: \"Billing\" <billing@corp62644.example>\r\n\
+Resent-From: \"Billing\" <attacker@evil62644.example>\r\n\
+Resent-Sender: <relay@evil62644.example>\r\n\
+X-Authenticated-User: attacker@evil62644.example\r\n\
+Reply-To: \"Billing\" <attacker@evil62644.example>\r\n\
+To: \"Victim\" <victim@victim62644.example>\r\n\
+Subject: Invoice overdue\r\n\
+Date: Mon, 13 Jul 2026 09:00:00 +0000\r\n\
+Message-ID: <resent-62644-twin@evil62644.example>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Please confirm your account credentials.\r\n"
+        .to_string()
+        .into_bytes()
+}
+
+/// 对照语料：诚实的 resend 邮件（`Resent-From` 与 `From` 地址一致）——
+/// 一致的面不得产生新行，否则合法转发获得永久噪声。
+fn cve_2026_62644_resent_honest_mail_bytes() -> Vec<u8> {
+    "From: \"Billing\" <billing@corp62644.example>\r\n\
+Resent-From: \"Billing\" <billing@corp62644.example>\r\n\
+Resent-Sender: <billing@corp62644.example>\r\n\
+To: \"Victim\" <victim@victim62644.example>\r\n\
+Subject: Your statement\r\n\
+Date: Mon, 13 Jul 2026 09:00:01 +0000\r\n\
+Message-ID: <resent-62644-honest@corp62644.example>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Honest resend, agreeing resent faces.\r\n"
+        .to_string()
+        .into_bytes()
+}
+
+/// CVE-2026-62644 twin（缺口修复的渲染级锁定）：与 `From` 分叉的
+/// `Resent-From`/`Resent-Sender` 必须画成 `From` 正下方的可见行——
+/// resend 链的身份分叉不再是隐藏重定向；同时 `Reply-To` 分叉行照常
+/// 可见，`From` 的诚实地址保持原样。
+#[test]
+fn cve_2026_62644_resent_faces_mismatch_rows_render() {
+    let text = cve_2023_35619_draw_text(cve_2026_62644_resent_spoof_mail_bytes());
+
+    assert!(
+        text.contains("Resent-From:"),
+        "the diverging Resent-From face must render as a header row: {text:?}"
+    );
+    assert!(
+        text.contains("attacker@evil62644.example"),
+        "the Resent-From face address must be visible: {text:?}"
+    );
+    assert!(
+        text.contains("Resent-Sender:"),
+        "the diverging Resent-Sender face must render as a header row: {text:?}"
+    );
+    assert!(
+        text.contains("relay@evil62644.example"),
+        "the Resent-Sender face address must be visible: {text:?}"
+    );
+    assert!(
+        text.contains("billing@corp62644.example"),
+        "the honest From address must stay visible: {text:?}"
+    );
+    // Resent 面与 From 分叉时，Reply-To 分叉行照常在场（#134 基线不回退）。
+    assert!(
+        text.contains("Reply-To:"),
+        "the diverging Reply-To face must keep rendering: {text:?}"
+    );
+}
+
+/// CVE-2026-62644 twin（无噪声回归）：`Resent-From`/`Resent-Sender` 与
+/// `From` 地址一致的诚实 resend 邮件不得产生新行——标注只属于真实分叉。
+#[test]
+fn cve_2026_62644_resent_agreeing_faces_add_no_rows() {
+    let text = cve_2023_35619_draw_text(cve_2026_62644_resent_honest_mail_bytes());
+
+    assert!(
+        !text.contains("Resent-From:") && !text.contains("Resent-Sender:"),
+        "agreeing resent faces must not add rows to the header band: {text:?}"
+    );
+    assert!(
+        text.contains("billing@corp62644.example"),
+        "the honest From row must render: {text:?}"
+    );
+}
+
+/// CVE-2026-62644 twin（免疫面）：`X-Authenticated-User` 是 CVE 的原生
+/// 载体（「会话数据用户名」的邮件内等价物），但 meli 从不消费它——
+/// 默认头部带既不显示它，也没有任何代码路径把它当作身份或凭据来源。
+/// 它只能经用户显式配置 `show_extra_headers` 才可见。
+#[test]
+fn cve_2026_62644_unconsumed_identity_headers_stay_hidden() {
+    let text = cve_2023_35619_draw_text(cve_2026_62644_resent_spoof_mail_bytes());
+
+    assert!(
+        !text.contains("X-Authenticated-User"),
+        "the never-consumed X-Authenticated-User header must stay out of the \
+         default header band: {text:?}"
+    );
+}

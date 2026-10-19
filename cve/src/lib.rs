@@ -6379,3 +6379,61 @@ mod cve_2026_33373;
 #[cfg(test)]
 #[path = "CVE-2026-73570.rs"]
 mod cve_2026_73570;
+
+/// CVE-2026-62644（Roundcube Webmail < 1.6.17、1.7.x < 1.7.2；2026-07-14
+/// 发布；CVSS 3.1 6.4 `AV:N/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:N`，CWE-290）
+/// **password 插件从会话数据取用户名未校验一致性 → 用户名伪造 → 账户
+/// 接管**攻击模拟回归（Gitea issue #195）：改密流程信任了会话里可被伪
+/// 造的用户名——「特权变更操作信任了一个未经与已认证主体绑定的标识
+/// 符」。
+///
+/// **meli 等价面映射（issue #195 侦察结论）**：meli 无服务端会话/密码插
+/// 件面；等价不变量是「身份与凭据绑定不可被邮件内容伪造」。攻击样本按
+/// issue 指定的身份劫持轴构造并逐面锁定：邮件内身份头
+/// （`Resent-From`/`Sender`/`Reply-To`/`X-Authenticated-User`）只落
+/// `other_headers` 显示数据，`Envelope.from` 只认 `From:`；回复 From 选
+/// 择在账号配置 `extra_identities` 集合内子串挑选、失败回落主身份（攻
+/// 击者可触发挑选、无法注入集合外的值）；发送账号绑定阅读账号
+/// （`ret.account_hash = coordinates.0`），mailto composer 的账号取自光
+/// 标账号；SMTP 传输与认证（`SmtpServerConf::auth` 的 `username:
+/// Secret`）全部来自账号配置反序列化，smtp.rs 不引用身份头；PGP 签名/
+/// 加密默认密钥来自账号设置串，key 选择 pattern 来自 composer 表单字
+/// 段，默认密钥与 `encrypt_for_self` 解析全部 `LocateKey::LOCAL` 先于
+/// `keylist`，gpgme 上下文出生即不取回+离线（offline 语义归
+/// CVE-2008-3068/#16），pgp 面零 Autocrypt；mailto 的 `from=` 家族被
+/// `Mailto::IGNORE_HEADERS` 丢弃、非标准头整头丢弃、`from=` 藏 CRLF 整
+/// 条 URI 拒绝、幸存 Draft From 恒空（CRLF 注入拒绝归
+/// CVE-2026-33373/#192）；`Draft::new_reply` 从不写 From、Bcc 恒空（回
+/// 复落点语义归 CVE-2001-1088）。
+///
+/// **缺口检出与修复**：#134（CVE-2023-35619）判例的头部带分叉标注
+/// `address_faces_disagreeing_with_from` 只覆盖
+/// `Sender`/`Mail-Reply-To`/`Reply-To`，不含 `Resent-From`/
+/// `Resent-Sender`——resend 链身份分叉（`From: 可信机构` +
+/// `Resent-From: 攻击者`）不可见。修复：`envelope.rs` 把 resent 两面加
+/// 入标注列表（显示面真值化，不替换 From 身份），渲染级锁定于孪生单测
+/// `meli/src/mail/view/tests.rs::cve_2026_62644_resent_faces_mismatch_
+/// rows_render`（连同 `::_resent_agreeing_faces_add_no_rows` 无噪声回
+/// 归与 `::_unconsumed_identity_headers_stay_hidden`——
+/// `X-Authenticated-User` 从不被消费、默认不可见）。
+///
+/// [`cve_2026_62644`] 分层锁定（详见模块文档）：L0 语料真实性；L1
+/// mailto 身份轴（含 `IGNORE_HEADERS` 常量钉死）；L2 回复 From 选择镜像
+/// ×源码锚点；L3 发送账号/传输/SMTP 认证绑定锚点；L4 PGP 密钥绑定锚点；
+/// L5 resent 面标注缺口修复回归。
+///
+/// 与近亲划界：CVE-2023-35619（#134）拥有显示名中和与 Sender/Reply-To
+/// 面标注基线（本文件补齐其 resent 覆盖）；CVE-2026-33373（#192）拥有
+/// mailto CRLF 拒绝与确认门 nonce；CVE-2001-1088 拥有回复收件人推导链；
+/// CVE-2008-3068（#16）拥有 gpgme offline 语义。语料 marker `62644` 家
+/// 族与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明 + 1 处显示面缺口修复**——身份与凭据绑定的每
+/// 个判定面都以本地配置为唯一输入；邮件内容能触碰的最远边界是「在配置
+/// 身份集内触发挑选」与「设置收件人」，两者均在 composer 表单中用户可
+/// 见。
+///
+/// [`cve_2026_62644`]: self::cve_2026_62644
+#[cfg(test)]
+#[path = "CVE-2026-62644.rs"]
+mod cve_2026_62644;
