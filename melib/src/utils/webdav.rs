@@ -106,6 +106,19 @@ fn is_loopback_host(url: &Url) -> bool {
     }
 }
 
+/// Render a URL for an error message without its userinfo section.
+///
+/// CVE-2026-96869: a URL such as `https://user:password@host/` must never
+/// have its embedded credentials echoed into a configuration error or a log
+/// line, so error messages print only the scheme, host and port.
+fn transport_endpoint(url: &Url) -> String {
+    match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+        (Some(host), None) => format!("{}://{host}", url.scheme()),
+        (None, _) => url.scheme().to_string(),
+    }
+}
+
 /// Fork hardening (mirrors the JMAP `CVE-2024-50624` TLS-only policy):
 /// every WebDAV/CardDAV transport URL must use `https`.
 ///
@@ -120,13 +133,28 @@ fn validate_transport_url(url: &Url, what: &str) -> Result<()> {
         "http" if is_loopback_host(url) => Ok(()),
         scheme => Err(Error::new(format!(
             "Configuration error: {what} must use `https` (plaintext `http` is only allowed \
-             for loopback hosts such as 127.0.0.1 or localhost), got scheme `{scheme}` in \
-             `{url}`: over a plaintext connection a man-in-the-middle can steal the WebDAV \
+             for loopback hosts such as 127.0.0.1 or localhost), got scheme `{scheme}` for \
+             `{endpoint}`: over a plaintext connection a man-in-the-middle can steal the WebDAV \
              authentication credentials (username/password or bearer token) sent with every \
-             request."
+             request.",
+            endpoint = transport_endpoint(url),
         ))
         .set_kind(ErrorKind::Configuration)),
+    }?;
+    // CVE-2026-96869 (CWE-200): the HTTP engine treats URL userinfo as
+    // transport-level Basic credentials, which bypasses meli's credential
+    // management and gets echoed by every error / log line that renders the
+    // URL. Reject it and never format the userinfo back into the error.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::new(format!(
+            "Configuration error: {what} must not embed credentials in the URL authority \
+             section; remove them and configure the WebDAV credentials separately. Embedded \
+             URL credentials are never used (CVE-2026-96869). Endpoint: `{endpoint}`.",
+            endpoint = transport_endpoint(url),
+        ))
+        .set_kind(ErrorKind::Configuration));
     }
+    Ok(())
 }
 
 /// Fork hardening: validate a server-issued redirect target before adopting

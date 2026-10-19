@@ -164,6 +164,19 @@ fn is_loopback_host(url: &Url) -> bool {
     }
 }
 
+/// Render a URL for an error message without its userinfo section.
+///
+/// CVE-2026-96869: a URL such as `https://user:password@host/` must never
+/// have its embedded credentials echoed into a configuration error or a log
+/// line, so error messages print only the scheme, host and port.
+fn transport_endpoint(url: &Url) -> String {
+    match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+        (Some(host), None) => format!("{}://{host}", url.scheme()),
+        (None, _) => url.scheme().to_string(),
+    }
+}
+
 /// CVE-2024-50624 hardening: every JMAP transport URL must use `https`.
 ///
 /// Plaintext `http` is only tolerated for loopback hosts, where the traffic
@@ -177,12 +190,28 @@ pub fn validate_transport_url(url: &Url, what: &str) -> Result<()> {
         "http" if is_loopback_host(url) => Ok(()),
         scheme => Err(Error::new(format!(
             "Configuration error: {what} must use `https` (plaintext `http` is only allowed \
-             for loopback hosts such as 127.0.0.1 or localhost), got scheme `{scheme}` in \
-             `{url}`: over a plaintext connection a man-in-the-middle can answer session \
-             discovery with attacker-controlled endpoints (CVE-2024-50624)."
+             for loopback hosts such as 127.0.0.1 or localhost), got scheme `{scheme}` for \
+             `{endpoint}`: over a plaintext connection a man-in-the-middle can answer session \
+             discovery with attacker-controlled endpoints (CVE-2024-50624).",
+            endpoint = transport_endpoint(url),
         ))
         .set_kind(ErrorKind::Configuration)),
+    }?;
+    // CVE-2026-96869 (CWE-200): a `scheme://user:password@host` URL makes the
+    // HTTP engine send transport-level Basic credentials on its own, bypassing
+    // meli's credential management, and every error / log line that renders
+    // the URL would echo them. Reject URL userinfo outright and never format
+    // it back into the error.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::new(format!(
+            "Configuration error: {what} must not embed credentials in the URL authority \
+             section; remove them and configure the account credentials separately. Embedded \
+             URL credentials are never used (CVE-2026-96869). Endpoint: `{endpoint}`.",
+            endpoint = transport_endpoint(url),
+        ))
+        .set_kind(ErrorKind::Configuration));
     }
+    Ok(())
 }
 
 /// Validate the transport URLs the server returned in the JMAP session
