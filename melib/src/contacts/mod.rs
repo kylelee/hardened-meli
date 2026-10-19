@@ -224,7 +224,13 @@ impl Contacts {
     pub fn search(&self, term: &str) -> Vec<Card> {
         self.cards
             .values()
-            .filter(|c| c.email.contains(term) || c.name.contains(term))
+            .filter(|c| {
+                c.email.contains(term)
+                    || c.name.contains(term)
+                    || c.nicknames.values().any(|nick| nick.name.contains(term))
+                    || c.organizations.values().any(|org| org.name.contains(term))
+                    || c.keywords.keys().any(|keyword| keyword.contains(term))
+            })
             .cloned()
             .collect()
     }
@@ -235,5 +241,68 @@ impl Deref for Contacts {
 
     fn deref(&self) -> &IndexMap<CardId, Card> {
         &self.cards
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contacts::jscontact::json_types::{Nickname, Organization};
+
+    #[test]
+    fn test_search_nicknames_organizations_keywords() {
+        let mut contacts = Contacts::new("test".into());
+
+        let mut nickname_card = Card::new();
+        nickname_card.set_name("Alice".into());
+        nickname_card.set_email("alice@example.com".into());
+        nickname_card
+            .nicknames
+            .insert("n0".into(), Nickname::from("Ally".to_string()));
+        let nickname_id = nickname_card.id;
+
+        let mut organization_card = Card::new();
+        organization_card.set_name("Bob".into());
+        organization_card.organizations.insert(
+            "o0".into(),
+            Organization {
+                __type: None,
+                name: "Acme Corp".into(),
+                units: Vec::new(),
+                sort_as: String::new(),
+                contexts: IndexMap::new(),
+                extra: IndexMap::new(),
+            },
+        );
+        let organization_id = organization_card.id;
+
+        let mut keyword_card = Card::new();
+        keyword_card.set_name("Carol".into());
+        keyword_card.keywords.insert("rustlang".into(), true);
+        let keyword_id = keyword_card.id;
+
+        contacts.add_card(nickname_card);
+        contacts.add_card(organization_card);
+        contacts.add_card(keyword_card);
+
+        let found = contacts.search("Ally");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, nickname_id);
+
+        let found = contacts.search("Acme");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, organization_id);
+
+        let found = contacts.search("rustlang");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, keyword_id);
+
+        // Existing name/email matching is unchanged.
+        let found = contacts.search("Alice");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, nickname_id);
+        let found = contacts.search("alice@example.com");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, nickname_id);
     }
 }
