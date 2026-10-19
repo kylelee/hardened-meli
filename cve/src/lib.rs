@@ -6483,35 +6483,51 @@ mod cve_2026_62644;
 #[cfg(test)]
 #[path = "CVE-2026-62643.rs"]
 mod cve_2026_62643;
-/// CVE-2026-96869（Thunderbird < 157，Networking 组件，CWE-200，CVSS 4.3，
-/// Mozilla 未公开根因）**网络栈错误消息/日志面信息泄露** regression
-/// （issue #193）。
+
+/// CVE-2026-35543（Roundcube Webmail < 1.5.14、< 1.6.14；2026-04-03 发布批次
+/// （1.7-rc5/1.6.14/1.5.14 修复）；CVSS 3.1 5.3 `AV:N/AC:L/PR:N/UI:N/S:U/
+/// C:L/I:N/A:N`，CWE-669）**邮件内 SVG 内容（animate 属性族）作为远程内容
+/// 载体绕过远程图片拦截 → 信息泄露**攻击模拟回归（Gitea issue #196）：
+/// SMIL 动画家族（`<animate attributeName="href">` 的 `from`/`to`/`by`/
+/// `values` 全参数、`<animateTransform>`、`<set>`、SMIL 时间轴
+/// `begin="0s;loop"`）在 Roundcube 图片拦截判定**之后**把宿主元素的
+/// `href`/`xlink:href` 动画成远程 URL——受害者查看邮件即向攻击者发起带指
+/// 纹请求。
 ///
-/// issue #193 按等价面做免疫证明与缺口检测：错误消息与日志面不得回显明文
-/// 口令与 URL userinfo；认证字节只在 TLS 建立后上线；凭据不随重定向跨主机
-/// 重放。侦察确认两处真缺口并已修复：G1 `Secret` 派生 `Debug` 泄露明文口令
-/// （`melib/src/conf/field_types.rs` 去掉 derive、手写脱敏 Debug）；
-/// G2 `validate_transport_url` 放行 `scheme://user:pass@host/`（JMAP 与
-/// WebDAV 两份 gate 均新增 userinfo 拒绝，错误只回显 scheme://host:port）。
-/// TLS 先于认证（CVE-2020-15954 / CVE-2021-38373）与重定向跨主机
-/// （`RedirectPolicy::None` + `redirect_target`）两轴经行为/源码断言确认免疫。
+/// **meli 等价面映射（issue #196 指定）**：远程内容两道防线——`sanitize()`
+/// 的默认拒绝白名单与渲染/提取面的零自动外联（CVE-2018-19516/#126、
+/// CVE-2023-36763/#133 已锁基线），本 CVE 扩展 **SVG 动画专轴** 与
+/// **`.svg` 附件形态**。
 ///
-/// [`cve_2026_96869`] 分层：L1 纯模型复刻「错误串内嵌完整 URL + Debug
-/// 派生口令」的旧客户端并对照加固模型；L2 锁定 `Secret` 与
-/// IMAP/SMTP/JMAP/NNTP 配置的 Debug 脱敏、JMAP `validate_transport_url`
-/// 与 `validate_session_urls` 的 userinfo 拒绝矩阵（含 source 链全走查）
-/// 及回环/https 正常 URL 放行；L3 用 127.0.0.1 敌意服务器锁定 IMAP
-/// STARTTLS 伪造 OK/拒绝、NNTP STARTTLS 拒绝、SMTP
-/// require_auth+STARTTLS 拒绝四场景的错误链与线上字节零口令；L4 源码扫描
-/// 三个带凭据客户端的 `RedirectPolicy::None`、`redirect_target` 的
-/// userinfo 剥离先于 origin 比较、`patch_retrieve` 无凭据 builder、
-/// `Secret` 手写 Debug、JMAP URL 回显位于 gate 下游、WebDAV gate 同构，
-/// 以及全仓 `tracing!`/`format!` 行无 Secret 承载配置的 `{:?}`。
+/// [`cve_2026_35543`] 以六个分层 `#[test]` 锁定（详见模块文档）：(1) 语料
+/// 结构自检——五类载体（animate href 劫持族/兄弟动画元素族/直接引用载体
+/// 族/foreignObject＋style 动画族/大小写与命名空间混淆族）每类 ≥8 条、每
+/// 条锚定专属 marker；(2) sanitize 平面——独立白名单预言机逐标签验证、
+/// SMIL 家族标签与 beacon 零出现、不动点、render 零 marker、良性对照存活；
+/// 两个结构性加固实证锁定：SVG 命名空间子树连坐清除（`<svg><a href=…>`
+/// 整体清空，命名空间混淆零额外暴露）与 foreign-content breakout 走普通白
+/// 名单（幸存者只有白名单标签，`<img>` 载体依旧死亡）；(3) 五种嵌入上下
+/// 文加倍探测；(4) 端到端 RFC 822 multipart/alternative 全语料单独成信
+/// （宽度 40/80/120）＋组合信，URL 提取面零 beacon、良性锚以脚注存活并被
+/// 提取；(5) `.svg` 附件两种投放（multipart/mixed 与 multipart/related;
+/// type="image/svg+xml"）——`ContentType::Other` 不透明叶（非 text/非
+/// html、HTML 过滤器选择谓词永不选中、`decode_rec` 零内联、Display 惰性
+/// 展示、显式 decode 才逐字节给原始文档）；(6) 纯文本形诚实观测（字面引
+/// 用 `<animate …>` 源码是转义文本，提取面可作诚实链接数据、永不自动抓
+/// 取）与兄弟语料标记隔离。
 ///
-/// 结论：**修复 G1/G2 两个真缺口，其余两轴免疫**；未新增依赖，未改动
-/// `.gitea/`、CHANGELOG 或 AGENTS.md。
+/// 与近亲划界：CVE-2023-36763（#133）拥有 HTML 远程引用家族与零交互无外
+/// 联基线；CVE-2026-62643（#194）拥有 CSS 引用载体裸 token 与解码轴；
+/// CVE-2020-35730（#162）拥有 svg/iframe/style 元素 XSS 原料；CVE-2023-5631
+/// （#165）拥有 SVG 文档 XSS 投递。本文件拥有 **SMIL 动画劫持轴**与
+/// **`.svg` 附件不透明叶形态**。语料 marker `rc35543.example` 家族与兄弟
+/// 文件逐字隔离。
 ///
-/// [`cve_2026_96869`]: self::cve_2026_96869
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——SMIL 载体族死
+/// 在默认拒绝的标签白名单（命名空间混淆连整棵子树一起死），`.svg` 附件是
+/// 永不进入渲染管线的不透明叶，meli 全管线无任何自动外联原语。
+///
+/// [`cve_2026_35543`]: self::cve_2026_35543
 #[cfg(test)]
-#[path = "CVE-2026-96869.rs"]
-mod cve_2026_96869;
+#[path = "CVE-2026-35543.rs"]
+mod cve_2026_35543;
