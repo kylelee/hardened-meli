@@ -6581,3 +6581,34 @@ mod cve_2026_75000;
 #[cfg(test)]
 #[path = "CVE-2026-33370.rs"]
 mod cve_2026_33370;
+
+/// CVE-2026-33371（Zimbra Collaboration 10.0.x / 10.1.x，EWS SOAP 接口；
+/// 2026-03-20 发布，10.1.16 修复；CVSS 4.3，CWE-611 XXE）**XML 外部实体
+/// 注入 → 解析器本地文件读取**攻击模拟回归（Gitea issue #201）：认证攻
+/// 击者提交的 XML 携带外部实体定义（`<!ENTITY xxe SYSTEM
+/// "file:///etc/passwd">`，含参数实体变体），解析器展开实体并回显。
+/// meli 无 SOAP/XML 解析面，等价面按 issue 指定为「外部实体引用 → 本地文
+/// 件读取」：实体/引用注入族（`<!ENTITY`/参数实体 `%`/`SYSTEM file:///`/
+/// `SYSTEM https://`/SVG `<!DOCTYPE`/vCard `URL:file:///`/ICAL
+/// `ATTACH;VALUE=URI:file://`/`message/external-body` local-file）投放于
+/// text/plain、text/html、附件三种形态，[`cve_2026_33371`] 分层证明：解
+/// 析面 XML/SVG/external-body 附件是不透明 `Other` 叶、decode 逐字节保真
+/// （实体定义串与调用以惰性字面字节保留，永不展开）；HTML 消毒面声明族
+/// 整体死亡、`&xxe;` 退化为转义字面文本（html5ever 只认固定实体表）；
+/// `file:` 全拼写族不过启动门；vCard 导入面 `URL:file:///` 只落
+/// `card.url()`/`card.links` 字符串元数据；源码/依赖锚点——邮件路径零
+/// XML 解析器痕迹，全树唯一 quick-xml 锁在可选 `webdav` 特性之后且只消
+/// 费用户自配置 CardDAV 服务器的 HTTP 响应、无 DTD/实体处理代码。
+///
+/// 与近亲划界：CVE-2023-36763（#133）拥有 external-body 不透明基线（本
+/// 文件复归 local-file 形态）；CVE-2023-35636（#132）拥有 ICS URL/ATTACH
+/// 惰性基线；CVE-2026-35543（#196）拥有 SVG 附件基线；CVE-2024-21413
+/// （#22）拥有 `file:` 启动门基线。本文件拥有 XML 实体展开轴与 XML 解析
+/// 器依赖面证明。语料 marker `xxe33371.example` 族与兄弟语料逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**。
+///
+/// [`cve_2026_33371`]: self::cve_2026_33371
+#[cfg(test)]
+#[path = "CVE-2026-33371.rs"]
+mod cve_2026_33371;
