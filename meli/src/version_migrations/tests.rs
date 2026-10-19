@@ -310,11 +310,14 @@ fn test_version_migrations_unrecognized_version_performs_migrations() {
         )
         .unwrap();
         // An `addressbook` data file exists, so the v0.8.8 AddressbookRename
-        // migration is applicable. (The v0.10.0 ServerPasswordCommand
-        // migration also applies because the test config contains
-        // `server_password_command`, but `is_applicable` returns false when
-        // stdin is empty / no work was attempted — actually it returns true,
-        // so we provide decline inputs for both migrations.)
+        // migration is applicable, and the v0.10.0 ServerPasswordCommand
+        // migration applies because the test config contains
+        // `server_password_command`. The two v0.9.0 SmtpAuth migrations are
+        // listed but are not applicable: the config has `send_mail = 'false'`
+        // and no auth table. Migrations are listed per version in range, so
+        // the count is three version groups (four migration entries); we
+        // provide decline inputs for the whole set and then accept updating
+        // the `.version` file.
         let addressbook = tempdir.path().join("meli").join("imap").join("addressbook");
         std::fs::create_dir_all(addressbook.parent().unwrap()).unwrap();
         std::fs::write(&addressbook, "addressbook contents\n").unwrap();
@@ -329,9 +332,13 @@ fn test_version_migrations_unrecognized_version_performs_migrations() {
             "warning: version file {vf} contains an unrecognized value {prev:?}; treating it as \
              predating {latest} and checking for applicable migrations\nYou might need to migrate \
              your configuration data for the new version to work.\nYou can skip any changes you \
-             don't want to happen and you can quit at any time.\n2 migrations are about to be \
-             performed:\nv0.8.8/AddressbookRename: {desc}\nv0.10.0/ServerPasswordCommand: \
-             Transform `server_password_command` to new syntax: `server_password = {{ command = \"...\" }}`\nPerform 2 migrations? [Y/n] Update \
+             don't want to happen and you can quit at any time.\n3 migrations are about to be \
+             performed:\nv0.8.8/AddressbookRename: {desc}\nv0.9.0/SmtpAuthPasswordCommand: \
+             Transform `send_mail = {{ password = {{ type = \"raw\", value = \"...\" }} }}` to new \
+             syntax: `send_mail = {{ password = \"...\" }}`\nv0.9.0/SmtpAuthTokenCommand: \
+             Transform `send_mail = {{ auth = {{ type = \"xoauth2\", token_command = \"...\" }} \
+             }}` to Secret\nv0.10.0/ServerPasswordCommand: \
+             Transform `server_password_command` to new syntax: `server_password = {{ command = \"...\" }}`\nPerform 3 migrations? [Y/n] Update \
              .version file despite not attempting migrations? [y/N] ",
             vf = version_file.display(),
             prev = "meli-git",
