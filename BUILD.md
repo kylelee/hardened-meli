@@ -72,7 +72,7 @@ The packaged Rust from `termux` will be used.
 The following steps should suffice to build and run `meli` on `termux`:
 
 ```console
-$ pkg install rust perl make m4 man
+$ pkg install rust perl make man
 $ cargo install meli # ensure .cargo/bin is in your PATH
 ```
 
