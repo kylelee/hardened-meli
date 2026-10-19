@@ -6188,3 +6188,57 @@ mod cve_2026_48842;
 #[cfg(test)]
 #[path = "CVE-2026-84642.rs"]
 mod cve_2026_84642;
+
+/// CVE-2026-107570（mutt < 2.3.2，NVD 2026-10-08，Debian DSA 6563-1，CVSS 2.5
+/// AV:L/AC:H/UI:R，CWE-823）**模板邮件 Content-Type 头堆越界写** regression
+///（issue #187，表 2 病毒/代码执行 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：把
+/// 邮件用作模板（meli 的 `Draft::edit` 装载）时，mutt 的
+/// `convert_file_from_to()` 用从 Content-Type 头取出的字符集对整份文件做
+/// iconv 转换，精心构造的头让输出指针与剩余长度簿记脱钩，写穿堆转换缓冲
+/// ——DSA 表述为 DoS 或潜在任意代码执行。
+///
+/// **meli 等价面映射（issue #187 侦察结论）**：mutt 写链四环在 meli 全部
+/// 构造性阻断。(1) C 字符串字符集：`Charset::from` 以 `eq_ignore_ascii_case`
+/// 对**闭集枚举**匹配原始参数字节，未知/非法/带 NUL/超长名一律降级
+/// `Charset::Ascii`——不存在交给 iconv 的字符集串与指针。(2) 转换缓冲：
+/// `decode_charset` 走 encoding_rs 解码器返回按需增长的 `Cow<str>`，无
+/// 定长输出缓冲可写穿。(3) 指针算术：整条链（`content_type` nom 借用切片
+/// 解析、`saturating_sub` 防下溢的 multipart 切分、compose/template 胶水）
+/// 为零 `unsafe`、零 `set_len`/`MaybeUninit`、零 32 位窄化转换（grep 审计）
+/// 的安全 Rust。(4) 模板入口：`Draft::edit` 装载敌意邮件、走
+/// `Envelope::body_bytes` → `Attachment` 树并逐部件 decode——正是 mutt 整文件
+/// 转换的管线。
+///
+/// [`cve_2026_107570`] 分层锁定（详见模块内注释）：L1 敌意 Content-Type 值
+/// 全族（非法/超长 charset、参数名值畸形、NUL 注入、大小写与折叠变体，加折
+/// 叠触发值的逐字节前缀扫）过 `content_type` 解析全部得到类型化判定——干净
+/// `Ok`（其后附件构建器做 RFC 2045 token 校验）或干净 nom `Err`，零 panic、
+/// 两次一致；L2 `Charset::from` 对任意字节全定义——NUL 截断族
+///（`gbk\0iso-8859-1\0utf-16le` 等 C 串截断任意前缀的形状）在 meli 整字节
+/// 比较下降级 `Ascii`，已知拼写的大小写/空白变体仍选中各自变体，重复
+/// charset 参数后者胜；L3 全部 30 个 `Charset` 枚举变体 × 敌意转换体
+///（奇长 UTF-16、悬垂代理项、截断 GB18030 四字节序列、悬垂 ISO-2022-JP
+/// 转义、截断 Shift_JIS 双字节、全字节值、70 KiB 体）两次解码逐字节一致、
+/// 3×+8 膨胀界内、零 panic；L4 转换缓冲随输入线性伸缩——ISO-8859-1 的
+/// `0xA0..=0xFF` 体在 65535/65536/65537/100000 字节（跨 64 KiB 经典定长缓冲
+/// 边界）精确解码为 2×N，定长 64 KiB 输出缓冲或 16 位长度恰在此截断/回绕；
+/// L5 模板管线端到端惰性——每个语料邮件（全族 Content-Type 植入完整邮件、
+/// 逐前缀扫、30 层 multipart 每层带敌意 charset、规范触发邮件逐字节截断）
+/// 经 `Envelope::from_bytes` → `Draft::edit` → 文本提取 + 逐部件两次解码
+/// 逐字节一致、有界、预算内、零 panic。
+///
+/// 与近亲划界：CVE-2023-4875（issue #44，mutt）是**草稿继续撰写**的
+/// userhdrs NULL 解引用与头块静默清空（写入面），CVE-2023-4874（issue #43）
+/// 是**查看**缺结构字段邮件的 NULL 解引用（读取面），本 CVE 是**模板装载**
+/// 驱动的整文件 charset 转换堆写穿（转换面）；CVE-2026-14899（issue #35）
+/// 是 MIME 头解析 off-by-one 越界**读**——本文件的 NUL 注入族特意构造
+/// `gbk\0iso-8859-1` 式 C 串截断形状，证明 meli 整字节比较无截断语义。
+/// marker 域名 `example.net`/`example.org` 与兄弟文件逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——闭集字符集枚举 +
+/// encoding_rs 增长输出 + 全链安全 Rust 使 CWE-823 写穿类无代码可运行。
+///
+/// [`cve_2026_107570`]: self::cve_2026_107570
+#[cfg(test)]
+#[path = "CVE-2026-107570.rs"]
+mod cve_2026_107570;
