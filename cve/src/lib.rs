@@ -6997,3 +6997,18 @@ mod cve_2026_43861;
 #[cfg(test)]
 #[path = "CVE-2026-43863.rs"]
 mod cve_2026_43863;
+/// CVE-2026-43862 — mutt < 2.3.2 IMAP GSSAPI 安全级协商数据未校验即消费
+/// （CWE-843）攻击模拟（Gitea issue #211）。meli 无 GSSAPI：按 issue 约定
+/// 映射到等价「认证安全级协商不可被服务器/中间人降级」面——oauth2 机制门
+/// 与 TLS 门均先于凭据解析、固定机制全集、LOGIN 兜底由配置通道决定、
+/// LOGINDISABLED/PREAUTH/失败取消全部 fail-closed、半认证流不复用且重连
+/// 重推导同一机制。L0 还原 mutt 截断 token / 64 位 `long` 两缺陷，L1 以
+/// 真实 loopback 敌意服务器驱动真实 `ImapStream::new_connection` 与
+/// `ImapConnection`，L2 源码锚点锁定机制词素、字节序与取消 token。
+/// 结论：发现并修复 1 个认证状态严格性缺口（PREAUTH 前缀无词边界，畸形
+/// greeting 不再跳过登录流）；T10b/T11 分别锁定该修复与 STARTTLS 拒绝面。
+///
+/// [`cve_2026_43862`]: self::cve_2026_43862
+#[cfg(test)]
+#[path = "CVE-2026-43862.rs"]
+mod cve_2026_43862;
