@@ -39,7 +39,7 @@ use futures::{
     stream::StreamExt,
 };
 use indexmap::{IndexMap, IndexSet};
-use isahc::AsyncReadResponseExt;
+use connection::BoundedResponseText;
 use serde_json::{json, Value};
 use url::Url;
 
@@ -854,7 +854,7 @@ impl MailBackend for JmapType {
                     bytes,
                 )
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mailbox_id: Id<mailbox::MailboxObject> = {
@@ -893,7 +893,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -976,7 +976,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1138,7 +1138,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1327,7 +1327,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1459,7 +1459,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1580,7 +1580,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1701,7 +1701,7 @@ impl MailBackend for JmapType {
                     bytes,
                 )
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let upload_response: UploadResponse = match deserialize_from_str(&res_text) {
@@ -1733,7 +1733,7 @@ impl MailBackend for JmapType {
                 let res_text = conn
                     .post_async(None, serde_json::to_string(&req)?)
                     .await?
-                    .text()
+                    .text_bounded()
                     .await?;
                 let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                     Err(err) => {
@@ -1794,7 +1794,7 @@ impl MailBackend for JmapType {
                 let res_text = conn
                     .post_async(None, serde_json::to_string(&req)?)
                     .await?
-                    .text()
+                    .text_bounded()
                     .await?;
 
                 // [ref:TODO] parse/return any error.

@@ -32,6 +32,7 @@ use isahc::{config::RedirectPolicy, http, http::request::Request, prelude::*, Ht
 use regex::Regex;
 use url::Url;
 
+use super::connection::BoundedResponseText;
 use crate::{
     error::Result,
     jmap::{
@@ -270,7 +271,7 @@ impl EventSourceConnection {
                 {
                     let status = response.status();
                     if !status.is_success() {
-                        let res_text = response.text().await?;
+                        let res_text = response.text_bounded().await?;
                         return Err(format!("{} {}", status.as_str(), res_text).into());
                     }
 

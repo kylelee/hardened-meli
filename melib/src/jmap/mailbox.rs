@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use isahc::AsyncReadResponseExt;
+use super::connection::BoundedResponseText;
 use serde_json::value::RawValue;
 use smallvec::SmallVec;
 
@@ -289,7 +289,7 @@ impl JmapConnection {
             let res_text = self
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {

@@ -27,7 +27,7 @@ use std::{convert::TryFrom, sync::Arc};
 
 use futures::lock::Mutex as FutureMutex;
 use indexmap::IndexMap;
-use isahc::AsyncReadResponseExt as _;
+use super::connection::BoundedResponseText;
 use serde_json::{json, Value};
 
 use crate::{
@@ -130,7 +130,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -163,7 +163,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -189,7 +189,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -229,7 +229,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -264,7 +264,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -314,7 +314,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -355,7 +355,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -392,7 +392,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -452,7 +452,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -505,7 +505,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -561,7 +561,7 @@ impl ContactBackend for JmapContacts {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {

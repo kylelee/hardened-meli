@@ -6738,3 +6738,57 @@ mod cve_2026_33372;
 #[cfg(test)]
 #[path = "CVE-2026-35537.rs"]
 mod cve_2026_35537;
+
+
+/// CVE-2026-110249（Thunderbird < 158；MFSA 2026-109，2026-10-13，low，
+/// CWE-400；Mozilla bug 2077826）**恶意/被入侵/MITM 服务器用单个良构响应
+/// 携带巨量属性元素 → 客户端 CPU/内存资源耗尽 DoS**攻击模拟回归（Gitea
+/// issue #203）。meli 无 Exchange/SOAP 组件；按 issue 指定的「服务器响应
+/// 结构数量级耗尽」等价面覆盖 IMAP FETCH/SEARCH/LIST、JMAP 服务器 JSON、
+/// MIME multipart 与 NNTP LIST/GROUP。
+///
+/// 侦察检出两个真实缺口，均已随回归修复：
+///
+/// 1. **IMAP `read_lines` 二次 CRLF 重扫（CWE-407）**：
+///    `melib/src/imap/connection.rs` 每读入一个 64 KiB 块就对
+///    `ret[last_line_idx..]` 全量 `rfind("\r\n")`，而 `last_line_idx` 只在
+///    找到 CRLF 后前移。恶意服务器发出一条永不终止的超长响应行（单个
+///    FETCH 巨量属性 / 单行 SEARCH 结果末尾才给 CRLF），在 64 MiB 上限下
+///    总扫描量约 32 GiB（`BytesExt::rfind` 为逐字节 `windows(2)`），一条
+///    良构响应即可烧掉数十秒 CPU，正好复现本 CVE。修复：仿 SMTP/NNTP 引入
+///    单调 `searched` 游标（回退一字节以命中跨块 CRLF），已扫描前缀永不
+///    重扫。
+/// 2. **JMAP HTTP 响应体无字节上限（CWE-400）**：
+///    `melib/src/jmap/` 全部响应用 isahc 的 `text()` 全量读入，而 isahc 无
+///    响应体大小配置，chunked 无限流即可无界分配。修复：新增
+///    `jmap::connection::BoundedResponseText::text_bounded`，按块读取并复用
+///    共享 `enforce_response_size_limit`（`MAX_SERVER_RESPONSE_SIZE`，64
+///    MiB），超限 `ProtocolViolation` fail-closed；33 处 `text()` 全部切换。
+///
+/// [`cve_2026_110249`] 分 7 层锁定（详见模块文档）：①IMAP 解析层数百万
+/// SEARCH 序列号 / 数万 FLAGS 关键字 / 数万属性 / 20k FETCH 行，30 s 预算
+/// 内、计数与顺序精确、两次一致、未知属性 fail-closed；②IMAP 传输层真实
+/// `read_response`：无 CRLF 单行洪流与良构行洪流都在 64 MiB 处
+/// `ProtocolViolation`、累积 ≤ 上限 + 读缓冲、预算内完成（①的预算即二次
+/// 重扫回归）；③multipart 两万部件精确计数 + 200 层嵌套被 100 层上限截断；
+/// ④NNTP 十万行 LIST 分帧线性、4 MiB XOVER 字段有界、无限多行在 64 MiB
+/// 处 fail-closed；⑤JMAP 十万层嵌套在 serde_json 递归上限（128）干净
+/// `Err` 不爆栈、二十万键 + 百万元素数组预算内解析且计数精确；⑥JMAP 敌意
+/// 服务器永不结束的 chunked 响应体经 `connect` + `send_request` 在上限处
+/// `ProtocolViolation`，服务器写入有界；⑦源码锚点——64 MiB 常量与四个协议
+/// 读取点调用、IMAP 增量游标、JMAP 有界入口、multipart/BODYSTRUCTURE 深度
+/// 常量，全 `melib/src` 无 `disable_recursion_limit`，JMAP 目录无无界
+/// `.text()`。语料 marker `res-exhaust-110249` 与兄弟文件逐字隔离。
+///
+/// 与近亲划界：CVE-2018-14350（#144）锁 IMAP 响应字节上限本身；
+/// CVE-2018-14360 锁行分帧与 SMTP 增量扫描；CVE-2007-3166 锁字面量探测
+/// 二次扫描；CVE-2020-16947（#105）锁 multipart 嵌套深度。本文件拥有
+/// **结构数量级行为断言**、**IMAP 长行二次重扫修复**与**JMAP 响应体字节
+/// 上限修复**。
+///
+/// 结论：**检出并修复两个真实缺口，非纯免疫证明**。
+///
+/// [`cve_2026_110249`]: self::cve_2026_110249
+#[cfg(test)]
+#[path = "CVE-2026-110249.rs"]
+mod cve_2026_110249;

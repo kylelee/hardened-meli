@@ -1152,6 +1152,18 @@ impl ImapStream {
         let mut buf: Vec<u8> = vec![0; Connection::IO_BUF_SIZE];
         ret.clear();
         let mut last_line_idx: usize = 0;
+        // How far into `ret` the search for the next CRLF separator has
+        // already gone without finding one (past the lines already consumed).
+        // The scan resumes one byte earlier — a `\r` at `searched - 1` may
+        // have met its `\n` in the newest chunk — so a separator split across
+        // read chunks is still found, while the accumulated prefix is never
+        // rescanned. A hostile server that streams one over-long response line
+        // (a single FETCH carrying a huge attribute run, or a SEARCH result
+        // line with no CRLF until the very end) must not turn every 64 KiB
+        // read into a rescan of the whole line accumulated so far — the
+        // quadratic separator rescan (CWE-407) closed here, mirroring the
+        // SMTP/NNTP `read_lines` fix.
+        let mut searched: usize = 0;
         // Complete lines already inspected for the termination tag below
         // (see the tag-not-last handling); `ret` only ever grows until the
         // loop breaks, so the cursor is monotonic.
@@ -1168,7 +1180,14 @@ impl ImapStream {
                     );
                     ret.extend_from_slice(&buf[0..b]);
                     enforce_response_size_limit(ret.len())?;
-                    if let Some(mut pos) = ret[last_line_idx..].rfind("\r\n") {
+                    if let Some(pos) = {
+                        let from = searched.saturating_sub(1).max(last_line_idx);
+                        ret[from..].rfind("\r\n").map(|pos| from + pos)
+                    } {
+                        // `pos` above is absolute; the framing logic below
+                        // works relative to `last_line_idx` (the start of the
+                        // last complete line).
+                        let mut pos = pos - last_line_idx;
                         if ret[last_line_idx..].starts_with(b"* BYE") {
                             return Err(Error::new("Disconnected"));
                         }
@@ -1239,6 +1258,10 @@ impl ImapStream {
                         }
                         last_line_idx += pos + b"\r\n".len();
                     }
+                    // The tail holds no further separator (bar a possible
+                    // `\r` byte at the very end): remember how far the scan
+                    // reached so the next chunk is scanned incrementally.
+                    searched = ret.len();
                 }
                 Err(err) => {
                     return Err(Error::from(err));
@@ -2655,6 +2678,53 @@ mod tests {
                 cap_test_utils::malicious_server(b"* 1 EXISTS\r\n", cap.saturating_mul(2));
             let mut imap_stream = ImapStream {
                 cmd_id: 1,
+                last_cmd: String::new(),
+                id: Cow::Borrowed("cap-test"),
+                stream,
+                protocol: ImapProtocol::default(),
+                current_mailbox: MailboxSelection::None,
+                timeout: Some(Duration::from_secs(60)),
+                preauthed: false,
+            };
+            let mut ret = Vec::new();
+            let res = smol::block_on(imap_stream.read_lines(&mut ret, Some(b"M1 "), true));
+            drop(imap_stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+                ),
+                "unexpected error: {err:?}"
+            );
+            assert!(ret.len() > cap);
+            assert!(
+                ret.len() <= cap + Connection::IO_BUF_SIZE,
+                "accumulation must stay bounded: {} > {}",
+                ret.len(),
+                cap + Connection::IO_BUF_SIZE
+            );
+        });
+    }
+
+    /// Regression for the CVE-2026-110249 corpus shape (issue #203): one
+    /// response line with no CRLF at all. The read loop must hit the cap and
+    /// fail closed with accumulation bounded to the cap plus one read
+    /// buffer, and it must scan the accumulated line incrementally (the
+    /// `searched` cursor) instead of rescanning it on every read; the
+    /// production-scale quadratic regression is locked by
+    /// `cve/src/CVE-2026-110249.rs`.
+    #[test]
+    fn test_imap_read_lines_unterminated_line_size_cap() {
+        cap_test_utils::assert_completes_within(10, || {
+            let cap = max_server_response_size();
+            let (stream, writer) = cap_test_utils::malicious_server(
+                b"* SEARCH 1 2 3 4 5 6 7 8 9 ",
+                cap.saturating_mul(2),
+            );
+            let mut imap_stream = ImapStream {
+                cmd_id: 2,
                 last_cmd: String::new(),
                 id: Cow::Borrowed("cap-test"),
                 stream,
