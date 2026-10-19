@@ -6699,3 +6699,42 @@ mod cve_2026_33371;
 #[cfg(test)]
 #[path = "CVE-2026-33372.rs"]
 mod cve_2026_33372;
+
+/// CVE-2026-35537（Roundcube Webmail < 1.5.14 / < 1.6.14，2026-03-18 发布
+/// 安全更新；CWE-502 不安全反序列化）**会话存储反序列化 → 未认证任意文件
+/// 写**攻击模拟回归（Gitea issue #204）：redis/memcache 会话数据按 PHP
+/// `unserialize` 语义还原为对象图，攻击者注入的会话载荷在反序列化时沿
+/// gadget 链触达文件写原语。meli 无 PHP 对象序列化/会话 handler 面，等价
+/// 面按 issue 指定为三个「不可信来源反序列化」目标路径——`melib/src/jmap/`
+/// （服务器 JSON 的 serde 强类型反序列化）、
+/// `melib/src/imap/sync/sqlite3_cache.rs`（缓存行读回）与
+/// `meli/src/sqlite3.rs`（搜索索引读回）。[`cve_2026_35537`] 分层锁定：
+/// JMAP 超预期字段只落 `EmailObject::extra` 纯数据、方法分派是静态期望名
+/// 比较、类型混淆矩阵/300 层深嵌套/4 MiB 巨型字符串全部干净 `Err` 或有界
+/// 数据；会话四端点（`apiUrl`/`downloadUrl`/`uploadUrl`/`eventSourceUrl`）
+/// 的 `file:`/`http:`/`javascript:` 载荷在任何 I/O 前被
+/// `validate_session_urls` 的 https 门拒绝，URL 模板展开把攻击者 id 限制
+/// 在模板既有 scheme/host 内；缓存 envelope 篡改行被隔离进
+/// `invalid_envelopes` 并以占位邮件显示（原始 blob 逐字节保留、健康行不受
+/// 影响、数据库不重置），`find_envelope`/`mailbox_list`/`flags`/
+/// `msn_cache` 的畸形读回一律 fail-closed；搜索索引的 7/16 字节或 TEXT
+/// `hash` 列触发 `EnvelopeHash::FromSql` 的 `InvalidType`，整次搜索拒绝；
+/// 源码锚点证明三个面都不含对象图格式、`transmute`、进程/文件写原语。
+///
+/// **缺口检出与修复**：JMAP 共享反序列化入口此前只解析第一个 JSON 值，尾
+/// 随字节（拼接文档/垃圾）被静默忽略；现补
+/// `serde_json::Deserializer::end()` 校验「整个响应恰好是一个 JSON 文档」，
+/// 尾随非空白字节一律干净 `Err`（`melib/src/jmap/mod.rs`）。
+///
+/// 与近亲划界：CVE-2024-50624（#139）拥有 JMAP transport URL 的 https 硬
+/// 化基线；CVE-2018-14362（#156）拥有 `DatabaseDescription` 路径门与哈希
+/// 整数化基线；本文件拥有 **serde 强类型反序列化读回轴**（超预期字段/类型
+/// 混淆/深嵌套/巨型字符串/缓存行篡改）与 **URL 模板展开不越界轴**。
+///
+/// 结论：**等价面免疫证明 + 1 处宽松解析缺口修复**（JMAP 响应尾随字节
+/// 校验）。
+///
+/// [`cve_2026_35537`]: self::cve_2026_35537
+#[cfg(test)]
+#[path = "CVE-2026-35537.rs"]
+mod cve_2026_35537;

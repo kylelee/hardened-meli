@@ -120,16 +120,32 @@ mod tests;
 
 pub fn deserialize_from_str<'de, T: serde::de::Deserialize<'de>>(s: &'de str) -> Result<T> {
     let jd = &mut serde_json::Deserializer::from_str(s);
-    match serde_path_to_error::deserialize(jd) {
-        Ok(v) => Ok(v),
-        Err(err) => Err(Error::new(format!(
+    let value = match serde_path_to_error::deserialize(&mut *jd) {
+        Ok(v) => v,
+        Err(err) => {
+            return Err(Error::new(format!(
+                "BUG: Could not deserialize server JSON response properly, please report this!\nError \
+                 {err} at {path}. Reply from server: {s}",
+                path = err.path(),
+            ))
+            .set_source(Some(Box::new(err)))
+            .set_kind(ErrorKind::Bug));
+        }
+    };
+    // CVE-2026-35537 regression (issue #204): the untrusted server response
+    // must be exactly one JSON document. A value followed by trailing bytes
+    // (`{...}35537`, a second concatenated document) is a lenient-parse gap:
+    // `serde_path_to_error::deserialize` alone stops after the first value
+    // and would silently ignore the rest. Trailing whitespace stays legal.
+    if let Err(err) = jd.end() {
+        return Err(Error::new(format!(
             "BUG: Could not deserialize server JSON response properly, please report this!\nError \
-             {err} at {path}. Reply from server: {s}",
-            path = err.path(),
+             {err}. Reply from server: {s}"
         ))
         .set_source(Some(Box::new(err)))
-        .set_kind(ErrorKind::Bug)),
+        .set_kind(ErrorKind::Bug));
     }
+    Ok(value)
 }
 
 #[derive(Debug, Default)]
