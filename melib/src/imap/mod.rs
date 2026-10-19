@@ -146,6 +146,7 @@ async fn copy_or_move_uids(
 
 pub static SUPPORTED_CAPABILITIES: &[&str] = &[
     "AUTH=ANONYMOUS",
+    "AUTH=OAUTHBEARER",
     "AUTH=PLAIN",
     "AUTH=XOAUTH2",
     "COMPRESS=DEFLATE",

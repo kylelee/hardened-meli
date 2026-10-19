@@ -40,6 +40,17 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-20 (UTC+8)
 
+- Method: per-commit semantic port (task T6 of the `1ada94c3..1e66d41e` range, conf preprocessing)
+- Upstream range: `1ada94c3..1e66d41e` (upstream `9a9fee81` only)
+- Conflicts: none (fork-kept deviations: depth>7 cyclic-include guard, infallible `xdg::BaseDirectories::with_prefix`, melib-root import style; upstream's `expand_config` removal adopted — fork had no external callers)
+- Accounting kinds: see the notes column
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `9a9fee81` | port | refactor(meli/conf) | remove m4 runtime dependency: `Preprocessed`/`Spanned` + stack-based (`VecDeque`) pure-Rust include expansion replaces both `Command::new("m4")` pipelines; `M4_PREAMBLE`s and `expand_config` deleted; missing-directory include errors unified on upstream's line-numbered message (more informative than the fork's two divergent styles); fork's recursion guard kept where upstream dropped it; docs: `meli.conf.5` include directive wording no longer references m4, `BUILD.md` termux pkg list drops m4; tests: nested/cyclic/self/missing/directory/non-UTF-8/malformed includes + no-`PATH` no-subprocess proof (issue #186) |
+
+## 2026-10-20 (UTC+8)
+
 - Method: per-commit semantic port (task T5 of the `1ada94c3..1e66d41e` range, melib misc improvements)
 - Upstream range: `1ada94c3..1e66d41e` (RFC2369 / thread subject trim / percent_encoding / attachment accessors only)
 - Conflicts: none; all fork callers adapted mechanically to the owned `ListAction` API (`meli/src/mail/{view,compose}`, `meli/src/mail/view/envelope.rs`, seven CVE corpus suites, `meli-test/tests/test_unsubscribe_confirm.rs`) without adopting upstream's dialog-based UI
@@ -57,6 +68,29 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 | — | `e1272d9f` | **SKIP** | fix(melib/logging) | debug logs not written to file: the fork's tracing-based logging is an intentional deviation |
 | — | `d54dff03` | **SKIP** | chore | assert_cmd 2.2.2 upgrade: fork's `Cargo.lock` already resolves `assert_cmd` 2.2.2 |
 | — | (VERIFY/TODO/clippy cosmetic commits in range) | **SKIP** | style | pure appearance cleanups outside this task's scope |
+
+## 2026-10-20 (UTC+8)
+
+- Method: per-commit semantic port (task T2 of the `1ada94c3..1e66d41e` range)
+- Upstream range: `1ada94c3..1e66d41e` (IMAP/ManageSieve cluster only)
+- Conflicts: none (test harness reimplemented under fork conventions: tracing instead of `log`, no `rusty_fork`, mock-server flags instead of upstream's event-queue redesign)
+- Accounting kinds: see the SKIP/PARTIAL notes in the table
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `3b5670e9` | port | feat(melib/imap) | PREAUTH greeting: `ImapStream::preauthed` + skip login/lazy-CAPABILITY/ID + `AccountStateChange` with the server message; detection scans the `M1 CAPABILITY` reply buffer (the fork, like upstream, sends `CAPABILITY` before anything else, so the greeting rides along in that reply) |
+| — | `0b501a1f` | **PARTIAL** | feat(melib/imap) | OAUTHBEARER (RFC 7628) alongside XOAUTH2: capability-based selection, TLS requirement, SASL string built from username+token with legacy base64-string recovery, SASL-IR and continuation forms, SASL failure continuation decoded into error details with the mechanism's cancel token; token resolved from `Secret` only at send time (fork redaction policy). NOT ported: the `new_connection`→`new`+`authenticate()` split and `UIDStore::preauth_capabilities` — the fork's inline auth keeps connection-pool hardening intact and already merges pre/post-auth capabilities in one set (documented in issue #182); docs example updated to the raw-token command form |
+| — | `c063b4a8c` | **SKIP** | fix(melib/imap/untagged) | skip fetch on `(0, 0)` EXISTS: fork's cache-first model already early-returns on `current_exists >= n` |
+| — | `747676ab1` | port | fix(melib/imap/untagged) | equal-count EXISTS (`current_exists == n`) probes the highest MSN once (`FETCH n`), catching an expunge+arrival swap whose total is unchanged; the probe is best-effort (a stale EXISTS may reference an expunged MSN; the UID resync stays authoritative) and dedup by UID suppresses duplicate Create events |
+| — | `2e408a029` | port | fix(melib/imap/managesieve) | literal framing via `send_raw` (no doubled CRLF), replies read with `read_lines(Some(b"OK"))`, `getscript` parses `{N+}` non-synchronizing literals (local parser extension), `ManageSieveConnection::connect()` added; `havespace`/`renamescript` fake-`Ok` stubs did not exist in the fork (removed earlier), nothing to fix; upstream's `putscript` drops the `OK` line it validates against (`keep_termination_string = false`) — the fork keeps it so `response_oknobye` can parse the reply |
+| — | `4cc43b035` | port | feat(meli) | `tools managesieve-shell` REPL subcommand (CLI smoke test for `--help`); upstream's `tools/src/managesieve.rs` binary never existed in the fork |
+| — | `0d23bddf7` | port | test(melib-test/imap) | 72 mock-server `eprintln!`s converted to `tracing::debug!`/`trace!` (fork tracing convention; output visible through `melib_test::init_test_logging`) |
+| — | `79a8c8291` | port | test(melib-test/imap) | TLS support: `ImapServerStream::new_with_tls` wraps the accepted socket in `Connection::new_tls` (WouldBlock handshake loop); negative cert-validation case, PLAIN/OAUTHBEARER/XOAUTH2 over TLS |
+| — | `7092d90cf` | port | test(melib-test/imap) | SASL continuation form: the mock answers the bare `AUTHENTICATE` with `+ ` and asserts the base64 exchange line (byte-exact RFC 7628 form) |
+| — | `43b0a52e4` | port | test(melib-test/imap) | `send_capabilities_on_auth` mock mode: capabilities glued to the auth reply; the client must not re-send `CAPABILITY` (asserted via the handshake command log) |
+| — | `6ef74bf8f` | **SKIP** | test(melib-test/imap) | exit stream recv on client disconnect: the fork's `read_line` already distinguishes EOF (`ReadOutcome::Eof` breaks the loop); read *errors* are now also mapped to EOF instead of panicking |
+| — | `5fddcb89a` | **SKIP** | test(melib-test) | `test_imap_fetch` cache-enabled check: the fork's cache-dependent tests are already `#[cfg(feature = "sqlite3")]`-gated |
+
 
 
 ## 2026-10-13 20:00 (UTC+8)

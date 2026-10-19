@@ -247,7 +247,17 @@ impl ImapConnection {
             UntaggedResponse::Exists(n) => {
                 imap_log!(trace, self, "exists {}", n);
                 let current_exists = mailbox.counters.lock().unwrap().total.len();
-                if current_exists >= n {
+                // Whether this push only warrants the equal-count probe
+                // below (see `sequence_set`): a stale EXISTS value may
+                // reference an MSN the server has since expunged, so the
+                // probe must stay best-effort instead of poisoning the
+                // session; the UID-based resync paths remain authoritative.
+                let probe_only = current_exists == n;
+                let sequence_set = if current_exists > n {
+                    // We know more mails than the server reports: EXPUNGE
+                    // responses were missed. The UID-based resync paths own
+                    // the full reconciliation against server truth, so there
+                    // is nothing to fetch here.
                     imap_log!(
                         trace,
                         self,
@@ -256,17 +266,53 @@ impl ImapConnection {
                         current_exists
                     );
                     return Ok(None);
-                }
-                // Fetch every message from the first one we do not know
-                // about yet: an EXISTS push reports the new total count, so
-                // more than one mail may have arrived with a single push.
-                let min = current_exists.max(1);
+                } else if current_exists == n {
+                    if n == 0 {
+                        // Nothing to do.
+                        return Ok(None);
+                    }
+                    // The total is unchanged, but an expunge of one mail
+                    // combined with one arrival also leaves it unchanged:
+                    // the highest message sequence number is then a
+                    // different (new) mail. Probe it once; if it is a mail
+                    // we already know, the dedup by `UID` below discards
+                    // it. Without the probe, the new mail would only be
+                    // noticed by the next full (heartbeat) resync.
+                    SequenceSet::try_from(n..=n)?
+                } else {
+                    // Fetch every message from the first one we do not know
+                    // about yet: an EXISTS push reports the new total count,
+                    // so more than one mail may have arrived with a single
+                    // push.
+                    let min = current_exists.max(1);
+                    SequenceSet::try_from(min..)?
+                };
                 let (required_responses, attributes) = common_attributes();
-                try_fail!(
-                    mailbox_hash,
-                    self.send_command(CommandBody::fetch(min.., attributes, false)?).await
-                    self.read_response(&mut response, required_responses).await
-                );
+                if probe_only {
+                    if let Err(err) = async {
+                        self.send_command(CommandBody::fetch(sequence_set, attributes, false)?)
+                            .await?;
+                        self.read_response(&mut response, required_responses).await
+                    }
+                    .await
+                    {
+                        imap_log!(
+                            trace,
+                            self,
+                            "exists probe of MSN {} failed (the EXISTS value was probably stale):                              {}",
+                            n,
+                            &err
+                        );
+                        return Ok(None);
+                    }
+                } else {
+                    try_fail!(
+                        mailbox_hash,
+                        self.send_command(CommandBody::fetch(sequence_set, attributes, false)?)
+                            .await
+                        self.read_response(&mut response, required_responses).await
+                    );
+                }
                 let mut v = match super::protocol_parser::fetch_responses(&response) {
                     Ok((_, v, _)) => v,
                     Err(err) => {

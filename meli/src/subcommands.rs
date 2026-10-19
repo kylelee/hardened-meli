@@ -242,6 +242,202 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
     }
 
     match opt {
+        ToolOpt::ManagesieveShell { ref account } => {
+            // The whole exchange lives in its own frame: `tool()` is
+            // already close to clippy's stack-allocation limit.
+            fn managesieve_shell(path: Option<PathBuf>, account: &str) -> Result<()> {
+
+                use futures::executor::block_on;
+
+                use melib::backends::AccountHash;
+
+                let (_, account_conf) = get_account(path, account)?;
+                // `ManageSieveConnection` carries large internal buffers; box
+                // it to keep this frame under clippy's stack-allocation limit.
+                let mut conn = Box::new(melib::imap::managesieve::ManageSieveConnection::new(
+                    AccountHash::default(),
+                    account.to_string(),
+                    &account_conf.account,
+                    melib::BackendEventConsumer::new(std::sync::Arc::new(|_, _| {})),
+                )?);
+
+                println!("connecting");
+                block_on(timeout(conn.inner.server_conf.timeout, conn.connect()))
+                    .unwrap()
+                    .unwrap();
+                println!("connected");
+                // Keep the REPL's locals (state enum, input buffers) in
+                // their own frame: `tool()` is already close to clippy's
+                // stack-allocation limit.
+                #[expect(clippy::print_stdout, reason = "interactive debug tool")]
+                fn shell(mut conn: Box<melib::imap::managesieve::ManageSieveConnection>) {
+                    let mut input = String::new();
+                    const AVAILABLE_COMMANDS: &[&str] = &[
+                        "help",
+                        "logout",
+                        "listscripts",
+                        "checkscript",
+                        "putscript",
+                        "setactive",
+                        "getscript",
+                        "deletescript",
+                    ];
+                    const COMMANDS_HELP: &[&str] = &[
+                        "help",
+                        "logout",
+                        "listscripts and whether they are active",
+                        "paste a script to check for validity without uploading it",
+                        "upload a script",
+                        "set a script as active",
+                        "get a script by its name",
+                        "delete a script by its name",
+                    ];
+                    println!(
+                        "managesieve shell: use 'help' for available commands. Use `help <command>` for \
+                         help with specific command. Managesieve commands with arguments take them in a \
+                         separate line (enter command first, press Enter, then the argument). Exit with \
+                         Ctrl+C, Ctrl+D or with the command `logout`."
+                    );
+                    enum PrevCmd {
+                        Checkscript,
+                        PutscriptName,
+                        PutscriptString(String),
+                        SetActiveName,
+                        GetScriptName,
+                    }
+                    use PrevCmd::*;
+                    let mut prev_cmd: Option<PrevCmd> = None;
+                    loop {
+                        use std::io;
+                        input.clear();
+                        print!("> ");
+                        io::stdout().flush().unwrap();
+
+                        match io::stdin().read_line(&mut input) {
+                            Ok(b) => {
+                                let input = input.trim();
+                                println!("\rC: {}", input.trim());
+                                if b == 0 || input.eq_ignore_ascii_case("logout") {
+                                    break;
+                                }
+                                if input.eq_ignore_ascii_case("help") {
+                                    println!("available commands: [{}]", AVAILABLE_COMMANDS.join(", "));
+                                    continue;
+                                }
+                                if input.len() >= "help ".len()
+                                    && input[0.."help ".len()].eq_ignore_ascii_case("help ")
+                                {
+                                    if let Some(i) = AVAILABLE_COMMANDS
+                                        .iter()
+                                        .position(|cmd| cmd.eq_ignore_ascii_case(&input["help ".len()..]))
+                                    {
+                                        println!("{}", COMMANDS_HELP[i]);
+                                    } else {
+                                        println!("invalid command `{}`", &input["help ".len()..]);
+                                    }
+                                    continue;
+                                }
+                                if input.eq_ignore_ascii_case("listscripts") {
+                                    match block_on(conn.listscripts()) {
+                                        Ok(scripts) => {
+                                            println!("S: Got {} scripts:", scripts.len());
+                                            for (script, active) in scripts {
+                                                println!(
+                                                    "S: - {}active: {}",
+                                                    if active { "" } else { "in" },
+                                                    String::from_utf8_lossy(&script)
+                                                );
+                                            }
+                                        }
+                                        Err(err) => {
+                                            println!("S: {err}");
+                                        }
+                                    }
+                                } else if input.eq_ignore_ascii_case("checkscript") {
+                                    prev_cmd = Some(Checkscript);
+                                    println!("insert file path of script in new line");
+                                } else if input.eq_ignore_ascii_case("putscript") {
+                                    prev_cmd = Some(PutscriptName);
+                                    println!("Insert script name in new line");
+                                } else if input.eq_ignore_ascii_case("setactive") {
+                                    prev_cmd = Some(SetActiveName);
+                                    println!("Insert script name in new line");
+                                } else if input.eq_ignore_ascii_case("getscript") {
+                                    prev_cmd = Some(GetScriptName);
+                                    println!("Insert script name in new line");
+                                } else if input.eq_ignore_ascii_case("deletescript") {
+                                    println!("unimplemented `{}`", input);
+                                } else if let Some(cmd) = prev_cmd.take() {
+                                    match cmd {
+                                        Checkscript => {
+                                            match std::fs::read_to_string(input)
+                                                .chain_err_related_path(std::path::Path::new(input))
+                                            {
+                                                Ok(content) => {
+                                                    match block_on(conn.checkscript(content.as_bytes())) {
+                                                        Ok(()) => {
+                                                            println!("S: OK");
+                                                        }
+                                                        Err(err) => {
+                                                            println!("S: {err}");
+                                                        }
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    println!("Could not read file: {err}");
+                                                }
+                                            }
+                                        }
+                                        PutscriptName => {
+                                            prev_cmd = Some(PutscriptString(input.to_string()));
+                                            println!("insert file path of script");
+                                        }
+                                        PutscriptString(name) => {
+                                            let content = std::fs::read_to_string(input)
+                                                .chain_err_related_path(std::path::Path::new(input))
+                                                .unwrap();
+                                            match block_on(
+                                                conn.putscript(name.as_bytes(), content.as_bytes()),
+                                            ) {
+                                                Ok(()) => {
+                                                    println!("S: OK");
+                                                }
+                                                Err(err) => {
+                                                    println!("S: {err}");
+                                                }
+                                            }
+                                        }
+                                        SetActiveName => match block_on(conn.setactive(input.as_bytes())) {
+                                            Ok(()) => {
+                                                println!("S: OK");
+                                            }
+                                            Err(err) => {
+                                                println!("S: {err}");
+                                            }
+                                        },
+                                        GetScriptName => match block_on(conn.getscript(input.as_bytes())) {
+                                            Ok(script) => {
+                                                println!("{}", String::from_utf8_lossy(&script));
+                                            }
+                                            Err(err) => {
+                                                println!("S: {err}");
+                                            }
+                                        },
+                                    }
+                                } else {
+                                    println!("invalid command `{}`", input);
+                                }
+                                io::stdout().flush().unwrap();
+                            }
+                            Err(error) => println!("error: {error}"),
+                        }
+                    }
+                }
+                shell(conn);
+                Ok(())
+            }
+            managesieve_shell(path, account)?;
+        }
         #[cfg(feature = "smtp")]
         ToolOpt::SmtpShell { ref account } => {
             use crate::conf::composing::SendMail;
