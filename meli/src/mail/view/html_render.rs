@@ -127,6 +127,25 @@ use melib::{Error, Result};
 /// 解码后进入 filter，与大小写形一并覆盖。如实记录的代价：URL/标题字面含这些
 /// token（例如普通单词里拼出 `eval(`）会整属性丢弃，anchor 文本与注入的 `rel`
 /// 存活——仅损失脚注/提示可见性，不损失安全。
+///
+/// 第八处与 nh3 parity 的**有意偏离**（CVE-2026-62643 / issue #194，Roundcube
+/// HTML 邮件 CSS 清洗不足致 SSRF/信息泄露，1.6.17/1.7.2 修复）：2026 批次新
+/// 载体复核——CVE-2024-42010（#116）已封 `@import`/`url(`/`expression(` 属性
+/// 值走私，但 CSS 远程引用载体全族里仍有 (a) 两个**裸 token 载体**：
+/// `image-set("a.png" 1x)` 字符串形可不带 `url(`，`srcset=` 是完整多分辨率引
+/// 用表；(b) 两条**解码轴**混淆：CSS 十六进制转义（CSS 词法里 `\75 rl(` 恰
+/// 是 `url(`——转义终结空白被消耗、token 邻接保持；`\40` 复活 `@`）与
+/// `/*…*/` 注释分割（`url/**/(` 剥注释后复活活原料；Roundcube 历史正则清洗
+/// 器正是被此家族绕过）。meli 依旧无 CSS 引擎、html2text 不外联（第二道防
+/// 线不变），但按 #115/#116/#117 的「清洗输出不得携带活原料」判例：保留属性
+/// 值只要以 ASCII 大小写不敏感方式含裸 `image-set` 或 `srcset` 子串，整个属
+/// 性丢弃（`href` 同判例：合法 https 可把 token 藏进 path/query）；再把值做
+/// 一次 **CSS 影子解码**（剥 `/*…*/` 注释、解 `\XXXXXX` 十六进制转义）后在
+/// 解码形上复跑全部活原料 token 检查——实体编码形（`&#x5c;75 rl(`）经
+/// html5ever 解码成字面 `\75 rl(` 后同样落进影子解码。影子解码只在值含 `\`
+/// 或 `/*` 时才发生（良性常见值零分配零扫描）。如实记录的代价：字面含
+/// `image-set`/`srcset` 的良性 URL/标题（如 MDN 的 image-set 文档页）整属性
+/// 丢弃，仅损失脚注/提示可见性，不损失安全。
 pub fn sanitize(input: &str) -> String {
     let tags: HashSet<&str> = [
         "a",
@@ -308,6 +327,38 @@ pub fn sanitize(input: &str) -> String {
             {
                 return None;
             }
+            // CVE-2026-62643 / issue #194 (Roundcube CSS sanitization
+            // insufficiency → SSRF/info leak, fixed in 1.6.17/1.7.2): the 2026
+            // reference-carrier re-audit of the #116 guard. Two gap families
+            // survived the bare-substring guard (probe-verified on the
+            // pre-fix code): (a) bare `image-set`/`srcset` tokens — the
+            // `image-set("a.png" 1x)` string form and a whole `srcset=`
+            // descriptor list carry remote references *without* containing
+            // `url(`; (b) the CSS decode axis — a CSS hex escape is resolved
+            // inside tokenization, so `\75 rl(` *is* `url(` (the escape's
+            // terminating whitespace is consumed, adjacency preserved) and
+            // `\40` revives `@`; a `/*…*/` comment split (`url/**/(`)
+            // revives the raw material once comments are stripped, the exact
+            // family that defeated Roundcube's regex-based cleaners. meli
+            // still has no CSS engine and html2text never fetches remote
+            // resources, but by the "no live material in sanitized output"
+            // precedent of #115/#116/#117: drop the whole attribute when the
+            // value contains the bare `image-set` or `srcset` token (ASCII
+            // case-insensitively; `href` included, same precedent — a legal
+            // `https:` URL can hide the token in its path/query), then
+            // re-run *every* live-material token check against a CSS-decoded
+            // shadow of the value (comments stripped, hex escapes decoded).
+            // Entity-encoded forms (`&#x5c;75 rl(`) reach this guard already
+            // html5ever-decoded to a literal `\75 rl(`. Documented cost,
+            // recorded honestly: a benign URL/title literally spelling
+            // `image-set`/`srcset` (e.g. MDN's image-set documentation page)
+            // loses the whole attribute — only footnote visibility is lost.
+            if contains_ascii_ci(trimmed, "image-set") || contains_ascii_ci(trimmed, "srcset") {
+                return None;
+            }
+            if css_shadow_carries_live_material(trimmed) {
+                return None;
+            }
             if trimmed.len() == value.len() {
                 return Some(Cow::Borrowed(value));
             }
@@ -374,6 +425,119 @@ fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
         .as_bytes()
         .windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// The full token family that makes a retained attribute value "live
+/// material" — every bare token the CVE guards in [`sanitize`]'s
+/// `attribute_filter` drop, mirrored here so the CSS-decoded shadow re-check
+/// of CVE-2026-62643 / issue #194 cannot miss a family member. Keep in sync
+/// with the guards above; [`css_shadow_carries_live_material`] is the only
+/// consumer.
+const LIVE_MATERIAL_TOKENS: &[&str] = &[
+    "@import",
+    "url(",
+    "expression(",
+    "onerror",
+    "javascript:",
+    "onload",
+    "srcdoc",
+    "data:",
+    "ontoggle",
+    "eval(",
+    "atob(",
+    "image-set",
+    "srcset",
+];
+
+/// Strip `/* … */` CSS comments (CVE-2026-62643 / issue #194). An
+/// unterminated comment strips to the end of the string, matching CSS EOF
+/// behavior. Returns [`Cow::Borrowed`] when there is nothing to strip.
+fn css_strip_comments(value: &str) -> Cow<'_, str> {
+    if !value.contains("/*") {
+        return Cow::Borrowed(value);
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        rest = &rest[start + 2..];
+        match rest.find("*/") {
+            Some(end) => rest = &rest[end + 2..],
+            None => rest = "",
+        }
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+/// Decode CSS hex escapes per CSS Syntax Level 3 (CVE-2026-62643 / issue
+/// #194): `\` followed by 1–6 hex digits denotes that code point, and one
+/// optional whitespace character after the digits terminates the escape and
+/// is consumed (so `\75 rl(` decodes to `url(`, adjacency preserved); `\`
+/// before a non-hex character escapes to that character literally; a
+/// trailing lone `\` and code point 0 both decode to U+FFFD. Code points
+/// outside the Unicode range decode to U+FFFD as well.
+fn css_unescape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let mut code: u32 = 0;
+        let mut digits = 0;
+        while digits < 6 {
+            match chars.peek() {
+                Some(h) if h.is_ascii_hexdigit() => {
+                    code = code * 16 + h.to_digit(16).expect("checked ascii hexdigit");
+                    digits += 1;
+                    chars.next();
+                }
+                _ => break,
+            }
+        }
+        if digits == 0 {
+            match chars.next() {
+                Some(literal) => out.push(literal),
+                None => out.push('\u{FFFD}'),
+            }
+            continue;
+        }
+        if matches!(chars.peek(), Some(w) if w.is_whitespace()) {
+            chars.next();
+        }
+        out.push(
+            char::from_u32(code)
+                .filter(|&c| c != '\0')
+                .unwrap_or('\u{FFFD}'),
+        );
+    }
+    out
+}
+
+/// CVE-2026-62643 / issue #194 shadow re-check: CSS-escape (`\75 rl(`) and
+/// comment-split (`url/**/(`) obfuscation decode to a live token without
+/// ever containing it literally. Decode a shadow of `value` (comments
+/// stripped, then hex escapes decoded — comments first, matching CSS
+/// tokenization order) and re-run every [`LIVE_MATERIAL_TOKENS`] check
+/// against it, ASCII case-insensitively. The common case (no `\` and no
+/// `/*` in the value) allocates nothing and scans nothing.
+fn css_shadow_carries_live_material(value: &str) -> bool {
+    let has_comment = value.contains("/*");
+    let has_escape = value.contains('\\');
+    if !has_comment && !has_escape {
+        return false;
+    }
+    let stripped = css_strip_comments(value);
+    let shadow: Cow<'_, str> = if has_escape {
+        Cow::Owned(css_unescape(&stripped))
+    } else {
+        stripped
+    };
+    LIVE_MATERIAL_TOKENS
+        .iter()
+        .any(|token| contains_ascii_ci(&shadow, token))
 }
 
 /// Character predicate: matches ASCII whitespace, Unicode `White_Space`,
@@ -687,6 +851,111 @@ mod tests {
         for (input, expected) in CASES {
             assert_eq!(sanitize(input), *expected, "input: {input}");
         }
+    }
+
+    /// CVE-2026-62643 / issue #194 regression: the 2026 CSS reference-carrier
+    /// re-audit of the #116 guard. Two gap families probe-verified on the
+    /// pre-fix code are locked here byte-exactly — the bare `image-set`/
+    /// `srcset` tokens (the `image-set("a.png" 1x)` string form carries a
+    /// remote reference without any `url(`) and the CSS decode axis (hex
+    /// escapes like `\75 rl(` *are* `url(` in CSS tokenization; `/*…*/`
+    /// comment splits revive `url(` / `@import` once stripped; an
+    /// entity-encoded backslash feeds the same escape after html5ever
+    /// decoding). Benign near-miss values must survive: a Windows backslash
+    /// path, spaced `src settings` / `image set` words, the bare `url` word (no
+    /// `url(`),
+    /// a complete `/* */` comment in a title and the bare `background` word.
+    #[test]
+    fn css_reference_carriers_and_css_escape_shadow_are_dropped() {
+        // Bare `image-set`/`srcset` tokens, on title, href and generic lang.
+        assert_eq!(
+            sanitize(r#"<a title='image-set("a.png" 1x)'>x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "string-form image-set() carries no url( yet is live material"
+        );
+        assert_eq!(
+            sanitize(r#"<a title="srcset=a.png 1x, b.png 2x">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "a srcset descriptor list is a complete remote reference table"
+        );
+        assert_eq!(
+            sanitize(r#"<a href="https://h.example/img/srcset">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "the bare srcset token hidden in a legal-https path is dropped"
+        );
+        assert_eq!(
+            sanitize(r#"<a href="https://h.example/?c=IMAGE-SET(d.png)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "the case-folded image-set token hidden in a query is dropped"
+        );
+        assert_eq!(
+            sanitize(r#"<p lang="srcset">x</p>"#),
+            "<p>x</p>",
+            "the generic lang attribute is covered too"
+        );
+        // CSS hex-escape decode axis.
+        assert_eq!(
+            sanitize(r#"<a title="\75 rl(https://h.example/x)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "`\\75 rl(` is `url(` in CSS tokenization and must die after decode"
+        );
+        assert_eq!(
+            sanitize(r#"<a title="\75\72\6c(https://h.example/x)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "per-char escapes decoding to url( must die after decode"
+        );
+        assert_eq!(
+            sanitize(r#"<a title="\40 import x">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "`\\40` revives @ and the @import token must die after decode"
+        );
+        assert_eq!(
+            sanitize("<p title=\"&#x5c;75 rl(x)\">x</p>"),
+            "<p>x</p>",
+            "an entity-encoded backslash feeds the same escape after html5ever decoding"
+        );
+        assert_eq!(
+            sanitize(r#"<a href="https://h.example/\75 rl(x)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "a mid-path escape in a legal-https href dies in the decode shadow"
+        );
+        // Comment-split axis.
+        assert_eq!(
+            sanitize(r#"<a title="url/**/(https://h.example/x)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "`url/**/(` revives url( once the comment is stripped"
+        );
+        assert_eq!(
+            sanitize(r#"<a title="@/**/import url/**/(x.css)">x</a>"#),
+            r#"<a rel="noopener noreferrer">x</a>"#,
+            "comment-split @import must die after comment stripping"
+        );
+        // Benign near-miss values survive the shadow decode.
+        assert_eq!(
+            sanitize(r#"<p title="C:\Users\kyle\75b (docs)">x</p>"#),
+            r#"<p title="C:\Users\kyle\75b (docs)">x</p>"#,
+            "a benign Windows backslash path title survives the decode shadow"
+        );
+        assert_eq!(
+            sanitize(r#"<p title="src settings and image set configuration">x</p>"#),
+            r#"<p title="src settings and image set configuration">x</p>"#,
+            "spaced `src settings` / `image set` words are not the bare tokens"
+        );
+        assert_eq!(
+            sanitize(r#"<p title="url examples (man pages)">x</p>"#),
+            r#"<p title="url examples (man pages)">x</p>"#,
+            "`url examples` carries the url word without the url( token"
+        );
+        assert_eq!(
+            sanitize(r#"<p title="see /* inline */ note">x</p>"#),
+            r#"<p title="see /* inline */ note">x</p>"#,
+            "a benign complete /* */ comment title survives comment stripping"
+        );
+        assert_eq!(
+            sanitize(r#"<p title="background notes">x</p>"#),
+            r#"<p title="background notes">x</p>"#,
+            "a bare `background` word must survive"
+        );
     }
 
     #[test]

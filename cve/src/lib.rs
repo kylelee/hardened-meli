@@ -6437,3 +6437,49 @@ mod cve_2026_73570;
 #[cfg(test)]
 #[path = "CVE-2026-62644.rs"]
 mod cve_2026_62644;
+
+/// CVE-2026-62643（Roundcube Webmail < 1.6.17、1.7.x < 1.7.2；2026-06 发布
+/// 批次，2026-07-05 安全公告；vendor advisory 定级 medium/high）**HTML 邮件
+/// CSS 清洗不足 → SSRF/信息泄露**攻击模拟回归（issue #194）：CSS 清洗器未
+/// 覆盖全部可携带远程引用/指令的载体，清洗后输出仍含可被下游消费的 CSS
+/// 原料。
+///
+/// **meli 等价面映射**：`meli/src/mail/view/html_render.rs` 的
+/// [`sanitize`]/[`render`] 与 `attribute_filter`——CVE-2024-42010（#116）已封
+/// `@import`/`url(`/`expression(` 属性值走私，本 CVE 复核 2026 年新载体
+/// （`image-set()`、`srcset`、嵌套 at-rule、注释分割 `\u75 rl(` 形、CSS 十六
+/// 进制转义、SVG 内联 `style`/`animate`、`link rel=stylesheet` 变体、
+/// `behavior`/`-moz-binding`）是否仍被封死。meli 无 CSS 引擎、html2text 不
+/// 外联（第二道防线），按「清洗输出不得携带活原料」判例（#115/#116/#117）
+/// 做免疫证明/缺口检测。
+///
+/// **缺口检出与修复**（探针实证）：(a) 裸 token 新载体——
+/// `image-set("a.png" 1x)` 字符串形与 `srcset=` 引用表不含 `url(`，可经
+/// `a[title]`/`a[href]`/通用 `title`/`lang` 原样走私；(b) 解码轴——CSS 十六
+/// 进制转义 `\75 rl(`（CSS 词法里就是 `url(`）、`\40 import`、实体
+/// `&#x5c;75 rl(` 复合形、`/*…*/` 注释分割 `url/**/(`，裸子串守卫全部失明。
+/// 生产改动（html_render.rs 第八处 nh3 parity 偏离）：保留属性值含裸
+/// `image-set`/`srcset` 即整属性丢弃；再对值做 CSS 影子解码（剥注释、解
+/// `\XXXXXX` 转义）后在解码形上复跑全部活原料 token 检查。
+///
+/// [`cve_2026_62643`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构
+/// ＋解码预言机自检；sanitize 平面（原样＋CSS 解码形双重复检、独立白名单预
+/// 言机、不动点）；五种嵌入上下文；端到端 RFC 822 multipart/alternative
+/// （宽度 40/80/120）全惰性＋全语料组合信；缺口回归（两类缺口逐字节固化、
+/// 良性值存活含 Windows 反斜杠路径与 `/* */` 注释标题、MDN 文档 URL 丢弃的
+/// 如实代价、纯文本形惰性观测、可见链接脚注对照）。
+///
+/// 与近亲划界：CVE-2024-42010（#116）锁 `@import`/`url(`/`expression(` 裸
+/// 子串轴；本文件锁 **2026 新载体裸 token**（`image-set`/`srcset`）与**解码
+/// 轴**（CSS 转义/注释分割复活）。语料 marker `rc62643.example` 与兄弟文件
+/// 逐字隔离。
+///
+/// 结论：**检出并修复两类缺口，非纯免疫证明**——载体元素/属性本就死在白名
+/// 单，但裸 token 与解码轴可把新载体原样带进清洗输出；修复后全部语料满足
+/// 不变量，且 meli 管线无 CSS 引擎、html2text 不加载远程资源，引用载体无
+/// 触发点。
+///
+/// [`cve_2026_62643`]: self::cve_2026_62643
+#[cfg(test)]
+#[path = "CVE-2026-62643.rs"]
+mod cve_2026_62643;
