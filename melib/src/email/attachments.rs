@@ -826,7 +826,13 @@ impl Attachment {
     }
 
     pub fn into_raw(&self) -> String {
-        let mut ret = String::with_capacity(2 * self.raw.len());
+        // `2 * len` is the classic wrapping capacity product at a buffer
+        // growth point (CWE-190; CVE-2026-110247, issue #188): on 32-bit
+        // targets a mail of 1 GiB or more pushed it past `isize::MAX` and
+        // aborted the process with a capacity overflow while serializing.
+        // Saturate instead — the estimate being short only costs
+        // reallocations, never correctness.
+        let mut ret = String::with_capacity(self.raw.len().saturating_mul(2));
         fn into_raw_helper(a: &Attachment, ret: &mut String) {
             match &a.content_type {
                 ContentType::Text {

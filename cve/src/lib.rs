@@ -6242,3 +6242,50 @@ mod cve_2026_84642;
 #[cfg(test)]
 #[path = "CVE-2026-107570.rs"]
 mod cve_2026_107570;
+
+/// CVE-2026-110247（Thunderbird < 158；MFSA 2026-109，2026-10-13，moderate）
+/// libmime **缓冲区增长点 32 位整数溢出 → 堆破坏** regression（issue
+/// #188）：Thunderbird 的 MIME 引擎在多处缓冲增长点用 32 位类型做长度
+/// 算术且无溢出检查，超大邮件使增长守卫 fail-open 或分配短于所需的缓
+/// 冲，随后 `memcpy` 把攻击者数据写越堆分配（Mozilla bug 2071621）。
+///
+/// **meli 等价面映射**：`melib/src/email/attachments.rs` 与
+/// `melib/src/email/parser.rs` 内一切按输入长度派生容量/偏移的运算点
+/// （传输解码、boundary 扫描、base64/QP 解码、header 折叠展开）。锚点
+/// 扫描 `as u32`/`as i32` 窄化转换零命中——MIME 增长路径全程 `usize`，
+/// 不存在「先按 32 位算长度再按 64 位分配」的路径；可达的增长守卫
+/// （boundary 偏移、`StrBuilder::display_bytes`、mbox/IMAP 声明长度）
+/// 已由 CVE-2026-70329（#27）等 checked 化。本 issue 扫描暴露并修复了
+/// 剩余三处增长点容量算术：`encodings::encoded_word_list` 的折叠累加、
+/// `address::address_list` 的折叠+调整链（`split` 恒 ≥1 段，饱和链保持
+/// 精确）、`Attachment::into_raw` 的 `2 × raw.len()` 容量积（32 位平台
+/// ≥1 GiB 邮件曾会 capacity overflow 中止序列化）——全部收敛为饱和语
+/// 义，低估只多一次扩容、不出错字节。回归断言还暴露并修复了同一
+/// 增长点上的一处功能死路：`encoded_word_list` 用零宽 `space` 分隔词
+/// 表，nom 7 防死循环守卫使**任何**恰好结束于最后一个编码词的输入
+/// （合法主流形态）整体报错，RFC 2047 词表拼接路径因此从未生效，
+/// `address_list` 恒回退原始字节；分隔符改为至少消费一字节。
+///
+/// 语料按 issue 四类攻击形态逐面锁定：部件声明 `Content-Length:
+/// 4294967295`（u32::MAX）与 `268435456`（256 MiB）对 ~20 字节实际体
+/// 的「声明超实际」confine 断言；512 部件 multipart 拼接的偏移累积
+/// in-bounds / 严格单调 / 缺失 boundary 干净 `Err` / 两次解析同树；QP
+/// 收缩不等式（decoded ≤ input，截断转义降级字面量）；RFC 2047 声明
+/// charset 与实际载荷不匹配（utf-8/us-ascii 高字节、utf-16 奇尾、
+/// iso-2022-jp 仅转义、空载荷、`=ZZ` 非十六进制）经有损 charset 门软
+/// 失败、≤3× 有界、确定性，含折叠 `Subject` 面。
+///
+/// 与近亲划界：CVE-2026-70329（#27）拥有协议面声明尺寸（IMAP
+/// literal、mbox `Content-Length`、boundary 记账），CVE-2020-9819（#30）
+/// 拥有 MIME 内嵌声明的分配足迹值无关性，CVE-2009-0587（#106）拥有
+/// base64 膨胀/空白/畸形不等式，CVE-2026-84639（#37）拥有 QP 错误路径
+/// 字面量，CVE-2024-30103（#24）拥有 `phrase()` 线性度；本文件拥有增
+/// 长点算术本身，marker（`growth-110247-outer` 等）与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明 + 三处增长点算术收口 + 一处增长点死路修
+/// 复**——无 32 位窄化路径，四类攻击面行为断言全部通过。
+///
+/// [`cve_2026_110247`]: self::cve_2026_110247
+#[cfg(test)]
+#[path = "CVE-2026-110247.rs"]
+mod cve_2026_110247;

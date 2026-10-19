@@ -2449,11 +2449,22 @@ pub mod encodings {
     }
 
     pub fn encoded_word_list(input: &[u8]) -> IResult<&[u8], SmallVec<[u8; 64]>> {
-        let (input, list) = separated_list1(space, encoded_word).parse(input)?;
-        let list_len = list.iter().fold(0, |mut acc, x| {
-            acc += x.len();
-            acc
-        });
+        // The separator must consume at least one byte: `space`
+        // (`take_while`) also matches empty, and nom 7's infinite-loop
+        // guard then fails the whole `separated_list1` — which made this
+        // parser error on *every* input that ends exactly at the last
+        // encoded word (the well-formed case), so the RFC 2047 join path
+        // was dead and `address_list` always fell back to the raw
+        // `ascii_token` bytes (CVE-2026-110247, issue #188).
+        let (input, list) = separated_list1(is_a(" \t\r\n"), encoded_word).parse(input)?;
+        // Capacity fold over N attacker-controlled segment lengths (the
+        // header-unfolding growth point): saturate so the estimate can
+        // never wrap the way libmime's 32-bit growth arithmetic did
+        // (CWE-190; CVE-2026-110247, issue #188). An undersized estimate
+        // only costs a reallocation, never correctness.
+        let list_len = list
+            .iter()
+            .fold(0usize, |acc, x| acc.saturating_add(x.len()));
         Ok((
             input,
             list.iter()
@@ -2908,11 +2919,15 @@ pub mod address {
         ))
         .parse(input)?;
         let list: Vec<&[u8]> = list.split(|c| *c == b',').collect();
-        let string_len = list.iter().fold(0, |mut acc, x| {
-            acc += x.trim().len();
-            acc
-        }) + list.len()
-            - 1;
+        // Same checked-semantics rule as `encoded_word_list`'s capacity
+        // fold above (CVE-2026-110247, issue #188): `split` always yields
+        // at least one segment, so the saturating chain is exact for every
+        // representable input.
+        let string_len = list
+            .iter()
+            .fold(0usize, |acc, x| acc.saturating_add(x.trim().len()))
+            .saturating_add(list.len())
+            .saturating_sub(1);
         let list_len = list.len();
         let mut i = 0;
         Ok((
