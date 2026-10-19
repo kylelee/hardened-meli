@@ -6565,6 +6565,54 @@ mod cve_2026_75004;
 #[path = "CVE-2026-75000.rs"]
 mod cve_2026_75000;
 
+/// CVE-2026-33369（Zimbra Collaboration 10.0.x/10.1.x，2026-03-20 发布，
+/// 10.1.16 修复；CVSS 3.1 4.3，CWE-20）**Mailbox SOAP `FolderAction`
+/// LDAP 注入**攻击模拟回归（Gitea issue #199）：用户输入未净化即并入
+/// LDAP 搜索过滤器，特制请求读取敏感目录属性。meli 无 LDAP 面，等价面
+/// 是「不可信/用户输入 → 查询/过滤器构造」的四个目标路径，LDAP 过滤器
+/// 注入族语料（`*`、`(`/`)`、`\2a` 转义混淆、NUL 截断、`a*` 通配拓宽、
+/// `)(objectClass=*)` 布尔注入、CJK/大小写折叠）投放于搜索关键词、
+/// mailbox 名、标签名、联系人查询字段。
+///
+/// [`cve_2026_33369`] 分七层锁定：L0 语料自检（marker
+/// `ldap33369.example` 与兄弟语料逐字隔离）；L1 Zimbra 缺陷模型 fail
+/// oracle（内插式过滤器构造器真的被语料破出值位置/激活通配符，meli
+/// 三个构造面结构逐字节不变）；L2 SQL 面（`query_to_sql` 命中集 ==
+/// 参数化预言机 `LIKE '%'||?1||'%'`，且 == Rust 子串预言机；`a*` 只
+/// 命中字面行、`\2a` 不解码、NUL 检索词 prepare fail-safe、LDAP 形状
+/// tags 在 Flags 分支不可见、`%`/`_` 作诚实观测归档）；L3 IMAP SEARCH
+/// 面（RFC 3501 严格 quoted 往返、CJK literal `{n}`==字节长度、KEYWORD
+/// atom 白名单拒绝 LDAP 形状 tag）；L4 真实 `Sqlite3Cache`
+/// （LDAP 形状 mailbox 名/标签/subject 全链路参数绑定、schema/行数/
+/// 字节保真）；L5 通讯录（`AddressBook::search` 纯 `contains` 字面命中、
+/// `CardDeserializer` 敌意 vCard 字段逐字节原样）；L6 源码锚点。
+///
+/// **缺口检出与修复**：含 NUL 的检索值会以 quoted 形式内联进 IMAP 命令
+/// 文本——RFC 3501 §9 的 `CHAR`/`CHAR8` 都排除 0x00，NUL 在 IMAP 线格式
+/// 上不存在合法形态（Zimbra `\00` 截断过滤器的镜像，C 字符串服务器会把
+/// 命令行截在 NUL 处，CWE-93/158）。修复为双层 fail-closed：
+/// `to_imap_search_segments_quoted` 对 NUL 返回 `None`（与 CR/LF 同判例，
+/// `melib/src/imap/search.rs`），新增 `pub fn segments_contain_nul` 且
+/// `ImapStream::search`（`melib/src/imap/connection.rs`）在首个发送动作
+/// 前拒绝（`ProtocolError`）；孪生单测
+/// `test_imap_query_nul_has_no_wire_form_at_all` 落在生产 crate。
+///
+/// 与近亲划界：CVE-2021-44026（#169）拥有 SQL 参数化预言机契约与缓存
+/// 全量深扫；CVE-2018-14352/14353 拥有 IMAP `"`/`\` 转义与 literal 计费；
+/// CVE-2026-75004（#198）拥有 `query_to_sql` 引号边界与 tags 白名单；
+/// CVE-2009-0587 拥有 vCard 解析界。本文件拥有 **LDAP 过滤器语法轴**与
+/// **NUL 无线形式轴**。语料 marker `ldap33369.example` 族与兄弟语料逐字
+/// 隔离。
+///
+/// 结论：**等价面免疫证明 + 1 处 IMAP 线格式缺口修复**——LDAP 语法语料
+/// 在 SQL/缓存/通讯录三个面全部只作字面数据；IMAP SEARCH 面上含 NUL 的
+/// 检索值现已在序列化层与发送层双重 fail-closed。
+///
+/// [`cve_2026_33369`]: self::cve_2026_33369
+#[cfg(test)]
+#[path = "CVE-2026-33369.rs"]
+mod cve_2026_33369;
+
 /// CVE-2026-33370（Zimbra Collaboration 10.0.x / 10.1.x，10.1.16 修复；
 /// 2026-03-20，CVSS 3.1 6.1，CWE-79）**共享文件（Briefcase）类型判定/清洗
 /// 清单绕过 → 存储型 XSS**攻击模拟回归（Gitea issue #200）：伪装扩展名

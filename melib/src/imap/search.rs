@@ -91,7 +91,9 @@ pub trait ToImapSearch: private::Sealed {
     ///
     /// Returns `None` when the result would contain `CR`/`LF` inside a quoted
     /// value: those octets terminate the command line early and can only
-    /// travel as a literal, so the query has no quoted form.
+    /// travel as a literal, so the query has no quoted form. A `NUL` octet
+    /// is refused for the stronger reason that it has no IMAP wire form at
+    /// all (see [`segments_contain_nul`]).
     fn to_imap_search_segments_quoted(&self) -> Option<Vec<ImapSearchSegment>>;
 }
 
@@ -218,6 +220,26 @@ fn is_valid_imap_keyword(keyword: &str) -> bool {
         })
 }
 
+/// Whether any segment carries a `NUL` octet, which has no legal IMAP wire
+/// form (CVE-2026-33369 regression anchor).
+///
+/// RFC 3501 §9 defines `CHAR = %x01-0x7F`, so a `NUL` cannot appear inside a
+/// quoted string, and literal octets are `CHAR8 = %x01-0xFF`, which excludes
+/// it as well. A search value carrying a `NUL` — the LDAP-filter
+/// NUL-truncation payload family, where `\00` cuts a filter short at servers
+/// that treat strings as C arrays — therefore cannot be put on the wire at
+/// all: emitting it would either place an illegal octet in the command or
+/// truncate the command line at C-string servers, leaving the rest to be
+/// parsed as a fresh command. Callers must refuse such queries instead of
+/// sending them; [`ImapSearchSegment::Text`] segments that merely *frame*
+/// values never contain `NUL` on their own.
+pub fn segments_contain_nul(segments: &[ImapSearchSegment]) -> bool {
+    segments.iter().any(|segment| match segment {
+        ImapSearchSegment::Text(text) => text.contains('\0'),
+        ImapSearchSegment::Literal(octets) => octets.contains(&0),
+    })
+}
+
 /// Turn serialized search segments into the ordered wire actions needed to
 /// send them.
 ///
@@ -317,7 +339,9 @@ impl ToImapSearch for Query {
     fn to_imap_search_segments_quoted(&self) -> Option<Vec<ImapSearchSegment>> {
         let segments = self.serialize(LiteralPolicy::Quoted);
         if segments.iter().any(|segment| match segment {
-            ImapSearchSegment::Text(text) => text.contains('\r') || text.contains('\n'),
+            ImapSearchSegment::Text(text) => {
+                text.contains('\r') || text.contains('\n') || text.contains('\0')
+            }
             ImapSearchSegment::Literal(_) => false,
         }) {
             return None;
@@ -952,6 +976,34 @@ mod tests {
             Query::Body("a\rb".to_string()).to_imap_search_segments_quoted(),
             None
         );
+    }
+
+    #[test]
+    fn test_imap_query_nul_has_no_wire_form_at_all() {
+        // CVE-2026-33369 regression: a NUL octet is neither a `CHAR`
+        // (quoted strings) nor a `CHAR8` (literals), so a value carrying one
+        // has no quoted form and the serialized segments are marked for the
+        // send-path refusal (`segments_contain_nul`).
+        assert_eq!(
+            Query::Subject("a\0b".to_string()).to_imap_search_segments_quoted(),
+            None
+        );
+        assert_eq!(
+            Query::Body("ab\0".to_string()).to_imap_search_segments_quoted(),
+            None
+        );
+        assert!(segments_contain_nul(
+            &Query::Subject("a\0b".to_string()).to_imap_search_segments()
+        ));
+        assert!(segments_contain_nul(
+            &Query::Subject("账\0号".to_string()).to_imap_search_segments()
+        ));
+        assert!(!segments_contain_nul(
+            &Query::Subject(")(objectClass=*)".to_string()).to_imap_search_segments()
+        ));
+        assert!(!segments_contain_nul(
+            &Query::Subject("账号".to_string()).to_imap_search_segments()
+        ));
     }
 
     #[test]
