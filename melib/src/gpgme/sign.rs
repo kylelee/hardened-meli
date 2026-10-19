@@ -244,9 +244,24 @@ impl Iterator for SignaturesIter<'_> {
         self.ptr = sig_ref.next;
         let summary = sig_ref.summary.into();
         let status = sig_ref.status;
-        let keyid = unsafe { CStr::from_ptr(sig_ref.fpr) }
-            .to_string_lossy()
-            .to_string();
+        // CVE-2026-43864 (mutt < 2.3.2, CWE-476): `gpgme_signature_t::fpr`
+        // is an optional field — gpgme hands out a NULL pointer for a
+        // signature it could not attribute to a key (e.g. a segment opened
+        // by a NEWSIG status line that never received a verdict). Feeding
+        // it to `CStr::from_ptr` unguarded is the C-level NULL-deref this
+        // CVE class is about; degrade it to an empty key id instead —
+        // exactly what `Key::fingerprint` does for a NULL key fingerprint
+        // — and let the display sink fail closed on it.
+        let keyid = NonNull::new(sig_ref.fpr)
+            .map(|fpr| {
+                // SAFETY: `fpr` was checked non-NULL; gpgme guarantees it
+                // is valid for reads, NUL-terminated, and lives as long as
+                // the verify result this iterator borrows.
+                unsafe { CStr::from_ptr(fpr.as_ptr()) }
+            })
+            .map(CStr::to_string_lossy)
+            .unwrap_or_default()
+            .into_owned();
         let status = if status > 0 {
             Err(Error::new(format!("BAD signature from {keyid}"))
                 .set_details(super::gpgme_error_to_string(&self.lib, status))

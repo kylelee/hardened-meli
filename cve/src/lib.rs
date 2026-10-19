@@ -7012,3 +7012,25 @@ mod cve_2026_43863;
 #[cfg(test)]
 #[path = "CVE-2026-43862.rs"]
 mod cve_2026_43862;
+
+/// CVE-2026-43864 — mutt < 2.3.2 `show_sig_summary` NULL 指针解引用
+/// （CWE-476，CVSS 2.5 DoS；修复 commit ebfa296904）攻击模拟（issue #213）：
+/// 签名状态摘要的某可选字段为空时未判空即使用。等价面映射两层：melib
+/// gpgme FFI 边界——`gpgme_signature_t::fpr` 可空（无法归属的签名段交出
+/// NULL），转换曾把它裸喂 `CStr::from_ptr`（合成零化条目复放 = SIGSEGV，
+/// 修复为 `NonNull::new` 判空降级空 key id）；汇点显示——空指纹 + Ok 状态
+/// 曾渲染成 `good signature by [?]`（无法归属签名呈现为已验证，修复为
+/// 整体 fail-closed Err）。L0 mutt 崩溃模型还原（触发形 panic / 补丁形降级
+/// 0）、L1 结构锚点、L2 JSON 契约字段缺失/空值族 + 空摘要族（裁决载体是
+/// 显式 status：诚实 GOODSIG 空摘要形仍 good，空指纹绝不 good；撤销/过期
+/// 令牌必须呈现）+ catch_unwind 全语料 panic-free/确定/有界扫描、L3 真 gpg
+/// 一次性密钥矩阵（好/篡改/缺钥 ERRSIG+NO_PUBKEY/撤销 REVKEYSIG/过期
+/// EXPKEYSIG/畸形族）+ 契约翻译进汇点、L4 CLI 脚本 shim 复放（悬挂
+/// NEWSIG 段、空状态流、缺指纹行、矛盾退出码形）。与 #119/#172 划界：
+/// 那两件拥有 status 契约与多签名聚合；本文件拥有「摘要/指纹可选字段
+/// 空值 → 崩溃/无法归属呈现」轴。结论：检出并修复两处真实缺口。
+///
+/// [`cve_2026_43864`]: self::cve_2026_43864
+#[cfg(test)]
+#[path = "CVE-2026-43864.rs"]
+mod cve_2026_43864;

@@ -168,6 +168,12 @@ if (
 ):
     if err:
         detail = err.group(0)
+    elif any(m is None for (m, _, _) in fields):
+        # CVE-2026-43864 (mutt < 2.3.2): a segment gpg opened (NEWSIG)
+        # that never received a verdict line is the empty-summary shape
+        # that crashed mutt's renderer. Name it as what it is instead of
+        # quoting an unrelated verdict from another segment.
+        detail = "gpg ended a signature segment without a verdict summary"
     elif first_non_affirming is not None:
         # gpg itself reported a failing verdict (e.g. BADSIG or a mixed
         # multi-signature run whose exit status is non-zero); name the
