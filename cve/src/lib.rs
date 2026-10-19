@@ -6322,3 +6322,60 @@ mod cve_2026_110247;
 #[cfg(test)]
 #[path = "CVE-2026-33373.rs"]
 mod cve_2026_33373;
+
+/// CVE-2026-73570（Zimbra Collaboration < 10.1.20，`zimbra-snmp` 可选包 +
+/// SNMP 通知启用时；2026-08-13，**CISA KEV 在野利用**，cert.pl 通报主动利用；
+/// CVSS 8.9 AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:L；CWE-78）**SNMP 通知处理
+/// 不可信输入清理不当 → OS 命令注入 RCE** 攻击模拟 regression（Gitea issue
+/// #191）：未认证攻击者发送特制 SMTP 请求，Zimbra 的 SNMP 通知处理器把不可信
+/// 数据拼进通知命令行，以 Zimbra 用户身份执行任意系统命令。
+///
+/// **meli 等价面映射（issue #191 侦察结论）**：meli 无 SNMP 面，等价面取
+/// 「不可信数据 → 命令行」边界的两个执行面。(1) 通知执行面
+/// `meli/src/notifications.rs::show_notification`：新邮件以
+/// `envelope.subject()` 为标题、`envelope.field_from_to_string()` 拼正文
+/// （`meli/src/accounts.rs`），交给用户配置的 `notifications.script` /
+/// `new_mail_script`；执行形状 `Command::new(bin)` + `.arg(kind)`/
+/// `.arg(title)`/`.arg(body)`——不可信邮件头字节只作**单一 argv 实参**，
+/// 全程无 shell、无模板插值，Zimbra 的「不可信字节进命令字符串」原语没有
+/// 代码可运行；NUL 字节在 argv 边界被 execve 拒绝（spawn `InvalidInput`
+/// fail-closed）。(2) mailcap `%s` 执行面 `meli/src/mailcap.rs::expand_args`
+/// （CVE-2016-3714/2000-0481 已锁的上下文感知 armor）：本 CVE 用通知语料
+/// 回归六种 shell 上下文 armor，并扩展 issue 点名的「`%s` 多次出现」与
+/// 「插入值不被重扫描」（`%{param}` 值里的字面 `%s` 不得再触发落盘替换）
+/// 两个轴。
+///
+/// [`cve_2026_73570`] 分层锁定（详见模块内注释）：L1 复刻 Zimbra 缺陷形状
+/// （不可信字节**插值**进 `sh -c` 命令字符串，裸/双引号/反引号/`$()`/单引号
+/// 五种上下文），同一批语料让 marker 真实出现——语料带武器、oracle 有效、
+/// 「插值」本身即漏洞；L2 敌意邮件（原始元字符、RFC 2047 Q 编码词、`=0A`
+/// 换行投递、折叠头、quoted-pair 引号逃逸显示名）经真实
+/// `Envelope::from_bytes` → `subject()`/`field_from_to_string()` 构造标题/
+/// 正文，按 `show_notification` 精确形状真实 spawn argv 哨兵脚本——三个
+/// 实参逐字节原样到达（单一实参、元字符保持数据位）、marker 永不出现，
+/// NUL 语料 spawn `InvalidInput` 零执行；L3 通知语料派生的附件名过真实
+/// `MailcapEntry::run` + `sh -c` 六上下文单实参惰性，多 `%s` 模板共用同一
+/// 落地文件、路径逐字打印两次，`%{trap}` 参数值内嵌字面 `%s` 零重扫描
+/// （零临时文件、stdout 恰为原值）；L4 源码锚点锁定通知执行点（恰一个
+/// `Command::new(bin)` + 三个 `.arg`、无 `sh -c`、`ForkedProcess` 登记串
+/// 仅展示且 `state.rs` 零 `Command::new`）、NewMail 取值面
+/// （`title: Some(subject.into())` + `field_from_to_string()`）、mailcap
+/// armor（`shell_quote_context`/`encode_for_context`/`quote_shell_word`/
+/// `Ambiguous` fail-closed）与配置契约（kind 第 1、title 第 2、body 第 3
+/// 实参）。
+///
+/// 与近亲划界：CVE-2016-3714（issue #118）拥有 mailcap `%s` 附件名/图片
+/// 解码面，CVE-2000-0481（issue #107）拥有附件名长度→固定缓冲面，本文件
+/// 拥有**通知执行轴**（邮件头字节 → 通知命令行）并把 mailcap armor 回归
+/// 扩展到「多 `%s`」与「插入值不重扫描」。marker 前缀
+/// `meli-cve-2026-73570-` 与 marker 域名 `zimbra73570.example` 与兄弟文件
+/// 逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——通知命令的插值
+/// 一律参数化（单一 argv 实参、无 shell），mailcap 模板插值一律经上下文
+/// armor，元字符语料在两个执行面上都不产生执行。
+///
+/// [`cve_2026_73570`]: self::cve_2026_73570
+#[cfg(test)]
+#[path = "CVE-2026-73570.rs"]
+mod cve_2026_73570;
