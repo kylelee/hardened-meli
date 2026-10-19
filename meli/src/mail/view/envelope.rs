@@ -1210,6 +1210,7 @@ impl Component for EnvelopeView {
                     ref archive,
                     ref post,
                     ref unsubscribe,
+                    ..
                 }) = list_management::ListActions::detect(envelope)
                 {
                     let mut x = 0;

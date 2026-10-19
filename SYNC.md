@@ -38,6 +38,26 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## Sync log
 
+## 2026-10-20 (UTC+8)
+
+- Method: per-commit semantic port (task T5 of the `1ada94c3..1e66d41e` range, melib misc improvements)
+- Upstream range: `1ada94c3..1e66d41e` (RFC2369 / thread subject trim / percent_encoding / attachment accessors only)
+- Conflicts: none; all fork callers adapted mechanically to the owned `ListAction` API (`meli/src/mail/{view,compose}`, `meli/src/mail/view/envelope.rs`, seven CVE corpus suites, `meli-test/tests/test_unsubscribe_confirm.rs`) without adopting upstream's dialog-based UI
+- Accounting kinds: see the SKIP/PARTIAL notes in the table
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `f819b9d5` | port | feat(melib/list_management) | RFC2369 full support: `ListAction` owned `Vec<u8>`, `HeaderName`-keyed lookup, six `List-*` action headers (`Archive`/`Post`/`Unsubscribe`/`Subscribe`/`Help`/`Owner`), empty options filtered, `is_url()`/`is_email()`; `List-Archive` now parsed as an RFC 2369 options list (stricter: bare unbracketed values no longer accepted); `mailto.rs` `TryFrom` error `String`→`Error` with `set_details`. Upstream's view-layer unsubscribe-selection dialog is UI design and NOT ported (fork keeps its confirmation dialog + CVE-2023-23397 scheme gate) |
+| — | `b61be3d6` | port | fix(melib/thread) | `SubjectPrefix::strip_prefixes` FIXME: per-character `"`/`\t`/`\r` loop replaced by `trim_ascii_start()` — every ASCII whitespace kind (`\n`, `\x0c` included) after `Re:`/`Fwd:` prefixes is now trimmed; fork's `&str` impl delegates to the bytes impl so one site covers both |
+| — | `9d0c3e9a` | port | feat(melib/percent_encoding) | `RESERVED` ASCII set from RFC 3986 §2.2 (gen-delims + sub-delims); upstream's duplicate `.add(b'(')` typo corrected to the intended `.add(b'\'')` so the set is exactly `!#$&'()*+,/:;=?@[]` |
+| — | `e596371b` | port | refactor(melib/percent_encoding) | `percent_encode`/`utf8_percent_encode`/`PercentEncode` take `&'s AsciiSet` (any lifetime, runtime-constructible sets); existing `&'static` call sites unchanged |
+| — | `5a3160bd` (melib side) | port | feat(melib/attachments) | `Attachment::content_id()` — parses the part's `Content-ID`, strips `<>`, RFC 2047 phrase-decodes |
+| — | `3827316e` (melib side) | port | feat(melib/attachments) | `Attachment::parts()` instance accessor; upstream's view/filters path-from-root rewiring is UI and NOT ported |
+| — | `b52a8675` | **SKIP** | chore(melib) | remove public dep re-exports: the fork no longer has those re-exports |
+| — | `e1272d9f` | **SKIP** | fix(melib/logging) | debug logs not written to file: the fork's tracing-based logging is an intentional deviation |
+| — | `d54dff03` | **SKIP** | chore | assert_cmd 2.2.2 upgrade: fork's `Cargo.lock` already resolves `assert_cmd` 2.2.2 |
+| — | (VERIFY/TODO/clippy cosmetic commits in range) | **SKIP** | style | pure appearance cleanups outside this task's scope |
+
 
 ## 2026-10-13 20:00 (UTC+8)
 

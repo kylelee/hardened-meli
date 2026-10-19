@@ -323,6 +323,7 @@ impl SubjectPrefix for &[u8] {
         let result = {
             let mut slice = self.trim();
             loop {
+                slice = slice.trim_ascii_start();
                 if slice.starts_with(b"RE: ")
                     || slice.starts_with(b"Re: ")
                     || slice.starts_with(b"FW: ")
@@ -336,11 +337,6 @@ impl SubjectPrefix for &[u8] {
                     || slice.starts_with(b"fwd: ")
                 {
                     slice = &slice[b"FWD: ".len()..];
-                    continue;
-                }
-                if slice.starts_with(b" ") || slice.starts_with(b"\t") || slice.starts_with(b"\r") {
-                    // [ref:FIXME]: just trim whitespace
-                    slice = &slice[b" ".len()..];
                     continue;
                 }
                 if slice.starts_with(b"[")
@@ -1574,6 +1570,86 @@ mod tests {
 
     fn mail(headers: &str, body: &str) -> Vec<u8> {
         format!("{headers}\r\n{body}\r\n").into_bytes()
+    }
+
+    /// Subject prefixes can be followed by any ASCII whitespace mix
+    /// (upstream b61be3d6): `trim_ascii_start()` replaced the per-character
+    /// loop that only knew about `' '`, `'\t'` and `'\r'`, so a `\n` or
+    /// `\x0c` after `Re:` used to survive stripping and split two mails
+    /// with the same subject into different thread groups.
+    #[test]
+    fn test_subject_prefix_strip_whitespace_mixed() {
+        for subject in [
+            "Re: Subject",
+            "Re: \tSubject",
+            "Re: \r\n\t Subject",
+            "Re: \rSubject",
+            "RE: \x0cSubject",
+            "FW: \n\r\tSubject",
+        ] {
+            let mut bytes: &[u8] = subject.as_bytes();
+            assert_eq!(
+                *<&[u8] as SubjectPrefix>::strip_prefixes(&mut bytes),
+                &b"Subject"[..],
+                "mixed ASCII whitespace after the prefix must be trimmed: {subject:?}"
+            );
+            let mut s: &str = subject;
+            assert_eq!(
+                *<&str as SubjectPrefix>::strip_prefixes(&mut s),
+                "Subject",
+                "the &str impl (delegating to bytes) must agree: {subject:?}"
+            );
+        }
+    }
+
+    /// `References` headers carrying `\t`/`\r` whitespace around the message
+    /// ids must still thread: replies with mixed-whitespace `Re:` subjects
+    /// group under the common root, and their redundant subject is hidden
+    /// (`show_subject == false`) — which only works once every ASCII
+    /// whitespace kind after the prefix is trimmed.
+    #[test]
+    fn test_thread_grouping_with_whitespace_in_references_and_subjects() {
+        let raw_mails = vec![
+            mail(
+                "From: root@example.org\r\nMessage-ID: <root@ref-b.example.org>\r\nSubject: beta feature\r\n",
+                "body",
+            ),
+            mail(
+                "From: a@example.org\r\nMessage-ID: <a@ref-b.example.org>\r\nReferences: <root@ref-b.example.org>\t\r <other@ref-b.example.org>\r\nSubject: Re: \x0c beta feature\r\n",
+                "body",
+            ),
+            mail(
+                "From: b@example.org\r\nMessage-ID: <b@ref-b.example.org>\r\nReferences: \t <root@ref-b.example.org>\r\nSubject: Fwd: \t beta feature\r\n",
+                "body",
+            ),
+        ];
+        let (envelopes, hashes) = envelopes_from(&raw_mails);
+        let mut threads = Threads::new(hashes.len());
+        for h in &hashes {
+            threads.insert(&envelopes, *h);
+        }
+        let roots = threads.roots();
+        assert_eq!(
+            roots.len(),
+            1,
+            "both whitespace-heavy References must thread under the single root"
+        );
+        for h in &hashes[1..] {
+            let node_hash = threads
+                .envelope_to_thread_node
+                .get(h)
+                .copied()
+                .expect("reply must be threaded");
+            assert!(
+                threads.thread_nodes()[&node_hash].parent.is_some(),
+                "reply {h:?} must have the root as parent"
+            );
+            assert!(
+                !threads.thread_nodes()[&node_hash].show_subject,
+                "a `Re:`/`Fwd:` subject differing only in trailing ASCII \
+                 whitespace from the parent subject is redundant"
+            );
+        }
     }
 
     /// `Message-ID`/`In-Reply-To`/`References` are attacker controlled. Empty

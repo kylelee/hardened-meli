@@ -104,12 +104,12 @@ impl UnsubscribeAction {
 /// system url launcher with a scheme the user did not sign up for
 /// (CVE-2023-23397, issue #21).
 pub fn unsubscribe_action(
-    unsubscribe: &[list_management::ListAction<'_>],
+    unsubscribe: &[list_management::ListAction],
 ) -> Option<UnsubscribeAction> {
     for option in unsubscribe.iter() {
         match option {
             list_management::ListAction::Email(email) => {
-                if let Ok(mailto) = Mailto::try_from(*email) {
+                if let Ok(mailto) = Mailto::try_from(email.as_slice()) {
                     return Some(UnsubscribeAction::Send(mailto));
                 }
             }
@@ -982,7 +982,7 @@ impl Component for MailView {
                             if let Some(list_management::ListAction::Email(list_post_addr)) =
                                 actions.post.as_deref().and_then(|p| p.first())
                             {
-                                if let Ok(mailto) = Mailto::try_from(*list_post_addr) {
+                                if let Ok(mailto) = Mailto::try_from(list_post_addr.as_slice()) {
                                     let draft: Draft = mailto.into();
                                     let mut composer =
                                         Composer::with_account(coordinates.0, context);
@@ -1037,7 +1037,29 @@ impl Component for MailView {
                         }
                         MailingListAction::ListArchive if actions.archive.is_some() => {
                             /* open archive url with url_launcher */
-                            let url_arg = actions.archive.unwrap();
+                            // RFC 2369 spells `List-Archive` as an options
+                            // list; take the first URL-carrying option.
+                            let Some(url_arg) =
+                                actions
+                                    .archive
+                                    .iter()
+                                    .flatten()
+                                    .find_map(|action| match action {
+                                        list_management::ListAction::Url(url)
+                                        | list_management::ListAction::Email(url) => {
+                                            Some(String::from_utf8_lossy(url).into_owned())
+                                        }
+                                        list_management::ListAction::No => None,
+                                    })
+                            else {
+                                context.replies.push_back(UIEvent::Notification {
+                                    title: Some("Couldn't perform List-Archive action".into()),
+                                    source: None,
+                                    body: "No usable List-Archive option".into(),
+                                    kind: None,
+                                });
+                                return true;
+                            };
                             // `List-Archive` (RFC 2369) is attacker-controlled
                             // header content: only default-launchable schemes
                             // (http/https/mailto) may reach the system url
@@ -1046,7 +1068,7 @@ impl Component for MailView {
                             // `file:` or `smb:` value would otherwise be
                             // dispatched by the OS launcher as-is
                             // (CVE-2023-23397, issue #21).
-                            if !envelope::is_default_launchable_scheme(url_arg) {
+                            if !envelope::is_default_launchable_scheme(&url_arg) {
                                 context.replies.push_back(UIEvent::Notification {
                                     title: Some("Refusing to open List-Archive URL".into()),
                                     source: None,
@@ -1071,7 +1093,7 @@ impl Component for MailView {
                                 "xdg-open"
                             });
                             match Command::new(url_launcher)
-                                .arg(url_arg)
+                                .arg(&url_arg)
                                 .stdin(Stdio::piped())
                                 .stdout(Stdio::piped())
                                 .spawn()

@@ -172,6 +172,29 @@ pub const NON_ALPHANUMERIC: &AsciiSet = &CONTROLS
     .add(b'}')
     .add(b'~');
 
+/// Reserved characters from `RFC3986`
+///
+/// `RFC 3986 section 2.2 Reserved Characters (January 2005)`
+pub const RESERVED: &AsciiSet = &CONTROLS
+    .add(b'!')
+    .add(b'#')
+    .add(b'$')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'=')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b']');
+
 /// Return the percent-encoding of the given byte.
 ///
 /// This is unconditional, unlike `percent_encode()` which has an `AsciiSet`
@@ -240,10 +263,10 @@ pub fn percent_encode_byte(byte: u8) -> &'static str {
 /// );
 /// ```
 #[inline]
-pub const fn percent_encode<'a>(
+pub const fn percent_encode<'a, 's>(
     input: &'a [u8],
-    ascii_set: &'static AsciiSet,
-) -> PercentEncode<'a> {
+    ascii_set: &'s AsciiSet,
+) -> PercentEncode<'a, 's> {
     PercentEncode {
         bytes: input,
         ascii_set,
@@ -265,18 +288,21 @@ pub const fn percent_encode<'a>(
 /// );
 /// ```
 #[inline]
-pub fn utf8_percent_encode<'a>(input: &'a str, ascii_set: &'static AsciiSet) -> PercentEncode<'a> {
+pub fn utf8_percent_encode<'a, 's>(
+    input: &'a str,
+    ascii_set: &'s AsciiSet,
+) -> PercentEncode<'a, 's> {
     percent_encode(input.as_bytes(), ascii_set)
 }
 
 /// The return type of [`percent_encode`] and [`utf8_percent_encode`].
 #[derive(Clone)]
-pub struct PercentEncode<'a> {
+pub struct PercentEncode<'a, 's> {
     bytes: &'a [u8],
-    ascii_set: &'static AsciiSet,
+    ascii_set: &'s AsciiSet,
 }
 
-impl<'a> Iterator for PercentEncode<'a> {
+impl<'a, 's> Iterator for PercentEncode<'a, 's> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<&'a str> {
@@ -313,7 +339,7 @@ impl<'a> Iterator for PercentEncode<'a> {
     }
 }
 
-impl std::fmt::Display for PercentEncode<'_> {
+impl std::fmt::Display for PercentEncode<'_, '_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for c in (*self).clone() {
             formatter.write_str(c)?
@@ -322,8 +348,8 @@ impl std::fmt::Display for PercentEncode<'_> {
     }
 }
 
-impl<'a> From<PercentEncode<'a>> for Cow<'a, str> {
-    fn from(mut iter: PercentEncode<'a>) -> Self {
+impl<'a, 's> From<PercentEncode<'a, 's>> for Cow<'a, str> {
+    fn from(mut iter: PercentEncode<'a, 's>) -> Self {
         iter.next().map_or_else(
             || "".into(),
             |first| {
@@ -561,6 +587,45 @@ mod tests {
                 .decode_utf8()
                 .unwrap(),
             "JavaScript_шеллы"
+        );
+    }
+
+    /// RFC 3986 §2.2 reserved characters are exactly the gen-delims
+    /// `:/?#[]@` plus the sub-delims `!$&'()*+,;=` — every one of them
+    /// percent-encoded, and nothing else (in particular the unreserved
+    /// `-._~` and alphanumerics stay literal).
+    #[test]
+    fn test_reserved_rfc3986_section_2_2() {
+        assert_eq!(
+            utf8_percent_encode("!#$&'()*+,/:;=?@[]", RESERVED).to_string(),
+            "%21%23%24%26%27%28%29%2A%2B%2C%2F%3A%3B%3D%3F%40%5B%5D"
+        );
+        assert_eq!(
+            utf8_percent_encode("AZaz09-._~", RESERVED).to_string(),
+            "AZaz09-._~"
+        );
+        // Spot check a couple of members against the `CONTROLS`-based base to
+        // catch a duplicated `.add()` silently dropping a neighbor.
+        assert!(RESERVED.should_percent_encode(b'('));
+        assert!(RESERVED.should_percent_encode(b')'));
+        assert!(RESERVED.should_percent_encode(b'\''));
+        assert!(!RESERVED.should_percent_encode(b' '));
+    }
+
+    /// The `AsciiSet` argument of the encode helpers accepts sets that are
+    /// not `'static` (e.g. built at runtime), while existing `&'static`
+    /// usage keeps compiling unchanged.
+    #[test]
+    fn test_percent_encode_accepts_non_static_ascii_set() {
+        fn runtime_set() -> AsciiSet {
+            CONTROLS.add(b'x').add(b'y')
+        }
+        let set = runtime_set();
+        assert_eq!(utf8_percent_encode("xyz", &set).to_string(), "%78%79z");
+        assert_eq!(percent_encode(b"xa", &set).to_string(), "%78a");
+        assert_eq!(
+            Cow::<str>::from(percent_encode(b"ab", NON_ALPHANUMERIC)),
+            "ab"
         );
     }
 }

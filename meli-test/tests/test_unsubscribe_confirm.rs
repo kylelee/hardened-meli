@@ -39,10 +39,8 @@ use melib::{
 
 use meli::mail::view::{unsubscribe_action, UnsubscribeAction};
 
-fn options(header_value: &[u8]) -> Vec<ListAction<'_>> {
-    ListAction::parse_options_list(header_value)
-        .expect("could not parse List-Unsubscribe value")
-        .to_vec()
+fn options(header_value: &[u8]) -> Vec<ListAction> {
+    ListAction::parse_options_list(header_value).expect("could not parse List-Unsubscribe value")
 }
 
 #[test]
@@ -92,17 +90,18 @@ fn unsubscribe_action_rejects_crlf_smuggle_instead_of_sending() {
     // The parser rejects it (RFC6068); the gate must then treat the option as
     // unparseable, NOT display or send it.
     let raw = b"mailto:victim@victim.example%0d%0aBcc:attacker@evil.example";
-    let parsed = vec![ListAction::Email(raw.as_slice())];
+    let parsed = vec![ListAction::Email(raw.to_vec())];
     assert_eq!(unsubscribe_action(&parsed), None);
 }
 
 #[test]
 fn unsubscribe_action_handles_malformed_input_without_panicking() {
     // Valid-UTF-8 malformations only for the mailto probes: `Mailto::try_from`
-    // formats its parse error with `{:?}`, and melib's `ParsingError` Debug
-    // impl panics on invalid UTF-8 input (pre-existing, tracked in
-    // issues.md); invalid UTF-8 is probed via the URL branch, which only
-    // does a lossy conversion.
+    // builds its parse error with `Error::set_details`, whose input
+    // rendering goes through `String::from_utf8_lossy` (melib's
+    // `ParsingError` Debug impl used to panic on invalid UTF-8 input;
+    // pre-existing, tracked in issues.md); invalid UTF-8 is probed via the
+    // URL branch, which only does a lossy conversion.
     let malformed: &[&[u8]] = &[
         b"mailto:",
         b"mailto:?",
@@ -111,7 +110,7 @@ fn unsubscribe_action_handles_malformed_input_without_panicking() {
         b"",
     ];
     for raw in malformed {
-        if let Some(action) = unsubscribe_action(&[ListAction::Email(raw)]) {
+        if let Some(action) = unsubscribe_action(&[ListAction::Email(raw.to_vec())]) {
             let _ = action.target_description();
         }
     }
@@ -120,7 +119,7 @@ fn unsubscribe_action_handles_malformed_input_without_panicking() {
         b"",
         b"https://example.com/%zz",
     ] {
-        if let Some(action) = unsubscribe_action(&[ListAction::Url(raw)]) {
+        if let Some(action) = unsubscribe_action(&[ListAction::Url(raw.to_vec())]) {
             let _ = action.target_description();
         }
     }
