@@ -733,11 +733,17 @@ impl ImapStream {
         // so it is part of `res` above) may be `* PREAUTH`, meaning the
         // connection is already authenticated and the whole login flow
         // must be skipped.
-        if let Some(preauth_msg) = res
-            .split_rn()
-            .into_iter()
-            .find_map(|l| l.strip_prefix(b"* PREAUTH"))
-        {
+        if let Some(preauth_msg) = res.split_rn().into_iter().find_map(|l| {
+            // Word boundary: RFC 3501 spells the greeting `* PREAUTH`
+            // (bare) or `* PREAUTH <text>`, so the remainder must be empty,
+            // start with the separating space, or be the line's CRLF. An
+            // illegal prefix such as `* PREAUTHED` or `* PREAUTH-bypass`
+            // must NOT be mistaken for a pre-authenticated greeting and
+            // skip the login flow.
+            l.strip_prefix(b"* PREAUTH").filter(|rest| {
+                rest.is_empty() || rest.starts_with(b" ") || rest.starts_with(b"\r")
+            })
+        }) {
             ret.preauthed = true;
             if send_state_changes {
                 let preauth_msg = String::from_utf8_lossy(preauth_msg);
