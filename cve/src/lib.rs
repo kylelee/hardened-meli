@@ -6531,3 +6531,14 @@ mod cve_2026_62643;
 #[cfg(test)]
 #[path = "CVE-2026-35543.rs"]
 mod cve_2026_35543;
+
+/// CVE-2026-75000（Gitea issue #197）：Roundcube Webmail &lt; 1.6.18、
+/// 1.7.x &lt; 1.7.3 的 SVG `animate` `by` 属性清洗不足 → 二次绕过远程图片
+/// 拦截（CVE-2026-35543 于 1.6.14 修复后的新变体，补丁式封堵漏了 `by`；
+/// CWE-669，CVSS 5.8）。本模块按 meli 的 sanitize→render 唯一 HTML 消费
+/// 通路做 L0–L4 攻击模拟回归：`by` 完整变体族、35543 全轴内嵌回归、动画
+/// 属性/元素完备性、纯文本与良性对照；两族 host（`rc75000.example` 与
+/// `rc35543reg.example`）逐字隔离，并断言等价面结构性免疫。
+#[cfg(test)]
+#[path = "CVE-2026-75000.rs"]
+mod cve_2026_75000;
