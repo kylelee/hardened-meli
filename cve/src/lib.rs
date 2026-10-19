@@ -6096,3 +6096,55 @@ mod cve_2020_15047;
 #[cfg(test)]
 #[path = "CVE-2021-39272.rs"]
 mod cve_2021_39272;
+
+/// CVE-2026-48842（Roundcube Webmail 1.6.x < 1.6.16、1.7.x < 1.7.1；CVSS 3.1
+/// 8.1；CWE-89；GHSA-vc2v-cxrw-6g4p；2026-05-25 发布，加拿大网安中心 2026-09
+/// 通报在野利用）**virtuser_query 插件 `preg_replace()` 反斜杠逃逸预认证
+/// SQL 注入**攻击模拟回归（Gitea issue #189）：登录用户名在代入 virtuser
+/// SQL 前先经一层引号转义、再作为 `preg_replace()` 替换串传入，PHP 替换串
+/// 语义二次解释反斜杠（`\\` 折叠、`\d`/`$d` 反向引用），攻击者以奇数个尾随
+/// 反斜杠 / 反斜杠-引号组合翻转转义奇偶性，让攻击字节跨越引号边界进入 SQL
+/// 结构——「转义后再拼接」的双层转义处理缺陷。
+///
+/// **meli 等价面映射（issue #189 侦察结论）**：两个 SQL 面。缓存面
+/// `melib/src/imap/sync/sqlite3_cache.rs` 的服务端可控数据（mailbox 名 /
+/// tag / FETCH 信头）全部走 `?N` 参数绑定，不存在转义层；UI 检索面
+/// `meli/src/sqlite3.rs::query_to_sql` 是仓库唯一「转义后拼接」站点——检索词
+/// 经 `escape_double_quote`（`"`→`""`）拼进 `LIKE "%…%"` 后插值进 SELECT。
+/// 免疫的结构性依据：捆绑版 SQLite 词法器（libsqlite3-sys 0.30.1
+/// `tokenize.c` 的 `CC_QUOTE`/`CC_ILLEGAL`/`CC_NUL` 分支）**没有反斜杠转义**
+/// ——字符串外 `\` 即非法 token，字符串内是普通字节，引号翻倍恰是其自身转
+/// 义，内嵌 NUL 使整条 prepare 判 `TK_ILLEGAL` fail-closed；CVE 的逃逸轴在
+/// 这个方言里没有第二层可落点。
+///
+/// [`cve_2026_48842`] 分层锁定（详见模块文档）：L0 逃逸轴语料自检（反斜杠
+/// 族/引号翻倍/LIKE 通配符/NUL/CJK+星面字符，54 条）＋转义层字节保真；
+/// L1 纯模型对照——按 PHP 替换串文档语义复刻易受攻击双层管线，证明语料真
+/// 使引号前反斜杠奇偶性翻转（`victim\' OR 1=1--`、`\'; DROP/ATTACH…` 落进
+/// 代码区、奇数尾随反斜杠吃掉闭合引号），同批语料过 meli 双层（引号翻倍 +
+/// SQLite `CC_QUOTE` 词法扫描器复刻）token 恰在推送的闭合引号处闭合、扫描
+/// 还原内容恰为原文；L2 真实
+/// `Sqlite3Cache` 全语料逐轮攻击（init/update/insert/find/save/load/msn/
+/// status/update_flags/update），schema/列/行数不变、载荷字节原样读回；
+/// L3 镜像表 + 参数化预言机——NUL-free 检索词命中集合逐条一致（七个字符串
+/// 分支 + 复合查询 + DQS 列名探针），`%` 通配符命中全表但与预言机一致（数据
+/// 语义），全角 `％` 不做通配符，NUL 语料 prepare 必 Err 且金丝雀/schema 不
+/// 变；L4 源码锚点复扫——三个生产 SQL 文件合计恰两处值插值（常量列 ALTER +
+/// 已转义 `{query}` SELECT），`escape_double_quote` 无反斜杠分支，
+/// `ToSql for Envelope` 为 JSON BLOB；L5 良性对照（含 `\Seen`、Windows 路
+/// 径、`50%`、CJK）全链路存活。
+///
+/// 与近亲划界：CVE-2021-44026（issue #169）锁 Roundcube 搜索参数的**堆叠引
+/// 号突破**基线；本文件锁**反斜杠逃逸轴**（双层转义奇偶翻转、LIKE 通配符、
+/// NUL 截断、CJK/代理对边界）。IMAP 线上 `\"`/`\\` 转义层
+/// （`escape_imap_quoted`）属 CVE-2018-14352 回归的命令面，非 SQL 面。语料
+/// marker `rc48842.example` 与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——SQLite 词法器没
+/// 有反斜杠转义，缓存面全部参数绑定，UI 检索词的引号翻倍恰是 SQLite 自身
+/// 的 token 转义，NUL 语料 fail-closed。
+///
+/// [`cve_2026_48842`]: self::cve_2026_48842
+#[cfg(test)]
+#[path = "CVE-2026-48842.rs"]
+mod cve_2026_48842;
