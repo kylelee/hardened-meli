@@ -76,14 +76,35 @@ pub enum UnsubscribeAction {
 
 impl UnsubscribeAction {
     /// The exact target that will be used if this action is confirmed.
+    ///
+    /// A `mailto:` action's draft is built from the whole parsed [`Mailto`],
+    /// so every recipient header it carries (`To`, `Cc` **and `Bcc`**) is
+    /// part of the target: the SMTP envelope puts all three into the
+    /// `RCPT TO` set (`melib/src/smtp.rs`), and `Bcc` only disappears from
+    /// the delivery copy afterwards. Enumerating just [`Mailto::address`]
+    /// would let a `List-Unsubscribe: <mailto:list@example?bcc=harvest@
+    /// attacker>` header send a blind copy the confirming user never saw —
+    /// the authorization exhibit must cover the executed action, not a
+    /// subset of it (CVE-2026-33372, issue #202). Subject and body stay
+    /// payload addressed to these recipients, not destinations.
     pub fn target_description(&self) -> String {
         match self {
-            Self::Send(mailto) => mailto
-                .address
-                .iter()
-                .map(|a| a.to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
+            Self::Send(mailto) => {
+                let mut parts = Vec::with_capacity(3);
+                for (header, label) in [
+                    (HeaderName::TO, "To"),
+                    (HeaderName::CC, "Cc"),
+                    (HeaderName::BCC, "Bcc"),
+                ] {
+                    if let Some(value) = mailto.headers.get(header) {
+                        let value = value.trim();
+                        if !value.is_empty() {
+                            parts.push(format!("{label}: {value}"));
+                        }
+                    }
+                }
+                parts.join("; ")
+            }
             Self::OpenUrl(url) => url.clone(),
         }
     }

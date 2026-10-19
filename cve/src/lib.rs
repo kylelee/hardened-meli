@@ -6660,3 +6660,42 @@ mod cve_2026_33370;
 #[cfg(test)]
 #[path = "CVE-2026-33371.rs"]
 mod cve_2026_33371;
+
+/// CVE-2026-33372（Zimbra Collaboration 10.0 / 10.1 Webmail，2026-03-20 发布，
+/// 10.1.16 修复；CVSS 3.1 5.4，CWE-352 CSRF）**CSRF 令牌「来源位置」校验
+/// 不当**攻击模拟回归（Gitea issue #202）：设计要求令牌出现在请求头里，应用
+/// 却接受请求体中携带的令牌——「授权材料来自哪个通道」未被校验。meli 无
+/// web 会话 / Cookie / SOAP 面，等价不变量是「授权材料只来自它被指定的可
+/// 信通道，邮件内容/URL/mailto 参数里的同形数据永远只能是数据」。攻击语料
+/// 按 issue 指定的授权走私族构造（RFC 8058 one-click
+/// `List-Unsubscribe=One-Click` 指令头、`?token=`/`?auth=` 查询参数、
+/// mailto 自动动作参数、伪造 `X-CSRF-Token`/`X-Auth-Token`/`Authorization`/
+/// `Cookie` 头），[`cve_2026_33372`] 分八层锁定：one-click 指令头被惰性忽
+/// 略（头名存在但零消费者，meli 无 POST 构造原语）、URL 令牌完整展示且受
+/// scheme 门与显式按键/确认门约束、mailto 授权形参数整条丢弃且 `?to=` 不能
+/// 重定向、伪造头只作显示数据（唯一的 `Authorization` 构造点全部配置供值且
+/// 跨源重定向拒绝）、SMTP/IMAP(含 OAUTHBEARER/XOAUTH2)/NNTP/JMAP/WebDAV 凭
+/// 据只从本地账号配置来（零环境变量）、JMAP `Session` 只在进程内存不落盘。
+///
+/// **缺口检出与修复**：`UnsubscribeAction::target_description` 对
+/// `Send(mailto)` 只枚举 `Mailto::address`（`To:`），而实际发送的草稿含
+/// 解析器保留的 `Cc`/`Bcc`，SMTP 信封把三者都加入 `RCPT TO`
+/// （`strip_bcc_headers` 只剥 DATA 副本的头）——`List-Unsubscribe:
+/// <mailto:list@example?bcc=harvest@attacker>` 会让用户在只看到 To 的授权
+/// 下发出盲抄件，`<mailto:?bcc=…>` 更会显示空目标；修复为
+/// `target_description` 枚举 `To`/`Cc`/`Bcc` 全部收件人头（展示即执行），
+/// 回归锁定于 `cve/src/CVE-2026-33372.rs` 与
+/// `meli-test/tests/test_unsubscribe_confirm.rs`。
+///
+/// 与近亲划界：CVE-2026-33373（#192）拥有授权令牌的时序语义（nonce/单次
+/// 消费/状态迁移吊销）；CVE-2024-38173（#131）拥有 `List-Unsubscribe`
+/// scheme 白名单；CVE-2023-23397（#21）拥有 `go_to_url` 启动 scheme 门。
+/// 本文件拥有**授权数据来源位置**与「授权展示必须覆盖执行动作」。语料
+/// marker `csrf33372.example` 族与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明 + 1 处确认目标覆盖缺口修复**。
+///
+/// [`cve_2026_33372`]: self::cve_2026_33372
+#[cfg(test)]
+#[path = "CVE-2026-33372.rs"]
+mod cve_2026_33372;
