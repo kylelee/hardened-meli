@@ -6289,3 +6289,36 @@ mod cve_2026_107570;
 #[cfg(test)]
 #[path = "CVE-2026-110247.rs"]
 mod cve_2026_110247;
+/// CVE-2026-33373（Zimbra Collaboration 10.0.x / 10.1.x，2026-03-30；
+/// CVSS 3.1 8.8 AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H，CWE-352 CSRF）
+/// **账户状态迁移期签发的认证令牌缺 CSRF 校验**攻击模拟回归（issue
+/// #192）：状态迁移（启用 2FA / 改密码）后签发的活动令牌可无校验触发
+/// 状态变更请求——「上一次授权顺延到下一个动作」。
+///
+/// **meli 等价面映射**：meli 无 web 令牌面；等价物是敏感操作（发信
+/// `start_send_confirmation`、退订 `unsubscribe_action`、mailto 外部触
+/// 发、`go_to_url`/`List-Archive` 外链启动）的确认门令牌——
+/// `UIEvent::FinishedUIDialog(id, ..)` 携带的对话框 `ComponentId`
+/// （UUID v4 一次性 nonce）。分层证明：载体逐字抵达门；nonce 512 次
+/// 抽取不重复；mailto/List-Post 触发只装 `ViewMode::Edit` 的 composer
+/// （分支内零发送词法，伪造 From/Date/Message-ID 被
+/// `Mailto::IGNORE_HEADERS` 丢弃，头值 CRLF 注入拒绝）；全仓
+/// `send_draft_async` 恰两个调用点、`perform_unsubscribe_action` 恰一
+/// 个调用点、`launch_url` 恰两个调用点，全部在「事件 id == 挂载对话框
+/// id」+ 显式确认 + `.take()` 单次消费之后；三文件全量扫描
+/// `FinishedUIDialog` 消费臂无一例外校验 nonce（≥10 臂）；状态迁移
+/// （对话框拆除 → `ViewMode::Edit`、`UIEvent::ConfigReload` 设置热重
+/// 载）吊销既有授权、成对清空 pending 动作，发信绑定
+/// `self.account_hash` 无光标账号间接层。
+///
+/// 与近亲划界：CVE-2024-38173（#131）拥有退订 scheme 白名单，
+/// CVE-2023-23397（#21）拥有 `go_to_url` scheme 门，本文件拥有授权令
+/// 牌语义（nonce 绑定 / 单次消费 / 状态迁移吊销）。marker 域名
+/// `transition33373.example` 族与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**。
+///
+/// [`cve_2026_33373`]: self::cve_2026_33373
+#[cfg(test)]
+#[path = "CVE-2026-33373.rs"]
+mod cve_2026_33373;
