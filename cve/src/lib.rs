@@ -6792,3 +6792,61 @@ mod cve_2026_35537;
 #[cfg(test)]
 #[path = "CVE-2026-110249.rs"]
 mod cve_2026_110249;
+
+/// CVE-2026-73573（Zimbra Collaboration < 10.1.17，Briefcase 文档编辑；
+/// 2026-08-13 发布，Zimbra 10.1.17 修复；CVSS 3.1；CWE-24）**`packages`
+/// 参数路径穿越**攻击模拟 regression（Gitea issue #205）：认证攻击者把
+/// `../` 族穿越序列放进用户可控参数，参数未经路径边界校验直接拼进文件系统
+/// 路径，读取 web 应用目录内的敏感文件。缺陷形状是「不可信字符串 →
+/// 文件系统路径」，与具体产品无关。
+///
+/// **meli 等价面映射（issue #205 侦察结论）**：meli 的每个「不可信字符串 →
+/// 落盘组件」面逐条检查——(1) 附件临时落盘
+/// `File::create_temp_file`（mailcap `%s`、open-with、预览共用；名称先过
+/// [`sanitize_filename`] + 长度预算，退化相对名改生成名）；(2) 附件另存/
+/// 批存/整封导出（`EnvelopeView::save_attachment`、
+/// `save_all_attachments_to`、`ExportMail`、线程导出；`Attachment::filename`
+/// 与 `Message-ID`/`Subject` 都经组件净化，落盘 `create_new` + `0600`）；
+/// (3) sqlite 缓存路径 `DatabaseDescription::db_path`（账号名 →
+/// identifier，`/`、`\`、NUL 拒绝）；(4) 日志名（`LOG_DIR`/
+/// `LOG_FILE_PREFIX` 常量，无邮件字节参与）；(5) 邮件导入（路径是用户
+/// 命令行实参，邮件内容不参与）。
+///
+/// [`cve_2026_73573`] 分 10 层锁定（详见模块文档）：L1 真实 MIME 载体把
+/// 全族拼写送到 `Attachment::filename`（含 RFC 2047 Q 编码 `=00` 投递的
+/// 真 NUL、608 字节超长名）；L2 组件净化器对全族 + 二次 percent-decode 后
+/// 仍折成单一块、`base.join` 不逃逸、≤ 192 字节；L3 临时落盘 `parent` 恒
+/// 为暂存目录、`0600`、drop 回收，`$HOME` 展开到目录时 `EISDIR`
+/// fail-closed；L4 另存面上级目录零残留；L5 目标目录预置符号链接不被跟随
+/// （`EEXIST`，链接目标字节不变）；L6 `.eml` 导出名有界 + 退化名兜底；
+/// L7 Subject→`meli-<title>` 批存目录组件有界；L8 `db_path` 拒绝盘符前缀
+/// 且字面拼写不逃逸 `directory`；L9 日志/导入面源码锚点；L10 净化器源码
+/// 契约。
+///
+/// **检出并修复三个真实缺口**：(A) `sanitize_filename` 不中和 Windows
+/// 盘符前缀——`C:evil` 是带 `Component::Prefix` 的盘符相对组件，
+/// `PathBuf::push` 会整体替换目标目录，攻击者无需 `/`/`\` 即可写出目录；
+/// 修复：净化器末段把组件开头的 `<字母>:` 改写为 `C-`，只动两字节前缀，
+/// `Re:` 等中段冒号保持原样（Windows 上仅打开失败，fail-closed）。
+/// (B) `ExportMail` 用 `sanitize_filename` + `format!("{name}.eml")` 自拼
+/// 文件名，无长度上限、无退化名兜底（4 KiB `Message-ID` → 保存静默
+/// `ENAMETOOLONG`，`..` → 裸 `.eml` 隐藏文件）；修复：改走 `eml_filename`。
+/// (C) `DatabaseDescription::db_path` 不识别盘符语义；修复：三个参与文件名
+/// 的字段拒绝 `^[A-Za-z]:`（内部冒号保留，Windows 上只写入失败、不逃逸）。
+///
+/// 与近亲划界：#26 CVE-2025-47176 拥有 `'.../...//'` 词素与导出名净化，
+/// 但其盘符断言在 Unix 测试机上只查 `components().count() == 1`，未锁
+/// `C:` 前缀的 `PathBuf::push` 语义；本文件拥有该类。#28 CVE-2024-43604
+/// 拥有附件名→保存路径端到端接线；#47 CVE-2003-0376 拥有长度预算；#61
+/// CVE-2002-2351 拥有尾点规则；#107 CVE-2000-0481 拥有固定缓冲面；#156
+/// CVE-2018-14362/14363 拥有头缓存分隔符校验。 marker 前缀
+/// `meli-cve-2026-73573-` 与 marker 域名 `zimbra73573.example` 与兄弟
+/// 文件逐字隔离。
+///
+/// 结论：**检出并修复三个真实缺口，非纯免疫证明**。
+///
+/// [`sanitize_filename`]: meli::types::sanitize_filename
+/// [`cve_2026_73573`]: self::cve_2026_73573
+#[cfg(test)]
+#[path = "CVE-2026-73573.rs"]
+mod cve_2026_73573;

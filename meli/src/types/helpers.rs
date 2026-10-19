@@ -426,6 +426,30 @@ pub fn sanitize_filename(value: &mut Cow<'_, str>) {
     // rewrite in the final path component. See [`strip_trailing_dots`]
     // for the check/use divergence this closes.
     strip_trailing_dots(value);
+    // CVE-2026-73573 (issue #205): the Windows drive-prefix spelling
+    // (`C:evil.txt`) carries a `Component::Prefix` and needs no
+    // separator at all to make `PathBuf::push` replace the whole
+    // destination. Runs last so a `C:.`/`C:` name cannot shed the dots
+    // and keep a prefix.
+    neutralize_windows_drive_prefix(value);
+}
+
+/// Rewrite the `:` of a leading Windows drive prefix (`C:`, `c:`) to `-`.
+///
+/// CVE-2026-73573 (issue #205): `PathBuf::push` replaces the whole
+/// destination when the pushed component carries a
+/// [`std::path::Component::Prefix`], and on Windows a component that
+/// begins with `<ASCII letter>:` carries one even when it contains no
+/// separator at all (`C:evil.txt` is drive-relative). A mail-controlled
+/// component must not be able to select another drive. Only the
+/// two-byte prefix is rewritten: `Re: subject` and every other interior
+/// colon stay verbatim — ordinary filename text on Unix, and merely
+/// invalid (fail-closed at open time) on Windows.
+fn neutralize_windows_drive_prefix(value: &mut Cow<'_, str>) {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        value.to_mut().replace_range(1..2, "-");
+    }
 }
 
 /// Sanitize a mail-controlled filename into a single safe path

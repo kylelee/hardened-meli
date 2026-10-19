@@ -2016,9 +2016,13 @@ impl Component for EnvelopeView {
                 let mut path = std::path::Path::new(path).to_path_buf().expand();
 
                 if path.is_dir() {
-                    let mut filename = self.mail.message_id().to_string().into();
-                    crate::sanitize_filename(&mut filename);
-                    path.push(format!("{filename}.eml",));
+                    // The Message-ID is mail-controlled: derive the same
+                    // bounded, generated-name-backstopped component the
+                    // thread export uses (CVE-2026-73573: a multi-KiB
+                    // identifier must not push the save past `NAME_MAX`;
+                    // CVE-2003-0376 length budget, CVE-2024-43604
+                    // sanitization).
+                    path.push(crate::eml_filename(self.mail.message_id().as_str()));
                 }
                 if path.is_relative() {
                     path = context.current_dir().join(&path);

@@ -67,6 +67,23 @@ pub struct DatabaseDescription {
 /// separator (CVE-2018-14362 defense in depth, issue #156).
 const FORBIDDEN_PATH_CHARS: [char; 3] = ['/', '\\', '\0'];
 
+/// Does `value` start with a Windows drive prefix (`C:`, `c:`)?
+///
+/// `PathBuf::join`/`push` replace the whole base with a component that
+/// carries a [`std::path::Component::Prefix`], and a drive-relative
+/// spelling such as `C:headers_cache` carries one without containing a
+/// separator at all. A [`DatabaseDescription`] identifier derived from
+/// the account name could therefore escape the configured `directory`
+/// on Windows (CVE-2026-73573 defense in depth, issue #205 — the
+/// Zimbra `packages`-parameter traversal class). Only the two-byte
+/// *prefix* is rejected; an interior colon is a legal Unix filename
+/// character and merely unrepresentable on Windows, where the open
+/// fails closed instead of escaping.
+fn has_windows_drive_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
 impl DatabaseDescription {
     /// Returns whether the computed database path for this description exist.
     pub fn exists(&self) -> Result<bool> {
@@ -86,10 +103,10 @@ impl DatabaseDescription {
             ("identifier", self.identifier.as_deref().unwrap_or_default()),
             ("application_prefix", self.application_prefix),
         ] {
-            if field_value.contains(FORBIDDEN_PATH_CHARS) {
+            if field_value.contains(FORBIDDEN_PATH_CHARS) || has_windows_drive_prefix(field_value) {
                 return Err(Error::new(format!(
                     "Database description for `{}{}{}` field {} cannot contain path separators \
-                     (`/`, `\\`) or NUL. Got: {}.",
+                     (`/`, `\\`), NUL, or a Windows drive prefix (`C:`). Got: {}.",
                     self.identifier.as_deref().unwrap_or_default(),
                     if self.identifier.is_none() { "" } else { ":" },
                     self.name,
