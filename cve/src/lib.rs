@@ -6148,3 +6148,43 @@ mod cve_2021_39272;
 #[cfg(test)]
 #[path = "CVE-2026-48842.rs"]
 mod cve_2026_48842;
+
+/// CVE-2026-84642（Thunderbird < 155 / < 153.2；MFSA 2026-86/88，CVSS
+/// 7.5，CWE-1333）**`mail.allowed_attachment_hostnames` 主机白名单未转义
+/// 未锚定拼正则 → 非预期主机命中（可服务远程附件，信息泄露）**攻击模
+/// 拟回归（Gitea issue #190）。
+///
+/// **meli 等价面映射（issue #190 侦察结论）**：meli 没有主机名列表式
+/// 附件/远程内容白名单（远程内容整体剥离，MFSA-2005-11/#13 已锁）；
+/// 主机/scheme/origin 语义匹配面全数枚举后每面都是**结构化精确比较**：
+/// 回环例外 `is_loopback_host`（jmap/webdav 两份，`eq_ignore_ascii_case`
+/// 整串相等）、scheme 门 `is_default_launchable_scheme`（逐项全串相等）、
+/// JMAP/WebDAV `redirect_target`（`url::Origin` 结构化全等）、脚注
+/// host 显示（完整渲染不截断）；仅有的两处用户配置正则（主题高亮
+/// `RegexValue`、maildir `rename_regex`）语义即模式、从不匹配主机名。
+///
+/// [`cve_2026_84642`] 分层锁定：L0 手写迷你正则复刻 Thunderbird 易受
+/// 攻击管线（未转义`.`通配、未锚定子串、`+`·`*`·`?` 量词），issue 指定
+/// 逃逸族（子域/前缀/后缀/点号通配/元字符条目）在模型里全部命中、在
+/// 精确相等预言机里全部落空；L1 `validate_transport_url` 对全攻击语料
+/// （子域/前缀/后缀/插入/尾点/大小写/Unicode 同形/userinfo `@` 混淆/
+/// 十进制-十六进制 IPv4/云元数据/IPv4-mapped/端口）逐条断言诚实回环
+/// 放行、逃逸拒绝、畸形串停在解析层；L2 scheme 门精确相等（`httpss`/
+/// `xhttp`/`http.s` 拒绝）；L3 脚注 host 逐字完整显示无截断；L4 全仓
+/// `meli/src`+`melib/src` 扫描——非字面量正则构造仅存在于两处「语义
+/// 即模式」配置面 + `$re:literal` 宏，六个安全相关文件零正则，精确比
+/// 较锚点逐一复扫。
+///
+/// 与近亲划界：CVE-2024-50624（#23）拥有 https-only 传输策略决策，本
+/// 文件拥有该门主机匹配语义（精确 vs 正则/子串）与整仓「配置串进正
+/// 则」扫描；CVE-2009-3766（#89）拥有 TLS 证书 CN/SAN 匹配面。marker
+/// 域名 `trusted84642.example` 族与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——每个主机
+/// /scheme/origin 判定面都是结构化全等比较，仓库内不存在主机名语义
+/// 配置值被拼进正则的路径。
+///
+/// [`cve_2026_84642`]: self::cve_2026_84642
+#[cfg(test)]
+#[path = "CVE-2026-84642.rs"]
+mod cve_2026_84642;
