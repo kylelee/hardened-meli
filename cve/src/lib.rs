@@ -6532,6 +6532,28 @@ mod cve_2026_62643;
 #[path = "CVE-2026-35543.rs"]
 mod cve_2026_35543;
 
+/// CVE-2026-75004（Roundcube Webmail < 1.6.18、1.7.x < 1.7.3；2026-08-17
+/// 修复；CVSS 4.3，CWE-77）**managesieve 插件规则名引号不当 → 经 Sieve
+/// 脚本特制规则名绕过 `managesieve_disabled_actions` 禁用清单**攻击模拟
+/// 回归（Gitea issue #198）。等价面映射：meli 无 managesieve；按「不可信
+/// 名字 → 解释型上下文」逐面证明——mailcap `%{param}`/`%t`/`%s` 的上下文
+/// 感知 shell armor（CVE-2016-3714 系）+ 真实 spawn 往返、通知脚本
+/// `Command::new` + `.arg()` 的 exec-argv 边界、`query_to_sql` 六分支
+/// `escape_double_quote` 引号边界与参数化预言机命中集一致（CVE-2021-
+/// 44026 契约）、tags/flags 固定片段白名单。**缺口检出与修复**：RFC 2047
+/// Q 解码的 CRLF 流入回复草稿 Subject/To 头后，`Draft::to_edit_string`
+/// 原样写入 `$EDITOR` 缓冲，值内非折叠换行让 `Draft::from_str` 把攻击者
+/// 行解析成新头（如 `Bcc:`）绕过 `finalise` 卡点；修复为
+/// `neutralize_unfoldable_newline` armor（非折叠 CR/LF → 单空格，合法
+/// 折叠续行原样保留），编辑器往返不再诞生原集合之外的头。第二缺口在
+/// `query_to_sql` 的 `Flags` 分支：多 flag 列表末位的未知 flag 留下悬空
+/// `AND )` 的语法非法 SQL——改为先收集白名单片段再 join，未知 flag 对
+/// SQL 文本真正不可见。发送面 fail-closed 卡点与 NUL 惰性语义分别归
+/// CVE-2023-4875/#44 与其自身锁定，本文件 L6 复核不重定义。
+#[cfg(test)]
+#[path = "CVE-2026-75004.rs"]
+mod cve_2026_75004;
+
 /// CVE-2026-75000（Gitea issue #197）：Roundcube Webmail &lt; 1.6.18、
 /// 1.7.x &lt; 1.7.3 的 SVG `animate` `by` 属性清洗不足 → 二次绕过远程图片
 /// 拦截（CVE-2026-35543 于 1.6.14 修复后的新变体，补丁式封堵漏了 `by`；

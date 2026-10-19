@@ -607,46 +607,37 @@ pub fn query_to_sql(q: &Query) -> String {
                 s.push_str(") ");
             }
             Flags(v) => {
-                let total = v.len();
-                if total > 1 {
-                    s.push('(');
-                }
-                for (i, f) in v.iter().enumerate() {
-                    match f.as_str() {
-                        "draft" => {
-                            s.push_str(" (flags & 8 > 0) ");
-                        }
-                        "deleted" | "trashed" => {
-                            s.push_str(" (flags & 6 > 0) ");
-                        }
-                        "flagged" => {
-                            s.push_str(" (flags & 16 > 0) ");
-                        }
-                        "recent" => {
-                            s.push_str(" (flags & 4 == 0) ");
-                        }
-                        "seen" | "read" => {
-                            s.push_str(" (flags & 4 > 0) ");
-                        }
-                        "unseen" | "unread" => {
-                            s.push_str(" (flags & 4 == 0) ");
-                        }
-                        "answered" | "replied" => {
-                            s.push_str(" (flags & 2 > 0) ");
-                        }
-                        "unanswered" => {
-                            s.push_str(" (flags & 2 == 0) ");
-                        }
-                        _ => {
-                            continue;
-                        }
+                // CVE-2026-75004 regression (issue #198): an unknown flag
+                // (e.g. an attacker-influenced tag) must be *invisible* in
+                // the SQL text. The previous loop joined on the input
+                // position, so an unknown flag in the tail of a multi-flag
+                // list left a dangling `AND )` — syntactically invalid SQL
+                // that fails the search. Collect the whitelisted fragments
+                // first and join only the ones that exist.
+                let fragments: Vec<&str> = v
+                    .iter()
+                    .filter_map(|f| match f.as_str() {
+                        "draft" => Some(" (flags & 8 > 0) "),
+                        "deleted" | "trashed" => Some(" (flags & 6 > 0) "),
+                        "flagged" => Some(" (flags & 16 > 0) "),
+                        "recent" => Some(" (flags & 4 == 0) "),
+                        "seen" | "read" => Some(" (flags & 4 > 0) "),
+                        "unseen" | "unread" => Some(" (flags & 4 == 0) "),
+                        "answered" | "replied" => Some(" (flags & 2 > 0) "),
+                        "unanswered" => Some(" (flags & 2 == 0) "),
+                        _ => None,
+                    })
+                    .collect();
+                match fragments.as_slice() {
+                    [] => {}
+                    [single] => {
+                        s.push_str(single);
                     }
-                    if total > 1 && i != total - 1 {
-                        s.push_str(" AND ");
+                    many => {
+                        s.push('(');
+                        s.push_str(&many.join(" AND "));
+                        s.push_str(") ");
                     }
-                }
-                if total > 1 {
-                    s.push_str(") ");
                 }
             }
             HasAttachment => {

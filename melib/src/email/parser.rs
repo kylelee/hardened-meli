@@ -91,6 +91,62 @@ pub fn has_unfoldable_newline(value: &str) -> bool {
     false
 }
 
+/// Neutralizes every unfoldable line break in `value`.
+///
+/// The exact set [`has_unfoldable_newline`] flags — every `CR`, `LF` or
+/// `CRLF` that is not part of a valid RFC 5322 folding sequence — is
+/// replaced with a single space. Fold continuations (`CR`/`LF`/`CRLF`
+/// immediately followed by `SP` or `HTAB`, e.g. the `References` values
+/// [`Draft::new_reply`] builds) are preserved verbatim.
+///
+/// This is the armoring counterpart of the [`has_unfoldable_newline`]
+/// predicate for serialization paths that cannot fail loudly because they
+/// return plain text: [`Draft::to_edit_string`] writes header values into
+/// the `$EDITOR` buffer, and an unfoldable break inside a value re-parses
+/// as a *new header line* (or hijacks the value of a default header such as
+/// `Bcc:`) when the buffer is read back through [`Draft::update`],
+/// bypassing the fail-closed chokepoint of [`Draft::finalise`]
+/// (CVE-2026-75004 regression, issue #198: a rule-name-shaped Subject
+/// decoded from an RFC 2047 `=0D=0A` payload smuggled a `Bcc:` header into
+/// the reply draft through exactly this round-trip).
+///
+/// [`Draft::to_edit_string`]: crate::email::compose::Draft::to_edit_string
+/// [`Draft::new_reply`]: crate::email::compose::Draft::new_reply
+/// [`Draft::update`]: crate::email::compose::Draft::update
+/// [`Draft::finalise`]: crate::email::compose::Draft::finalise
+pub fn neutralize_unfoldable_newline(value: &str) -> Cow<'_, str> {
+    if !has_unfoldable_newline(value) {
+        return Cow::Borrowed(value);
+    }
+    let bytes = value.as_bytes();
+    let mut ret = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\r' || b == b'\n' {
+            let mut next = i + 1;
+            if b == b'\r' && bytes.get(next) == Some(&b'\n') {
+                next += 1;
+            }
+            match bytes.get(next) {
+                // A line break followed by whitespace is header folding:
+                // keep it verbatim so folded values round-trip unchanged.
+                Some(b' ') | Some(b'\t') => ret.push_str(&value[i..next]),
+                // Any other line break would terminate the header line when
+                // re-parsed: collapse it to a single space so the value
+                // stays one logical line.
+                _ => ret.push(' '),
+            }
+            i = next;
+            continue;
+        }
+        let step = value[i..].chars().next().map_or(1, char::len_utf8);
+        ret.push_str(&value[i..i + step]);
+        i += step;
+    }
+    Cow::Owned(ret)
+}
+
 pub struct ParsingError<I> {
     pub input: I,
     pub error: Cow<'static, str>,
