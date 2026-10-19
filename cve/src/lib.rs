@@ -2301,6 +2301,44 @@ mod cve_2025_48700;
 #[path = "CVE-2026-73572.rs"]
 mod cve_2026_73572;
 
+/// CVE-2026-73574（Zimbra Collaboration < 10.1.17，Classic Web Client Forward
+/// servlet；CVSS 3.1，CWE-669）**未认证本地文件包含（LFI）** regression
+/// （issue #206）：Forward servlet 把请求参数 `fu` 直接当资源路径解析，可越过
+/// 访问边界读取 `WEB-INF/web.xml` 等受保护文件——「请求参数 → 文件读取点」
+/// 零转换直达。meli 无 servlet/资源包含面，等价面按 issue 的映射取四条
+/// 「不可信路径参数 → 本地文件读取」通路：(1) 正文/HTML 链接面——`file:`
+/// 变体、UNC/SMB、相对穿越、URL 编码与大小写、`fu=web.xml` 资源名混淆全部
+/// 过不了 [`is_default_launchable_scheme`] 免确认启动门（白名单仅
+/// http/https/mailto，`envelope.rs:86`），非白名单一律落入显式确认对话框
+/// （`envelope.rs:2327`，孪生单测 `go_to_url_non_default_scheme_requires_
+/// confirmation` 锁定）；`List-Unsubscribe` 头的 URL 选项同样被
+/// [`unsubscribe_action`]（`view.rs:126`）跳过；(2) `message/external-body`
+/// 引用面（`fu` 参数最直接等价物）——melib 分类为不透明 `ContentType::Other`
+/// 叶，`decode` 一律空字节（`attachments.rs` `Other => Vec::new()`），LFI
+/// 路径只作元数据逐字保留、永不解引用；(3) 附件名落盘面——LFI 文件名经
+/// [`sanitize_filename_component`] 压成单路径分量（双分隔符全平台替换、
+/// `""`/`.`/`..` 拒绝回退随机名）；(4) 源码锚点扫描——消费邮件字节的全部
+/// 解析/渲染面（parser/attachments/html_render/view 全家族）**零文件读取
+/// 原语**，仓内读取点全部在用户动作门之后（`import`/`add-attachment` 用户
+/// 手敲 ex 命令、mailcap 只读用户 XDG 配置）。
+///
+/// [`cve_2026_73574`] 以内嵌 `multipart/mixed` 语料逐层锁定：L1 载体真实
+/// （alternative(plain+html) + 5 个 external-body 声明 + 2 个 LFI 文件名附件，
+/// 四家族 22 向量逐字在场、标记与兄弟语料逐字隔离）；L2 external-body 对
+/// 载体 5 声明 + (A)(B)(C) 每条独立拼写全部 decode 为空、HTML 绝对 scheme
+/// LFI href 在 sanitize scheme 白名单处剥除且 render 脚注无可启动 LFI 值；
+/// L3 启动门/unsubscribe 头门/附件名单分量三扇门全部拒绝 + 诚实对照放行；
+/// L4 源码锚点扫描 + 整封邮件端到端惰性、诚实链接保持可用。**免疫证明，
+/// 未发现缺口，未改动生产代码**。
+///
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+/// [`unsubscribe_action`]: meli::mail::view::unsubscribe_action
+/// [`sanitize_filename_component`]: meli::types::sanitize_filename_component
+/// [`cve_2026_73574`]: self::cve_2026_73574
+#[cfg(test)]
+#[path = "CVE-2026-73574.rs"]
+mod cve_2026_73574;
+
 /// CVE-2021-29956（Mozilla Thunderbird 78.8.1–78.10.1；CVSS 4.3，CWE-312）**导入
 /// 的 OpenPGP 私钥在未设置主密码时明文写入本地 keystore** regression（issue
 /// #102）。Thunderbird 把用户导入的私钥存进自有 `key4.db`/secring 式 keystore，
