@@ -387,6 +387,17 @@ impl Draft {
                 ))
                 .set_kind(ErrorKind::ValueError));
             }
+            // A NUL octet in a header value is invalid RFC 5322 and cannot
+            // ride the SMTP DATA stream (RFC 5321): downstream C-string
+            // consumers would truncate at it (CWE-158, mutt
+            // CVE-2026-43861). Entry paths that copy received-mail bytes
+            // verbatim (reply/forward subjects) rely on this wire gate.
+            if v.contains('\0') {
+                return Err(Error::new(format!(
+                    "refusing to finalise: NUL in header value of {k}"
+                ))
+                .set_kind(ErrorKind::ValueError));
+            }
             if v.is_ascii() {
                 ret.push_str(&format!("{k}: {v}\r\n"));
             } else {

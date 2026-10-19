@@ -1129,6 +1129,11 @@ pub mod generic {
         let mut body = None;
         let mut headers = HeaderMap::empty();
         let mut address: Vec<Address>;
+        // Set when the address part was rejected specifically for containing
+        // a decoded NUL; the lenient `mailto:?hfield` fallback below must not
+        // swallow that rejection (NUL in a decoded product fails the whole
+        // URI, as mutt's url_pct_decode does since CVE-2026-43861).
+        let mut address_nul_rejected = false;
 
         // [ref:TODO]: Validate header content (e.g. test address containing Headers for valid address,
         // so that the following would return an error:
@@ -1185,6 +1190,25 @@ pub mod generic {
                          mailto URIs (RFC6068)",
                     ).into()));
                     }
+                    // A percent-encoded %00 decodes to NUL, which is invalid in
+                    // an addr-spec (RFC 5322) and in the SMTP DATA stream (RFC
+                    // 5321). The address parser stops at it silently, so
+                    // without this check `mailto:a@b%00c.example` would be
+                    // truncated to `a@b`: the recipient actually used would
+                    // diverge from the URI text — the CWE-158 NUL-truncation
+                    // face (mutt CVE-2026-43861, fixed in mutt 2.3.2 by
+                    // rejecting NUL in url_pct_decode products). Reject.
+                    if s.contains('\0') {
+                        address_nul_rejected = true;
+                        return Err(nom::Err::Error(
+                            (
+                                input,
+                                "mailto(): NUL characters are not allowed in the address part of \
+                         mailto URIs (RFC6068/RFC5322)",
+                            )
+                                .into(),
+                        ));
+                    }
                     Address::list_try_from(s.as_bytes()).map_err(|_| {
                         nom::Err::Error(ParsingError::<&[u8]>::new(
                             input,
@@ -1199,6 +1223,15 @@ pub mod generic {
             } else {
                 &decoded[end_or_len + 1..]
             };
+        } else if address_nul_rejected {
+            return Err(nom::Err::Error(
+                (
+                    input,
+                    "mailto(): NUL characters are not allowed in the address part of mailto URIs \
+                 (RFC6068/RFC5322)",
+                )
+                    .into(),
+            ));
         } else if end.is_some() {
             decoded = &decoded[1..];
             address = vec![];
@@ -1263,6 +1296,25 @@ pub mod generic {
             else {
                 return Err(nom::Err::Error((input, "mailto(): invalid UTF-8.").into()));
             };
+            // A percent-encoded %00 decodes to NUL: NUL is invalid in
+            // header values (RFC 5322) and in the body (the SMTP DATA stream
+            // cannot carry NUL octets, RFC 5321 §4), so downstream C-string
+            // consumers would silently truncate the value at it — the CWE-158
+            // face of mutt CVE-2026-43861. mutt 2.3.2 rejects NUL in
+            // url_pct_decode products; reject the whole URI here too.
+            if value.contains('\0') {
+                return Err(nom::Err::Error(
+                    (
+                        input,
+                        format!(
+                            "mailto(): NUL characters are not allowed in the value of mailto \
+                             header `{}` (RFC6068/RFC5322)",
+                            String::from_utf8_lossy(tag)
+                        ),
+                    )
+                        .into(),
+                ));
+            }
             // RFC6068 forbids CR/LF control characters in mailto hfield
             // values; percent-encoded %0d/%0a (in any case combination) would
             // otherwise be decoded into a header value, enabling header

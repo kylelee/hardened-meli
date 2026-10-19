@@ -6967,3 +6967,17 @@ mod cve_2026_43859;
 #[cfg(test)]
 #[path = "CVE-2026-43860.rs"]
 mod cve_2026_43860;
+
+/// CVE-2026-43861 — mutt < 2.3.2 `url_pct_decode` 不检查解码产物中的
+/// NUL（CWE-158）攻击模拟（issue #210）：mailto 地址轴 `%00` 曾被地址
+/// 解析器静默截断（实际收件人与 URI 文本分叉）、hfield 轴 `%00` 曾把
+/// NUL 保真穿透到出站消息、收件头字面 NUL 曾经回复/转发穿透 wire 门；
+/// 三缺口修复回归（mutt 12f54fe 同款拒绝语义 + finalise chokepoint）。
+/// URL 显示/提取/启动与 list-unsubscribe 轴为免疫证明（字节保真、
+/// 无解码分叉、启动门对内嵌 NUL fail-closed）。结论：检出并修复三处
+/// 真实缺口。
+///
+/// [`cve_2026_43861`]: self::cve_2026_43861
+#[cfg(test)]
+#[path = "CVE-2026-43861.rs"]
+mod cve_2026_43861;
