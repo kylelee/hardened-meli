@@ -7034,3 +7034,35 @@ mod cve_2026_43862;
 #[cfg(test)]
 #[path = "CVE-2026-43864.rs"]
 mod cve_2026_43864;
+/// CVE-2026-96869（Thunderbird < 157，Networking 组件，CWE-200，CVSS 4.3，
+/// Mozilla 未公开根因）**网络栈错误消息/日志面信息泄露** regression
+/// （issue #193）。
+///
+/// issue #193 按等价面做免疫证明与缺口检测：错误消息与日志面不得回显明文
+/// 口令与 URL userinfo；认证字节只在 TLS 建立后上线；凭据不随重定向跨主机
+/// 重放。侦察确认两处真缺口并已修复：G1 `Secret` 派生 `Debug` 泄露明文口令
+/// （`melib/src/conf/field_types.rs` 去掉 derive、手写脱敏 Debug）；
+/// G2 `validate_transport_url` 放行 `scheme://user:pass@host/`（JMAP 与
+/// WebDAV 两份 gate 均新增 userinfo 拒绝，错误只回显 scheme://host:port）。
+/// TLS 先于认证（CVE-2020-15954 / CVE-2021-38373）与重定向跨主机
+/// （`RedirectPolicy::None` + `redirect_target`）两轴经行为/源码断言确认免疫。
+///
+/// [`cve_2026_96869`] 分层：L1 纯模型复刻「错误串内嵌完整 URL + Debug
+/// 派生口令」的旧客户端并对照加固模型；L2 锁定 `Secret` 与
+/// IMAP/SMTP/JMAP/NNTP 配置的 Debug 脱敏、JMAP `validate_transport_url`
+/// 与 `validate_session_urls` 的 userinfo 拒绝矩阵（含 source 链全走查）
+/// 及回环/https 正常 URL 放行；L3 用 127.0.0.1 敌意服务器锁定 IMAP
+/// STARTTLS 伪造 OK/拒绝、NNTP STARTTLS 拒绝、SMTP
+/// require_auth+STARTTLS 拒绝四场景的错误链与线上字节零口令；L4 源码扫描
+/// 三个带凭据客户端的 `RedirectPolicy::None`、`redirect_target` 的
+/// userinfo 剥离先于 origin 比较、`patch_retrieve` 无凭据 builder、
+/// `Secret` 手写 Debug、JMAP URL 回显位于 gate 下游、WebDAV gate 同构，
+/// 以及全仓 `tracing!`/`format!` 行无 Secret 承载配置的 `{:?}`。
+///
+/// 结论：**修复 G1/G2 两个真缺口，其余两轴免疫**；未新增依赖，未改动
+/// `.gitea/`、CHANGELOG 或 AGENTS.md。
+///
+/// [`cve_2026_96869`]: self::cve_2026_96869
+#[cfg(test)]
+#[path = "CVE-2026-96869.rs"]
+mod cve_2026_96869;
