@@ -338,3 +338,14 @@ kept tree-identical to this repository at each publish).
 - Superseded in the mirror by this publish: its interim self-directed upstream sync (`aea4508b..168410ab`, 73 commits — aggregate-Contacts design, v0.12.0, UI ports, sequoia backend, frozen-CVE-corpus assertion edits), removed by the align commit (visible deletions: `melib/src/sequoia.rs`, `meli/src/version_migrations/v0_12_0.rs`)
 - Verification in the mirror repo: `make lint`, full `cargo test --workspace` (28 suites), `cargo test -p cve` **1174/1174**, sensitive-info scan clean (no internal domains/private IPs/credentials in messages or historical blobs)
 - Publish: force-push to `origin/master` pending (sandbox has no `ssh`; to be run from the user's shell)
+
+### 2026-10-20 (UTC+8)
+
+- Method: atomic publish — `git cherry-pick -x -X theirs 7fce2bf..b87b971a3` (43 commits; 1 merge node skipped), one explicit `align` commit, one baseline clippy fix landed here first and picked, one `--no-ff --signoff` merge to `master`
+- Outcome: **41 picks** with `-x` provenance lines + **1 empty-drop** (the 2026-10-13 ledger entry, already content-equivalent on the mirror) + 1 align + 1 merge; the 4 AGENTS doc commits expected to drop empty replayed instead as converging picks (the mirror-side equivalents sat at intermediate wording states; final trees identical either way)
+- Replay fix (align): `-X theirs` let the `cve_2026_96869` module block land at a divergent position and a later pick drop it; the align commit restored it at the source-tip position (backed by the diff=0 gate)
+- Baseline fix: the fork tip carried a clippy break in `cve_2026_43864` (`unreachable_pub` x5, `useless_format`, `bool_comparison`) — fixed here first (visibility narrowed to `pub(super)`, the `format!`-escaped literal inlined unescaped, `== false` turned into a negation) and cherry-picked to the mirror; module tests 6/6
+- Identity unification: `611ada51` re-authored post-pick to Kyle Lee <kylelee@users.noreply.github.com> (sign-off rewritten, author name kept); new-range author/committer/sign-off verified unique
+- Hard gate: `git diff` against this fork's `main` tip = **0** (tree-identical, re-verified on the published tip)
+- Verification in the mirror repo: `make lint`, full `cargo test --workspace` (29 suites, 2634 tests), `cargo test -p cve` **1427/1427**, sensitive-info scan clean (new-range commit messages and both trees: no internal domains/repo names)
+- Publish: push to `origin/master` pending (fast-forward, no history rewritten; to be run from the user's shell)

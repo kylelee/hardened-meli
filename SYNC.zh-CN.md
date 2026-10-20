@@ -282,3 +282,14 @@ git fetch upstream
 - 本次发布取代的镜像仓内容：其过渡期自行上游同步（`aea4508b..168410ab`，73 提交——聚合 Contacts 设计、v0.12.0、UI 移植、sequoia 后端、冻结 CVE 语料断言改动），由 align 提交移除（可见删除：`melib/src/sequoia.rs`、`meli/src/version_migrations/v0_12_0.rs`）
 - 镜像仓内验证：`make lint`、全量 `cargo test --workspace`（28 套件）、`cargo test -p cve` **1174/1174**、敏感信息扫描清洁（提交信息与历史 blob 均无内部域名/私网 IP/凭据）
 - 发布：`origin/master` 的 force-push 待执行（沙箱无 `ssh`，由用户本机运行）
+
+### 2026-10-20（UTC+8）
+
+- 方式：原子发布——`git cherry-pick -x -X theirs 7fce2bf..b87b971a3`（43 提交；1 个 merge 节点跳过），一个显式 `align` 提交，一个先落本仓再拣选的基线 clippy 修复，一个 `--no-ff --signoff` 合并入 `master`
+- 结果：**41 个拣选**（带 `-x` 溯源行）+ **1 个空拣选**（2026-10-13 台账提交，镜像侧已有等价内容）+ 1 align + 1 merge；预期空投的 4 个 AGENTS 文档提交实际以「重放收敛」落地（镜像侧等价提交处于中间措辞态，终态两树一致）
+- 重放修正（align）：`-X theirs` 使 `cve_2026_96869` 模块块落位偏移并被后续拣选删除；align 提交将其恢复至源终态位（diff=0 硬门兜底）
+- 基线修复：fork 尖端 `cve_2026_43864` 存在 clippy 阻断（`unreachable_pub`x5、`useless_format`、`bool_comparison`）——先在本仓修复（可见性收敛为 `pub(super)`、内联去 `format!` 转义字面量、`== false` 改否定式）再拣选至镜像；模块测试 6/6
+- 身份统一：`611ada51` pick 后改写作者邮箱与 sign-off 为规范身份（保留作者名）；新范围作者/提交者/签名唯一身份校验通过
+- 硬门：与本 fork `main` 尖端的 `git diff` = **0**（文件树一致，并在发布端复验）
+- 镜像仓内验证：`make lint`、全量 `cargo test --workspace`（29 套件、2634 测试）、`cargo test -p cve` **1427/1427**、敏感信息扫描清洁（新范围提交信息与两树均无内部域名/仓库名）
+- 发布：`origin/master` 推送待执行（快进式、无历史改写；由用户本机运行）
