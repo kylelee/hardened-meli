@@ -1586,6 +1586,10 @@ pub mod server {
                 // RFC 9051 §7.1.5: the connection is already authenticated;
                 // no login flow must follow.
                 block_on(tcp_stream.write_all(b"* PREAUTH logged in\r\n")).unwrap();
+            } else {
+                // RFC 3501 §7.1: every IMAP session starts with a greeting;
+                // the unauthenticated flavor is `* OK <text>`.
+                block_on(tcp_stream.write_all(b"* OK melib-test mock ready\r\n")).unwrap();
             }
             // Stage 1: the pre-auth capability request. The reply's
             // capability list is parameterized by the server state flags
@@ -15159,8 +15163,8 @@ kfcMJpFWNRl6P2sUcsOhR6g=
                     let n = tcp.read(&mut buf).unwrap();
                     assert_eq!(&buf[..n], b"M1 CAPABILITY\r\n");
                     tcp.write_all(
-                        b"* CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=OAUTHBEARER SASL-IR\r\nM1 OK \
-                         CAPABILITY completed\r\n",
+                        b"* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=OAUTHBEARER \
+                         SASL-IR\r\nM1 OK CAPABILITY completed\r\n",
                     )
                     .unwrap();
                     // The client fails locally; it sends nothing more.
@@ -15201,8 +15205,8 @@ kfcMJpFWNRl6P2sUcsOhR6g=
                     let n = tcp.read(&mut buf).unwrap();
                     assert_eq!(&buf[..n], b"M1 CAPABILITY\r\n");
                     tcp.write_all(
-                        b"* CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR\r\nM1 OK CAPABILITY \
-                         completed\r\n",
+                        b"* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR\r\nM1 OK \
+                         CAPABILITY completed\r\n",
                     )
                     .unwrap();
                     let _ = tcp.read(&mut buf);
