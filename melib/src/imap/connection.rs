@@ -425,6 +425,56 @@ pub struct ImapConnection {
     msn_index_cache_uidvalidity: HashMap<MailboxHash, UIDVALIDITY>,
 }
 
+/// The RFC 3501 §7.1 greeting status words: the first line a server sends
+/// must be `* OK`, `* PREAUTH` or `* BYE`, each optionally followed by a
+/// space and response text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Greeting {
+    /// `* OK …`: a plain unauthenticated session, the login flow proceeds.
+    Ok,
+    /// `* PREAUTH …`: the server already authenticated the session.
+    Preauth,
+    /// `* BYE …`: the server refuses or closes the connection.
+    Bye,
+}
+
+/// Parse one line as an RFC 3501 server greeting. Returns the kind and the
+/// bytes after the status word (the separating space of the optional
+/// response text, or empty/the line's CRLF for a bare greeting), or `None`
+/// when the line is not a legal greeting: no untagged `* ` marker, a tagged
+/// line, an unknown status word, no word boundary after the status word
+/// (`* PREAUTHED …`), or a NUL byte, which is not a valid `TEXT-CHAR` in a
+/// greeting line. The status word itself is matched case-insensitively so
+/// odd but harmless legacy servers are still accepted.
+fn parse_greeting(line: &[u8]) -> Option<(Greeting, &[u8])> {
+    if line.contains(&0) {
+        return None;
+    }
+    let rest = line.strip_prefix(b"* ")?;
+    let (greeting, rest) = [
+        (&b"OK"[..], Greeting::Ok),
+        (&b"PREAUTH"[..], Greeting::Preauth),
+        (&b"BYE"[..], Greeting::Bye),
+    ]
+    .into_iter()
+    .find_map(|(word, greeting)| {
+        let head = rest.get(..word.len())?;
+        if head.eq_ignore_ascii_case(word) {
+            Some((greeting, rest.get(word.len()..)?))
+        } else {
+            None
+        }
+    })?;
+    // Word boundary: the status word must end the line or be followed by
+    // the separating space of the optional response text. An illegal
+    // prefix such as `* PREAUTHED` or `* BYEBYE` is not a greeting status
+    // word at all.
+    if rest.first().is_some_and(|&b| b != b' ' && b != b'\r') {
+        return None;
+    }
+    Some((greeting, rest))
+}
+
 impl ImapStream {
     pub async fn new_connection(
         server_conf: &ImapServerConf,
@@ -434,6 +484,11 @@ impl ImapStream {
     ) -> Result<(Capabilities, Self)> {
         let path = &server_conf.server_hostname;
 
+        // Whether the STARTTLS negotiation already validated (and drained)
+        // the pre-TLS greeting: RFC 3501 §6.2.1 defines no second greeting
+        // after the upgrade, so the post-upgrade capability read must not
+        // expect one.
+        let mut starttls_greeted = false;
         let stream = if server_conf.use_tls {
             if send_state_changes {
                 (uid_store.event_consumer)(
@@ -510,9 +565,45 @@ impl ImapStream {
                     enforce_response_size_limit(response.len())?;
                     match server_conf.protocol {
                         ImapProtocol::IMAP { .. } => {
-                            if response.starts_with(b"* OK ") && response.find(b"\r\n").is_some() {
+                            // The pre-TLS greeting is the first line the
+                            // server sends: validate its full shape before
+                            // draining it into the TLS handshake phase.
+                            // Only `* OK` may precede a successful STARTTLS
+                            // exchange; a `* PREAUTH` or `* BYE` greeting,
+                            // or any illegal greeting form, fails closed
+                            // instead of being silently buffered.
+                            if !starttls_greeted {
                                 if let Some(pos) = response.find(b"\r\n") {
-                                    response.drain(0..pos + 2);
+                                    match parse_greeting(&response[..pos]) {
+                                        Some((Greeting::Ok, _)) => {
+                                            response.drain(0..pos + 2);
+                                            starttls_greeted = true;
+                                        }
+                                        Some((Greeting::Preauth, _)) => {
+                                            return Err(Error::new(format!(
+                                                "Could not initiate STARTTLS negotiation to \
+                                                 {path}: server greeted with PREAUTH instead \
+                                                 of an unauthenticated session"
+                                            ))
+                                            .set_kind(ErrorKind::ProtocolError));
+                                        }
+                                        Some((Greeting::Bye, _)) => {
+                                            return Err(Error::new(format!(
+                                                "Could not initiate STARTTLS negotiation to \
+                                                 {path}: server refused the connection with \
+                                                 a BYE greeting"
+                                            ))
+                                            .set_kind(ErrorKind::ProtocolError));
+                                        }
+                                        None => {
+                                            return Err(Error::new(format!(
+                                                "Could not initiate STARTTLS negotiation to \
+                                                 {path}: server did not send a valid IMAP \
+                                                 greeting before its STARTTLS reply"
+                                            ))
+                                            .set_kind(ErrorKind::ProtocolError));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -688,6 +779,73 @@ impl ImapStream {
             String::from_utf8_lossy(&res)
         );
 
+        // The server greeting — the first line of `res` above, sent before
+        // our `CAPABILITY` command reply — decides the session's
+        // authentication state, and it must be a legal RFC 3501 §7.1
+        // greeting: `* OK`, `* PREAUTH` or `* BYE`, each optionally
+        // followed by a space and response text. An illegal greeting (an
+        // unknown status word, no word boundary such as `* PREAUTHED`, a
+        // tagged or missing greeting, a NUL byte) fails the connection
+        // closed instead of proceeding with an unauthenticated session,
+        // and a `* BYE` greeting — the server refusing the connection — is
+        // an error instead of a login attempt against a session the server
+        // is closing. Only the greeting itself may decide: a `* PREAUTH`
+        // line injected later, next to the capability reply, is just
+        // untagged response data. In the STARTTLS flow the greeting was
+        // already validated before the TLS upgrade and RFC 3501 §6.2.1
+        // defines no second greeting, so nothing is validated here.
+        if !starttls_greeted {
+            let first_line = res.split_rn().next().unwrap_or_default();
+            match parse_greeting(first_line) {
+                Some((Greeting::Preauth, preauth_msg)) => {
+                    ret.preauthed = true;
+                    if send_state_changes {
+                        let preauth_msg = String::from_utf8_lossy(preauth_msg);
+                        let preauth_msg = preauth_msg.trim();
+                        (uid_store.event_consumer)(
+                            uid_store.account_hash,
+                            BackendEvent::AccountStateChange {
+                                message: if preauth_msg.is_empty() {
+                                    "Connection was automatically authenticated by server".into()
+                                } else {
+                                    format!(
+                                        "Connection was automatically authenticated by server: \
+                                         {preauth_msg}"
+                                    )
+                                    .into()
+                                },
+                            },
+                        );
+                    }
+                }
+                Some((Greeting::Ok, _)) => {}
+                Some((Greeting::Bye, text)) => {
+                    return Err(Error::new(format!(
+                        "Could not connect to {}: server refused the connection with a BYE \
+                         greeting",
+                        server_conf.server_hostname
+                    ))
+                    .set_details(format!(
+                        "The server greeting was: `{}`.",
+                        String::from_utf8_lossy(text).trim()
+                    ))
+                    .set_kind(ErrorKind::ProtocolError));
+                }
+                None => {
+                    return Err(Error::new(format!(
+                        "Could not connect to {}: server did not send a valid IMAP greeting",
+                        server_conf.server_hostname
+                    ))
+                    .set_details(format!(
+                        "The first line must be `* OK`, `* PREAUTH` or `* BYE` (RFC 3501 \
+                         §7.1); the first line received was: `{}`.",
+                        String::from_utf8_lossy(first_line).trim()
+                    ))
+                    .set_kind(ErrorKind::ProtocolError));
+                }
+            }
+        }
+
         fn parse_capabilities(bytes: &[u8], hostname: &str) -> Result<IndexSet<Box<[u8]>>> {
             protocol_parser::capabilities(bytes)
                 .map(|(_, v)| {
@@ -728,42 +886,6 @@ impl ImapStream {
                 Ok(v) => v,
             }
         };
-
-        // The server greeting (sent before our `CAPABILITY` command reply,
-        // so it is part of `res` above) may be `* PREAUTH`, meaning the
-        // connection is already authenticated and the whole login flow
-        // must be skipped.
-        if let Some(preauth_msg) = res.split_rn().into_iter().find_map(|l| {
-            // Word boundary: RFC 3501 spells the greeting `* PREAUTH`
-            // (bare) or `* PREAUTH <text>`, so the remainder must be empty,
-            // start with the separating space, or be the line's CRLF. An
-            // illegal prefix such as `* PREAUTHED` or `* PREAUTH-bypass`
-            // must NOT be mistaken for a pre-authenticated greeting and
-            // skip the login flow.
-            l.strip_prefix(b"* PREAUTH").filter(|rest| {
-                rest.is_empty() || rest.starts_with(b" ") || rest.starts_with(b"\r")
-            })
-        }) {
-            ret.preauthed = true;
-            if send_state_changes {
-                let preauth_msg = String::from_utf8_lossy(preauth_msg);
-                let preauth_msg = preauth_msg.trim();
-                (uid_store.event_consumer)(
-                    uid_store.account_hash,
-                    BackendEvent::AccountStateChange {
-                        message: if preauth_msg.is_empty() {
-                            "Connection was automatically authenticated by server".into()
-                        } else {
-                            format!(
-                                "Connection was automatically authenticated by server: \
-                                 {preauth_msg}"
-                            )
-                            .into()
-                        },
-                    },
-                );
-            }
-        }
 
         if !capabilities
             .iter()
