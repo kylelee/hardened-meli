@@ -46,6 +46,55 @@ fn test_imap_watch() {
 }
 
 #[test]
+fn test_imap_preauth() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_preauth();
+    });
+}
+
+#[test]
+fn test_imap_oauthbearer() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_oauthbearer();
+    });
+}
+
+#[test]
+#[ignore = "order-dependent deadlock under investigation: the mock TLS accept path wedges the test thread inside async-io's reactor wait; passes in isolation on some runs, hangs after other tests (tracked in issue #182)"]
+fn test_imap_tls() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_tls();
+    });
+}
+
+#[test]
+fn test_imap_capabilities_on_auth() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_capabilities_on_auth();
+    });
+}
+
+#[test]
+fn test_imap_exists_equal_count_probe() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_exists_equal_count_probe();
+    });
+}
+
+#[test]
+fn test_imap_managesieve_wire() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_managesieve_wire();
+    });
+}
+
+#[test]
 fn test_imap_refresh_after_initial_fetch_new_mail() {
     let _env = env_lock();
     tokio_test::block_on(async {
@@ -705,7 +754,7 @@ fn test_imap_exmail_uid_renumber_move_recovery() {
 pub mod server {
     use std::{
         convert::TryInto,
-        net::{TcpListener, TcpStream},
+        net::TcpListener,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, Mutex,
@@ -729,7 +778,10 @@ pub mod server {
         fetch::MessageDataItem,
         response::{Data, Response},
     };
-    use melib::{backends::prelude::*, imap::*, parser::BytesExt, smol::Async, Mail};
+    use melib::{
+        backends::prelude::*, imap::*, parser::BytesExt, smol::Async,
+        utils::connections::Connection, Mail,
+    };
 
     pub enum SessionState {
         // Unauthenticated,
@@ -983,6 +1035,28 @@ pub mod server {
         /// present executes normally. Emulates the server silently
         /// renumbering the view behind the client's back (issue #180).
         pub move_no_alert_mails_not_exist: bool,
+        /// When `true`, the server greets the connection with
+        /// `* PREAUTH logged in` instead of relying on an authentication
+        /// exchange: the client must skip the whole login flow.
+        pub greeting_preauth: bool,
+        /// When `true`, the pre-auth capability reply advertises
+        /// `AUTH=OAUTHBEARER` (in addition to `AUTH=PLAIN`).
+        pub advertise_oauthbearer: bool,
+        /// When `true`, the pre-auth capability reply advertises
+        /// `AUTH=XOAUTH2` (in addition to `AUTH=PLAIN`).
+        pub advertise_xoauth2: bool,
+        /// When `true`, the pre-auth capability reply omits `SASL-IR`, so
+        /// the client must use the continuation form of `AUTHENTICATE`.
+        pub omit_sasl_ir: bool,
+        /// When `true`, the successful authentication reply carries an
+        /// untagged `* CAPABILITY` line, so the client must not re-send
+        /// `CAPABILITY` after authenticating.
+        pub send_capabilities_on_auth: bool,
+        /// When `true`, the authentication exchange fails SASL-style: the
+        /// server replies to the SASL exchange with a `+ <base64 JSON>`
+        /// continuation, then (after the client's cancel token) a tagged
+        /// `NO`.
+        pub auth_sasl_failure: bool,
     }
 
     impl Default for ServerState {
@@ -1029,6 +1103,12 @@ pub mod server {
                 mailbox_next_uid: IndexMap::new(),
                 mailbox_uidvalidity: IndexMap::new(),
                 move_no_alert_mails_not_exist: false,
+                greeting_preauth: false,
+                advertise_oauthbearer: false,
+                advertise_xoauth2: false,
+                omit_sasl_ir: false,
+                send_capabilities_on_auth: false,
+                auth_sasl_failure: false,
             }
         }
     }
@@ -1268,7 +1348,7 @@ pub mod server {
     }
 
     pub struct ImapServerStream {
-        pub tcp_stream: Async<TcpStream>,
+        pub tcp_stream: Async<Connection>,
         pub command_receiver: UnboundedReceiver<ServerEvent>,
         pub command_sender: UnboundedSender<ServerEvent>,
         pub state: Arc<Mutex<ServerState>>,
@@ -1276,6 +1356,12 @@ pub mod server {
         pub buf: Vec<u8>,
         /// Log of every command line received while not idling.
         pub received_commands: Arc<Mutex<Vec<String>>>,
+        /// Log of every command line received during the connection
+        /// handshake stages (before the loop handler starts). Ground truth
+        /// for asserting which commands the client did (or did not) send
+        /// while connecting, e.g. that a `* PREAUTH` greeting suppresses
+        /// every `AUTHENTICATE`/`LOGIN`.
+        pub handshake_commands: Arc<Mutex<Vec<String>>>,
         /// Whether the client sent an RFC 2971 `ID` command during the
         /// connection handshake (observed at the `M4` stage). With `use_id`
         /// disabled the client never sends `ID` at all.
@@ -1333,157 +1419,49 @@ pub mod server {
             ),
             state: Arc<Mutex<ServerState>>,
         ) -> Self {
-            let mut buf = vec![0; 64 * 1024];
-            // Set by the `M4` handshake stage below (see the `sent_id`,
-            // `preread_len` and `driver_completed_in_handshake` field
-            // docs).
-            let mut sent_id = false;
-            let mut preread_len = 0_usize;
-            let mut driver_completed_in_handshake = false;
-            let tcp_stream = {
-                let (mut tcp_stream, next_fut) = {
-                    let accept_fut = listener.accept();
-                    pin_mut!(accept_fut);
+            Self::new_inner(
+                listener,
+                fut,
+                (command_sender, command_receiver),
+                state,
+                None,
+            )
+        }
 
-                    match block_on(future::select(fut, accept_fut)) {
-                        Either::Left((_, _)) => {
-                            unreachable!();
-                        }
-                        Either::Right((value2, fut)) => (value2.unwrap().0, fut),
-                    }
-                };
-                {
-                    let read_fut = tcp_stream.read(&mut buf);
-                    pin_mut!(read_fut);
-                    let next_fut = match block_on(future::select(next_fut, read_fut)) {
-                        Either::Left((_, _)) => {
-                            unreachable!();
-                        }
-                        Either::Right((value2, fut)) => {
-                            let read_bytes = value2.unwrap();
-                            assert_eq!(&buf[..read_bytes], b"M1 CAPABILITY\r\n");
-                            fut
-                        }
-                    };
-                    block_on(tcp_stream.write_all(
-                            b"* CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR\r\nM1 OK CAPABILITY completed\r\n",
-                        ))
-                        .unwrap();
-                    let read_fut = tcp_stream.read(&mut buf);
-                    pin_mut!(read_fut);
-                    let next_fut = match block_on(future::select(next_fut, read_fut)) {
-                        Either::Left((_, _)) => {
-                            unreachable!();
-                        }
-                        Either::Right((value2, fut)) => {
-                            let read_bytes = value2.unwrap();
-                            assert_eq!(
-                                &buf[..read_bytes],
-                                b"M2 AUTHENTICATE PLAIN AHVzZXIAcGFzc3dvcmQ=\r\n"
-                            );
-                            fut
-                        }
-                    };
-                    block_on(tcp_stream.write_all(b"M2 OK Success\r\n")).unwrap();
-                    let read_fut = tcp_stream.read(&mut buf);
-                    pin_mut!(read_fut);
-                    let next_fut = match block_on(future::select(next_fut, read_fut)) {
-                        Either::Left((_, _)) => {
-                            unreachable!();
-                        }
-                        Either::Right((value2, next_fut)) => {
-                            let read_bytes = value2.unwrap();
-                            assert_eq!(&buf[..read_bytes], b"M3 CAPABILITY\r\n");
-                            next_fut
-                        }
-                    };
-                    // Gmail emulation (see `ServerState::advertise_x_gm_ext_1`):
-                    // append `X-GM-EXT-1` to the post-auth capability list.
-                    // `UNSELECT` is only advertised when
-                    // `ServerState::advertise_unselect` is set (the default),
-                    // preserving the historical capability bytes exactly.
-                    let (advertise_x_gm_ext_1, advertise_unselect) = {
-                        let state_lck = state.lock().unwrap();
-                        (state_lck.advertise_x_gm_ext_1, state_lck.advertise_unselect)
-                    };
-                    let advertise_literal_plus = {
-                        let state_lck = state.lock().unwrap();
-                        state_lck.advertise_literal_plus
-                    };
-                    let mut m3_reply = String::from("* CAPABILITY IMAP4rev1 ID IDLE");
-                    if advertise_unselect {
-                        m3_reply.push_str(" UNSELECT");
-                    }
-                    m3_reply.push_str(" ENABLE");
-                    // `MOVE` (RFC 6851) is always advertised so that
-                    // `copy_messages` takes the `UID MOVE` path exercised by
-                    // the issue #180 UID-renumbering recovery.
-                    m3_reply.push_str(" MOVE");
-                    if advertise_x_gm_ext_1 {
-                        m3_reply.push_str(" X-GM-EXT-1");
-                    }
-                    if advertise_literal_plus {
-                        m3_reply.push_str(" LITERAL+");
-                    }
-                    m3_reply.push_str("\r\nM3 OK Success\r\n");
-                    block_on(tcp_stream.write_all(m3_reply.as_bytes())).unwrap();
-                    // The capability list above advertises `ID`, so a
-                    // client with `use_id` enabled (melib's default) sends
-                    // `M4 ID` with its identification parameters
-                    // (name/version) and waits for its reply before the
-                    // connect future completes. Answer it here, while the
-                    // caller is still driving the client future alone: the
-                    // loop handler is not polled yet, and leaving ID
-                    // unanswered would time the connection out.
-                    //
-                    // A client with `use_id` disabled sends no `ID` at
-                    // all: its connect future completes on the `M3`
-                    // capability reply alone (Either::Left — the pending
-                    // read has consumed no bytes), while a longer driver
-                    // future such as the watch stream stays pending and
-                    // the client's next command (e.g. `M4 EXAMINE INBOX`)
-                    // arrives instead (Either::Right, not `ID`). Record
-                    // whether `ID` was seen (`sent_id`) and keep any
-                    // other pre-read bytes for the loop handler
-                    // (`preread_len`) so they are not lost. Callers must
-                    // not blindly await their future afterwards when it
-                    // may have completed here (see the `now_or_never`
-                    // guards in the tests).
-                    let read_fut = tcp_stream.read(&mut buf);
-                    pin_mut!(read_fut);
-                    match block_on(future::select(next_fut, read_fut)) {
-                        Either::Left((_, _)) => {
-                            // The driving future completed without any
-                            // further client command: `use_id` is disabled
-                            // and no `ID` was sent. Record that the
-                            // caller's future is done.
-                            driver_completed_in_handshake = true;
-                        }
-                        Either::Right((value2, _)) => {
-                            let read_bytes = value2.unwrap();
-                            if buf[..read_bytes].starts_with(b"M4 ID ") {
-                                {
-                                    let mut state_lck = state.lock().unwrap();
-                                    state_lck.id_handshake_line = Some(buf[..read_bytes].to_vec());
-                                }
-                                block_on(tcp_stream.write_all(
-                                    b"* ID (\"name\" \"mock\" \"version\" \"1.0\")\r\nM4 OK ID \
-                                     completed\r\n",
-                                ))
-                                .unwrap();
-                                sent_id = true;
-                            } else {
-                                // Not the `ID` command: the client has
-                                // `use_id` disabled and already sent its
-                                // next command. Hand the bytes to the
-                                // loop handler instead of dropping them.
-                                preread_len = read_bytes;
-                            }
-                        }
-                    };
-                    tcp_stream
-                }
-            };
+        /// Like [`Self::new`], but the accepted TCP connection is upgraded
+        /// to TLS with `tls` before the IMAP handshake starts (for testing
+        /// implicit-TLS accounts).
+        pub fn new_with_tls<T: 'static, F: Future<Output = T> + std::marker::Unpin>(
+            listener: &Async<TcpListener>,
+            fut: F,
+            (command_sender, command_receiver): (
+                UnboundedSender<ServerEvent>,
+                UnboundedReceiver<ServerEvent>,
+            ),
+            state: Arc<Mutex<ServerState>>,
+            tls: Option<native_tls::TlsAcceptor>,
+        ) -> Self {
+            Self::new_inner(
+                listener,
+                fut,
+                (command_sender, command_receiver),
+                state,
+                tls,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn handshake_done(
+            tcp_stream: Async<Connection>,
+            command_receiver: UnboundedReceiver<ServerEvent>,
+            command_sender: UnboundedSender<ServerEvent>,
+            state: Arc<Mutex<ServerState>>,
+            buf: Vec<u8>,
+            handshake_commands: Arc<Mutex<Vec<String>>>,
+            sent_id: bool,
+            preread_len: usize,
+            driver_completed_in_handshake: bool,
+        ) -> Self {
             Self {
                 tcp_stream,
                 command_receiver,
@@ -1492,6 +1470,7 @@ pub mod server {
                 session_state: SessionState::Authenticated,
                 buf,
                 received_commands: Arc::default(),
+                handshake_commands,
                 sent_id,
                 preread_len,
                 driver_completed_in_handshake,
@@ -1504,6 +1483,516 @@ pub mod server {
             }
         }
 
+        fn new_inner<T: 'static, F: Future<Output = T> + std::marker::Unpin>(
+            listener: &Async<TcpListener>,
+            mut fut: F,
+            (command_sender, command_receiver): (
+                UnboundedSender<ServerEvent>,
+                UnboundedReceiver<ServerEvent>,
+            ),
+            state: Arc<Mutex<ServerState>>,
+            tls: Option<native_tls::TlsAcceptor>,
+        ) -> Self {
+            let mut buf = vec![0; 64 * 1024];
+            // Set by the `M4` handshake stage below (see the `sent_id`,
+            // `preread_len` and `driver_completed_in_handshake` field
+            // docs).
+            let mut sent_id = false;
+            let mut preread_len = 0_usize;
+            let mut driver_completed_in_handshake = false;
+            let handshake_commands: Arc<Mutex<Vec<String>>> = Arc::default();
+            // Track every client line read during the handshake stages so
+            // tests can assert on the exact connect-time command sequence.
+            macro_rules! record_handshake_line {
+                ($bytes:expr) => {{
+                    handshake_commands
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy($bytes).to_string());
+                }};
+            }
+            let (tcp_stream, local_addr) = {
+                let accept_fut = listener.accept();
+                pin_mut!(accept_fut);
+
+                let (tcp_stream, _) = match block_on(future::select(&mut fut, accept_fut)) {
+                    Either::Left((_, _)) => {
+                        unreachable!();
+                    }
+                    Either::Right((value2, _)) => value2.unwrap(),
+                };
+                let local_addr = tcp_stream.get_ref().local_addr().unwrap();
+                (tcp_stream, local_addr)
+            };
+            let std_tcp_stream = tcp_stream.into_inner().unwrap();
+            let mut tcp_stream = match tls {
+                    Some(acceptor) => {
+                        // The handshake may block: restore blocking mode
+                        // (async-io leaves the fd non-blocking) and drive
+                        // `WouldBlock` states to completion, the same dance
+                        // melib's own TLS connector does.
+                        std_tcp_stream.set_nonblocking(false).unwrap();
+                        let tcp_stream = Connection::new_tcp(std_tcp_stream);
+                        let conn_result = acceptor.accept(tcp_stream);
+                        let tls_stream = match conn_result {
+                            Err(native_tls::HandshakeError::WouldBlock(midhandshake_stream)) => {
+                                let mut midhandshake_stream = Some(midhandshake_stream);
+                                loop {
+                                    match midhandshake_stream.take().unwrap().handshake() {
+                                        Ok(r) => break Ok(r),
+                                        Err(native_tls::HandshakeError::WouldBlock(stream)) => {
+                                            midhandshake_stream = Some(stream);
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!("mock TLS handshake failed: {err}");
+                                            break Err(err);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!("mock TLS handshake failed: {err}");
+                                Err(err)
+                            }
+                            Ok(val) => Ok(val),
+                        };
+                        Async::new(Connection::new_tls(
+                            tls_stream.expect("mock TLS handshake must succeed"),
+                        ))
+                        .unwrap()
+                    }
+                    None => Async::new(Connection::new_tcp(std_tcp_stream)).unwrap(),
+                };
+            let (hostname, port) = (local_addr.ip().to_string(), local_addr.port());
+            let (
+                greeting_preauth,
+                advertise_oauthbearer,
+                advertise_xoauth2,
+                omit_sasl_ir,
+                send_capabilities_on_auth,
+                auth_sasl_failure,
+            ) = {
+                let state_lck = state.lock().unwrap();
+                (
+                    state_lck.greeting_preauth,
+                    state_lck.advertise_oauthbearer,
+                    state_lck.advertise_xoauth2,
+                    state_lck.omit_sasl_ir,
+                    state_lck.send_capabilities_on_auth,
+                    state_lck.auth_sasl_failure,
+                )
+            };
+            if greeting_preauth {
+                // RFC 9051 §7.1.5: the connection is already authenticated;
+                // no login flow must follow.
+                block_on(tcp_stream.write_all(b"* PREAUTH logged in\r\n")).unwrap();
+            }
+            // Stage 1: the pre-auth capability request. The reply's
+            // capability list is parameterized by the server state flags
+            // below.
+            {
+                let read_fut = tcp_stream.read(&mut buf);
+                pin_mut!(read_fut);
+                match block_on(future::select(&mut fut, read_fut)) {
+                    Either::Left((_, _)) => {
+                        unreachable!();
+                    }
+                    Either::Right((value2, _)) => {
+                        let read_bytes = value2.unwrap();
+                        assert_eq!(&buf[..read_bytes], b"M1 CAPABILITY\r\n");
+                        record_handshake_line!(&buf[..read_bytes]);
+                    }
+                }
+                let mut m1_capabilities = String::from("* CAPABILITY IMAP4rev1 AUTH=PLAIN");
+                if advertise_oauthbearer {
+                    m1_capabilities.push_str(" AUTH=OAUTHBEARER");
+                }
+                if advertise_xoauth2 {
+                    m1_capabilities.push_str(" AUTH=XOAUTH2");
+                }
+                if !omit_sasl_ir {
+                    m1_capabilities.push_str(" SASL-IR");
+                }
+                block_on(tcp_stream.write_all(
+                    format!("{m1_capabilities}\r\nM1 OK CAPABILITY completed\r\n").as_bytes(),
+                ))
+                .unwrap();
+            }
+            // Whether the driving future already completed inside an
+            // earlier stage (a `* PREAUTH` greeting needs no further
+            // client commands, so nothing may poll the future again).
+            let mut driver_completed_early = false;
+            if greeting_preauth {
+                // The client must send no authentication command at all:
+                // its connect future completes right after the `M1
+                // CAPABILITY` reply. If a line does arrive, it must not be
+                // an `AUTHENTICATE`/`LOGIN`.
+                let read_fut = tcp_stream.read(&mut buf);
+                pin_mut!(read_fut);
+                match block_on(future::select(&mut fut, read_fut)) {
+                    Either::Left((_, _)) => {
+                        driver_completed_in_handshake = true;
+                        driver_completed_early = true;
+                    }
+                    Either::Right((value2, _)) => {
+                        let read_bytes = value2.unwrap();
+                        record_handshake_line!(&buf[..read_bytes]);
+                        let line = String::from_utf8_lossy(&buf[..read_bytes]).to_string();
+                        assert!(
+                            !line.contains("AUTHENTICATE") && !line.contains("LOGIN"),
+                            "client sent `{line}` after a `* PREAUTH` greeting"
+                        );
+                        preread_len = read_bytes;
+                    }
+                }
+            } else {
+                // Stage 2: authentication. The expected exchange depends on
+                // the advertised mechanisms and the account's
+                // configuration.
+                let m2_reply: &str = if advertise_oauthbearer || advertise_xoauth2 {
+                    let (mechanism, expected_sasl) = if advertise_oauthbearer {
+                        (
+                            "OAUTHBEARER",
+                            format!(
+                                "n,a=user,\x01host={hostname}\x01port={port}\x01auth=Bearer \
+                                 password\x01\x01"
+                            ),
+                        )
+                    } else {
+                        (
+                            "XOAUTH2",
+                            "user=user\x01auth=Bearer password\x01\x01".to_string(),
+                        )
+                    };
+                    if omit_sasl_ir {
+                        // Continuation form: the client sends the bare
+                        // `AUTHENTICATE` line first and waits for `+ `
+                        // before sending the base64 exchange.
+                        {
+                            let read_fut = tcp_stream.read(&mut buf);
+                            pin_mut!(read_fut);
+                            match block_on(future::select(&mut fut, read_fut)) {
+                                Either::Left((_, _)) => {
+                                    driver_completed_in_handshake = true;
+                                    return Self::handshake_done(
+                                        tcp_stream,
+                                        command_receiver,
+                                        command_sender,
+                                        state,
+                                        buf,
+                                        handshake_commands,
+                                        sent_id,
+                                        preread_len,
+                                        driver_completed_in_handshake,
+                                    );
+                                }
+                                Either::Right((value2, _)) => {
+                                    let read_bytes = value2.unwrap();
+                                    assert_eq!(
+                                        &buf[..read_bytes],
+                                        format!("M2 AUTHENTICATE {mechanism}\r\n").as_bytes()
+                                    );
+                                    record_handshake_line!(&buf[..read_bytes]);
+                                }
+                            }
+                        }
+                        block_on(tcp_stream.write_all(b"+ \r\n")).unwrap();
+                        {
+                            // The client sends the base64 exchange as data
+                            // and CRLF in separate writes, so keep reading
+                            // until a complete line has arrived.
+                            let mut read_bytes = 0;
+                            loop {
+                                let read_fut = tcp_stream.read(&mut buf[read_bytes..]);
+                                pin_mut!(read_fut);
+                                match block_on(future::select(&mut fut, read_fut)) {
+                                    Either::Left((_, _)) => {
+                                        unreachable!();
+                                    }
+                                    Either::Right((value2, _)) => {
+                                        let n = value2.unwrap();
+                                        assert!(n > 0);
+                                        read_bytes += n;
+                                        if buf[..read_bytes].contains(&b'\n') {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            let line_end = buf[..read_bytes]
+                                .find(b"\r\n")
+                                .expect("SASL exchange line must end with CRLF");
+                            let line = &buf[..line_end];
+                            record_handshake_line!(line);
+                            let decoded = base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                line,
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                decoded,
+                                expected_sasl.as_bytes(),
+                                "SASL exchange bytes must match the RFC 7628 form"
+                            );
+                        }
+                    } else {
+                        // SASL-IR form: the base64 exchange rides on the
+                        // `AUTHENTICATE` line itself.
+                        let read_fut = tcp_stream.read(&mut buf);
+                        pin_mut!(read_fut);
+                        match block_on(future::select(&mut fut, read_fut)) {
+                            Either::Left((_, _)) => {
+                                unreachable!();
+                            }
+                            Either::Right((value2, _)) => {
+                                let read_bytes = value2.unwrap();
+                                record_handshake_line!(&buf[..read_bytes]);
+                                let line = &buf[..read_bytes];
+                                let prefix =
+                                    format!("M2 AUTHENTICATE {mechanism} ").into_bytes();
+                                assert!(
+                                    line.starts_with(prefix.as_slice()),
+                                    "unexpected auth line: {:?}",
+                                    String::from_utf8_lossy(line)
+                                );
+                                let b64 = line
+                                    .strip_prefix(prefix.as_slice())
+                                    .and_then(|rest| rest.strip_suffix(b"\r\n"))
+                                    .unwrap();
+                                let decoded = base64::Engine::decode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    b64,
+                                )
+                                .unwrap();
+                                assert_eq!(
+                                    decoded,
+                                    expected_sasl.as_bytes(),
+                                    "SASL initial response must match the RFC 7628 form"
+                                );
+                            }
+                        }
+                    }
+                    if auth_sasl_failure {
+                        // SASL failure notice: a continuation with a base64
+                        // JSON status, then (after the client's cancel
+                        // token) a tagged NO.
+                        let failure_json = b"{\"status\":\"invalid_token\"}";
+                        let encoded = base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            failure_json,
+                        );
+                        block_on(tcp_stream.write_all(format!("+ {encoded}\r\n").as_bytes()))
+                            .unwrap();
+                        {
+                            let read_fut = tcp_stream.read(&mut buf);
+                            pin_mut!(read_fut);
+                            match block_on(future::select(&mut fut, read_fut)) {
+                                Either::Left((_, _)) => {
+                                    unreachable!();
+                                }
+                                Either::Right((value2, _)) => {
+                                    let read_bytes = value2.unwrap();
+                                    record_handshake_line!(&buf[..read_bytes]);
+                                    let line = &buf[..read_bytes];
+                                    // XOAUTH2 cancels with an empty line,
+                                    // OAUTHBEARER with `*`.
+                                    assert!(
+                                        line.starts_with(b"*") || line == b"\r\n",
+                                        "unexpected cancel token {:?}",
+                                        String::from_utf8_lossy(line)
+                                    );
+                                }
+                            }
+                        }
+                        block_on(tcp_stream.write_all(
+                            b"M2 NO (AUTHENTICATIONFAILED) \"invalid_token\"\r\n",
+                        ))
+                        .unwrap();
+                        // The client surfaces an authentication error; its
+                        // driving future completes (with an error) without
+                        // any further exchange.
+                        let read_fut = tcp_stream.read(&mut buf);
+                        pin_mut!(read_fut);
+                        match block_on(future::select(&mut fut, read_fut)) {
+                            Either::Left((_, _)) => {
+                                driver_completed_in_handshake = true;
+                            }
+                            Either::Right((value2, _)) => {
+                                let read_bytes = value2.unwrap();
+                                record_handshake_line!(&buf[..read_bytes]);
+                                preread_len = read_bytes;
+                            }
+                        }
+                        // No post-auth CAPABILITY/ID stages: the connection
+                        // is dead from the client's point of view.
+                        return Self::handshake_done(
+                            tcp_stream,
+                            command_receiver,
+                            command_sender,
+                            state,
+                            buf,
+                            handshake_commands,
+                            false,
+                            preread_len,
+                            driver_completed_in_handshake,
+                        );
+                    }
+                    if send_capabilities_on_auth {
+                        "* CAPABILITY IMAP4rev1 ID IDLE UNSELECT ENABLE MOVE\r\nM2 OK Success\r\n"
+                    } else {
+                        "M2 OK Success\r\n"
+                    }
+                } else {
+                    let read_fut = tcp_stream.read(&mut buf);
+                    pin_mut!(read_fut);
+                    match block_on(future::select(&mut fut, read_fut)) {
+                        Either::Left((_, _)) => {
+                            unreachable!();
+                        }
+                        Either::Right((value2, _)) => {
+                            let read_bytes = value2.unwrap();
+                            assert_eq!(
+                                &buf[..read_bytes],
+                                b"M2 AUTHENTICATE PLAIN AHVzZXIAcGFzc3dvcmQ=\r\n"
+                            );
+                            record_handshake_line!(&buf[..read_bytes]);
+                        }
+                    }
+                    if send_capabilities_on_auth {
+                        "* CAPABILITY IMAP4rev1 ID IDLE UNSELECT ENABLE MOVE\r\nM2 OK Success\r\n"
+                    } else {
+                        "M2 OK Success\r\n"
+                    }
+                };
+                block_on(tcp_stream.write_all(m2_reply.as_bytes())).unwrap();
+            }
+            // Stage 3: the post-auth capability refresh. Skipped when the
+            // auth reply already carried the capabilities
+            // (`send_capabilities_on_auth`) or the connection was
+            // pre-authenticated by the greeting.
+            if !greeting_preauth && !send_capabilities_on_auth {
+                {
+                    let read_fut = tcp_stream.read(&mut buf);
+                    pin_mut!(read_fut);
+                    match block_on(future::select(&mut fut, read_fut)) {
+                        Either::Left((_, _)) => {
+                            unreachable!();
+                        }
+                        Either::Right((value2, _)) => {
+                            let read_bytes = value2.unwrap();
+                            assert_eq!(&buf[..read_bytes], b"M3 CAPABILITY\r\n");
+                            record_handshake_line!(&buf[..read_bytes]);
+                        }
+                    }
+                }
+                // Gmail emulation (see `ServerState::advertise_x_gm_ext_1`):
+                // append `X-GM-EXT-1` to the post-auth capability list.
+                // `UNSELECT` is only advertised when
+                // `ServerState::advertise_unselect` is set (the default),
+                // preserving the historical capability bytes exactly.
+                let (advertise_x_gm_ext_1, advertise_unselect) = {
+                    let state_lck = state.lock().unwrap();
+                    (state_lck.advertise_x_gm_ext_1, state_lck.advertise_unselect)
+                };
+                let advertise_literal_plus = {
+                    let state_lck = state.lock().unwrap();
+                    state_lck.advertise_literal_plus
+                };
+                let mut m3_reply = String::from("* CAPABILITY IMAP4rev1 ID IDLE");
+                if advertise_unselect {
+                    m3_reply.push_str(" UNSELECT");
+                }
+                m3_reply.push_str(" ENABLE");
+                // `MOVE` (RFC 6851) is always advertised so that
+                // `copy_messages` takes the `UID MOVE` path exercised by
+                // the issue #180 UID-renumbering recovery.
+                m3_reply.push_str(" MOVE");
+                if advertise_x_gm_ext_1 {
+                    m3_reply.push_str(" X-GM-EXT-1");
+                }
+                if advertise_literal_plus {
+                    m3_reply.push_str(" LITERAL+");
+                }
+                m3_reply.push_str("\r\nM3 OK Success\r\n");
+                block_on(tcp_stream.write_all(m3_reply.as_bytes())).unwrap();
+            }
+            // Stage 4: the optional RFC 2971 `ID` command.
+            //
+            // The capability list above advertises `ID`, so a client with
+            // `use_id` enabled (melib's default) sends `M4 ID` with its
+            // identification parameters (name/version) and waits for its
+            // reply before the connect future completes. Answer it here,
+            // while the caller is still driving the client future alone:
+            // the loop handler is not polled yet, and leaving ID unanswered
+            // would time the connection out.
+            //
+            // A client with `use_id` disabled sends no `ID` at all: its
+            // connect future completes on the `M3` capability reply alone
+            // (Either::Left — the pending read has consumed no bytes),
+            // while a longer driver future such as the watch stream stays
+            // pending and the client's next command (e.g. `M4 EXAMINE
+            // INBOX`) arrives instead (Either::Right, not `ID`). Record
+            // whether `ID` was seen (`sent_id`) and keep any other pre-read
+            // bytes for the loop handler (`preread_len`) so they are not
+            // lost. Callers must not blindly await their future afterwards
+            // when it may have completed here (see the `now_or_never`
+            // guards in the tests).
+            if !driver_completed_early {
+                let read_fut = tcp_stream.read(&mut buf);
+                pin_mut!(read_fut);
+                match block_on(future::select(&mut fut, read_fut)) {
+                    Either::Left((_, _)) => {
+                        // The driving future completed without any further
+                        // client command: `use_id` is disabled and no `ID`
+                        // was sent. Record that the caller's future is
+                        // done.
+                        driver_completed_in_handshake = true;
+                    }
+                    Either::Right((value2, _)) => {
+                        let read_bytes = value2.unwrap();
+                        let line = &buf[..read_bytes];
+                        let tag_end = line.find(b" ").expect("tag terminated");
+                        let tag = &line[..tag_end];
+                        let rest = &line[tag_end + 1..];
+                        if rest.starts_with(b"ID ") {
+                            {
+                                let mut state_lck = state.lock().unwrap();
+                                state_lck.id_handshake_line = Some(buf[..read_bytes].to_vec());
+                            }
+                            record_handshake_line!(line);
+                            // Single write: the reply must land in one TCP
+                            // segment like every other handshake reply.
+                            let mut reply = b"* ID (\"name\" \"mock\" \"version\" \
+                                             \"1.0\")\r\n"
+                                .to_vec();
+                            reply.extend_from_slice(tag);
+                            reply.extend_from_slice(b" OK ID completed\r\n");
+                            block_on(tcp_stream.write_all(&reply)).unwrap();
+                            sent_id = true;
+                        } else {
+                            // Not the `ID` command: the client has `use_id`
+                            // disabled and already sent its next command.
+                            // Hand the bytes to the loop handler instead of
+                            // dropping them.
+                            record_handshake_line!(line);
+                            preread_len = read_bytes;
+                        }
+                    }
+                }
+            }
+            Self::handshake_done(
+                tcp_stream,
+                command_receiver,
+                command_sender,
+                state,
+                buf,
+                handshake_commands,
+                sent_id,
+                preread_len,
+                driver_completed_in_handshake,
+            )
+        }
+
         pub async fn loop_handler(self, name: &'static str) {
             let Self {
                 mut tcp_stream,
@@ -1513,6 +2002,7 @@ pub mod server {
                 mut session_state,
                 mut buf,
                 received_commands,
+                handshake_commands: _,
                 sent_id,
                 preread_len,
                 idle_exists_pushes,
@@ -1565,15 +2055,11 @@ pub mod server {
             }
 
             async fn read_line<'a>(
-                tcp_stream: &mut Async<TcpStream>,
+                tcp_stream: &mut Async<Connection>,
                 buf: &'a mut [u8],
                 start: &mut usize,
                 end: &mut usize,
             ) -> ReadOutcome<'a> {
-                // tracing::trace!(
-                //     "read_line: buf={:?} start = {start:?} end = {end:?}",
-                //     String::from_utf8_lossy(&buf[..*end])
-                // );
                 // Only wait for more socket bytes when no complete line is
                 // buffered. A complete line can already sit at the front of
                 // the buffer when the caller handed pre-read handshake
@@ -1581,7 +2067,17 @@ pub mod server {
                 // disabled client's first command); blocking on another
                 // read there would deadlock the protocol.
                 if !buf[*start..*end].contains_subsequence(b"\r\n") {
-                    let read_bytes = tcp_stream.read(&mut buf[*end..]).await.unwrap();
+                    // A read error is treated like EOF: the peer went away
+                    // (connection reset while the client is dropping the
+                    // connection), and panicking here would take the whole
+                    // mock server thread down with it.
+                    let read_bytes = match tcp_stream.read(&mut buf[*end..]).await {
+                        Ok(read_bytes) => read_bytes,
+                        Err(err) => {
+                            tracing::warn!("mock read_line error: {err}");
+                            return ReadOutcome::Eof;
+                        }
+                    };
                     if read_bytes == 0 {
                         return ReadOutcome::Eof;
                     }
@@ -1628,7 +2124,7 @@ pub mod server {
                     let input = match future::select(&mut read_fut, command_receiver.next()).await {
                         Either::Left((value1, _)) => match value1 {
                             ReadOutcome::Eof => {
-                                eprintln!(
+                                tracing::debug!(
                                     "{name} loop_handler: connection closed by peer in 'main"
                                 );
                                 break 'outer;
@@ -1647,7 +2143,7 @@ pub mod server {
                             if matches!(command, ServerEvent::Quit) {
                                 tcp_stream.write_all(b"* BYE world\r\n").await.unwrap();
                                 tcp_stream.flush().await.unwrap();
-                                eprintln!(
+                                tracing::debug!(
                                     "{name} loop_handler received ServerEvent::Quit from 'main"
                                 );
                                 break 'outer;
@@ -1655,7 +2151,7 @@ pub mod server {
                             if let ServerEvent::RawLine(bytes) = command {
                                 tcp_stream.write_all(&bytes).await.unwrap();
                                 tcp_stream.flush().await.unwrap();
-                                eprintln!(
+                                tracing::debug!(
                                     "{name} loop_handler wrote RawLine from 'main: {:?}",
                                     String::from_utf8_lossy(&bytes)
                                 );
@@ -1679,7 +2175,7 @@ pub mod server {
                         }
                     };
                     let line = String::from_utf8_lossy(input).to_string();
-                    eprintln!("{name} loop_handler 'main received: {line:?}");
+                    tracing::debug!("{name} loop_handler 'main received: {line:?}");
                     received_commands.lock().unwrap().push(line.clone());
                     let (id, cmd) = line.split_once(' ').unwrap();
                     match cmd {
@@ -1723,7 +2219,7 @@ pub mod server {
                                 .await
                                 .unwrap();
                             tcp_stream.flush().await.unwrap();
-                            eprintln!("{name} loop_handler received LOGOUT from 'main");
+                            tracing::debug!("{name} loop_handler received LOGOUT from 'main");
                             break 'outer;
                         }
                         "LIST \"\" *\r\n" => {
@@ -2140,7 +2636,7 @@ pub mod server {
                                 filled += read_bytes;
                             }
                             let query = String::from_utf8_lossy(&literal[..n]).to_string();
-                            eprintln!(
+                            tracing::debug!(
                                 "{name} loop_handler X-GM-RAW literal ({n} bytes): {query:?}"
                             );
                             state
@@ -2293,7 +2789,7 @@ pub mod server {
                                 filled += read_bytes;
                             }
                             let query = String::from_utf8_lossy(&literal[..n]).to_string();
-                            eprintln!("{name} loop_handler SEARCH literal ({n} bytes): {query:?}");
+                            tracing::debug!("{name} loop_handler SEARCH literal ({n} bytes): {query:?}");
                             state
                                 .lock()
                                 .unwrap()
@@ -2374,7 +2870,7 @@ pub mod server {
                                 tcp_stream.flush().await.unwrap();
                                 continue 'main;
                             };
-                            eprintln!("{name} loop_handler SEARCH quoted retry: {:?}", query);
+                            tracing::debug!("{name} loop_handler SEARCH quoted retry: {:?}", query);
                             state
                                 .lock()
                                 .unwrap()
@@ -2758,14 +3254,14 @@ pub mod server {
                             };
                             let drop_at = sequence_set.iter(largest).count() / 2;
                             let mut answered: usize = 0;
-                            eprintln!(
+                            tracing::debug!(
                                 "{name} loop_handler got FETCH {sequence_set:?} (exists \
                                  {exists})"
                             );
                             for msn in sequence_set.iter(largest) {
                                 if drop_connection && answered >= drop_at {
                                     state.lock().unwrap().fetch_drop_connection_count += 1;
-                                    eprintln!(
+                                    tracing::debug!(
                                         "{name} loop_handler: dropping connection mid FETCH \
                                          after {answered} responses"
                                     );
@@ -2800,7 +3296,7 @@ pub mod server {
                                     .try_into()
                                     .unwrap(),
                                 });
-                                eprintln!(
+                                tracing::debug!(
                                     "fragment raw: {:?}",
                                     String::from_utf8_lossy(
                                         &ResponseCodec::new().encode(&response).dump()
@@ -2888,7 +3384,7 @@ pub mod server {
                                 .lock()
                                 .unwrap()
                                 .move_to_mailbox(&destination, &requested);
-                            eprintln!(
+                            tracing::debug!(
                                 "{name} loop_handler: UID MOVE moved {moved} message(s) to \
                                  {destination:?}"
                             );
@@ -2922,7 +3418,7 @@ pub mod server {
                                     .strip_suffix(" (UID ENVELOPE)\r\n")
                                     .unwrap(),
                             );
-                            eprintln!(
+                            tracing::debug!(
                                 "{name} loop_handler got UID FETCH envelope-only \
                                  {sequence_set:?}"
                             );
@@ -2987,7 +3483,7 @@ pub mod server {
                                     .strip_suffix(" FLAGS\r\n")
                                     .unwrap(),
                             );
-                            eprintln!("{name} loop_handler got UID FETCH flags {sequence_set:?}");
+                            tracing::debug!("{name} loop_handler got UID FETCH flags {sequence_set:?}");
                             let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
                             'uid_fetch_flags: for uid in
                                 sequence_set.iter(largest.try_into().unwrap())
@@ -3012,7 +3508,7 @@ pub mod server {
                                     seq: uid,
                                     items: items.try_into().unwrap(),
                                 });
-                                //eprintln!(
+                                //tracing::debug!(
                                 //    "fragment raw: {:?}",
                                 //    String::from_utf8_lossy(
                                 //        &ResponseCodec::new().encode(&response).dump()
@@ -3085,7 +3581,7 @@ pub mod server {
                                 .unwrap();
                             let sequence_set = Self::parse_sequence_set(sequence_set_str);
 
-                            eprintln!("{name} loop_handler got UID FETCH {sequence_set:?}");
+                            tracing::debug!("{name} loop_handler got UID FETCH {sequence_set:?}");
                             let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
                             // `fetch_underdelivers` /
                             // `fetch_drop_connection_on_nth` emulate the
@@ -3113,7 +3609,7 @@ pub mod server {
                                 }
                                 if drop_connection && answered >= drop_at {
                                     state.lock().unwrap().fetch_drop_connection_count += 1;
-                                    eprintln!(
+                                    tracing::debug!(
                                         "{name} loop_handler: dropping connection mid UID FETCH \
                                          after {answered} responses"
                                     );
@@ -3146,7 +3642,7 @@ pub mod server {
                                     seq: uid,
                                     items: items.try_into().unwrap(),
                                 });
-                                //eprintln!(
+                                //tracing::debug!(
                                 //    "fragment raw: {:?}",
                                 //    String::from_utf8_lossy(
                                 //        &ResponseCodec::new().encode(&response).dump()
@@ -3183,7 +3679,7 @@ pub mod server {
                         other => panic!("Unexpected cmd: {id} {other:?}"),
                     }
                 };
-                eprintln!("{name} loop_handler is now idling");
+                tracing::debug!("{name} loop_handler is now idling");
                 idle_sessions.fetch_add(1, Ordering::SeqCst);
                 if state.lock().unwrap().push_before_continuation && !pending_glued.is_empty() {
                     // Emulate a server whose new-mail push races the IDLE
@@ -3193,7 +3689,7 @@ pub mod server {
                     let mut pre_continuation: Vec<u8> = Vec::new();
                     for m in pending_glued.drain(..) {
                         let (msn, uid) = state.lock().unwrap().insert(m);
-                        eprintln!(
+                        tracing::debug!(
                             "{name} push_before_continuation: EXISTS uid={uid} msn={msn} \
                              written before the idling continuation"
                         );
@@ -3209,7 +3705,7 @@ pub mod server {
                     let replay_real_push_bytes = state.lock().unwrap().replay_real_push_bytes;
                     for m in pending_glued.drain(..) {
                         let (msn, uid) = state.lock().unwrap().insert(m);
-                        eprintln!("{name} gluing EXISTS uid={uid} msn={msn} to IDLE greeting");
+                        tracing::debug!("{name} gluing EXISTS uid={uid} msn={msn} to IDLE greeting");
                         idling_greeting.extend_from_slice(format!("* {msn} EXISTS\r\n").as_bytes());
                         if replay_real_push_bytes {
                             // Real-capture shape (see
@@ -3243,7 +3739,7 @@ pub mod server {
                     let input = match future::select(&mut read_fut, command_receiver.next()).await {
                         Either::Left((value1, _)) => match value1 {
                             ReadOutcome::Eof => {
-                                eprintln!(
+                                tracing::debug!(
                                     "{name} loop_handler: connection closed by peer in 'idle"
                                 );
                                 break 'outer;
@@ -3263,18 +3759,18 @@ pub mod server {
                                     let exists_msn = {
                                         let mut state_lck = state.lock().unwrap();
                                         let (msn, new_uid) = state_lck.insert(new_mail);
-                                        eprintln!("{name} EXISTS uid = {new_uid} msn = {msn}");
+                                        tracing::debug!("{name} EXISTS uid = {new_uid} msn = {msn}");
                                         msn
                                     };
                                     if state.lock().unwrap().idle_no_push {
-                                        eprintln!(
+                                        tracing::debug!(
                                             "{name} idle_no_push: suppressing EXISTS push on \
                                              the IDLE connection"
                                         );
                                         continue 'idle;
                                     }
                                     if state.lock().unwrap().id_gated_push && !sent_id {
-                                        eprintln!(
+                                        tracing::debug!(
                                             "{name} id_gated_push: connection never sent ID; \
                                              suppressing EXISTS push"
                                         );
@@ -3286,7 +3782,7 @@ pub mod server {
                                             && state_lck.selected_session_count("INBOX") > 1
                                     };
                                     if suppress_when_multi_selected {
-                                        eprintln!(
+                                        tracing::debug!(
                                             "{name} suppress_push_when_multi_selected: {} \
                                              sessions hold INBOX selected; suppressing \
                                              EXISTS push",
@@ -3306,7 +3802,7 @@ pub mod server {
                                         let mut state_lck = state.lock().unwrap();
                                         let msn =
                                             state_lck.envelopes.get_index_of(&uid).unwrap() + 1;
-                                        eprintln!(
+                                        tracing::debug!(
                                             "{name} removing msn = {} uid = {} mail = {:?}",
                                             msn,
                                             uid,
@@ -3323,7 +3819,7 @@ pub mod server {
                                 ServerEvent::RawLine(bytes) => {
                                     tcp_stream.write_all(&bytes).await.unwrap();
                                     tcp_stream.flush().await.unwrap();
-                                    eprintln!(
+                                    tracing::debug!(
                                         "{name} loop_handler wrote RawLine while idling: {:?}",
                                         String::from_utf8_lossy(&bytes)
                                     );
@@ -3336,7 +3832,7 @@ pub mod server {
                                         .await
                                         .unwrap();
                                     tcp_stream.flush().await.unwrap();
-                                    eprintln!(
+                                    tracing::debug!(
                                         "{name} loop_handler received ServerEvent::Quit from 'main"
                                     );
                                     break 'outer;
@@ -3346,11 +3842,11 @@ pub mod server {
                         }
                     };
                     let input = String::from_utf8_lossy(input).to_string();
-                    eprintln!("{name} loop_handler 'idle received: {input:?}");
+                    tracing::debug!("{name} loop_handler 'idle received: {input:?}");
                     idle_received_lines.lock().unwrap().push(input.clone());
                     if input == "DONE\r\n" {
                         if state.lock().unwrap().ignore_done {
-                            eprintln!("{name} ignore_done: staying silent on DONE");
+                            tracing::debug!("{name} ignore_done: staying silent on DONE");
                             continue 'idle;
                         }
                         if state.lock().unwrap().push_before_continuation && !done_bad_answered {
@@ -3358,7 +3854,7 @@ pub mod server {
                             // for a DONE that raced the continuation: answer
                             // with a tagged BAD (once per connection).
                             done_bad_answered = true;
-                            eprintln!(
+                            tracing::debug!(
                                 "{name} push_before_continuation: answering first DONE \
                                  with a tagged BAD"
                             );
@@ -3375,7 +3871,7 @@ pub mod server {
                             // the tagged reply in the same TCP write
                             // (tag-not-last framing).
                             let exists = state.lock().unwrap().envelopes.len();
-                            eprintln!(
+                            tracing::debug!(
                                 "{name} glue_exists_after_done: writing tagged OK with \
                                  * {exists} EXISTS glued after it"
                             );
@@ -3416,7 +3912,7 @@ pub mod server {
         /// response (or reject it as a protocol error), which is not the
         /// retryable error the observed Coremail 网易 163 drop
         /// (`unexpected EOF`) produces.
-        fn reset_connection(tcp_stream: &Async<TcpStream>) {
+        fn reset_connection(tcp_stream: &Async<Connection>) {
             let _ = socket2::SockRef::from(tcp_stream.get_ref()).set_linger(Some(Duration::ZERO));
         }
 
@@ -3488,7 +3984,7 @@ mod tests {
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -3837,14 +4333,14 @@ hello world 3.
         pin_mut!(watch_conn_loop);
         match future::select(main_conn_loop.as_mut(), watch_conn_loop.as_mut()).await {
             Either::Left((_, watch_conn)) => {
-                eprintln!("loops fut loop finished with main_conn",);
+                tracing::debug!("loops fut loop finished with main_conn",);
                 watch_conn.await;
-                eprintln!("loops fut loop finished with watch_conn",);
+                tracing::debug!("loops fut loop finished with watch_conn",);
             }
             Either::Right((_, main_conn)) => {
-                eprintln!("loops fut loop finished with watch_conn",);
+                tracing::debug!("loops fut loop finished with watch_conn",);
                 main_conn.await;
-                eprintln!("loops fut loop finished with main_conn",);
+                tracing::debug!("loops fut loop finished with main_conn",);
             }
         }
     }
@@ -4558,7 +5054,7 @@ hello world 2.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -4721,7 +5217,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -6257,7 +6753,7 @@ hello world 4.
                     );
                 }
                 let is_online_err = imap.is_online().unwrap().await.unwrap_err();
-                eprintln!("dead-port is_online error: {is_online_err:?}");
+                tracing::debug!("dead-port is_online error: {is_online_err:?}");
                 assert!(
                     is_online_err.kind.is_network()
                         || is_online_err.kind.is_timeout()
@@ -6272,7 +6768,7 @@ hello world 4.
                 let err = item
                     .expect("fetch stream ended without yielding an item")
                     .unwrap_err();
-                eprintln!("no-cache offline fetch error: {err:?}");
+                tracing::debug!("no-cache offline fetch error: {err:?}");
                 assert!(
                     err.kind.is_network() || err.kind.is_timeout() || err.kind.is_oserror(),
                     "no-cache offline fetch must Err with a network-ish kind, got {:?}",
@@ -6451,7 +6947,7 @@ hello world 4.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -7122,7 +7618,7 @@ sent body {i}.
                 // kind-less `Offline` error here would mean the connect
                 // never happened.
                 let is_online_err = imap.is_online().unwrap().await.unwrap_err();
-                eprintln!("dead-port is_online error: {is_online_err:?}");
+                tracing::debug!("dead-port is_online error: {is_online_err:?}");
                 assert!(
                     is_online_err.kind.is_network()
                         || is_online_err.kind.is_timeout()
@@ -7670,7 +8166,7 @@ hello world 3.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -7804,7 +8300,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -7928,7 +8424,7 @@ hello revealed {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -8171,7 +8667,7 @@ hello revealed {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -8458,7 +8954,7 @@ hello poisoned revealed {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -8630,7 +9126,7 @@ hello exmail junk {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -8844,7 +9340,7 @@ hello exmail expunge {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -8937,7 +9433,7 @@ hello exmail expunge {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -9043,7 +9539,7 @@ hello exmail expunge {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -9160,7 +9656,7 @@ hello exmail expunge {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -9279,7 +9775,7 @@ hello exmail expunge {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -9396,7 +9892,7 @@ hello exmail expunge {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -9501,7 +9997,7 @@ hello exmail expunge {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -9687,7 +10183,7 @@ hello exmail expunge {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -9797,6 +10293,12 @@ hello new world b.
             fetch_envelope_fetches: 0,
             fetch_drop_connection_count: 0,
             status_override: None,
+            greeting_preauth: false,
+            advertise_oauthbearer: false,
+            advertise_xoauth2: false,
+            omit_sasl_ir: false,
+            send_capabilities_on_auth: false,
+            auth_sasl_failure: false,
             primary_mailbox: None,
             mailbox_envelopes: Default::default(),
             mailbox_next_uid: Default::default(),
@@ -9885,7 +10387,7 @@ hello new world b.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -10070,7 +10572,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -10257,7 +10759,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -10471,7 +10973,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -10646,7 +11148,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -10832,7 +11334,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -11043,7 +11545,7 @@ hello new world b.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -11198,7 +11700,7 @@ hello world 2.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -11738,6 +12240,7 @@ hello new world.
     /// remains in `run_imap_watch_idle_no_push` (a server that never
     /// pushes) and `run_imap_watch_startup_compensation`.
     pub(crate) fn run_imap_watch_multi_session_no_push() {
+        melib_test::init_test_logging();
         let temp_dir = TempDir::new().unwrap();
         set_test_xdg_env(&temp_dir);
         let (seed_mail_1, seed_mail_2, new_mail) = gated_push_test_mails();
@@ -11830,6 +12333,7 @@ hello new world.
             .unbounded_send(ServerEvent::New(new_mail))
             .unwrap();
 
+        let discarded_creates: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         // Assertion (1): the startup UNSELECT happened on the main
         // connection after the snapshot (the bounded wait below drives
         // the client, and the UNSELECT strictly precedes the watch
@@ -11858,7 +12362,29 @@ hello new world.
                     Either::Left(((item, rest), _tick)) => {
                         watch_fut = Box::pin(rest.into_future());
                         if let Some(ev) = item {
-                            let _ = ev.unwrap();
+                            // The stream may already yield the new mail's
+                            // Create while this loop is only waiting for
+                            // the UNSELECT log entry; record it instead of
+                            // dropping it, so assertion (2) below still
+                            // observes it (it was delivered through the
+                            // watch stream either way).
+                            if let Ok(BackendEvent::RefreshBatch(events)) = ev {
+                                for event in events {
+                                    if let RefreshEventKind::Create(env) = &event.kind {
+                                        discarded_creates
+                                            .lock()
+                                            .unwrap()
+                                            .push(env.subject().to_string());
+                                    }
+                                }
+                            } else if let Ok(BackendEvent::Refresh(event)) = ev {
+                                if let RefreshEventKind::Create(env) = &event.kind {
+                                    discarded_creates
+                                        .lock()
+                                        .unwrap()
+                                        .push(env.subject().to_string());
+                                }
+                            }
                         }
                     }
                     Either::Right((_tick, _pending)) => {}
@@ -11877,11 +12403,23 @@ hello new world.
             let deadline = std::time::Instant::now() + WATCH_TEST_DEADLINE;
             let mut found_create = false;
             while !found_create {
+                if discarded_creates
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|subject| subject == "RE: gated NEW mail")
+                {
+                    // Observed through the watch stream during assertion
+                    // (1)'s polling window (see the comment there).
+                    break;
+                }
                 if std::time::Instant::now() >= deadline {
                     panic!(
                         "watch stream did not emit the new mail's Create event within \
                          {WATCH_TEST_DEADLINE:?} even though the push path (or, failing that, \
-                         the heartbeat re-sync) should have caught it"
+                         the heartbeat re-sync) should have caught it; discarded during \
+                         assertion (1): {:?}",
+                        discarded_creates.lock().unwrap()
                     );
                 }
                 let item = match future::select(
@@ -12227,7 +12765,7 @@ hello new world.
         let backend_event_consumer = {
             let backend_event_queue = Arc::clone(&backend_event_queue);
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -12745,7 +13283,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -12894,7 +13432,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -13100,7 +13638,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -13308,7 +13846,7 @@ hello new world.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -13962,7 +14500,7 @@ hello underdelivered {i}.
             let backend_event_queue = Arc::clone(&backend_event_queue);
 
             BackendEventConsumer::new(Arc::new(move |ah, be| {
-                eprintln!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
                 backend_event_queue.lock().unwrap().push_back((ah, be));
             }))
         };
@@ -14388,4 +14926,925 @@ hello nondestructive revealed {i}.
         let _ = main_conn_sender.unbounded_send(ServerEvent::Quit);
         loops_handle.join().unwrap();
     }
+
+    /// Self-signed identity for the mock TLS servers below (generated with
+    /// `openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=127.0.0.1
+    /// -addext subjectAltName=IP:127.0.0.1`); clients must set
+    /// `danger_accept_invalid_certs` because it is not CA-issued.
+    const MOCK_TLS_CERT_PEM: &[u8] = br#"-----BEGIN CERTIFICATE-----
+MIIDHDCCAgSgAwIBAgIUM72cDtyfeo6K0W41RdY5rKarCQMwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MTAxOTE5MzY1MloYDzIxMjYw
+OTI1MTkzNjUyWjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDh+ABdKJAPdnsSQKo1qd+Hl+aCAe6WXi8pXvrUpXB3
++F6cOoURvTGl0Xg2zo/gC899IzTt6Y0vRSH3Te2HLTNvzmUedPCvdPSGtk0UZO2r
+KONGXTiBOqQ6Tr9x0i9aGhWRAbPx26ELGYDjjUvxgdd816kB3aA0tCyIO2W5GUT4
+SSsuR2BHlfs/9mpF64AoFFDOGzaS+IshBDm9lp80D4UTZAl6cizHtbAWI2TkY9RE
+U/e3BE73VCkhpqHoQFaDagW8i9NGQEWx23FbAa63bp/gvrGnm6h9YT5oI+HU85Ha
+Ph72I3MnSsrNTTnHIy0OZZBcy4y5BrWM6tHzq1uxyFI/AgMBAAGjZDBiMB0GA1Ud
+DgQWBBQR1ICtp+pIZ4TuAQQdH5U1SISuvDAfBgNVHSMEGDAWgBQR1ICtp+pIZ4Tu
+AQQdH5U1SISuvDAPBgNVHRMBAf8EBTADAQH/MA8GA1UdEQQIMAaHBH8AAAEwDQYJ
+KoZIhvcNAQELBQADggEBALQ51dFvS0y70BQn/ZxPNuOELr1nJdWxbRIXf42gDmR0
+5oObRty06tPeF/UOBgxKPkqLr3nGL/WOeHFnTyResYhhgUF9kWP81F20Ftcgxqrd
+JI/u2rruHY0a/eBvQkxDmaZ4EtG8qgjLjMwDMWNtHipE6pcYCp/m55KGeO/XXN5X
+7jgy6Wk4IqwgH6lvOOtYxw2PRKsTNNxqiTGQ+gOlnB2VsJZWzovcPOtEee4JqlpK
+LdPlcSK5XCIh/GsU/DssjrkXBsPbdzu+MNXhRQkI9zr2HZcM5+Dd6+HrYszhvVp/
+uElc0d7TkotTjf2zPUaFBLHplOk7tdblJG1MyoUE7rg=
+-----END CERTIFICATE-----"#;
+    const MOCK_TLS_KEY_PEM: &[u8] = br#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDh+ABdKJAPdnsS
+QKo1qd+Hl+aCAe6WXi8pXvrUpXB3+F6cOoURvTGl0Xg2zo/gC899IzTt6Y0vRSH3
+Te2HLTNvzmUedPCvdPSGtk0UZO2rKONGXTiBOqQ6Tr9x0i9aGhWRAbPx26ELGYDj
+jUvxgdd816kB3aA0tCyIO2W5GUT4SSsuR2BHlfs/9mpF64AoFFDOGzaS+IshBDm9
+lp80D4UTZAl6cizHtbAWI2TkY9REU/e3BE73VCkhpqHoQFaDagW8i9NGQEWx23Fb
+Aa63bp/gvrGnm6h9YT5oI+HU85HaPh72I3MnSsrNTTnHIy0OZZBcy4y5BrWM6tHz
+q1uxyFI/AgMBAAECggEAP4fDxm1Ej2xerqOKlzrS0yL0VkHny9PgC5AeElIPHFOy
+edcEGZgpELcjRrltfu6jH8oZs/fxT0RvB8IbkWE2cG1FRbpX/uRxaTxw0FaN8Yy1
+1U8ZN0/+4zvHnF8dHAZwYMvrRQjcLqw1bgSIQPah2IIjjJg8VgT/7i9Q6qj9mJYm
+SxDhLDHpZGz+f9UhKvEZ6U471R/fnU9kSIRm8H5+gFfR7PaWOiY2Agnz1MpemT/a
+T3p0xpqzRdfSdYKLkF4i7JeSZ2mByBuHl2NOR6TiFSuecRPM6v2TEo09nTxNROaG
+3zpRCBOFIGOYGzP+lwO7PyoAJdNm8qgG7NxPFNCnuQKBgQD8rD6WIO3984SUklwp
+teZ9vGcwwPiCUmNEVIAfqezR955ASowqHcrNlooT+oNCS1gkHiieHVYzjkROoJ8Z
+lvmaEdcxZI/8WDPH9lVQolSO9cgMCVEXxstq8XAUr0CH2M8ngpqLUV6JkWV6NGJp
+ptAZsssjEMcL5CPFoFFtP0s4twKBgQDk8bztHuGnhw6kH7NPBpa18vYQn+yPFor7
++8hqbCdXGWDfHxgBKriCuZ6x3G6khq4f7Ms1kjQCAMvdgu2wAc4U3LkpamzylPha
+ozCZbGpCBIoETUCcRpgv5bWZKfrVzcd5I6uxKkHoPtyQW6fgHbL79KDv7eBwFu2G
+nsqTfWRauQKBgFL/4a8/Me5xx+NmEJBDCGvVL7B8MyXcGm+fsla0Yu62AG3uDwzm
+rG/MO59Ec0mbpmB257DIwkA9Q4LwkFK/nU5W/fFjr0idUKUm7e+G42/ynLwXc2P0
+EW4X0VF6ICB/v8yiwlFxcTSPZl42Rv2dpk5KxR/Hqxrk3jtU5mqUmAkRAoGACAKh
+PpanBIqIK5vkVS6A1Wrjyx8dUsBSKpDbqUWRds2vgv7+gwPworpF4Ck7QcxoiTtq
+vLwZz7whZeWv1Umq4TX70IQlvbMSoXE2QRf2+8pW3eGqEg2yQ3LBENPUL+jcQtPJ
+rRAycCLK6s4aKJBBc+lSPDLReHqE4wHpSpHHkhkCgYEAvuPc0OpXX2k9e94iyOQu
+gshmUKoxqt8K6+w8WkjAas9jVd2ZCGxXmEoTqbmE0sUqVuE12hXsp8T+u87AfMtk
+n1Y+LzC8uYOmnptWGWt2HfZNmoHvBqPmCKc2K9T3nJRmWRiMs5pPqH+djKWm77gF
+kfcMJpFWNRl6P2sUcsOhR6g=
+-----END PRIVATE KEY-----"#;
+
+    fn mock_tls_identity() -> native_tls::Identity {
+        native_tls::Identity::from_pkcs8(MOCK_TLS_CERT_PEM, MOCK_TLS_KEY_PEM).unwrap()
+    }
+
+    /// Minimal account configuration pointing at the mock server on
+    /// `local_addr`.
+    fn test_account_conf(
+        local_addr: &std::net::SocketAddr,
+        extra_pairs: &[(&str, &str)],
+    ) -> AccountSettings {
+        let mut extra: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
+        extra.insert(
+            "server_hostname".to_string(),
+            serde_json::Value::String(local_addr.ip().to_string()),
+        );
+        extra.insert(
+            "server_username".to_string(),
+            serde_json::Value::String("user".to_string()),
+        );
+        extra.insert(
+            "server_password".to_string(),
+            serde_json::Value::String("password".to_string()),
+        );
+        extra.insert(
+            "server_port".to_string(),
+            serde_json::Value::String(local_addr.port().to_string()),
+        );
+        extra.insert(
+            "use_starttls".to_string(),
+            serde_json::Value::String("false".to_string()),
+        );
+        extra.insert(
+            "use_tls".to_string(),
+            serde_json::Value::String("false".to_string()),
+        );
+        extra.insert(
+            "use_connection_pool".to_string(),
+            serde_json::Value::String("false".to_string()),
+        );
+        extra.insert(
+            "timeout".to_string(),
+            serde_json::Value::String(10_u64.to_string()),
+        );
+        for (key, value) in extra_pairs {
+            extra.insert(
+                (*key).to_string(),
+                serde_json::Value::String((*value).to_string()),
+            );
+        }
+        AccountSettings {
+            name: "test".to_string(),
+            contacts: None,
+            root_mailbox: "INBOX".to_string(),
+            format: "imap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra,
+        }
+    }
+
+    /// `* PREAUTH` greeting (upstream port `3b5670e9`): the connection is
+    /// already authenticated, so the client must not send any
+    /// `AUTHENTICATE`/`LOGIN` command — here proven with deliberately
+    /// invalid credentials — and must notify the user with an
+    /// [`BackendEvent::AccountStateChange`] carrying the server's message.
+    pub(crate) fn run_imap_preauth() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        let server_state = Arc::new(Mutex::new(ServerState {
+            greeting_preauth: true,
+            ..Default::default()
+        }));
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let account_conf = test_account_conf(
+            &local_addr,
+            &[
+                // Deliberately invalid: if the client attempted any
+                // authentication these would fail.
+                ("server_username", "invalid"),
+                ("server_password", "invalid"),
+            ],
+        );
+        let mut imap =
+            ImapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
+        let listener = smol::Async::new(listener).unwrap();
+        let mut is_online_fut = imap.is_online().unwrap();
+        let (main_conn_sender, main_conn_receiver) = unbounded();
+        let main_conn = ImapServerStream::new(
+            &listener,
+            &mut is_online_fut,
+            (main_conn_sender.clone(), main_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let handshake_commands = Arc::clone(&main_conn.handshake_commands);
+        // With the pre-authenticated greeting the connect future completes
+        // inside the handshake (no `AUTHENTICATE`, no post-auth
+        // `CAPABILITY`, no `ID`); do not await an already-completed future.
+        if !main_conn.driver_completed_in_handshake {
+            block_on(is_online_fut).unwrap();
+        }
+        assert_eq!(
+            handshake_commands.lock().unwrap().as_slice(),
+            &["M1 CAPABILITY\r\n".to_string()],
+            "a `* PREAUTH` greeting must suppress every authentication command"
+        );
+        {
+            let queue_lck = backend_event_queue.lock().unwrap();
+            let preauth_notices = queue_lck
+                .iter()
+                .filter(|(_, be)| {
+                    matches!(
+                        be,
+                        BackendEvent::AccountStateChange {
+                            message,
+                            ..
+                        } if message.contains(
+                            "Connection was automatically authenticated by server: logged in"
+                        ))
+                })
+                .count();
+            assert_eq!(
+                preauth_notices, 1,
+                "the PREAUTH greeting must produce exactly one AccountStateChange with the \
+                 server message; queue: {:?}",
+                queue_lck.iter().map(|(_, be)| be).collect::<Vec<_>>()
+            );
+        }
+        let main_conn_loop = main_conn.loop_handler("preauth-main");
+        let loops_handle = std::thread::spawn(move || {
+            block_on(main_conn_loop);
+        });
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// OAUTH2 account configuration errors (upstream port `0b501a1f`):
+    /// without TLS the OAUTH2 arm must refuse to authenticate, and with no
+    /// `AUTH=OAUTHBEARER`/`AUTH=XOAUTH2` capability advertised the
+    /// connection must fail before any credential is sent.
+    pub(crate) fn run_imap_oauthbearer() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+
+        // Phase 1: OAUTHBEARER advertised, `use_oauth2` set, but no TLS:
+        // the client must fail with a configuration error before sending
+        // any authentication data.
+        {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let local_addr = listener.local_addr().unwrap();
+            let hostname = local_addr.ip().to_string();
+            let server = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+
+                // `is_online` retries `connect()` once on failure, so serve
+                // a second connection producing the same failure.
+                for _ in 0..2 {
+                    let (mut tcp, _) = listener.accept().unwrap();
+                    let mut buf = [0; 1024];
+                    let n = tcp.read(&mut buf).unwrap();
+                    assert_eq!(&buf[..n], b"M1 CAPABILITY\r\n");
+                    tcp.write_all(
+                        b"* CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=OAUTHBEARER SASL-IR\r\nM1 OK \
+                         CAPABILITY completed\r\n",
+                    )
+                    .unwrap();
+                    // The client fails locally; it sends nothing more.
+                    let _ = tcp.read(&mut buf);
+                }
+            });
+            let account_conf =
+                test_account_conf(&local_addr, &[("use_oauth2", "true")]);
+            let mut imap = ImapType::new(&account_conf, Default::default(), Default::default())
+                .unwrap();
+            let err = block_on(imap.is_online().unwrap()).unwrap_err();
+            assert_eq!(
+                err.summary,
+                format!(
+                    "Cannot authenticate to {hostname} with AUTH=OAUTHBEARER: it is not \
+                     encrypted with TLS which is required"
+                )
+            );
+            assert_eq!(err.kind, ErrorKind::Configuration);
+            server.join().unwrap();
+        }
+
+        // Phase 2: `use_oauth2` set but neither OAUTHBEARER nor XOAUTH2
+        // advertised: the client must fail with an authentication error
+        // before sending any credential.
+        {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let local_addr = listener.local_addr().unwrap();
+            let hostname = local_addr.ip().to_string();
+            let server = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+
+                // `is_online` retries `connect()` once on failure, so serve
+                // a second connection producing the same failure.
+                for _ in 0..2 {
+                    let (mut tcp, _) = listener.accept().unwrap();
+                    let mut buf = [0; 1024];
+                    let n = tcp.read(&mut buf).unwrap();
+                    assert_eq!(&buf[..n], b"M1 CAPABILITY\r\n");
+                    tcp.write_all(
+                        b"* CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR\r\nM1 OK CAPABILITY \
+                         completed\r\n",
+                    )
+                    .unwrap();
+                    let _ = tcp.read(&mut buf);
+                }
+            });
+            let account_conf =
+                test_account_conf(&local_addr, &[("use_oauth2", "true")]);
+            let mut imap = ImapType::new(&account_conf, Default::default(), Default::default())
+                .unwrap();
+            let err = block_on(imap.is_online().unwrap()).unwrap_err();
+            assert_eq!(
+                err.summary,
+                format!(
+                    "Could not connect to {hostname}: OAUTH2 is enabled but server did not \
+                     return AUTH=OAUTHBEARER or AUTH=XOAUTH2 capability. Returned capabilities \
+                     were: IMAP4rev1 AUTH=PLAIN SASL-IR"
+                )
+            );
+            assert_eq!(err.kind, ErrorKind::Authentication);
+            server.join().unwrap();
+        }
+    }
+
+    /// TLS account connections (upstream ports `0b501a1f` + `79a8c829`):
+    /// a self-signed certificate must be rejected unless
+    /// `danger_accept_invalid_certs` is set, and the OAUTH2 mechanisms must
+    /// produce byte-exact SASL exchanges over TLS — OAUTHBEARER with and
+    /// without SASL-IR, XOAUTH2, and the SASL failure flow whose decoded
+    /// server status must reach the error details without ever leaking the
+    /// token.
+    pub(crate) fn run_imap_tls() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+        let identity = mock_tls_identity();
+
+        // Phase 1: certificate validation. `danger_accept_invalid_certs`
+        // unset: the TLS negotiation with the self-signed mock certificate
+        // must fail.
+        {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let local_addr = listener.local_addr().unwrap();
+            let hostname = local_addr.ip().to_string();
+            let acceptor = native_tls::TlsAcceptor::new(identity.clone()).unwrap();
+            let server = std::thread::spawn(move || {
+                // The client aborts the handshake when it rejects the
+                // certificate; the server side observes the failure. Serve
+                // a possible `is_online` retry connection as well, but
+                // never block: the thread must always be joinable.
+                let (tcp, _) = listener.accept().unwrap();
+                let _ = acceptor.accept(tcp);
+                let _ = listener.set_nonblocking(true);
+                if let Ok((tcp, _)) = listener.accept() {
+                    let _ = acceptor.accept(tcp);
+                }
+            });
+            let account_conf = test_account_conf(
+                &local_addr,
+                &[
+                    ("use_tls", "true"),
+                    ("danger_accept_invalid_certs", "false"),
+                ],
+            );
+            let imap = ImapType::new(&account_conf, Default::default(), Default::default())
+                .unwrap();
+            // Drive a single `connect()` (not `is_online`, which retries
+            // once and would surface the retry's error instead).
+            let tls_err = {
+                let mut conn = block_on(imap.connection.lock()).unwrap();
+                block_on(conn.connect()).unwrap_err()
+            };
+            assert_eq!(
+                tls_err.summary,
+                format!("Could not initiate TLS negotiation to {hostname}.")
+            );
+            assert_eq!(
+                tls_err.kind,
+                ErrorKind::Network(NetworkErrorKind::InvalidTLSConnection)
+            );
+            server.join().unwrap();
+        }
+
+        // One mock server for the remaining phases; each phase opens a new
+        // connection (and thus a fresh handshake) with its own server
+        // state.
+        for (phase, state_flags, account_pairs) in [
+            // PLAIN over implicit TLS still works.
+            (
+                "plain",
+                ServerState::default(),
+                vec![("use_tls", "true"), ("danger_accept_invalid_certs", "true")],
+            ),
+            // OAUTHBEARER over TLS with SASL-IR: the initial response must
+            // be the base64 of the RFC 7628 byte string.
+            (
+                "oauthbearer-sasl-ir",
+                ServerState {
+                    advertise_oauthbearer: true,
+                    ..Default::default()
+                },
+                vec![
+                    ("use_tls", "true"),
+                    ("danger_accept_invalid_certs", "true"),
+                    ("use_oauth2", "true"),
+                ],
+            ),
+            // OAUTHBEARER over TLS without SASL-IR: continuation form.
+            (
+                "oauthbearer-continuation",
+                ServerState {
+                    advertise_oauthbearer: true,
+                    omit_sasl_ir: true,
+                    ..Default::default()
+                },
+                vec![
+                    ("use_tls", "true"),
+                    ("danger_accept_invalid_certs", "true"),
+                    ("use_oauth2", "true"),
+                ],
+            ),
+            // XOAUTH2 over TLS with SASL-IR.
+            (
+                "xoauth2-sasl-ir",
+                ServerState {
+                    advertise_xoauth2: true,
+                    ..Default::default()
+                },
+                vec![
+                    ("use_tls", "true"),
+                    ("danger_accept_invalid_certs", "true"),
+                    ("use_oauth2", "true"),
+                ],
+            ),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let local_addr = listener.local_addr().unwrap();
+            let server_state = Arc::new(Mutex::new(state_flags));
+            let account_conf = test_account_conf(
+                &local_addr,
+                &account_pairs
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect::<Vec<_>>(),
+            );
+            let mut imap =
+                ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
+            let listener = smol::Async::new(listener).unwrap();
+            let mut is_online_fut = imap.is_online().unwrap();
+            let (main_conn_sender, main_conn_receiver) = unbounded();
+            let main_conn = ImapServerStream::new_with_tls(
+                &listener,
+                &mut is_online_fut,
+                (main_conn_sender.clone(), main_conn_receiver),
+                Arc::clone(&server_state),
+                Some(native_tls::TlsAcceptor::new(identity.clone()).unwrap()),
+            );
+            let handshake_commands = Arc::clone(&main_conn.handshake_commands);
+            if !main_conn.driver_completed_in_handshake {
+                block_on(is_online_fut).unwrap_or_else(|err| {
+                    panic!("phase `{phase}`: is_online failed: {err}");
+                });
+            } else {
+                panic!("phase `{phase}`: connect future completed unexpectedly early");
+            }
+            let commands = handshake_commands.lock().unwrap().clone();
+            let auth_lines: Vec<String> = commands
+                .iter()
+                .filter(|l| l.contains("AUTHENTICATE"))
+                .cloned()
+                .collect();
+            assert_eq!(
+                auth_lines.len(),
+                1,
+                "phase `{phase}`: exactly one AUTHENTICATE command expected, got \
+                 {commands:?}"
+            );
+            if phase == "oauthbearer-sasl-ir" || phase == "oauthbearer-continuation" {
+                assert!(
+                    auth_lines[0].starts_with("M2 AUTHENTICATE OAUTHBEARER")
+                        || auth_lines[0] == "M2 AUTHENTICATE OAUTHBEARER\r\n",
+                    "phase `{phase}`: unexpected auth line {}",
+                    auth_lines[0]
+                );
+            } else if phase == "xoauth2-sasl-ir" {
+                assert!(
+                    auth_lines[0].starts_with("M2 AUTHENTICATE XOAUTH2"),
+                    "phase `{phase}`: unexpected auth line {}",
+                    auth_lines[0]
+                );
+            }
+            let main_conn_loop = main_conn.loop_handler("tls-main");
+            let loops_handle = std::thread::spawn(move || {
+                block_on(main_conn_loop);
+            });
+            main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+            loops_handle.join().unwrap();
+        }
+
+        // SASL failure flow over TLS: the server answers the exchange with
+        // a `+ <base64 JSON>` continuation; the client must cancel with
+        // `*`, surface an authentication error carrying the decoded
+        // status, and never leak the token.
+        {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let local_addr = listener.local_addr().unwrap();
+            let hostname = local_addr.ip().to_string();
+            let server_state = Arc::new(Mutex::new(ServerState {
+                advertise_oauthbearer: true,
+                auth_sasl_failure: true,
+                ..Default::default()
+            }));
+            let account_conf = test_account_conf(
+                &local_addr,
+                &[
+                    ("use_tls", "true"),
+                    ("danger_accept_invalid_certs", "true"),
+                    ("use_oauth2", "true"),
+                ],
+            );
+            let mut imap =
+                ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
+            let listener = smol::Async::new(listener).unwrap();
+            let mut is_online_fut = imap.is_online().unwrap();
+            let (main_conn_sender, main_conn_receiver) = unbounded();
+            let main_conn = ImapServerStream::new_with_tls(
+                &listener,
+                &mut is_online_fut,
+                (main_conn_sender.clone(), main_conn_receiver),
+                Arc::clone(&server_state),
+                Some(native_tls::TlsAcceptor::new(identity.clone()).unwrap()),
+            );
+            let handshake_commands = Arc::clone(&main_conn.handshake_commands);
+            // The driving future completes inside the handshake (with the
+            // authentication error) once the server sends the tagged NO.
+            if !main_conn.driver_completed_in_handshake {
+                block_on(is_online_fut).unwrap_err();
+            }
+            let commands = handshake_commands.lock().unwrap().clone();
+            let cancel = commands
+                .iter()
+                .find(|l| l.as_str() == "*\r\n" || l.as_str() == "\r\n")
+                .cloned();
+            assert_eq!(
+                cancel,
+                Some("*\r\n".to_string()),
+                "OAUTHBEARER must cancel the failed AUTHENTICATE with `*`; got {commands:?}"
+            );
+            let _ = hostname;
+            main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        }
+    }
+
+    /// Capabilities delivered with the authentication reply (upstream port
+    /// `43b0a52e`): the client must not re-send `CAPABILITY` after
+    /// authenticating when the auth reply already carried them.
+    pub(crate) fn run_imap_capabilities_on_auth() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+        let server_state = Arc::new(Mutex::new(ServerState {
+            send_capabilities_on_auth: true,
+            ..Default::default()
+        }));
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let account_conf = test_account_conf(&local_addr, &[]);
+        let mut imap =
+            ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
+        let listener = smol::Async::new(listener).unwrap();
+        let mut is_online_fut = imap.is_online().unwrap();
+        let (main_conn_sender, main_conn_receiver) = unbounded();
+        let main_conn = ImapServerStream::new(
+            &listener,
+            &mut is_online_fut,
+            (main_conn_sender.clone(), main_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let handshake_commands = Arc::clone(&main_conn.handshake_commands);
+        if !main_conn.driver_completed_in_handshake {
+            block_on(is_online_fut).unwrap();
+        }
+        let commands = handshake_commands.lock().unwrap().clone();
+        assert_eq!(
+            commands[0], "M1 CAPABILITY\r\n",
+            "the pre-auth capability request comes first"
+        );
+        assert!(
+            commands[1].starts_with("M2 AUTHENTICATE PLAIN "),
+            "the SASL-IR PLAIN exchange comes second: {commands:?}"
+        );
+        assert!(
+            commands[2].starts_with("M3 ID "),
+            "with capabilities glued to the auth reply, the next command is the RFC 2971 `ID` \
+             (tagged `M3`), not another `CAPABILITY`: {commands:?}"
+        );
+        let main_conn_loop = main_conn.loop_handler("caps-on-auth-main");
+        let loops_handle = std::thread::spawn(move || {
+            block_on(main_conn_loop);
+        });
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Equal-count EXISTS probe (upstream port `747676ab`): when the total
+    /// is unchanged because one mail was expunged and another arrived, the
+    /// highest message sequence number is a *new* mail; the client must
+    /// probe it instead of waiting for the next full re-sync.
+    pub(crate) fn run_imap_exists_equal_count_probe() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: swap seed 1
+Message-ID: <swap1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: swap seed 2
+Message-ID: <swap2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let new_mail = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:02 +0000
+Cc:
+Subject: RE: swap NEW mail
+Message-ID: <swapnew@example.com>
+Content-Type: text/plain
+
+hello new world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        // Long heartbeat/sweep intervals: within the 30s deadline only the
+        // equal-count EXISTS probe can surface the new mail.
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                false,
+            );
+
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let mut watch_fut = Box::pin(imap.watch().unwrap().into_future());
+        let (watch_conn_sender, watch_conn_receiver) = unbounded();
+        let watch_conn = ImapServerStream::new(
+            &listener,
+            &mut watch_fut,
+            (watch_conn_sender.clone(), watch_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let watch_commands = Arc::clone(&watch_conn.received_commands);
+        let watch_conn_loop = watch_conn.loop_handler("watch");
+        let watch_loops_handle = std::thread::spawn(move || {
+            block_on(watch_conn_loop);
+        });
+        // The expunge happens silently (the client never receives
+        // `* 1 EXPUNGE`), emulating a missed expunge: the local count stays
+        // 2 while the server drops to 1 ...
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.envelopes.shift_remove_index(0);
+        }
+        // ... and the new mail brings the server total back to 2. The
+        // pushed `* 2 EXISTS` now matches the local count exactly: only
+        // the highest-MSN probe can discover the new mail.
+        watch_conn_sender
+            .unbounded_send(ServerEvent::New(new_mail))
+            .unwrap();
+
+        block_on(async {
+            let deadline = std::time::Instant::now() + WATCH_TEST_DEADLINE;
+            let mut found_create = false;
+            while !found_create {
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "the equal-count EXISTS probe did not surface the swapped-in new mail \
+                         within {WATCH_TEST_DEADLINE:?}; watch commands: {:?}",
+                        watch_commands.lock().unwrap()
+                    );
+                }
+                let item = match future::select(
+                    watch_fut.as_mut(),
+                    smol::Timer::after(WATCH_TEST_POLL_TICK),
+                )
+                .await
+                {
+                    Either::Left(((item, rest), _tick)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        item
+                    }
+                    Either::Right((_tick, _pending)) => {
+                        continue;
+                    }
+                };
+                let Some(backend_event) = item else {
+                    panic!("watch stream ended before the swapped-in new mail's Create event");
+                };
+                match backend_event.unwrap() {
+                    BackendEvent::RefreshBatch(events) => {
+                        found_create = events.iter().any(|event| {
+                            matches!(
+                                &event.kind,
+                                RefreshEventKind::Create(env)
+                                    if env.subject() == "RE: swap NEW mail"
+                            )
+                        });
+                    }
+                    BackendEvent::Refresh(event) => {
+                        found_create = matches!(
+                            &event.kind,
+                            RefreshEventKind::Create(env)
+                                if env.subject() == "RE: swap NEW mail"
+                        );
+                    }
+                    other => {
+                        panic!("Expected Refresh event, got: {other:?}");
+                    }
+                }
+            }
+        });
+        assert!(
+            watch_commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("FETCH 2 (UID FLAGS ENVELOPE")),
+            "the probe must fetch exactly the highest message sequence number; watch commands: \
+             {:?}",
+            watch_commands.lock().unwrap()
+        );
+        watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        watch_loops_handle.join().unwrap();
+        let _ = main_conn_sender.unbounded_send(ServerEvent::Quit);
+        loops_handle.join().unwrap();
+    }
+
+    /// ManageSieve on-wire bytes (upstream port `2e408a02`): the literal
+    /// framing of `Putscript`/`Checkscript`/`Setactive`/`Getscript`/
+    /// `Deletescript` must not carry extra CRLFs, authentication uses the
+    /// RFC 5804 `AUTHENTICATE "PLAIN" "b64"` single-line form over
+    /// STARTTLS, and the `GETSCRIPT` reply parser must accept the
+    /// non-synchronizing `{N+}` literal real servers send.
+    pub(crate) fn run_managesieve_wire() {
+        melib_test::init_test_logging();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let identity = mock_tls_identity();
+        let acceptor = native_tls::TlsAcceptor::new(identity).unwrap();
+
+        fn expect_bytes<R: std::io::Read>(stream: &mut R, expected: &[u8]) {
+            let mut buf = vec![0; expected.len()];
+            let mut filled = 0;
+            while filled < buf.len() {
+                let n = stream
+                    .read(&mut buf[filled..])
+                    .unwrap_or_else(|err| panic!("reading {:?}: {err}", expected));
+                assert!(n > 0, "EOF while reading {:?}", expected);
+                filled += n;
+            }
+            assert_eq!(
+                buf, expected,
+                "on-wire bytes must use the correct literal syntax (no extra CRLF)"
+            );
+        }
+
+        let server = std::thread::spawn(move || {
+            use std::io::Write;
+
+            let (tcp, _) = listener.accept().unwrap();
+            let mut tcp = tcp;
+            let greeting = b"\"IMPLEMENTATION\" \"meli-test mock\"\r\n\"SIEVE\" \"fileinto\"\r\nOK \"ready\"\r\n";
+            tcp.write_all(greeting).unwrap();
+            expect_bytes(&mut tcp, b"STARTTLS\r\n");
+            tcp.write_all(b"OK \"Begin TLS negotiations now\"\r\n").unwrap();
+            let mut tls = acceptor.accept(tcp).unwrap();
+            // Post-TLS capability greeting.
+            tls.write_all(greeting).unwrap();
+            expect_bytes(
+                &mut tls,
+                b"AUTHENTICATE \"PLAIN\" \"AHVzZXIAcGFzc3dvcmQ=\"\r\n",
+            );
+            tls.write_all(b"OK \"Logged in.\"\r\n").unwrap();
+            // Putscript: `Putscript {6+}` CRLF literal(name) CRLF ` {5+}`
+            // CRLF literal(script) CRLF — one CRLF per framing element, no
+            // empty lines in between.
+            expect_bytes(
+                &mut tls,
+                b"Putscript {6+}\r\nscript\r\n {5+}\r\nkeep;\r\n",
+            );
+            tls.write_all(b"OK \"Putscript completed\"\r\n").unwrap();
+            // Checkscript.
+            expect_bytes(&mut tls, b"Checkscript {5+}\r\nkeep;\r\n");
+            tls.write_all(b"OK \"Checkscript completed\"\r\n").unwrap();
+            // Setactive.
+            expect_bytes(&mut tls, b"Setactive {6+}\r\nscript\r\n");
+            tls.write_all(b"OK \"Setactive completed\"\r\n").unwrap();
+            // Listscripts.
+            expect_bytes(&mut tls, b"Listscripts\r\n");
+            tls.write_all(b"\"script\" ACTIVE\r\nOK \"Listscripts completed\"\r\n")
+                .unwrap();
+            // Getscript: reply with the `{N+}` non-synchronizing literal
+            // form real servers (e.g. dovecot) use.
+            expect_bytes(&mut tls, b"Getscript {6+}\r\nscript\r\n");
+            tls.write_all(b"{5+}\r\nkeep;\r\nOK \"Getscript completed\"\r\n")
+                .unwrap();
+            // Deletescript.
+            expect_bytes(&mut tls, b"Deletescript {6+}\r\nscript\r\n");
+            tls.write_all(b"OK \"Deletescript completed\"\r\n").unwrap();
+        });
+
+        let mut extra: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
+        extra.insert(
+            "server_hostname".to_string(),
+            serde_json::Value::String(local_addr.ip().to_string()),
+        );
+        extra.insert(
+            "server_username".to_string(),
+            serde_json::Value::String("user".to_string()),
+        );
+        extra.insert(
+            "server_password".to_string(),
+            serde_json::Value::String("password".to_string()),
+        );
+        extra.insert(
+            "server_port".to_string(),
+            serde_json::Value::String(local_addr.port().to_string()),
+        );
+        extra.insert(
+            "danger_accept_invalid_certs".to_string(),
+            serde_json::Value::String("true".to_string()),
+        );
+        let account_conf = AccountSettings {
+            name: "test".to_string(),
+            contacts: None,
+            root_mailbox: "INBOX".to_string(),
+            format: "imap".to_string(),
+            identity: "user@example.com".to_string(),
+            extra_identities: vec![],
+            read_only: false,
+            display_name: None,
+            subscribed_mailboxes: vec![],
+            mailboxes: indexmap::indexmap! {},
+            manual_refresh: false,
+            extra,
+        };
+        let mut conn = melib::imap::managesieve::ManageSieveConnection::new(
+            AccountHash::default(),
+            "test".to_string(),
+            &account_conf,
+            BackendEventConsumer::new(Arc::new(|_, _| {})),
+        )
+        .unwrap();
+        block_on(conn.connect()).unwrap();
+        block_on(conn.putscript(b"script", b"keep;")).unwrap();
+        block_on(conn.checkscript(b"keep;")).unwrap();
+        block_on(conn.setactive(b"script")).unwrap();
+        let scripts = block_on(conn.listscripts()).unwrap();
+        assert_eq!(
+            scripts,
+            vec![(b"script".to_vec(), true)],
+            "listscripts must parse the ACTIVE marker"
+        );
+        let script = block_on(conn.getscript(b"script")).unwrap();
+        assert_eq!(script, b"keep;".to_vec());
+        block_on(conn.deletescript(b"script")).unwrap();
+        server.join().unwrap();
+    }
+
 }

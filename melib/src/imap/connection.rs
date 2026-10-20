@@ -72,8 +72,8 @@ use crate::{
             SelectResponse,
         },
         search::{
-            search_send_steps, search_send_steps_non_sync, ImapSearchSegment, ImapSearchSendStep,
-            ToImapSearch,
+            search_send_steps, search_send_steps_non_sync, segments_contain_nul,
+            ImapSearchSegment, ImapSearchSendStep, ToImapSearch,
         },
         sync::cache::ImapCache,
         Capabilities, ImapServerConf, MessageSequenceNumber, UIDStore, UID, UIDVALIDITY,
@@ -175,6 +175,10 @@ pub struct ImapStream {
     pub protocol: ImapProtocol,
     pub current_mailbox: MailboxSelection,
     pub timeout: Option<Duration>,
+    /// Set when the server greeted the connection with `* PREAUTH`, which
+    /// means the connection is already authenticated and the whole login
+    /// flow must be skipped.
+    pub preauthed: bool,
 }
 
 /// Log/trace representation of an IMAP command body, tagged with its
@@ -615,19 +619,55 @@ impl ImapStream {
             protocol: server_conf.protocol,
             current_mailbox: MailboxSelection::None,
             timeout: server_conf.timeout,
+            preauthed: false,
         };
         if matches!(server_conf.protocol, ImapProtocol::ManageSieve) {
+            // Read the (post-STARTTLS, if any) capability greeting and
+            // collect its capability lines; only lines that do not start
+            // with `OK` are capabilities.
             ret.read_response(&mut res).await?;
+            if !res.split_rn().into_iter().any(|l| l.starts_with(b"OK")) {
+                return Err(Error::new(format!(
+                    "Could not connect to ManageSieve server {}",
+                    server_conf.server_hostname
+                ))
+                .set_details(format!(
+                    "Server did not reply with `OK`, it replied with: {:?}",
+                    String::from_utf8_lossy(&res)
+                ))
+                .set_kind(ErrorKind::ProtocolError));
+            }
+            let capabilities: Capabilities = res
+                .split_rn()
+                .filter(|l| !l.starts_with(b"OK"))
+                .map(|v| v.to_vec().into_boxed_slice())
+                .collect();
+            // `AUTHENTICATE "PLAIN" "b64"` is the ManageSieve (RFC 5804)
+            // form: the base64 credentials are a quoted string on the same
+            // command line, not an IMAP-style SASL continuation exchange.
             // Resolve Secret right before use, mirroring the IMAP SASL path.
             let password_value = server_conf.server_password.value()?;
             let credentials = format!("\0{}\0{}", server_conf.server_username, password_value);
-            ret.send_command(CommandBody::authenticate(AuthMechanism::Plain))
-                .await?;
-            ret.wait_for_continuation_request().await?;
-            ret.send_literal(base64.encode(credentials).as_bytes())
-                .await?;
-            ret.read_response(&mut res).await?;
-            return Ok((Default::default(), ret));
+            ret.send_command_raw(
+                format!(
+                    "AUTHENTICATE \"PLAIN\" \"{}\"",
+                    base64.encode(credentials.as_bytes())
+                )
+                .as_bytes(),
+            )
+            .await?;
+            let mut response = Vec::new();
+            ret.read_lines(&mut response, None, false).await?;
+            if !response.starts_with(b"OK") {
+                return Err(Error::new(format!(
+                    "Could not connect to ManageSieve server {}: server replied to AUTHENTICATE \
+                     PLAIN with: {}",
+                    server_conf.server_hostname,
+                    String::from_utf8_lossy(&response)
+                ))
+                .set_kind(ErrorKind::Authentication));
+            }
+            return Ok((capabilities, ret));
         }
 
         if send_state_changes {
@@ -689,6 +729,42 @@ impl ImapStream {
             }
         };
 
+        // The server greeting (sent before our `CAPABILITY` command reply,
+        // so it is part of `res` above) may be `* PREAUTH`, meaning the
+        // connection is already authenticated and the whole login flow
+        // must be skipped.
+        if let Some(preauth_msg) = res.split_rn().into_iter().find_map(|l| {
+            // Word boundary: RFC 3501 spells the greeting `* PREAUTH`
+            // (bare) or `* PREAUTH <text>`, so the remainder must be empty,
+            // start with the separating space, or be the line's CRLF. An
+            // illegal prefix such as `* PREAUTHED` or `* PREAUTH-bypass`
+            // must NOT be mistaken for a pre-authenticated greeting and
+            // skip the login flow.
+            l.strip_prefix(b"* PREAUTH").filter(|rest| {
+                rest.is_empty() || rest.starts_with(b" ") || rest.starts_with(b"\r")
+            })
+        }) {
+            ret.preauthed = true;
+            if send_state_changes {
+                let preauth_msg = String::from_utf8_lossy(preauth_msg);
+                let preauth_msg = preauth_msg.trim();
+                (uid_store.event_consumer)(
+                    uid_store.account_hash,
+                    BackendEvent::AccountStateChange {
+                        message: if preauth_msg.is_empty() {
+                            "Connection was automatically authenticated by server".into()
+                        } else {
+                            format!(
+                                "Connection was automatically authenticated by server: \
+                                 {preauth_msg}"
+                            )
+                            .into()
+                        },
+                    },
+                );
+            }
+        }
+
         if !capabilities
             .iter()
             .any(|cap| cap.eq_ignore_ascii_case(b"IMAP4rev1"))
@@ -699,6 +775,15 @@ impl ImapStream {
             ))
             .set_kind(ErrorKind::ProtocolNotSupported));
         }
+        if ret.preauthed {
+            // The server already authenticated the connection in its
+            // greeting (`* PREAUTH`): skip the login flow, the
+            // post-authentication capability refresh (the pre-auth
+            // `CAPABILITY` reply above is already authoritative) and the
+            // `ID` identification step.
+            return Ok((capabilities, ret));
+        }
+
         let has_sasl_ir: bool = capabilities
             .iter()
             .any(|cap| cap.eq_ignore_ascii_case(b"SASL-IR"));
@@ -711,18 +796,29 @@ impl ImapStream {
                 },
             );
         }
+        // What a failed SASL exchange must send to cancel the `AUTHENTICATE`
+        // command (empty line for XOAUTH2, `*` for OAUTHBEARER), paired
+        // with the mechanism name for error reporting.
+        let mut sasl_failure_cancel: Option<(&'static [u8], &'static str)> = None;
         match server_conf.protocol {
             ImapProtocol::IMAP {
                 extension_use: ImapExtensionUse { oauth2, .. },
             } if oauth2 => {
-                // [ref:FIXME]: differentiate between OAUTH2 and XOAUTH2
-                if !capabilities
+                let is_xoauth2 = if capabilities
+                    .iter()
+                    .any(|cap| cap.eq_ignore_ascii_case(b"AUTH=OAUTHBEARER"))
+                {
+                    false
+                } else if capabilities
                     .iter()
                     .any(|cap| cap.eq_ignore_ascii_case(b"AUTH=XOAUTH2"))
                 {
+                    true
+                } else {
                     return Err(Error::new(format!(
                         "Could not connect to {}: OAUTH2 is enabled but server did not return \
-                         AUTH=XOAUTH2 capability. Returned capabilities were: {}",
+                         AUTH=OAUTHBEARER or AUTH=XOAUTH2 capability. Returned capabilities \
+                         were: {}",
                         server_conf.server_hostname,
                         capabilities
                             .iter()
@@ -731,28 +827,89 @@ impl ImapStream {
                             .join(" ")
                     ))
                     .set_kind(ErrorKind::Authentication));
+                };
+                if !server_conf.use_tls {
+                    return Err(Error::new(format!(
+                        "Cannot authenticate to {} with {}: it is not encrypted with TLS which is \
+                         required",
+                        server_conf.server_hostname,
+                        if is_xoauth2 {
+                            "AUTH=XOAUTH2"
+                        } else {
+                            "AUTH=OAUTHBEARER"
+                        }
+                    ))
+                    .set_kind(ErrorKind::Configuration));
                 }
                 // Resolve Secret -> plaintext only at the moment we need to
                 // send it. Fork policy: do not pass the Secret through a
                 // trace/log path; evaluate, send, drop.
                 let password_value = server_conf.server_password.value()?;
-                if has_sasl_ir {
-                    let xoauth2 = base64
-                        .decode(&password_value)
-                        .chain_err_summary(|| {
-                            "Could not decode `server_password` from base64. Is the value correct?"
-                        })
-                        .chain_err_kind(ErrorKind::Configuration)?;
-                    ret.send_command(CommandBody::authenticate_with_ir(
-                        AuthMechanism::XOAuth2,
-                        &xoauth2,
-                    ))
-                    .await?;
+                // Check if user supplied a base64-encoded oauth2 string instead of
+                // the raw token and recover the raw token if possible.
+                let password_value = if let Some(decoded) = base64
+                    .decode(password_value.as_bytes())
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                {
+                    if is_xoauth2 {
+                        decoded
+                            .strip_prefix(&format!(
+                                "user={}\x01auth=Bearer ",
+                                server_conf.server_username
+                            ))
+                            .and_then(|v| v.strip_suffix("\x01\x01"))
+                            .map(str::to_string)
+                            .unwrap_or(password_value)
+                    } else {
+                        decoded
+                            .strip_prefix(&format!(
+                                "n,a={},\x01host={}\x01port={}\x01auth=Bearer ",
+                                server_conf.server_username,
+                                server_conf.server_hostname,
+                                server_conf.server_port
+                            ))
+                            .and_then(|v| v.strip_suffix("\x01\x01"))
+                            .map(str::to_string)
+                            .unwrap_or(password_value)
+                    }
                 } else {
-                    ret.send_command(CommandBody::authenticate(AuthMechanism::XOAuth2))
+                    password_value
+                };
+                let (mechanism, secret) = if is_xoauth2 {
+                    // user=someuser@example.com^Aauth=Bearer ya29.vF9dft4qmTc2Nvb3RlckBhdHRhdGlzdGEuY29tCg^A^A
+                    (
+                        AuthMechanism::XOAuth2,
+                        format!(
+                            "user={}\x01auth=Bearer {}\x01\x01",
+                            server_conf.server_username, password_value
+                        )
+                        .into_bytes(),
+                    )
+                } else {
+                    // n,a=user@example.com,^Ahost=server.example.com^Aport=143^Aauth=Bearer vF9dft4qmTc2Nvb3RlckBhbHRhdGlzdGEuY29tCg==^A^A
+                    #[rustfmt::skip]
+                    let auth_string = format!(
+                        "n,a={},\x01host={}\x01port={}\x01auth=Bearer {}\x01\x01",
+                        server_conf.server_username,
+                        server_conf.server_hostname,
+                        server_conf.server_port,
+                        password_value,
+                    );
+                    (AuthMechanism::OAuthBearer, auth_string.into_bytes())
+                };
+                sasl_failure_cancel = Some(if is_xoauth2 {
+                    (b"", "AUTH=XOAUTH2")
+                } else {
+                    (b"*", "AUTH=OAUTHBEARER")
+                });
+                if has_sasl_ir {
+                    ret.send_command(CommandBody::authenticate_with_ir(mechanism, &secret))
                         .await?;
+                } else {
+                    ret.send_command(CommandBody::authenticate(mechanism)).await?;
                     ret.wait_for_continuation_request().await?;
-                    ret.send_literal(password_value.as_bytes()).await?;
+                    ret.send_literal(base64.encode(&secret).as_bytes()).await?;
                 }
             }
             ImapProtocol::IMAP {
@@ -837,6 +994,31 @@ impl ImapStream {
             ret.read_lines(&mut res, None, false).await?;
             let mut should_break = false;
             for l in res.split_rn() {
+                // A continuation request while waiting for the tagged
+                // completion of `AUTHENTICATE` is the SASL server's failure
+                // notice: it carries a base64-encoded status the client must
+                // surface, and the exchange must be cancelled with the
+                // mechanism's cancel token (empty line for XOAUTH2, `*` for
+                // OAUTHBEARER).
+                if l.starts_with(b"+") {
+                    if let Some((cancel, mechanism_name)) = sasl_failure_cancel.take() {
+                        let res = l.strip_prefix(b"+ ").unwrap_or(l).trim();
+                        let failure_response = base64
+                            .decode(res)
+                            .ok()
+                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                            .unwrap_or_else(|| String::from_utf8_lossy(res).into_owned());
+                        // Cancel AUTHENTICATE
+                        ret.send_literal([cancel, b"\r\n"].concat().as_slice())
+                            .await?;
+                        return Err(Error::new(format!(
+                            "Cannot authenticate to {} with {mechanism_name}",
+                            server_conf.server_hostname
+                        ))
+                        .set_details(format!("Server_replied with {failure_response}"))
+                        .set_kind(ErrorKind::Authentication));
+                    }
+                }
                 if l.starts_with(b"* CAPABILITY") {
                     got_new_capabilities = true;
                     capability_lines += 1;
@@ -946,6 +1128,14 @@ impl ImapStream {
                 }
             }
         }
+        if send_state_changes {
+            (uid_store.event_consumer)(
+                uid_store.account_hash,
+                BackendEvent::AccountStateChange {
+                    message: "Authenticated.".into(),
+                },
+            );
+        }
         Ok((capabilities, ret))
     }
 
@@ -968,6 +1158,18 @@ impl ImapStream {
         let mut buf: Vec<u8> = vec![0; Connection::IO_BUF_SIZE];
         ret.clear();
         let mut last_line_idx: usize = 0;
+        // How far into `ret` the search for the next CRLF separator has
+        // already gone without finding one (past the lines already consumed).
+        // The scan resumes one byte earlier — a `\r` at `searched - 1` may
+        // have met its `\n` in the newest chunk — so a separator split across
+        // read chunks is still found, while the accumulated prefix is never
+        // rescanned. A hostile server that streams one over-long response line
+        // (a single FETCH carrying a huge attribute run, or a SEARCH result
+        // line with no CRLF until the very end) must not turn every 64 KiB
+        // read into a rescan of the whole line accumulated so far — the
+        // quadratic separator rescan (CWE-407) closed here, mirroring the
+        // SMTP/NNTP `read_lines` fix.
+        let mut searched: usize = 0;
         // Complete lines already inspected for the termination tag below
         // (see the tag-not-last handling); `ret` only ever grows until the
         // loop breaks, so the cursor is monotonic.
@@ -984,7 +1186,14 @@ impl ImapStream {
                     );
                     ret.extend_from_slice(&buf[0..b]);
                     enforce_response_size_limit(ret.len())?;
-                    if let Some(mut pos) = ret[last_line_idx..].rfind("\r\n") {
+                    if let Some(pos) = {
+                        let from = searched.saturating_sub(1).max(last_line_idx);
+                        ret[from..].rfind("\r\n").map(|pos| from + pos)
+                    } {
+                        // `pos` above is absolute; the framing logic below
+                        // works relative to `last_line_idx` (the start of the
+                        // last complete line).
+                        let mut pos = pos - last_line_idx;
                         if ret[last_line_idx..].starts_with(b"* BYE") {
                             return Err(Error::new("Disconnected"));
                         }
@@ -1055,6 +1264,10 @@ impl ImapStream {
                         }
                         last_line_idx += pos + b"\r\n".len();
                     }
+                    // The tail holds no further separator (bar a possible
+                    // `\r` byte at the very end): remember how far the scan
+                    // reached so the next chunk is scanned incrementally.
+                    searched = ret.len();
                 }
                 Err(err) => {
                     return Err(Error::from(err));
@@ -1342,6 +1555,7 @@ impl ImapConnection {
                                         protocol,
                                         current_mailbox,
                                         timeout,
+                                        preauthed,
                                     } = std::mem::replace(&mut self.stream, Err(Error::new("")))?;
                                     let stream = stream.into_inner()?;
                                     self.stream = Ok(ImapStream {
@@ -1352,6 +1566,7 @@ impl ImapConnection {
                                         protocol,
                                         current_mailbox,
                                         timeout,
+                                        preauthed,
                                     });
                                 }
                                 ImapResponse::No(code)
@@ -2169,6 +2384,18 @@ impl ImapConnection {
             ));
         };
         let segments = query.to_imap_search_segments();
+        // RFC 3501 §9 has no wire form for a `NUL` octet (`CHAR` is
+        // %x01-0x7F and literal octets are `CHAR8 = %x01-0xFF`), so a search
+        // value carrying one — the LDAP-filter NUL-truncation payload family,
+        // CVE-2026-33369 — cannot be sent at all. Refuse the search instead
+        // of writing an illegal octet that C-string servers would truncate
+        // the command line at (CWE-158 style command injection).
+        if segments_contain_nul(&segments) {
+            return Err(Error::new(
+                "Search query contains a NUL octet, which has no legal IMAP wire form",
+            )
+            .set_kind(ErrorKind::ProtocolError));
+        }
         let query_repr = segments
             .iter()
             .map(|segment| match segment {
@@ -2463,6 +2690,54 @@ mod tests {
                 protocol: ImapProtocol::default(),
                 current_mailbox: MailboxSelection::None,
                 timeout: Some(Duration::from_secs(60)),
+                preauthed: false,
+            };
+            let mut ret = Vec::new();
+            let res = smol::block_on(imap_stream.read_lines(&mut ret, Some(b"M1 "), true));
+            drop(imap_stream);
+            let _ = writer.join();
+            let err = res.unwrap_err();
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::Network(NetworkErrorKind::ProtocolViolation)
+                ),
+                "unexpected error: {err:?}"
+            );
+            assert!(ret.len() > cap);
+            assert!(
+                ret.len() <= cap + Connection::IO_BUF_SIZE,
+                "accumulation must stay bounded: {} > {}",
+                ret.len(),
+                cap + Connection::IO_BUF_SIZE
+            );
+        });
+    }
+
+    /// Regression for the CVE-2026-110249 corpus shape (issue #203): one
+    /// response line with no CRLF at all. The read loop must hit the cap and
+    /// fail closed with accumulation bounded to the cap plus one read
+    /// buffer, and it must scan the accumulated line incrementally (the
+    /// `searched` cursor) instead of rescanning it on every read; the
+    /// production-scale quadratic regression is locked by
+    /// `cve/src/CVE-2026-110249.rs`.
+    #[test]
+    fn test_imap_read_lines_unterminated_line_size_cap() {
+        cap_test_utils::assert_completes_within(10, || {
+            let cap = max_server_response_size();
+            let (stream, writer) = cap_test_utils::malicious_server(
+                b"* SEARCH 1 2 3 4 5 6 7 8 9 ",
+                cap.saturating_mul(2),
+            );
+            let mut imap_stream = ImapStream {
+                cmd_id: 2,
+                last_cmd: String::new(),
+                id: Cow::Borrowed("cap-test"),
+                stream,
+                protocol: ImapProtocol::default(),
+                current_mailbox: MailboxSelection::None,
+                timeout: Some(Duration::from_secs(60)),
+                preauthed: false,
             };
             let mut ret = Vec::new();
             let res = smol::block_on(imap_stream.read_lines(&mut ret, Some(b"M1 "), true));
@@ -2537,6 +2812,7 @@ mod tests {
                 protocol: ImapProtocol::default(),
                 current_mailbox: MailboxSelection::None,
                 timeout: None,
+                preauthed: false,
             });
             let mut blocking_conn: ImapBlockingConnection = conn.into();
             let line = smol::block_on(blocking_conn.read_line());

@@ -80,6 +80,7 @@
 
 use std::{borrow::Cow, convert::TryFrom};
 
+use base64::{engine::general_purpose::STANDARD as base64, Engine as _};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use native_tls::TlsConnector;
 use smallvec::SmallVec;
@@ -217,6 +218,12 @@ pub enum SmtpAuth {
         #[serde(default = "crate::conf::true_val")]
         require_auth: bool,
     },
+    #[serde(alias = "oauthbearer")]
+    OAuthBearer {
+        token: Secret,
+        #[serde(default = "crate::conf::true_val")]
+        require_auth: bool,
+    },
     // md5, sasl, etc
 }
 
@@ -231,7 +238,9 @@ impl SmtpAuth {
         use SmtpAuth::*;
         match self {
             None => false,
-            Auto { require_auth, .. } | XOAuth2 { require_auth, .. } => *require_auth,
+            Auto { require_auth, .. }
+            | XOAuth2 { require_auth, .. }
+            | OAuthBearer { require_auth, .. } => *require_auth,
         }
     }
 }
@@ -295,12 +304,12 @@ impl SmtpServerConf {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SmtpExtensionSupport {
     #[serde(default = "crate::conf::true_val")]
-    pipelining: bool,
+    pub pipelining: bool,
     #[serde(default = "crate::conf::true_val")]
-    chunking: bool,
+    pub chunking: bool,
     /// [RFC 6152: SMTP Service Extension for 8-bit MIME Transport](https://www.rfc-editor.org/rfc/rfc6152)
     #[serde(alias = "8bitmime", default = "crate::conf::true_val")]
-    _8bitmime: bool,
+    pub _8bitmime: bool,
     /// Essentially, the PRDR extension to SMTP allows (but does not require) an
     /// SMTP server to issue multiple responses after a message has been
     /// transferred, by mutual consent of the client and server. SMTP
@@ -308,17 +317,17 @@ pub struct SmtpExtensionSupport {
     /// responses as supplemental data to the responses that were received
     /// during the earlier envelope exchange.
     #[serde(default = "crate::conf::true_val")]
-    prdr: bool,
+    pub prdr: bool,
     #[serde(default = "crate::conf::true_val")]
-    binarymime: bool,
+    pub binarymime: bool,
     /// Resources:
     /// - <http://www.postfix.org/SMTPUTF8_README.html>
     #[serde(default = "crate::conf::true_val")]
-    smtputf8: bool,
+    pub smtputf8: bool,
     #[serde(default = "crate::conf::true_val")]
-    auth: bool,
+    pub auth: bool,
     #[serde(default = "default_dsn")]
-    dsn_notify: Option<Cow<'static, str>>,
+    pub dsn_notify: Option<Cow<'static, str>>,
 }
 
 fn default_dsn() -> Option<Cow<'static, str>> {
@@ -340,6 +349,20 @@ impl Default for SmtpExtensionSupport {
     }
 }
 
+impl SmtpExtensionSupport {
+    /// Check that the set extension combinations are valid.
+    pub fn validate(&mut self) -> Result<()> {
+        if self.binarymime && !self.chunking {
+            self.binarymime = false;
+            return Err(Error::new(
+                "The BINARYMIME service extension can only be used with the \"CHUNKING\" service \
+                 extension.",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Prefix an SMTP error's summary with the command that produced it, so the
 /// user can tell which step of the transaction failed and for which recipient.
 fn add_command_context(command: String, mut err: Error) -> Error {
@@ -355,6 +378,7 @@ pub struct SmtpConnection {
     stream: AsyncWrapper<Connection>,
     read_buffer: String,
     server_conf: SmtpServerConf,
+    capabilities: Vec<String>,
 }
 
 impl SmtpConnection {
@@ -503,51 +527,45 @@ impl SmtpConnection {
             stream,
             read_buffer: String::new(),
             server_conf: server_conf.clone(),
+            capabilities: Vec::new(),
         };
-        let no_auth_needed: bool;
+        let no_auth_needed: bool =
+            ret.server_conf.auth == SmtpAuth::None || !ret.server_conf.auth.require_auth();
+        let mut auth_plain_support = false;
+        let mut auth_login_support = false;
+        let mut auth_xoauth2_support = false;
+        let mut auth_oauthbearer_support = false;
         {
             let pre_auth_extensions_reply = ret
                 .read_lines(&mut res, Some((ReplyCode::_250, &[])))
                 .await?;
-            if ret.server_conf.auth != SmtpAuth::None
-                && ret.server_conf.auth.require_auth()
-                && !pre_auth_extensions_reply
-                    .lines
-                    .iter()
-                    .any(|l| l.starts_with("AUTH"))
+            for l in pre_auth_extensions_reply
+                .lines
+                .iter()
+                .filter(|l| l.starts_with("AUTH"))
             {
-                return Err(Error::new(format!(
-                    "SMTP Server doesn't advertise Authentication support. Server response was: \
-                     {pre_auth_extensions_reply:?}"
-                ))
-                .set_kind(ErrorKind::Authentication));
-            }
-            no_auth_needed =
-                ret.server_conf.auth == SmtpAuth::None || !ret.server_conf.auth.require_auth();
-            if no_auth_needed {
-                ret.set_extension_support(pre_auth_extensions_reply);
-            } else if let SmtpAuth::Auto {
-                ref mut auth_type, ..
-            } = ret.server_conf.auth
-            {
-                if let Some(l) = pre_auth_extensions_reply
-                    .lines
-                    .iter()
-                    .find(|l| l.starts_with("AUTH"))
-                {
-                    // The server may advertise bare `AUTH` with no mechanism
-                    // list (or an `AUTH`-prefixed line shorter than
-                    // `"AUTH "`); `.get()` yields no mechanisms instead of
-                    // panicking on the out-of-bounds slice.
-                    for _type in parse_auth_mechanisms(l) {
-                        if _type == "PLAIN" {
-                            auth_type.plain = true;
-                        } else if _type == "LOGIN" {
-                            auth_type.login = true;
-                        }
+                // The server may advertise a bare `AUTH` line with no
+                // mechanism list (or an `AUTH`-prefixed line shorter than
+                // `"AUTH "`); `parse_auth_mechanisms` yields no mechanisms
+                // instead of panicking on the out-of-bounds slice.
+                for _type in parse_auth_mechanisms(l) {
+                    match _type {
+                        "PLAIN" => auth_plain_support = true,
+                        "LOGIN" => auth_login_support = true,
+                        "XOAUTH2" => auth_xoauth2_support = true,
+                        "OAUTHBEARER" => auth_oauthbearer_support = true,
+                        _ => {}
                     }
                 }
             }
+            ret.set_extension_support(pre_auth_extensions_reply);
+        }
+        if let SmtpAuth::Auto {
+            ref mut auth_type, ..
+        } = ret.server_conf.auth
+        {
+            auth_type.plain = auth_plain_support;
+            auth_type.login = auth_login_support;
         }
         if !no_auth_needed {
             match &ret.server_conf.auth {
@@ -571,16 +589,18 @@ impl SmtpConnection {
                         ret.read_lines(&mut res, Some((ReplyCode::_334, &[])))
                             .await
                             .chain_err_kind(ErrorKind::Authentication)?;
-                        #[allow(deprecated)]
-                        let buf = base64::encode(&username);
-                        ret.send_command(&[buf.as_bytes()]).await?;
+                        let buf = base64.encode(&username);
+                        ret.stream.write_all(buf.as_bytes()).await?;
+                        ret.stream.write_all(b"\r\n").await?;
+                        ret.stream.flush().await?;
                         ret.read_lines(&mut res, Some((ReplyCode::_334, &[])))
                             .await
                             .chain_err_kind(ErrorKind::Authentication)?;
-                        #[allow(deprecated)]
-                        let buf = base64::encode(&password);
-                        ret.send_command(&[buf.as_bytes()]).await?;
-                    } else {
+                        let buf = base64.encode(&password);
+                        ret.stream.write_all(buf.as_bytes()).await?;
+                        ret.stream.write_all(b"\r\n").await?;
+                        ret.stream.flush().await?;
+                    } else if auth_type.plain {
                         // # RFC 4616 The PLAIN SASL Mechanism
                         // # https://www.ietf.org/rfc/rfc4616.txt
                         // message   = [authzid] UTF8NUL authcid UTF8NUL passwd
@@ -594,11 +614,20 @@ impl SmtpConnection {
                             buf.extend(username.as_bytes().to_vec());
                             buf.push(b'\0');
                             buf.extend(password.as_bytes());
-                            #[allow(deprecated)]
-                            base64::encode(buf)
+                            base64.encode(buf)
                         };
                         ret.send_command(&[b"AUTH PLAIN ", username_password.as_bytes()])
                             .await?;
+                    } else {
+                        return Err(Error::new(format!(
+                            "SMTP Server {path} doesn't advertise PLAIN/LOGIN Authentication \
+                             support"
+                        ))
+                        .set_details(format!(
+                            "Server reported these capabilities: {capabilities:?}",
+                            capabilities = ret.capabilities
+                        ))
+                        .set_kind(ErrorKind::Authentication));
                     }
                     ret.read_lines(&mut res, Some((ReplyCode::_235, &[])))
                         .await
@@ -606,12 +635,47 @@ impl SmtpConnection {
                     ret.send_command(&[b"EHLO meli-email.org"]).await?;
                 }
                 SmtpAuth::XOAuth2 { token, .. } => {
+                    if !auth_xoauth2_support {
+                        return Err(Error::new(format!(
+                            "SMTP Server {path} doesn't advertise XOAUTH2 Authentication support"
+                        ))
+                        .set_details(format!(
+                            "Server reported these capabilities: {capabilities:?}",
+                            capabilities = ret.capabilities
+                        ))
+                        .set_kind(ErrorKind::Authentication));
+                    }
                     let password_token = token
                         .value_with_timeout(std::time::Duration::new(4, 0))
                         .await
                         .chain_err_summary(|| "SMTP XOAUTH2 token")?;
                     // https://developers.google.com/gmail/imap/xoauth2-protocol#smtp_protocol_exchange
                     ret.send_command(&[b"AUTH XOAUTH2 ", password_token.as_bytes()])
+                        .await?;
+                    ret.read_lines(&mut res, Some((ReplyCode::_235, &[])))
+                        .await
+                        .chain_err_kind(ErrorKind::Authentication)?;
+                    ret.send_command(&[b"EHLO meli-email.org"]).await?;
+                }
+                SmtpAuth::OAuthBearer { token, .. } => {
+                    if !auth_oauthbearer_support {
+                        return Err(Error::new(format!(
+                            "SMTP Server {path} doesn't advertise OAUTHBEARER Authentication \
+                             support"
+                        ))
+                        .set_details(format!(
+                            "Server reported these capabilities: {capabilities:?}",
+                            capabilities = ret.capabilities
+                        ))
+                        .set_kind(ErrorKind::Authentication));
+                    }
+                    let token = token
+                        .value_with_timeout(std::time::Duration::new(4, 0))
+                        .await
+                        .chain_err_summary(|| "SMTP OAUTHBEARER token")?;
+                    let token = base64.encode(token);
+                    // https://developers.google.com/gmail/imap/xoauth2-protocol#smtp_protocol_exchange
+                    ret.send_command(&[b"AUTH OAUTHBEARER ", token.as_bytes()])
                         .await?;
                     ret.read_lines(&mut res, Some((ReplyCode::_235, &[])))
                         .await
@@ -636,14 +700,26 @@ impl SmtpConnection {
 
     fn set_extension_support(&mut self, reply: Reply) {
         debug_assert_eq!(reply.code, ReplyCode::_250);
+        let len = reply.lines.len().saturating_sub(1);
+        self.capabilities = reply
+            .lines
+            .iter()
+            .take(len)
+            .map(|s| s.to_string())
+            .collect();
         self.server_conf.extensions.pipelining &= reply.lines.contains(&"PIPELINING");
         self.server_conf.extensions.chunking &= reply.lines.contains(&"CHUNKING");
         self.server_conf.extensions.prdr &= reply.lines.contains(&"PRDR");
         self.server_conf.extensions._8bitmime &= reply.lines.contains(&"8BITMIME");
-        self.server_conf.extensions.binarymime &= reply.lines.contains(&"BINARYMIME");
+        // RFC 3030 §3: binarymime can only be active if chunking also is.
+        self.server_conf.extensions.binarymime &=
+            reply.lines.contains(&"BINARYMIME") && self.server_conf.extensions.chunking;
         self.server_conf.extensions.smtputf8 &= reply.lines.contains(&"SMTPUTF8");
         if !reply.lines.contains(&"DSN") {
             self.server_conf.extensions.dsn_notify = None;
+        }
+        if let Err(err) = self.server_conf.extensions.validate() {
+            tracing::warn!("{}", err);
         }
     }
 
@@ -666,7 +742,47 @@ impl SmtpConnection {
             self.stream.write_all(c).await?;
         }
         self.stream.write_all(b"\r\n").await?;
+        self.stream.flush().await?;
         Ok(())
+    }
+
+    /// Reject an envelope address whose spec contains SMTP command framing
+    /// bytes (CR or LF).
+    ///
+    /// A folded RFC 5322 quoted-string local part (e.g.
+    /// `"a<CRLF> b"@example.com`, legal *display* data under RFC 5322 FWS)
+    /// keeps its raw line break inside the parsed `address_spec`. Framing
+    /// such a spec into `MAIL FROM:<…>`/`RCPT TO:<…>` would split the command
+    /// line and put the remainder on the wire as if it were a separate
+    /// command. RFC 5321 §4.1.2 SMTP quoted-strings admit no CR/LF at all,
+    /// so no legitimate envelope address is excluded by this check — the
+    /// mail-provided bytes are untrusted at exactly this boundary and must
+    /// not dictate the command framing (CVE-2026-73575: fail-closed request
+    /// form validation at the wire boundary).
+    fn reject_unframeable_envelope_address(spec: &str, role: &str) -> Result<()> {
+        if spec.contains(['\r', '\n']) {
+            return Err(Error::new(format!(
+                "SMTP submission was aborted because the {role} envelope address contains line \
+                 breaks and cannot be safely framed on the wire: {spec:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Every address spec an envelope `Address` contributes to the RCPT set:
+    /// a group expands to its member mailboxes.
+    fn envelope_address_specs(address: &Address) -> Vec<&str> {
+        match address {
+            Address::Mailbox(m) => vec![m.address_spec.trim()],
+            Address::Group(g) => g
+                .mailbox_list
+                .iter()
+                .filter_map(|address| match address {
+                    Address::Mailbox(m) => Some(m.address_spec.trim()),
+                    Address::Group(_) => None,
+                })
+                .collect(),
+        }
     }
 
     /// Sends mail
@@ -687,7 +803,7 @@ impl SmtpConnection {
             ));
         }
         let mut current_command: SmallVec<[&[u8]; 16]> = SmallVec::new();
-        //first step in the procedure is the MAIL command.
+        // first step in the procedure is the MAIL command.
         // `MAIL FROM:<reverse-path> [SP <mail-parameters> ] <CRLF>`
         let mail_from_addr: &str = if !envelope_from.is_empty() {
             envelope_from.trim()
@@ -707,13 +823,30 @@ impl SmtpConnection {
             }
             envelope.from()[0].get_email().trim()
         };
+        // CVE-2026-73575: validate every envelope address *before* the first
+        // command is written — an unframeable address must abort the
+        // transaction with zero envelope bytes on the wire.
+        Self::reject_unframeable_envelope_address(mail_from_addr, "`From`")?;
+        for address in tos
+            .iter()
+            .chain(envelope.cc().iter())
+            .chain(envelope.bcc().iter())
+        {
+            for spec in Self::envelope_address_specs(address) {
+                if spec.is_empty() {
+                    continue;
+                }
+                Self::reject_unframeable_envelope_address(spec, "recipient")?;
+            }
+        }
         current_command.push(b"MAIL FROM:<");
         current_command.push(mail_from_addr.as_bytes());
         current_command.push(b">");
         if self.server_conf.extensions.prdr {
             current_command.push(b" PRDR");
         }
-        if self.server_conf.extensions.binarymime {
+        // binarymime and chunking need to be set together, according to RFC 3030 §3
+        if self.server_conf.extensions.binarymime && self.server_conf.extensions.chunking {
             current_command.push(b" BODY=BINARYMIME");
         } else if self.server_conf.extensions._8bitmime {
             current_command.push(b" BODY=8BITMIME");
@@ -728,7 +861,7 @@ impl SmtpConnection {
         } else {
             pipelining_queue.push((Some((ReplyCode::_250, &[])), mail_from_label));
         }
-        //The second step in the procedure is the RCPT command. This step of the
+        // The second step in the procedure is the RCPT command. This step of the
         // procedure can be repeated any number of times. If accepted, the SMTP
         // server returns a "250 OK" reply. If the mailbox specification is not
         // acceptable for some reason, the server MUST return a reply indicating
@@ -756,16 +889,20 @@ impl SmtpConnection {
                     }
                     self.send_command(&current_command).await?;
 
-                    //`RCPT TO:<forward-path> [ SP <rcpt-parameters> ] <CRLF>`
+                    // <https://www.rfc-editor.org/info/rfc5321/#section-4.3.2>
+                    //  S: 250, 251 (but see Section 3.4 for discussion of 251 and 551)
+                    // E: 550, 551, 552, 553, 450, 451, 452, 503, 455, 555
+                    // `RCPT TO:<forward-path> [ SP <rcpt-parameters> ] <CRLF>`
                     // If accepted, the SMTP server returns a "250 OK" reply and stores the
                     // forward-path.
                     let rcpt_label = format!("RCPT TO:<{}>", $mailbox.get_email().trim());
                     if !self.server_conf.extensions.pipelining {
-                        self.read_lines(&mut res, Some((ReplyCode::_250, &[])))
+                        self.read_lines(&mut res, Some((ReplyCode::_250, &[ReplyCode::_251])))
                             .await
                             .map_err(|err| add_command_context(rcpt_label, err))?;
                     } else {
-                        pipelining_queue.push((Some((ReplyCode::_250, &[])), rcpt_label));
+                        pipelining_queue
+                            .push((Some((ReplyCode::_250, &[ReplyCode::_251])), rcpt_label));
                     }
                 }};
             }
@@ -794,15 +931,29 @@ impl SmtpConnection {
 
         if self.server_conf.extensions.binarymime {
             let mail_length = format!("{}", mail.len());
-            self.send_command(&[b"BDAT", mail_length.as_bytes(), b"LAST"])
+            self.send_command(&[b"BDAT ", mail_length.as_bytes(), b" LAST"])
                 .await?;
             self.stream.write_all(mail.as_bytes()).await?;
+
+            // Client SMTP implementations that employ pipelining MUST check ALL statuses
+            // associated with each command in a group. For example, if none of
+            // the RCPT TO recipient addresses were accepted the client must
+            // then check the response to the BDAT command -- the client
+            // cannot assume that the BDAT command will be rejected just because none of the
+            // RCPT TO commands worked.
+            for (expected_reply_code, command) in pipelining_queue {
+                let reply = self
+                    .read_lines(&mut res, expected_reply_code)
+                    .await
+                    .map_err(|err| add_command_context(command, err))?;
+                pipelining_results.push(reply.into());
+            }
         } else {
-            //The third step in the procedure is the DATA command
-            //(or some alternative specified in a service extension).
-            //DATA `<CRLF>`
+            // The third step in the procedure is the DATA command
+            // (or some alternative specified in a service extension).
+            // DATA `<CRLF>`
             self.send_command(&[b"DATA"]).await?;
-            //Client SMTP implementations that employ pipelining MUST check ALL statuses
+            // Client SMTP implementations that employ pipelining MUST check ALL statuses
             // associated with each command in a group. For example, if none of
             // the RCPT TO recipient addresses were accepted the client must
             // then check the response to the DATA command -- the client
@@ -818,7 +969,7 @@ impl SmtpConnection {
                 pipelining_results.push(reply.into());
             }
 
-            //If accepted, the SMTP server returns a 354 Intermediate reply and considers
+            // If accepted, the SMTP server returns a 354 Intermediate reply and considers
             // all succeeding lines up to but not including the end of mail data
             // indicator to be the message text. When the end of text is
             // successfully received and stored, the SMTP-receiver sends a "250
@@ -827,7 +978,7 @@ impl SmtpConnection {
                 .await
                 .map_err(|err| add_command_context("DATA".to_string(), err))?;
 
-            //Before sending a line of mail text, the SMTP client checks the first
+            // Before sending a line of mail text, the SMTP client checks the first
             // character of the line.If it is a period, one additional period is
             // inserted at the beginning of the line.
             for line in mail.lines() {
@@ -838,14 +989,15 @@ impl SmtpConnection {
                 self.stream.write_all(b"\r\n").await?;
             }
 
-            //The mail data are terminated by a line containing only a period, that is, the
+            // The mail data are terminated by a line containing only a period, that is, the
             // character sequence "`<CRLF>`.`<CRLF>`", where the first `<CRLF>` is
             // actually the terminator of the previous line (see Section 4.5.2).
             // This is the end of mail data indication.
             self.stream.write_all(b".\r\n").await?;
         }
+        self.stream.flush().await?;
 
-        //The end of mail data indicator also confirms the mail transaction and tells
+        // The end of mail data indicator also confirms the mail transaction and tells
         // the SMTP server to now process the stored recipients and mail data.
         // If accepted, the SMTP server returns a "250 OK" reply.
         let reply_code = self
@@ -1117,12 +1269,18 @@ pub struct Reply<'s> {
 impl<'s> From<Reply<'s>> for Result<ReplyCode> {
     fn from(val: Reply<'s>) -> Self {
         if val.code.is_err() {
-            Err(Error::new(
-                format!("{} {}", val.code.value(), val.lines.join("\n"))
-                    .trim()
-                    .to_string(),
-            )
-            .set_summary(val.code.as_str()))
+            let kind = match val.code {
+                ReplyCode::_500 => ErrorKind::Bug,
+                ReplyCode::_530 | ReplyCode::_535 => ErrorKind::Authentication,
+                _ => ErrorKind::None,
+            };
+            Err(Error::new(val.lines.join("\n"))
+                .set_details(format!(
+                    "SMTP {code} error: {msg}",
+                    code = val.code.value(),
+                    msg = val.code.as_str()
+                ))
+                .set_kind(kind))
         } else {
             Ok(val.code)
         }
@@ -1212,7 +1370,16 @@ async fn read_lines<'r>(
                     buffer.extend(ret.drain(sep + "\r\n".len()..));
                     break 'read_loop;
                 }
-                returned_code = Some(ReplyCode::try_from(&ret[last_line_idx..last_line_idx + 3])?);
+                returned_code = Some(
+                    ReplyCode::try_from(&ret[last_line_idx..last_line_idx + 3]).chain_err_summary(
+                        || {
+                            format!(
+                                "Invalid SMTP reply: {:?}",
+                                &ret[last_line_idx..last_line_idx + 3]
+                            )
+                        },
+                    )?,
+                );
             }
             last_line_idx = sep + "\r\n".len();
             searched = last_line_idx;
@@ -1237,7 +1404,6 @@ async fn read_lines<'r>(
     }
     let code = ReplyCode::try_from(&ret[..3])?;
     let reply = Reply::new(ret, code);
-    //debug!(&reply);
     if expected_reply_code
         .map(|(exp, exp_list)| exp != reply.code && !exp_list.contains(&reply.code))
         .unwrap_or(false)
@@ -1885,6 +2051,64 @@ security = { type = "tls" }
             assert!(err.summary.contains("danger_accept_invalid_certs"), "{err}");
             assert!(err.summary.contains("CVE-2009-3765"), "{err}");
             assert!(err.summary.contains("set it to false"), "{err}");
+        }
+    }
+
+    /// `SmtpExtensionSupport::validate` rejects BINARYMIME without CHUNKING,
+    /// resetting the invalid flag, and accepts the valid combination.
+    #[test]
+    fn test_smtp_extension_support_validate() {
+        let mut extensions = SmtpExtensionSupport {
+            binarymime: true,
+            chunking: false,
+            ..SmtpExtensionSupport::default()
+        };
+        let err = extensions.validate().unwrap_err();
+        assert!(
+            err.summary.contains("BINARYMIME"),
+            "error should name BINARYMIME: {err}"
+        );
+        assert!(
+            err.summary.contains("CHUNKING"),
+            "error should name CHUNKING: {err}"
+        );
+        assert!(
+            !extensions.binarymime,
+            "an invalid binarymime flag must be reset"
+        );
+
+        let mut extensions = SmtpExtensionSupport {
+            binarymime: true,
+            chunking: true,
+            ..SmtpExtensionSupport::default()
+        };
+        extensions.validate().unwrap();
+        assert!(extensions.binarymime);
+    }
+
+    /// A failed SMTP reply is turned into an [`Error`] whose kind reflects the
+    /// reply code and whose details start with the numeric `SMTP <code> error`.
+    #[test]
+    fn test_smtp_reply_error_maps_code_to_kind_and_details() {
+        for (code, kind, text) in [
+            (ReplyCode::_530, ErrorKind::Authentication, "auth required"),
+            (ReplyCode::_535, ErrorKind::Authentication, "auth failed"),
+            (ReplyCode::_500, ErrorKind::Bug, "syntax error"),
+            (ReplyCode::_550, ErrorKind::None, "mailbox unavailable"),
+        ] {
+            let mut reply = Reply {
+                code,
+                lines: SmallVec::new(),
+            };
+            reply.lines.push(text);
+            let result: Result<ReplyCode> = reply.into();
+            let err = result.unwrap_err();
+            assert_eq!(err.kind, kind, "unexpected kind for {code:?}");
+            let details = err.details.as_ref().expect("details must be set");
+            assert!(
+                details.starts_with(&format!("SMTP {} error", code.value())),
+                "unexpected details: {details}"
+            );
         }
     }
 }

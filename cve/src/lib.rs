@@ -2301,6 +2301,44 @@ mod cve_2025_48700;
 #[path = "CVE-2026-73572.rs"]
 mod cve_2026_73572;
 
+/// CVE-2026-73574（Zimbra Collaboration < 10.1.17，Classic Web Client Forward
+/// servlet；CVSS 3.1，CWE-669）**未认证本地文件包含（LFI）** regression
+/// （issue #206）：Forward servlet 把请求参数 `fu` 直接当资源路径解析，可越过
+/// 访问边界读取 `WEB-INF/web.xml` 等受保护文件——「请求参数 → 文件读取点」
+/// 零转换直达。meli 无 servlet/资源包含面，等价面按 issue 的映射取四条
+/// 「不可信路径参数 → 本地文件读取」通路：(1) 正文/HTML 链接面——`file:`
+/// 变体、UNC/SMB、相对穿越、URL 编码与大小写、`fu=web.xml` 资源名混淆全部
+/// 过不了 [`is_default_launchable_scheme`] 免确认启动门（白名单仅
+/// http/https/mailto，`envelope.rs:86`），非白名单一律落入显式确认对话框
+/// （`envelope.rs:2327`，孪生单测 `go_to_url_non_default_scheme_requires_
+/// confirmation` 锁定）；`List-Unsubscribe` 头的 URL 选项同样被
+/// [`unsubscribe_action`]（`view.rs:126`）跳过；(2) `message/external-body`
+/// 引用面（`fu` 参数最直接等价物）——melib 分类为不透明 `ContentType::Other`
+/// 叶，`decode` 一律空字节（`attachments.rs` `Other => Vec::new()`），LFI
+/// 路径只作元数据逐字保留、永不解引用；(3) 附件名落盘面——LFI 文件名经
+/// [`sanitize_filename_component`] 压成单路径分量（双分隔符全平台替换、
+/// `""`/`.`/`..` 拒绝回退随机名）；(4) 源码锚点扫描——消费邮件字节的全部
+/// 解析/渲染面（parser/attachments/html_render/view 全家族）**零文件读取
+/// 原语**，仓内读取点全部在用户动作门之后（`import`/`add-attachment` 用户
+/// 手敲 ex 命令、mailcap 只读用户 XDG 配置）。
+///
+/// [`cve_2026_73574`] 以内嵌 `multipart/mixed` 语料逐层锁定：L1 载体真实
+/// （alternative(plain+html) + 5 个 external-body 声明 + 2 个 LFI 文件名附件，
+/// 四家族 22 向量逐字在场、标记与兄弟语料逐字隔离）；L2 external-body 对
+/// 载体 5 声明 + (A)(B)(C) 每条独立拼写全部 decode 为空、HTML 绝对 scheme
+/// LFI href 在 sanitize scheme 白名单处剥除且 render 脚注无可启动 LFI 值；
+/// L3 启动门/unsubscribe 头门/附件名单分量三扇门全部拒绝 + 诚实对照放行；
+/// L4 源码锚点扫描 + 整封邮件端到端惰性、诚实链接保持可用。**免疫证明，
+/// 未发现缺口，未改动生产代码**。
+///
+/// [`is_default_launchable_scheme`]: meli::mail::view::envelope::is_default_launchable_scheme
+/// [`unsubscribe_action`]: meli::mail::view::unsubscribe_action
+/// [`sanitize_filename_component`]: meli::types::sanitize_filename_component
+/// [`cve_2026_73574`]: self::cve_2026_73574
+#[cfg(test)]
+#[path = "CVE-2026-73574.rs"]
+mod cve_2026_73574;
+
 /// CVE-2021-29956（Mozilla Thunderbird 78.8.1–78.10.1；CVSS 4.3，CWE-312）**导入
 /// 的 OpenPGP 私钥在未设置主密码时明文写入本地 keystore** regression（issue
 /// #102）。Thunderbird 把用户导入的私钥存进自有 `key4.db`/secring 式 keystore，
@@ -6096,3 +6134,935 @@ mod cve_2020_15047;
 #[cfg(test)]
 #[path = "CVE-2021-39272.rs"]
 mod cve_2021_39272;
+
+/// CVE-2026-48842（Roundcube Webmail 1.6.x < 1.6.16、1.7.x < 1.7.1；CVSS 3.1
+/// 8.1；CWE-89；GHSA-vc2v-cxrw-6g4p；2026-05-25 发布，加拿大网安中心 2026-09
+/// 通报在野利用）**virtuser_query 插件 `preg_replace()` 反斜杠逃逸预认证
+/// SQL 注入**攻击模拟回归（Gitea issue #189）：登录用户名在代入 virtuser
+/// SQL 前先经一层引号转义、再作为 `preg_replace()` 替换串传入，PHP 替换串
+/// 语义二次解释反斜杠（`\\` 折叠、`\d`/`$d` 反向引用），攻击者以奇数个尾随
+/// 反斜杠 / 反斜杠-引号组合翻转转义奇偶性，让攻击字节跨越引号边界进入 SQL
+/// 结构——「转义后再拼接」的双层转义处理缺陷。
+///
+/// **meli 等价面映射（issue #189 侦察结论）**：两个 SQL 面。缓存面
+/// `melib/src/imap/sync/sqlite3_cache.rs` 的服务端可控数据（mailbox 名 /
+/// tag / FETCH 信头）全部走 `?N` 参数绑定，不存在转义层；UI 检索面
+/// `meli/src/sqlite3.rs::query_to_sql` 是仓库唯一「转义后拼接」站点——检索词
+/// 经 `escape_double_quote`（`"`→`""`）拼进 `LIKE "%…%"` 后插值进 SELECT。
+/// 免疫的结构性依据：捆绑版 SQLite 词法器（libsqlite3-sys 0.30.1
+/// `tokenize.c` 的 `CC_QUOTE`/`CC_ILLEGAL`/`CC_NUL` 分支）**没有反斜杠转义**
+/// ——字符串外 `\` 即非法 token，字符串内是普通字节，引号翻倍恰是其自身转
+/// 义，内嵌 NUL 使整条 prepare 判 `TK_ILLEGAL` fail-closed；CVE 的逃逸轴在
+/// 这个方言里没有第二层可落点。
+///
+/// [`cve_2026_48842`] 分层锁定（详见模块文档）：L0 逃逸轴语料自检（反斜杠
+/// 族/引号翻倍/LIKE 通配符/NUL/CJK+星面字符，54 条）＋转义层字节保真；
+/// L1 纯模型对照——按 PHP 替换串文档语义复刻易受攻击双层管线，证明语料真
+/// 使引号前反斜杠奇偶性翻转（`victim\' OR 1=1--`、`\'; DROP/ATTACH…` 落进
+/// 代码区、奇数尾随反斜杠吃掉闭合引号），同批语料过 meli 双层（引号翻倍 +
+/// SQLite `CC_QUOTE` 词法扫描器复刻）token 恰在推送的闭合引号处闭合、扫描
+/// 还原内容恰为原文；L2 真实
+/// `Sqlite3Cache` 全语料逐轮攻击（init/update/insert/find/save/load/msn/
+/// status/update_flags/update），schema/列/行数不变、载荷字节原样读回；
+/// L3 镜像表 + 参数化预言机——NUL-free 检索词命中集合逐条一致（七个字符串
+/// 分支 + 复合查询 + DQS 列名探针），`%` 通配符命中全表但与预言机一致（数据
+/// 语义），全角 `％` 不做通配符，NUL 语料 prepare 必 Err 且金丝雀/schema 不
+/// 变；L4 源码锚点复扫——三个生产 SQL 文件合计恰两处值插值（常量列 ALTER +
+/// 已转义 `{query}` SELECT），`escape_double_quote` 无反斜杠分支，
+/// `ToSql for Envelope` 为 JSON BLOB；L5 良性对照（含 `\Seen`、Windows 路
+/// 径、`50%`、CJK）全链路存活。
+///
+/// 与近亲划界：CVE-2021-44026（issue #169）锁 Roundcube 搜索参数的**堆叠引
+/// 号突破**基线；本文件锁**反斜杠逃逸轴**（双层转义奇偶翻转、LIKE 通配符、
+/// NUL 截断、CJK/代理对边界）。IMAP 线上 `\"`/`\\` 转义层
+/// （`escape_imap_quoted`）属 CVE-2018-14352 回归的命令面，非 SQL 面。语料
+/// marker `rc48842.example` 与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——SQLite 词法器没
+/// 有反斜杠转义，缓存面全部参数绑定，UI 检索词的引号翻倍恰是 SQLite 自身
+/// 的 token 转义，NUL 语料 fail-closed。
+///
+/// [`cve_2026_48842`]: self::cve_2026_48842
+#[cfg(test)]
+#[path = "CVE-2026-48842.rs"]
+mod cve_2026_48842;
+
+/// CVE-2026-84642（Thunderbird < 155 / < 153.2；MFSA 2026-86/88，CVSS
+/// 7.5，CWE-1333）**`mail.allowed_attachment_hostnames` 主机白名单未转义
+/// 未锚定拼正则 → 非预期主机命中（可服务远程附件，信息泄露）**攻击模
+/// 拟回归（Gitea issue #190）。
+///
+/// **meli 等价面映射（issue #190 侦察结论）**：meli 没有主机名列表式
+/// 附件/远程内容白名单（远程内容整体剥离，MFSA-2005-11/#13 已锁）；
+/// 主机/scheme/origin 语义匹配面全数枚举后每面都是**结构化精确比较**：
+/// 回环例外 `is_loopback_host`（jmap/webdav 两份，`eq_ignore_ascii_case`
+/// 整串相等）、scheme 门 `is_default_launchable_scheme`（逐项全串相等）、
+/// JMAP/WebDAV `redirect_target`（`url::Origin` 结构化全等）、脚注
+/// host 显示（完整渲染不截断）；仅有的两处用户配置正则（主题高亮
+/// `RegexValue`、maildir `rename_regex`）语义即模式、从不匹配主机名。
+///
+/// [`cve_2026_84642`] 分层锁定：L0 手写迷你正则复刻 Thunderbird 易受
+/// 攻击管线（未转义`.`通配、未锚定子串、`+`·`*`·`?` 量词），issue 指定
+/// 逃逸族（子域/前缀/后缀/点号通配/元字符条目）在模型里全部命中、在
+/// 精确相等预言机里全部落空；L1 `validate_transport_url` 对全攻击语料
+/// （子域/前缀/后缀/插入/尾点/大小写/Unicode 同形/userinfo `@` 混淆/
+/// 十进制-十六进制 IPv4/云元数据/IPv4-mapped/端口）逐条断言诚实回环
+/// 放行、逃逸拒绝、畸形串停在解析层；L2 scheme 门精确相等（`httpss`/
+/// `xhttp`/`http.s` 拒绝）；L3 脚注 host 逐字完整显示无截断；L4 全仓
+/// `meli/src`+`melib/src` 扫描——非字面量正则构造仅存在于两处「语义
+/// 即模式」配置面 + `$re:literal` 宏，六个安全相关文件零正则，精确比
+/// 较锚点逐一复扫。
+///
+/// 与近亲划界：CVE-2024-50624（#23）拥有 https-only 传输策略决策，本
+/// 文件拥有该门主机匹配语义（精确 vs 正则/子串）与整仓「配置串进正
+/// 则」扫描；CVE-2009-3766（#89）拥有 TLS 证书 CN/SAN 匹配面。marker
+/// 域名 `trusted84642.example` 族与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——每个主机
+/// /scheme/origin 判定面都是结构化全等比较，仓库内不存在主机名语义
+/// 配置值被拼进正则的路径。
+///
+/// [`cve_2026_84642`]: self::cve_2026_84642
+#[cfg(test)]
+#[path = "CVE-2026-84642.rs"]
+mod cve_2026_84642;
+
+/// CVE-2026-107570（mutt < 2.3.2，NVD 2026-10-08，Debian DSA 6563-1，CVSS 2.5
+/// AV:L/AC:H/UI:R，CWE-823）**模板邮件 Content-Type 头堆越界写** regression
+///（issue #187，表 2 病毒/代码执行 of `SECURITY-CVE-RESEARCH.zh-CN.md`）：把
+/// 邮件用作模板（meli 的 `Draft::edit` 装载）时，mutt 的
+/// `convert_file_from_to()` 用从 Content-Type 头取出的字符集对整份文件做
+/// iconv 转换，精心构造的头让输出指针与剩余长度簿记脱钩，写穿堆转换缓冲
+/// ——DSA 表述为 DoS 或潜在任意代码执行。
+///
+/// **meli 等价面映射（issue #187 侦察结论）**：mutt 写链四环在 meli 全部
+/// 构造性阻断。(1) C 字符串字符集：`Charset::from` 以 `eq_ignore_ascii_case`
+/// 对**闭集枚举**匹配原始参数字节，未知/非法/带 NUL/超长名一律降级
+/// `Charset::Ascii`——不存在交给 iconv 的字符集串与指针。(2) 转换缓冲：
+/// `decode_charset` 走 encoding_rs 解码器返回按需增长的 `Cow<str>`，无
+/// 定长输出缓冲可写穿。(3) 指针算术：整条链（`content_type` nom 借用切片
+/// 解析、`saturating_sub` 防下溢的 multipart 切分、compose/template 胶水）
+/// 为零 `unsafe`、零 `set_len`/`MaybeUninit`、零 32 位窄化转换（grep 审计）
+/// 的安全 Rust。(4) 模板入口：`Draft::edit` 装载敌意邮件、走
+/// `Envelope::body_bytes` → `Attachment` 树并逐部件 decode——正是 mutt 整文件
+/// 转换的管线。
+///
+/// [`cve_2026_107570`] 分层锁定（详见模块内注释）：L1 敌意 Content-Type 值
+/// 全族（非法/超长 charset、参数名值畸形、NUL 注入、大小写与折叠变体，加折
+/// 叠触发值的逐字节前缀扫）过 `content_type` 解析全部得到类型化判定——干净
+/// `Ok`（其后附件构建器做 RFC 2045 token 校验）或干净 nom `Err`，零 panic、
+/// 两次一致；L2 `Charset::from` 对任意字节全定义——NUL 截断族
+///（`gbk\0iso-8859-1\0utf-16le` 等 C 串截断任意前缀的形状）在 meli 整字节
+/// 比较下降级 `Ascii`，已知拼写的大小写/空白变体仍选中各自变体，重复
+/// charset 参数后者胜；L3 全部 30 个 `Charset` 枚举变体 × 敌意转换体
+///（奇长 UTF-16、悬垂代理项、截断 GB18030 四字节序列、悬垂 ISO-2022-JP
+/// 转义、截断 Shift_JIS 双字节、全字节值、70 KiB 体）两次解码逐字节一致、
+/// 3×+8 膨胀界内、零 panic；L4 转换缓冲随输入线性伸缩——ISO-8859-1 的
+/// `0xA0..=0xFF` 体在 65535/65536/65537/100000 字节（跨 64 KiB 经典定长缓冲
+/// 边界）精确解码为 2×N，定长 64 KiB 输出缓冲或 16 位长度恰在此截断/回绕；
+/// L5 模板管线端到端惰性——每个语料邮件（全族 Content-Type 植入完整邮件、
+/// 逐前缀扫、30 层 multipart 每层带敌意 charset、规范触发邮件逐字节截断）
+/// 经 `Envelope::from_bytes` → `Draft::edit` → 文本提取 + 逐部件两次解码
+/// 逐字节一致、有界、预算内、零 panic。
+///
+/// 与近亲划界：CVE-2023-4875（issue #44，mutt）是**草稿继续撰写**的
+/// userhdrs NULL 解引用与头块静默清空（写入面），CVE-2023-4874（issue #43）
+/// 是**查看**缺结构字段邮件的 NULL 解引用（读取面），本 CVE 是**模板装载**
+/// 驱动的整文件 charset 转换堆写穿（转换面）；CVE-2026-14899（issue #35）
+/// 是 MIME 头解析 off-by-one 越界**读**——本文件的 NUL 注入族特意构造
+/// `gbk\0iso-8859-1` 式 C 串截断形状，证明 meli 整字节比较无截断语义。
+/// marker 域名 `example.net`/`example.org` 与兄弟文件逐字隔离。
+///
+/// 结论：**免疫证明，未发现缺口，未触碰生产代码**——闭集字符集枚举 +
+/// encoding_rs 增长输出 + 全链安全 Rust 使 CWE-823 写穿类无代码可运行。
+///
+/// [`cve_2026_107570`]: self::cve_2026_107570
+#[cfg(test)]
+#[path = "CVE-2026-107570.rs"]
+mod cve_2026_107570;
+
+/// CVE-2026-110247（Thunderbird < 158；MFSA 2026-109，2026-10-13，moderate）
+/// libmime **缓冲区增长点 32 位整数溢出 → 堆破坏** regression（issue
+/// #188）：Thunderbird 的 MIME 引擎在多处缓冲增长点用 32 位类型做长度
+/// 算术且无溢出检查，超大邮件使增长守卫 fail-open 或分配短于所需的缓
+/// 冲，随后 `memcpy` 把攻击者数据写越堆分配（Mozilla bug 2071621）。
+///
+/// **meli 等价面映射**：`melib/src/email/attachments.rs` 与
+/// `melib/src/email/parser.rs` 内一切按输入长度派生容量/偏移的运算点
+/// （传输解码、boundary 扫描、base64/QP 解码、header 折叠展开）。锚点
+/// 扫描 `as u32`/`as i32` 窄化转换零命中——MIME 增长路径全程 `usize`，
+/// 不存在「先按 32 位算长度再按 64 位分配」的路径；可达的增长守卫
+/// （boundary 偏移、`StrBuilder::display_bytes`、mbox/IMAP 声明长度）
+/// 已由 CVE-2026-70329（#27）等 checked 化。本 issue 扫描暴露并修复了
+/// 剩余三处增长点容量算术：`encodings::encoded_word_list` 的折叠累加、
+/// `address::address_list` 的折叠+调整链（`split` 恒 ≥1 段，饱和链保持
+/// 精确）、`Attachment::into_raw` 的 `2 × raw.len()` 容量积（32 位平台
+/// ≥1 GiB 邮件曾会 capacity overflow 中止序列化）——全部收敛为饱和语
+/// 义，低估只多一次扩容、不出错字节。回归断言还暴露并修复了同一
+/// 增长点上的一处功能死路：`encoded_word_list` 用零宽 `space` 分隔词
+/// 表，nom 7 防死循环守卫使**任何**恰好结束于最后一个编码词的输入
+/// （合法主流形态）整体报错，RFC 2047 词表拼接路径因此从未生效，
+/// `address_list` 恒回退原始字节；分隔符改为至少消费一字节。
+///
+/// 语料按 issue 四类攻击形态逐面锁定：部件声明 `Content-Length:
+/// 4294967295`（u32::MAX）与 `268435456`（256 MiB）对 ~20 字节实际体
+/// 的「声明超实际」confine 断言；512 部件 multipart 拼接的偏移累积
+/// in-bounds / 严格单调 / 缺失 boundary 干净 `Err` / 两次解析同树；QP
+/// 收缩不等式（decoded ≤ input，截断转义降级字面量）；RFC 2047 声明
+/// charset 与实际载荷不匹配（utf-8/us-ascii 高字节、utf-16 奇尾、
+/// iso-2022-jp 仅转义、空载荷、`=ZZ` 非十六进制）经有损 charset 门软
+/// 失败、≤3× 有界、确定性，含折叠 `Subject` 面。
+///
+/// 与近亲划界：CVE-2026-70329（#27）拥有协议面声明尺寸（IMAP
+/// literal、mbox `Content-Length`、boundary 记账），CVE-2020-9819（#30）
+/// 拥有 MIME 内嵌声明的分配足迹值无关性，CVE-2009-0587（#106）拥有
+/// base64 膨胀/空白/畸形不等式，CVE-2026-84639（#37）拥有 QP 错误路径
+/// 字面量，CVE-2024-30103（#24）拥有 `phrase()` 线性度；本文件拥有增
+/// 长点算术本身，marker（`growth-110247-outer` 等）与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明 + 三处增长点算术收口 + 一处增长点死路修
+/// 复**——无 32 位窄化路径，四类攻击面行为断言全部通过。
+///
+/// [`cve_2026_110247`]: self::cve_2026_110247
+#[cfg(test)]
+#[path = "CVE-2026-110247.rs"]
+mod cve_2026_110247;
+/// CVE-2026-33373（Zimbra Collaboration 10.0.x / 10.1.x，2026-03-30；
+/// CVSS 3.1 8.8 AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H，CWE-352 CSRF）
+/// **账户状态迁移期签发的认证令牌缺 CSRF 校验**攻击模拟回归（issue
+/// #192）：状态迁移（启用 2FA / 改密码）后签发的活动令牌可无校验触发
+/// 状态变更请求——「上一次授权顺延到下一个动作」。
+///
+/// **meli 等价面映射**：meli 无 web 令牌面；等价物是敏感操作（发信
+/// `start_send_confirmation`、退订 `unsubscribe_action`、mailto 外部触
+/// 发、`go_to_url`/`List-Archive` 外链启动）的确认门令牌——
+/// `UIEvent::FinishedUIDialog(id, ..)` 携带的对话框 `ComponentId`
+/// （UUID v4 一次性 nonce）。分层证明：载体逐字抵达门；nonce 512 次
+/// 抽取不重复；mailto/List-Post 触发只装 `ViewMode::Edit` 的 composer
+/// （分支内零发送词法，伪造 From/Date/Message-ID 被
+/// `Mailto::IGNORE_HEADERS` 丢弃，头值 CRLF 注入拒绝）；全仓
+/// `send_draft_async` 恰两个调用点、`perform_unsubscribe_action` 恰一
+/// 个调用点、`launch_url` 恰两个调用点，全部在「事件 id == 挂载对话框
+/// id」+ 显式确认 + `.take()` 单次消费之后；三文件全量扫描
+/// `FinishedUIDialog` 消费臂无一例外校验 nonce（≥10 臂）；状态迁移
+/// （对话框拆除 → `ViewMode::Edit`、`UIEvent::ConfigReload` 设置热重
+/// 载）吊销既有授权、成对清空 pending 动作，发信绑定
+/// `self.account_hash` 无光标账号间接层。
+///
+/// 与近亲划界：CVE-2024-38173（#131）拥有退订 scheme 白名单，
+/// CVE-2023-23397（#21）拥有 `go_to_url` scheme 门，本文件拥有授权令
+/// 牌语义（nonce 绑定 / 单次消费 / 状态迁移吊销）。marker 域名
+/// `transition33373.example` 族与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**。
+///
+/// [`cve_2026_33373`]: self::cve_2026_33373
+#[cfg(test)]
+#[path = "CVE-2026-33373.rs"]
+mod cve_2026_33373;
+
+/// CVE-2026-73570（Zimbra Collaboration < 10.1.20，`zimbra-snmp` 可选包 +
+/// SNMP 通知启用时；2026-08-13，**CISA KEV 在野利用**，cert.pl 通报主动利用；
+/// CVSS 8.9 AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:L；CWE-78）**SNMP 通知处理
+/// 不可信输入清理不当 → OS 命令注入 RCE** 攻击模拟 regression（Gitea issue
+/// #191）：未认证攻击者发送特制 SMTP 请求，Zimbra 的 SNMP 通知处理器把不可信
+/// 数据拼进通知命令行，以 Zimbra 用户身份执行任意系统命令。
+///
+/// **meli 等价面映射（issue #191 侦察结论）**：meli 无 SNMP 面，等价面取
+/// 「不可信数据 → 命令行」边界的两个执行面。(1) 通知执行面
+/// `meli/src/notifications.rs::show_notification`：新邮件以
+/// `envelope.subject()` 为标题、`envelope.field_from_to_string()` 拼正文
+/// （`meli/src/accounts.rs`），交给用户配置的 `notifications.script` /
+/// `new_mail_script`；执行形状 `Command::new(bin)` + `.arg(kind)`/
+/// `.arg(title)`/`.arg(body)`——不可信邮件头字节只作**单一 argv 实参**，
+/// 全程无 shell、无模板插值，Zimbra 的「不可信字节进命令字符串」原语没有
+/// 代码可运行；NUL 字节在 argv 边界被 execve 拒绝（spawn `InvalidInput`
+/// fail-closed）。(2) mailcap `%s` 执行面 `meli/src/mailcap.rs::expand_args`
+/// （CVE-2016-3714/2000-0481 已锁的上下文感知 armor）：本 CVE 用通知语料
+/// 回归六种 shell 上下文 armor，并扩展 issue 点名的「`%s` 多次出现」与
+/// 「插入值不被重扫描」（`%{param}` 值里的字面 `%s` 不得再触发落盘替换）
+/// 两个轴。
+///
+/// [`cve_2026_73570`] 分层锁定（详见模块内注释）：L1 复刻 Zimbra 缺陷形状
+/// （不可信字节**插值**进 `sh -c` 命令字符串，裸/双引号/反引号/`$()`/单引号
+/// 五种上下文），同一批语料让 marker 真实出现——语料带武器、oracle 有效、
+/// 「插值」本身即漏洞；L2 敌意邮件（原始元字符、RFC 2047 Q 编码词、`=0A`
+/// 换行投递、折叠头、quoted-pair 引号逃逸显示名）经真实
+/// `Envelope::from_bytes` → `subject()`/`field_from_to_string()` 构造标题/
+/// 正文，按 `show_notification` 精确形状真实 spawn argv 哨兵脚本——三个
+/// 实参逐字节原样到达（单一实参、元字符保持数据位）、marker 永不出现，
+/// NUL 语料 spawn `InvalidInput` 零执行；L3 通知语料派生的附件名过真实
+/// `MailcapEntry::run` + `sh -c` 六上下文单实参惰性，多 `%s` 模板共用同一
+/// 落地文件、路径逐字打印两次，`%{trap}` 参数值内嵌字面 `%s` 零重扫描
+/// （零临时文件、stdout 恰为原值）；L4 源码锚点锁定通知执行点（恰一个
+/// `Command::new(bin)` + 三个 `.arg`、无 `sh -c`、`ForkedProcess` 登记串
+/// 仅展示且 `state.rs` 零 `Command::new`）、NewMail 取值面
+/// （`title: Some(subject.into())` + `field_from_to_string()`）、mailcap
+/// armor（`shell_quote_context`/`encode_for_context`/`quote_shell_word`/
+/// `Ambiguous` fail-closed）与配置契约（kind 第 1、title 第 2、body 第 3
+/// 实参）。
+///
+/// 与近亲划界：CVE-2016-3714（issue #118）拥有 mailcap `%s` 附件名/图片
+/// 解码面，CVE-2000-0481（issue #107）拥有附件名长度→固定缓冲面，本文件
+/// 拥有**通知执行轴**（邮件头字节 → 通知命令行）并把 mailcap armor 回归
+/// 扩展到「多 `%s`」与「插入值不重扫描」。marker 前缀
+/// `meli-cve-2026-73570-` 与 marker 域名 `zimbra73570.example` 与兄弟文件
+/// 逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——通知命令的插值
+/// 一律参数化（单一 argv 实参、无 shell），mailcap 模板插值一律经上下文
+/// armor，元字符语料在两个执行面上都不产生执行。
+///
+/// [`cve_2026_73570`]: self::cve_2026_73570
+#[cfg(test)]
+#[path = "CVE-2026-73570.rs"]
+mod cve_2026_73570;
+
+/// CVE-2026-62644（Roundcube Webmail < 1.6.17、1.7.x < 1.7.2；2026-07-14
+/// 发布；CVSS 3.1 6.4 `AV:N/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:N`，CWE-290）
+/// **password 插件从会话数据取用户名未校验一致性 → 用户名伪造 → 账户
+/// 接管**攻击模拟回归（Gitea issue #195）：改密流程信任了会话里可被伪
+/// 造的用户名——「特权变更操作信任了一个未经与已认证主体绑定的标识
+/// 符」。
+///
+/// **meli 等价面映射（issue #195 侦察结论）**：meli 无服务端会话/密码插
+/// 件面；等价不变量是「身份与凭据绑定不可被邮件内容伪造」。攻击样本按
+/// issue 指定的身份劫持轴构造并逐面锁定：邮件内身份头
+/// （`Resent-From`/`Sender`/`Reply-To`/`X-Authenticated-User`）只落
+/// `other_headers` 显示数据，`Envelope.from` 只认 `From:`；回复 From 选
+/// 择在账号配置 `extra_identities` 集合内子串挑选、失败回落主身份（攻
+/// 击者可触发挑选、无法注入集合外的值）；发送账号绑定阅读账号
+/// （`ret.account_hash = coordinates.0`），mailto composer 的账号取自光
+/// 标账号；SMTP 传输与认证（`SmtpServerConf::auth` 的 `username:
+/// Secret`）全部来自账号配置反序列化，smtp.rs 不引用身份头；PGP 签名/
+/// 加密默认密钥来自账号设置串，key 选择 pattern 来自 composer 表单字
+/// 段，默认密钥与 `encrypt_for_self` 解析全部 `LocateKey::LOCAL` 先于
+/// `keylist`，gpgme 上下文出生即不取回+离线（offline 语义归
+/// CVE-2008-3068/#16），pgp 面零 Autocrypt；mailto 的 `from=` 家族被
+/// `Mailto::IGNORE_HEADERS` 丢弃、非标准头整头丢弃、`from=` 藏 CRLF 整
+/// 条 URI 拒绝、幸存 Draft From 恒空（CRLF 注入拒绝归
+/// CVE-2026-33373/#192）；`Draft::new_reply` 从不写 From、Bcc 恒空（回
+/// 复落点语义归 CVE-2001-1088）。
+///
+/// **缺口检出与修复**：#134（CVE-2023-35619）判例的头部带分叉标注
+/// `address_faces_disagreeing_with_from` 只覆盖
+/// `Sender`/`Mail-Reply-To`/`Reply-To`，不含 `Resent-From`/
+/// `Resent-Sender`——resend 链身份分叉（`From: 可信机构` +
+/// `Resent-From: 攻击者`）不可见。修复：`envelope.rs` 把 resent 两面加
+/// 入标注列表（显示面真值化，不替换 From 身份），渲染级锁定于孪生单测
+/// `meli/src/mail/view/tests.rs::cve_2026_62644_resent_faces_mismatch_
+/// rows_render`（连同 `::_resent_agreeing_faces_add_no_rows` 无噪声回
+/// 归与 `::_unconsumed_identity_headers_stay_hidden`——
+/// `X-Authenticated-User` 从不被消费、默认不可见）。
+///
+/// [`cve_2026_62644`] 分层锁定（详见模块文档）：L0 语料真实性；L1
+/// mailto 身份轴（含 `IGNORE_HEADERS` 常量钉死）；L2 回复 From 选择镜像
+/// ×源码锚点；L3 发送账号/传输/SMTP 认证绑定锚点；L4 PGP 密钥绑定锚点；
+/// L5 resent 面标注缺口修复回归。
+///
+/// 与近亲划界：CVE-2023-35619（#134）拥有显示名中和与 Sender/Reply-To
+/// 面标注基线（本文件补齐其 resent 覆盖）；CVE-2026-33373（#192）拥有
+/// mailto CRLF 拒绝与确认门 nonce；CVE-2001-1088 拥有回复收件人推导链；
+/// CVE-2008-3068（#16）拥有 gpgme offline 语义。语料 marker `62644` 家
+/// 族与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明 + 1 处显示面缺口修复**——身份与凭据绑定的每
+/// 个判定面都以本地配置为唯一输入；邮件内容能触碰的最远边界是「在配置
+/// 身份集内触发挑选」与「设置收件人」，两者均在 composer 表单中用户可
+/// 见。
+///
+/// [`cve_2026_62644`]: self::cve_2026_62644
+#[cfg(test)]
+#[path = "CVE-2026-62644.rs"]
+mod cve_2026_62644;
+
+/// CVE-2026-62643（Roundcube Webmail < 1.6.17、1.7.x < 1.7.2；2026-06 发布
+/// 批次，2026-07-05 安全公告；vendor advisory 定级 medium/high）**HTML 邮件
+/// CSS 清洗不足 → SSRF/信息泄露**攻击模拟回归（issue #194）：CSS 清洗器未
+/// 覆盖全部可携带远程引用/指令的载体，清洗后输出仍含可被下游消费的 CSS
+/// 原料。
+///
+/// **meli 等价面映射**：`meli/src/mail/view/html_render.rs` 的
+/// [`sanitize`]/[`render`] 与 `attribute_filter`——CVE-2024-42010（#116）已封
+/// `@import`/`url(`/`expression(` 属性值走私，本 CVE 复核 2026 年新载体
+/// （`image-set()`、`srcset`、嵌套 at-rule、注释分割 `\u75 rl(` 形、CSS 十六
+/// 进制转义、SVG 内联 `style`/`animate`、`link rel=stylesheet` 变体、
+/// `behavior`/`-moz-binding`）是否仍被封死。meli 无 CSS 引擎、html2text 不
+/// 外联（第二道防线），按「清洗输出不得携带活原料」判例（#115/#116/#117）
+/// 做免疫证明/缺口检测。
+///
+/// **缺口检出与修复**（探针实证）：(a) 裸 token 新载体——
+/// `image-set("a.png" 1x)` 字符串形与 `srcset=` 引用表不含 `url(`，可经
+/// `a[title]`/`a[href]`/通用 `title`/`lang` 原样走私；(b) 解码轴——CSS 十六
+/// 进制转义 `\75 rl(`（CSS 词法里就是 `url(`）、`\40 import`、实体
+/// `&#x5c;75 rl(` 复合形、`/*…*/` 注释分割 `url/**/(`，裸子串守卫全部失明。
+/// 生产改动（html_render.rs 第八处 nh3 parity 偏离）：保留属性值含裸
+/// `image-set`/`srcset` 即整属性丢弃；再对值做 CSS 影子解码（剥注释、解
+/// `\XXXXXX` 转义）后在解码形上复跑全部活原料 token 检查。
+///
+/// [`cve_2026_62643`] 以五个分层 `#[test]` 锁定（详见模块文档）：语料结构
+/// ＋解码预言机自检；sanitize 平面（原样＋CSS 解码形双重复检、独立白名单预
+/// 言机、不动点）；五种嵌入上下文；端到端 RFC 822 multipart/alternative
+/// （宽度 40/80/120）全惰性＋全语料组合信；缺口回归（两类缺口逐字节固化、
+/// 良性值存活含 Windows 反斜杠路径与 `/* */` 注释标题、MDN 文档 URL 丢弃的
+/// 如实代价、纯文本形惰性观测、可见链接脚注对照）。
+///
+/// 与近亲划界：CVE-2024-42010（#116）锁 `@import`/`url(`/`expression(` 裸
+/// 子串轴；本文件锁 **2026 新载体裸 token**（`image-set`/`srcset`）与**解码
+/// 轴**（CSS 转义/注释分割复活）。语料 marker `rc62643.example` 与兄弟文件
+/// 逐字隔离。
+///
+/// 结论：**检出并修复两类缺口，非纯免疫证明**——载体元素/属性本就死在白名
+/// 单，但裸 token 与解码轴可把新载体原样带进清洗输出；修复后全部语料满足
+/// 不变量，且 meli 管线无 CSS 引擎、html2text 不加载远程资源，引用载体无
+/// 触发点。
+///
+/// [`cve_2026_62643`]: self::cve_2026_62643
+#[cfg(test)]
+#[path = "CVE-2026-62643.rs"]
+mod cve_2026_62643;
+
+/// CVE-2026-35543（Roundcube Webmail < 1.5.14、< 1.6.14；2026-04-03 发布批次
+/// （1.7-rc5/1.6.14/1.5.14 修复）；CVSS 3.1 5.3 `AV:N/AC:L/PR:N/UI:N/S:U/
+/// C:L/I:N/A:N`，CWE-669）**邮件内 SVG 内容（animate 属性族）作为远程内容
+/// 载体绕过远程图片拦截 → 信息泄露**攻击模拟回归（Gitea issue #196）：
+/// SMIL 动画家族（`<animate attributeName="href">` 的 `from`/`to`/`by`/
+/// `values` 全参数、`<animateTransform>`、`<set>`、SMIL 时间轴
+/// `begin="0s;loop"`）在 Roundcube 图片拦截判定**之后**把宿主元素的
+/// `href`/`xlink:href` 动画成远程 URL——受害者查看邮件即向攻击者发起带指
+/// 纹请求。
+///
+/// **meli 等价面映射（issue #196 指定）**：远程内容两道防线——`sanitize()`
+/// 的默认拒绝白名单与渲染/提取面的零自动外联（CVE-2018-19516/#126、
+/// CVE-2023-36763/#133 已锁基线），本 CVE 扩展 **SVG 动画专轴** 与
+/// **`.svg` 附件形态**。
+///
+/// [`cve_2026_35543`] 以六个分层 `#[test]` 锁定（详见模块文档）：(1) 语料
+/// 结构自检——五类载体（animate href 劫持族/兄弟动画元素族/直接引用载体
+/// 族/foreignObject＋style 动画族/大小写与命名空间混淆族）每类 ≥8 条、每
+/// 条锚定专属 marker；(2) sanitize 平面——独立白名单预言机逐标签验证、
+/// SMIL 家族标签与 beacon 零出现、不动点、render 零 marker、良性对照存活；
+/// 两个结构性加固实证锁定：SVG 命名空间子树连坐清除（`<svg><a href=…>`
+/// 整体清空，命名空间混淆零额外暴露）与 foreign-content breakout 走普通白
+/// 名单（幸存者只有白名单标签，`<img>` 载体依旧死亡）；(3) 五种嵌入上下
+/// 文加倍探测；(4) 端到端 RFC 822 multipart/alternative 全语料单独成信
+/// （宽度 40/80/120）＋组合信，URL 提取面零 beacon、良性锚以脚注存活并被
+/// 提取；(5) `.svg` 附件两种投放（multipart/mixed 与 multipart/related;
+/// type="image/svg+xml"）——`ContentType::Other` 不透明叶（非 text/非
+/// html、HTML 过滤器选择谓词永不选中、`decode_rec` 零内联、Display 惰性
+/// 展示、显式 decode 才逐字节给原始文档）；(6) 纯文本形诚实观测（字面引
+/// 用 `<animate …>` 源码是转义文本，提取面可作诚实链接数据、永不自动抓
+/// 取）与兄弟语料标记隔离。
+///
+/// 与近亲划界：CVE-2023-36763（#133）拥有 HTML 远程引用家族与零交互无外
+/// 联基线；CVE-2026-62643（#194）拥有 CSS 引用载体裸 token 与解码轴；
+/// CVE-2020-35730（#162）拥有 svg/iframe/style 元素 XSS 原料；CVE-2023-5631
+/// （#165）拥有 SVG 文档 XSS 投递。本文件拥有 **SMIL 动画劫持轴**与
+/// **`.svg` 附件不透明叶形态**。语料 marker `rc35543.example` 家族与兄弟
+/// 文件逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**——SMIL 载体族死
+/// 在默认拒绝的标签白名单（命名空间混淆连整棵子树一起死），`.svg` 附件是
+/// 永不进入渲染管线的不透明叶，meli 全管线无任何自动外联原语。
+///
+/// [`cve_2026_35543`]: self::cve_2026_35543
+#[cfg(test)]
+#[path = "CVE-2026-35543.rs"]
+mod cve_2026_35543;
+
+/// CVE-2026-75004（Roundcube Webmail < 1.6.18、1.7.x < 1.7.3；2026-08-17
+/// 修复；CVSS 4.3，CWE-77）**managesieve 插件规则名引号不当 → 经 Sieve
+/// 脚本特制规则名绕过 `managesieve_disabled_actions` 禁用清单**攻击模拟
+/// 回归（Gitea issue #198）。等价面映射：meli 无 managesieve；按「不可信
+/// 名字 → 解释型上下文」逐面证明——mailcap `%{param}`/`%t`/`%s` 的上下文
+/// 感知 shell armor（CVE-2016-3714 系）+ 真实 spawn 往返、通知脚本
+/// `Command::new` + `.arg()` 的 exec-argv 边界、`query_to_sql` 六分支
+/// `escape_double_quote` 引号边界与参数化预言机命中集一致（CVE-2021-
+/// 44026 契约）、tags/flags 固定片段白名单。**缺口检出与修复**：RFC 2047
+/// Q 解码的 CRLF 流入回复草稿 Subject/To 头后，`Draft::to_edit_string`
+/// 原样写入 `$EDITOR` 缓冲，值内非折叠换行让 `Draft::from_str` 把攻击者
+/// 行解析成新头（如 `Bcc:`）绕过 `finalise` 卡点；修复为
+/// `neutralize_unfoldable_newline` armor（非折叠 CR/LF → 单空格，合法
+/// 折叠续行原样保留），编辑器往返不再诞生原集合之外的头。第二缺口在
+/// `query_to_sql` 的 `Flags` 分支：多 flag 列表末位的未知 flag 留下悬空
+/// `AND )` 的语法非法 SQL——改为先收集白名单片段再 join，未知 flag 对
+/// SQL 文本真正不可见。发送面 fail-closed 卡点与 NUL 惰性语义分别归
+/// CVE-2023-4875/#44 与其自身锁定，本文件 L6 复核不重定义。
+#[cfg(test)]
+#[path = "CVE-2026-75004.rs"]
+mod cve_2026_75004;
+
+/// CVE-2026-75000（Gitea issue #197）：Roundcube Webmail &lt; 1.6.18、
+/// 1.7.x &lt; 1.7.3 的 SVG `animate` `by` 属性清洗不足 → 二次绕过远程图片
+/// 拦截（CVE-2026-35543 于 1.6.14 修复后的新变体，补丁式封堵漏了 `by`；
+/// CWE-669，CVSS 5.8）。本模块按 meli 的 sanitize→render 唯一 HTML 消费
+/// 通路做 L0–L4 攻击模拟回归：`by` 完整变体族、35543 全轴内嵌回归、动画
+/// 属性/元素完备性、纯文本与良性对照；两族 host（`rc75000.example` 与
+/// `rc35543reg.example`）逐字隔离，并断言等价面结构性免疫。
+#[cfg(test)]
+#[path = "CVE-2026-75000.rs"]
+mod cve_2026_75000;
+
+/// CVE-2026-33369（Zimbra Collaboration 10.0.x/10.1.x，2026-03-20 发布，
+/// 10.1.16 修复；CVSS 3.1 4.3，CWE-20）**Mailbox SOAP `FolderAction`
+/// LDAP 注入**攻击模拟回归（Gitea issue #199）：用户输入未净化即并入
+/// LDAP 搜索过滤器，特制请求读取敏感目录属性。meli 无 LDAP 面，等价面
+/// 是「不可信/用户输入 → 查询/过滤器构造」的四个目标路径，LDAP 过滤器
+/// 注入族语料（`*`、`(`/`)`、`\2a` 转义混淆、NUL 截断、`a*` 通配拓宽、
+/// `)(objectClass=*)` 布尔注入、CJK/大小写折叠）投放于搜索关键词、
+/// mailbox 名、标签名、联系人查询字段。
+///
+/// [`cve_2026_33369`] 分七层锁定：L0 语料自检（marker
+/// `ldap33369.example` 与兄弟语料逐字隔离）；L1 Zimbra 缺陷模型 fail
+/// oracle（内插式过滤器构造器真的被语料破出值位置/激活通配符，meli
+/// 三个构造面结构逐字节不变）；L2 SQL 面（`query_to_sql` 命中集 ==
+/// 参数化预言机 `LIKE '%'||?1||'%'`，且 == Rust 子串预言机；`a*` 只
+/// 命中字面行、`\2a` 不解码、NUL 检索词 prepare fail-safe、LDAP 形状
+/// tags 在 Flags 分支不可见、`%`/`_` 作诚实观测归档）；L3 IMAP SEARCH
+/// 面（RFC 3501 严格 quoted 往返、CJK literal `{n}`==字节长度、KEYWORD
+/// atom 白名单拒绝 LDAP 形状 tag）；L4 真实 `Sqlite3Cache`
+/// （LDAP 形状 mailbox 名/标签/subject 全链路参数绑定、schema/行数/
+/// 字节保真）；L5 通讯录（`AddressBook::search` 纯 `contains` 字面命中、
+/// `CardDeserializer` 敌意 vCard 字段逐字节原样）；L6 源码锚点。
+///
+/// **缺口检出与修复**：含 NUL 的检索值会以 quoted 形式内联进 IMAP 命令
+/// 文本——RFC 3501 §9 的 `CHAR`/`CHAR8` 都排除 0x00，NUL 在 IMAP 线格式
+/// 上不存在合法形态（Zimbra `\00` 截断过滤器的镜像，C 字符串服务器会把
+/// 命令行截在 NUL 处，CWE-93/158）。修复为双层 fail-closed：
+/// `to_imap_search_segments_quoted` 对 NUL 返回 `None`（与 CR/LF 同判例，
+/// `melib/src/imap/search.rs`），新增 `pub fn segments_contain_nul` 且
+/// `ImapStream::search`（`melib/src/imap/connection.rs`）在首个发送动作
+/// 前拒绝（`ProtocolError`）；孪生单测
+/// `test_imap_query_nul_has_no_wire_form_at_all` 落在生产 crate。
+///
+/// 与近亲划界：CVE-2021-44026（#169）拥有 SQL 参数化预言机契约与缓存
+/// 全量深扫；CVE-2018-14352/14353 拥有 IMAP `"`/`\` 转义与 literal 计费；
+/// CVE-2026-75004（#198）拥有 `query_to_sql` 引号边界与 tags 白名单；
+/// CVE-2009-0587 拥有 vCard 解析界。本文件拥有 **LDAP 过滤器语法轴**与
+/// **NUL 无线形式轴**。语料 marker `ldap33369.example` 族与兄弟语料逐字
+/// 隔离。
+///
+/// 结论：**等价面免疫证明 + 1 处 IMAP 线格式缺口修复**——LDAP 语法语料
+/// 在 SQL/缓存/通讯录三个面全部只作字面数据；IMAP SEARCH 面上含 NUL 的
+/// 检索值现已在序列化层与发送层双重 fail-closed。
+///
+/// [`cve_2026_33369`]: self::cve_2026_33369
+#[cfg(test)]
+#[path = "CVE-2026-33369.rs"]
+mod cve_2026_33369;
+
+/// CVE-2026-33370（Zimbra Collaboration 10.0.x / 10.1.x，10.1.16 修复；
+/// 2026-03-20，CVSS 3.1 6.1，CWE-79）**共享文件（Briefcase）类型判定/清洗
+/// 清单绕过 → 存储型 XSS**攻击模拟回归（Gitea issue #200）：伪装扩展名
+/// （`.svg`/`.html`/双扩展/大小写/NUL 后缀/无扩展）与 MIME sniff 诱饵试图
+/// 把含脚本的文件送进可执行呈现上下文。[`cve_2026_33370`] 以六个分层
+/// `#[test]` 锁定 meli 的三环等价面：分类环只认 `Content-Type` 声明（文件
+/// 名零参与，源码锚点钉死分类函数体内无扩展名清单）、呈现环的 HTML 门唯
+/// 一入口 `is_html()` 且嗅探诱饵以字面文本进 pager、外部打开环（mailcap/
+/// 进程外程序）以声明串为键且全在显式编号门之后。结论：**等价面免疫证
+/// 明，未发现缺口，未改动生产代码**——声明 HTML（含大写/网关揉碎形规范化）
+/// 只会被升进 [`sanitize`] 墙，武器载体全灭、良性锚存活。
+///
+/// [`sanitize`]: meli::mail::view::html_render::sanitize
+#[cfg(test)]
+#[path = "CVE-2026-33370.rs"]
+mod cve_2026_33370;
+
+/// CVE-2026-33371（Zimbra Collaboration 10.0.x / 10.1.x，EWS SOAP 接口；
+/// 2026-03-20 发布，10.1.16 修复；CVSS 4.3，CWE-611 XXE）**XML 外部实体
+/// 注入 → 解析器本地文件读取**攻击模拟回归（Gitea issue #201）：认证攻
+/// 击者提交的 XML 携带外部实体定义（`<!ENTITY xxe SYSTEM
+/// "file:///etc/passwd">`，含参数实体变体），解析器展开实体并回显。
+/// meli 无 SOAP/XML 解析面，等价面按 issue 指定为「外部实体引用 → 本地文
+/// 件读取」：实体/引用注入族（`<!ENTITY`/参数实体 `%`/`SYSTEM file:///`/
+/// `SYSTEM https://`/SVG `<!DOCTYPE`/vCard `URL:file:///`/ICAL
+/// `ATTACH;VALUE=URI:file://`/`message/external-body` local-file）投放于
+/// text/plain、text/html、附件三种形态，[`cve_2026_33371`] 分层证明：解
+/// 析面 XML/SVG/external-body 附件是不透明 `Other` 叶、decode 逐字节保真
+/// （实体定义串与调用以惰性字面字节保留，永不展开）；HTML 消毒面声明族
+/// 整体死亡、`&xxe;` 退化为转义字面文本（html5ever 只认固定实体表）；
+/// `file:` 全拼写族不过启动门；vCard 导入面 `URL:file:///` 只落
+/// `card.url()`/`card.links` 字符串元数据；源码/依赖锚点——邮件路径零
+/// XML 解析器痕迹，全树唯一 quick-xml 锁在可选 `webdav` 特性之后且只消
+/// 费用户自配置 CardDAV 服务器的 HTTP 响应、无 DTD/实体处理代码。
+///
+/// 与近亲划界：CVE-2023-36763（#133）拥有 external-body 不透明基线（本
+/// 文件复归 local-file 形态）；CVE-2023-35636（#132）拥有 ICS URL/ATTACH
+/// 惰性基线；CVE-2026-35543（#196）拥有 SVG 附件基线；CVE-2024-21413
+/// （#22）拥有 `file:` 启动门基线。本文件拥有 XML 实体展开轴与 XML 解析
+/// 器依赖面证明。语料 marker `xxe33371.example` 族与兄弟语料逐字隔离。
+///
+/// 结论：**等价面免疫证明，未发现缺口，未改动生产代码**。
+///
+/// [`cve_2026_33371`]: self::cve_2026_33371
+#[cfg(test)]
+#[path = "CVE-2026-33371.rs"]
+mod cve_2026_33371;
+
+/// CVE-2026-33372（Zimbra Collaboration 10.0 / 10.1 Webmail，2026-03-20 发布，
+/// 10.1.16 修复；CVSS 3.1 5.4，CWE-352 CSRF）**CSRF 令牌「来源位置」校验
+/// 不当**攻击模拟回归（Gitea issue #202）：设计要求令牌出现在请求头里，应用
+/// 却接受请求体中携带的令牌——「授权材料来自哪个通道」未被校验。meli 无
+/// web 会话 / Cookie / SOAP 面，等价不变量是「授权材料只来自它被指定的可
+/// 信通道，邮件内容/URL/mailto 参数里的同形数据永远只能是数据」。攻击语料
+/// 按 issue 指定的授权走私族构造（RFC 8058 one-click
+/// `List-Unsubscribe=One-Click` 指令头、`?token=`/`?auth=` 查询参数、
+/// mailto 自动动作参数、伪造 `X-CSRF-Token`/`X-Auth-Token`/`Authorization`/
+/// `Cookie` 头），[`cve_2026_33372`] 分八层锁定：one-click 指令头被惰性忽
+/// 略（头名存在但零消费者，meli 无 POST 构造原语）、URL 令牌完整展示且受
+/// scheme 门与显式按键/确认门约束、mailto 授权形参数整条丢弃且 `?to=` 不能
+/// 重定向、伪造头只作显示数据（唯一的 `Authorization` 构造点全部配置供值且
+/// 跨源重定向拒绝）、SMTP/IMAP(含 OAUTHBEARER/XOAUTH2)/NNTP/JMAP/WebDAV 凭
+/// 据只从本地账号配置来（零环境变量）、JMAP `Session` 只在进程内存不落盘。
+///
+/// **缺口检出与修复**：`UnsubscribeAction::target_description` 对
+/// `Send(mailto)` 只枚举 `Mailto::address`（`To:`），而实际发送的草稿含
+/// 解析器保留的 `Cc`/`Bcc`，SMTP 信封把三者都加入 `RCPT TO`
+/// （`strip_bcc_headers` 只剥 DATA 副本的头）——`List-Unsubscribe:
+/// <mailto:list@example?bcc=harvest@attacker>` 会让用户在只看到 To 的授权
+/// 下发出盲抄件，`<mailto:?bcc=…>` 更会显示空目标；修复为
+/// `target_description` 枚举 `To`/`Cc`/`Bcc` 全部收件人头（展示即执行），
+/// 回归锁定于 `cve/src/CVE-2026-33372.rs` 与
+/// `meli-test/tests/test_unsubscribe_confirm.rs`。
+///
+/// 与近亲划界：CVE-2026-33373（#192）拥有授权令牌的时序语义（nonce/单次
+/// 消费/状态迁移吊销）；CVE-2024-38173（#131）拥有 `List-Unsubscribe`
+/// scheme 白名单；CVE-2023-23397（#21）拥有 `go_to_url` 启动 scheme 门。
+/// 本文件拥有**授权数据来源位置**与「授权展示必须覆盖执行动作」。语料
+/// marker `csrf33372.example` 族与兄弟文件逐字隔离。
+///
+/// 结论：**等价面免疫证明 + 1 处确认目标覆盖缺口修复**。
+///
+/// [`cve_2026_33372`]: self::cve_2026_33372
+#[cfg(test)]
+#[path = "CVE-2026-33372.rs"]
+mod cve_2026_33372;
+
+/// CVE-2026-35537（Roundcube Webmail < 1.5.14 / < 1.6.14，2026-03-18 发布
+/// 安全更新；CWE-502 不安全反序列化）**会话存储反序列化 → 未认证任意文件
+/// 写**攻击模拟回归（Gitea issue #204）：redis/memcache 会话数据按 PHP
+/// `unserialize` 语义还原为对象图，攻击者注入的会话载荷在反序列化时沿
+/// gadget 链触达文件写原语。meli 无 PHP 对象序列化/会话 handler 面，等价
+/// 面按 issue 指定为三个「不可信来源反序列化」目标路径——`melib/src/jmap/`
+/// （服务器 JSON 的 serde 强类型反序列化）、
+/// `melib/src/imap/sync/sqlite3_cache.rs`（缓存行读回）与
+/// `meli/src/sqlite3.rs`（搜索索引读回）。[`cve_2026_35537`] 分层锁定：
+/// JMAP 超预期字段只落 `EmailObject::extra` 纯数据、方法分派是静态期望名
+/// 比较、类型混淆矩阵/300 层深嵌套/4 MiB 巨型字符串全部干净 `Err` 或有界
+/// 数据；会话四端点（`apiUrl`/`downloadUrl`/`uploadUrl`/`eventSourceUrl`）
+/// 的 `file:`/`http:`/`javascript:` 载荷在任何 I/O 前被
+/// `validate_session_urls` 的 https 门拒绝，URL 模板展开把攻击者 id 限制
+/// 在模板既有 scheme/host 内；缓存 envelope 篡改行被隔离进
+/// `invalid_envelopes` 并以占位邮件显示（原始 blob 逐字节保留、健康行不受
+/// 影响、数据库不重置），`find_envelope`/`mailbox_list`/`flags`/
+/// `msn_cache` 的畸形读回一律 fail-closed；搜索索引的 7/16 字节或 TEXT
+/// `hash` 列触发 `EnvelopeHash::FromSql` 的 `InvalidType`，整次搜索拒绝；
+/// 源码锚点证明三个面都不含对象图格式、`transmute`、进程/文件写原语。
+///
+/// **缺口检出与修复**：JMAP 共享反序列化入口此前只解析第一个 JSON 值，尾
+/// 随字节（拼接文档/垃圾）被静默忽略；现补
+/// `serde_json::Deserializer::end()` 校验「整个响应恰好是一个 JSON 文档」，
+/// 尾随非空白字节一律干净 `Err`（`melib/src/jmap/mod.rs`）。
+///
+/// 与近亲划界：CVE-2024-50624（#139）拥有 JMAP transport URL 的 https 硬
+/// 化基线；CVE-2018-14362（#156）拥有 `DatabaseDescription` 路径门与哈希
+/// 整数化基线；本文件拥有 **serde 强类型反序列化读回轴**（超预期字段/类型
+/// 混淆/深嵌套/巨型字符串/缓存行篡改）与 **URL 模板展开不越界轴**。
+///
+/// 结论：**等价面免疫证明 + 1 处宽松解析缺口修复**（JMAP 响应尾随字节
+/// 校验）。
+///
+/// [`cve_2026_35537`]: self::cve_2026_35537
+#[cfg(test)]
+#[path = "CVE-2026-35537.rs"]
+mod cve_2026_35537;
+
+
+/// CVE-2026-110249（Thunderbird < 158；MFSA 2026-109，2026-10-13，low，
+/// CWE-400；Mozilla bug 2077826）**恶意/被入侵/MITM 服务器用单个良构响应
+/// 携带巨量属性元素 → 客户端 CPU/内存资源耗尽 DoS**攻击模拟回归（Gitea
+/// issue #203）。meli 无 Exchange/SOAP 组件；按 issue 指定的「服务器响应
+/// 结构数量级耗尽」等价面覆盖 IMAP FETCH/SEARCH/LIST、JMAP 服务器 JSON、
+/// MIME multipart 与 NNTP LIST/GROUP。
+///
+/// 侦察检出两个真实缺口，均已随回归修复：
+///
+/// 1. **IMAP `read_lines` 二次 CRLF 重扫（CWE-407）**：
+///    `melib/src/imap/connection.rs` 每读入一个 64 KiB 块就对
+///    `ret[last_line_idx..]` 全量 `rfind("\r\n")`，而 `last_line_idx` 只在
+///    找到 CRLF 后前移。恶意服务器发出一条永不终止的超长响应行（单个
+///    FETCH 巨量属性 / 单行 SEARCH 结果末尾才给 CRLF），在 64 MiB 上限下
+///    总扫描量约 32 GiB（`BytesExt::rfind` 为逐字节 `windows(2)`），一条
+///    良构响应即可烧掉数十秒 CPU，正好复现本 CVE。修复：仿 SMTP/NNTP 引入
+///    单调 `searched` 游标（回退一字节以命中跨块 CRLF），已扫描前缀永不
+///    重扫。
+/// 2. **JMAP HTTP 响应体无字节上限（CWE-400）**：
+///    `melib/src/jmap/` 全部响应用 isahc 的 `text()` 全量读入，而 isahc 无
+///    响应体大小配置，chunked 无限流即可无界分配。修复：新增
+///    `jmap::connection::BoundedResponseText::text_bounded`，按块读取并复用
+///    共享 `enforce_response_size_limit`（`MAX_SERVER_RESPONSE_SIZE`，64
+///    MiB），超限 `ProtocolViolation` fail-closed；33 处 `text()` 全部切换。
+///
+/// [`cve_2026_110249`] 分 7 层锁定（详见模块文档）：①IMAP 解析层数百万
+/// SEARCH 序列号 / 数万 FLAGS 关键字 / 数万属性 / 20k FETCH 行，30 s 预算
+/// 内、计数与顺序精确、两次一致、未知属性 fail-closed；②IMAP 传输层真实
+/// `read_response`：无 CRLF 单行洪流与良构行洪流都在 64 MiB 处
+/// `ProtocolViolation`、累积 ≤ 上限 + 读缓冲、预算内完成（①的预算即二次
+/// 重扫回归）；③multipart 两万部件精确计数 + 200 层嵌套被 100 层上限截断；
+/// ④NNTP 十万行 LIST 分帧线性、4 MiB XOVER 字段有界、无限多行在 64 MiB
+/// 处 fail-closed；⑤JMAP 十万层嵌套在 serde_json 递归上限（128）干净
+/// `Err` 不爆栈、二十万键 + 百万元素数组预算内解析且计数精确；⑥JMAP 敌意
+/// 服务器永不结束的 chunked 响应体经 `connect` + `send_request` 在上限处
+/// `ProtocolViolation`，服务器写入有界；⑦源码锚点——64 MiB 常量与四个协议
+/// 读取点调用、IMAP 增量游标、JMAP 有界入口、multipart/BODYSTRUCTURE 深度
+/// 常量，全 `melib/src` 无 `disable_recursion_limit`，JMAP 目录无无界
+/// `.text()`。语料 marker `res-exhaust-110249` 与兄弟文件逐字隔离。
+///
+/// 与近亲划界：CVE-2018-14350（#144）锁 IMAP 响应字节上限本身；
+/// CVE-2018-14360 锁行分帧与 SMTP 增量扫描；CVE-2007-3166 锁字面量探测
+/// 二次扫描；CVE-2020-16947（#105）锁 multipart 嵌套深度。本文件拥有
+/// **结构数量级行为断言**、**IMAP 长行二次重扫修复**与**JMAP 响应体字节
+/// 上限修复**。
+///
+/// 结论：**检出并修复两个真实缺口，非纯免疫证明**。
+///
+/// [`cve_2026_110249`]: self::cve_2026_110249
+#[cfg(test)]
+#[path = "CVE-2026-110249.rs"]
+mod cve_2026_110249;
+
+/// CVE-2026-73573（Zimbra Collaboration < 10.1.17，Briefcase 文档编辑；
+/// 2026-08-13 发布，Zimbra 10.1.17 修复；CVSS 3.1；CWE-24）**`packages`
+/// 参数路径穿越**攻击模拟 regression（Gitea issue #205）：认证攻击者把
+/// `../` 族穿越序列放进用户可控参数，参数未经路径边界校验直接拼进文件系统
+/// 路径，读取 web 应用目录内的敏感文件。缺陷形状是「不可信字符串 →
+/// 文件系统路径」，与具体产品无关。
+///
+/// **meli 等价面映射（issue #205 侦察结论）**：meli 的每个「不可信字符串 →
+/// 落盘组件」面逐条检查——(1) 附件临时落盘
+/// `File::create_temp_file`（mailcap `%s`、open-with、预览共用；名称先过
+/// [`sanitize_filename`] + 长度预算，退化相对名改生成名）；(2) 附件另存/
+/// 批存/整封导出（`EnvelopeView::save_attachment`、
+/// `save_all_attachments_to`、`ExportMail`、线程导出；`Attachment::filename`
+/// 与 `Message-ID`/`Subject` 都经组件净化，落盘 `create_new` + `0600`）；
+/// (3) sqlite 缓存路径 `DatabaseDescription::db_path`（账号名 →
+/// identifier，`/`、`\`、NUL 拒绝）；(4) 日志名（`LOG_DIR`/
+/// `LOG_FILE_PREFIX` 常量，无邮件字节参与）；(5) 邮件导入（路径是用户
+/// 命令行实参，邮件内容不参与）。
+///
+/// [`cve_2026_73573`] 分 10 层锁定（详见模块文档）：L1 真实 MIME 载体把
+/// 全族拼写送到 `Attachment::filename`（含 RFC 2047 Q 编码 `=00` 投递的
+/// 真 NUL、608 字节超长名）；L2 组件净化器对全族 + 二次 percent-decode 后
+/// 仍折成单一块、`base.join` 不逃逸、≤ 192 字节；L3 临时落盘 `parent` 恒
+/// 为暂存目录、`0600`、drop 回收，`$HOME` 展开到目录时 `EISDIR`
+/// fail-closed；L4 另存面上级目录零残留；L5 目标目录预置符号链接不被跟随
+/// （`EEXIST`，链接目标字节不变）；L6 `.eml` 导出名有界 + 退化名兜底；
+/// L7 Subject→`meli-<title>` 批存目录组件有界；L8 `db_path` 拒绝盘符前缀
+/// 且字面拼写不逃逸 `directory`；L9 日志/导入面源码锚点；L10 净化器源码
+/// 契约。
+///
+/// **检出并修复三个真实缺口**：(A) `sanitize_filename` 不中和 Windows
+/// 盘符前缀——`C:evil` 是带 `Component::Prefix` 的盘符相对组件，
+/// `PathBuf::push` 会整体替换目标目录，攻击者无需 `/`/`\` 即可写出目录；
+/// 修复：净化器末段把组件开头的 `<字母>:` 改写为 `C-`，只动两字节前缀，
+/// `Re:` 等中段冒号保持原样（Windows 上仅打开失败，fail-closed）。
+/// (B) `ExportMail` 用 `sanitize_filename` + `format!("{name}.eml")` 自拼
+/// 文件名，无长度上限、无退化名兜底（4 KiB `Message-ID` → 保存静默
+/// `ENAMETOOLONG`，`..` → 裸 `.eml` 隐藏文件）；修复：改走 `eml_filename`。
+/// (C) `DatabaseDescription::db_path` 不识别盘符语义；修复：三个参与文件名
+/// 的字段拒绝 `^[A-Za-z]:`（内部冒号保留，Windows 上只写入失败、不逃逸）。
+///
+/// 与近亲划界：#26 CVE-2025-47176 拥有 `'.../...//'` 词素与导出名净化，
+/// 但其盘符断言在 Unix 测试机上只查 `components().count() == 1`，未锁
+/// `C:` 前缀的 `PathBuf::push` 语义；本文件拥有该类。#28 CVE-2024-43604
+/// 拥有附件名→保存路径端到端接线；#47 CVE-2003-0376 拥有长度预算；#61
+/// CVE-2002-2351 拥有尾点规则；#107 CVE-2000-0481 拥有固定缓冲面；#156
+/// CVE-2018-14362/14363 拥有头缓存分隔符校验。 marker 前缀
+/// `meli-cve-2026-73573-` 与 marker 域名 `zimbra73573.example` 与兄弟
+/// 文件逐字隔离。
+///
+/// 结论：**检出并修复三个真实缺口，非纯免疫证明**。
+///
+/// [`sanitize_filename`]: meli::types::sanitize_filename
+/// [`cve_2026_73573`]: self::cve_2026_73573
+#[cfg(test)]
+#[path = "CVE-2026-73573.rs"]
+mod cve_2026_73573;
+/// CVE-2026-73575（Zimbra Collaboration < 10.1.17，2026-08-13 发布，10.1.17
+/// 修复；CVSS 3.1，CWE-352 CSRF）**EWS 端点请求内容类型校验不当 → CSRF**
+/// 攻击模拟回归（Gitea issue #207）：EWS 端点未严格校验请求的
+/// Content-Type/来源，非预期形态的请求也被接受处理——「声明的形态」与
+/// 「接受的形态」不匹配。
+///
+/// **meli 等价面映射**：出站请求/命令的**形态**（HTTP 方法、Content-Type
+/// 头、请求端点、SMTP 命令框架与顺序）只能由客户端代码与本地配置决定，
+/// 邮件字节只作不透明载荷/显示数据；入站响应的声明形态必须与处理语义
+/// 匹配，缺失/异形/不可解码一律 fail-closed。四条攻击路径：诱导请求族
+/// （one-click 头 + 令牌 URL + HTML 自动提交表单 + EWS SOAP/JSON 方言部件
+/// 全部死成惰性数据/显示文本）、JMAP 请求构造（唯一 Content-Type 常量
+/// `application/json`、blob 上传不透明载荷、端点模板 fail-closed 实例化）、
+/// SMTP 命令序列（#123 判例正交面：AUTH 严格先于且门控 MAIL FROM，敌意
+/// 地址语料产不出带 CR/LF 的信封 spec）、入站 SSE 响应形态校验。
+///
+/// [`cve_2026_73575`] 分层锁定：L0 语料逐字到达各门（令牌 URL、EWS 方言
+/// 部件声明类型与原始体）；L1 出站形态全客户端常量（源码锚点 + 行为：
+/// 全仓恰一处 Content-Type 默认头、HTTP 客户端构造点封闭三处、
+/// `upload_request_format` 未知参数 `ProtocolError`）；L2 入站形态
+/// fail-closed（缺口回归：SSE 缺 Content-Type 头 → Err；EWS JSON/SOAP 方
+/// 言及撞库形 → Err；非 UTF-8 头值 → Err 非 panic；合法参数形 → Ok；源
+/// 码锚点：流循环消费真实响应头）；L3 SMTP（真实 socket：认证成功 wire
+/// 序列 AUTH < EHLO < MAIL FROM 单行框架；认证失败 wire 零事务字节；
+/// G-C 回归：折叠引号串信封在写出任何信封字节前 fail-closed；无网络：
+/// 敌意地址语料仅折叠引号串可产出脏 spec（如实记录），mailto `%0d%0a`
+/// 注入被 RFC 6068 门拒绝）；L4 确认门前置（退订目标惰性 verbatim、
+/// scheme 走私全拒、HTML 自动提交原料过真实 `sanitize` 全灭、EWS 方言
+/// 部件只作显示数据）。
+///
+/// 与近亲划界：CVE-2026-33372（#202）拥有授权数据**来源通道**；33373
+/// （#192）拥有确认门令牌**时序**；73572 拥有 HTML 渲染**脚本/XSS 原料**；
+/// 38173（#131）/23397（#21）拥有 scheme 白名单与启动点；38373（#123）
+/// 拥有 STARTTLS 与认证开关**正交性**；35537 拥有 JSON 响应**尾随字节**；
+/// 50624 拥有传输层 **https 强制**；110249 拥有响应体**字节上限**；6505
+/// 拥有 external-body。本文件拥有**请求/响应「形态校验」轴**。marker 域
+/// 名 `ews73575.example` 族与哨兵 `cve-2026-73575-*` 与兄弟文件逐字隔离。
+///
+/// 结论：**免疫证明 + 检出并修复三处缺口**——G-A JMAP event source 此
+/// 前对缺 Content-Type 头的响应跳过校验继续解析（fail-open）；G-B 非
+/// UTF-8 头值命中 `to_str().unwrap()` panic 流循环（新增
+/// `validate_event_source_content_type` 后缺头/异形/非 UTF-8 全部
+/// fail-closed）；G-C 邮件派生的折叠引号串信封地址携带 CR/LF 上 SMTP
+/// 命令框架（`mail_transaction` 现在在任何信封字节上线前校验全部信封
+/// 地址，含框架字节一律 fail-closed，RFC 5321 §4.1.2 合法地址零误
+/// 伤）。
+///
+/// [`cve_2026_73575`]: self::cve_2026_73575
+#[cfg(test)]
+#[path = "CVE-2026-73575.rs"]
+mod cve_2026_73575;
+
+/// CVE-2026-43859 — mutt < 2.3.2 IMAP CRAM-MD5 `strfcpy` 二进制摘要 NUL 截断
+/// （CWE-158）攻击模拟。meli 无 CRAM-MD5 面：按 issue #208 约定映射到等价
+/// 「二进制凭证经字符串边界」面（SASL-IR/续行 PLAIN、LOGIN literal、
+/// ManageSieve 引号 armor、oauth token 字节通道）；RFC 2195 向量锁定独立
+/// HMAC-MD5 预言机，mutt strfcpy 模型还原 + 真实连接逐字节免疫断言。
+/// 结论：免疫证明。
+///
+/// [`cve_2026_43859`]: self::cve_2026_43859
+#[cfg(test)]
+#[path = "CVE-2026-43859.rs"]
+mod cve_2026_43859;
+
+/// CVE-2026-43860 — mutt < 2.3.2 IMAP CRAM-MD5 `hash_passwd` 摘要长度差一
+/// 截断（CWE-193）攻击模拟（issue #209）：`strfcpy(secret, hash_passwd,
+/// MD5_DIGEST_LEN)` 把 16 字节数据长度当缓冲区大小，`dlen-1` 语义使 >64
+/// 字节口令的 HMAC 密钥丢掉第 16 个摘要字节。meli 无 CRAM-MD5 面：按
+/// issue 约定映射到等价「认证材料长度派生」面——RFC 2202 块边界向量锁定
+/// 独立 HMAC-MD5 预言机，mutt `dlen-1` 模型还原（63/64 无缺陷、65/66/80
+/// 缺陷分支、静默侥幸律）、±1 偏移锁、base64 模 3 边界长度透明、meli 三
+/// 种 SASL 构造与 token 恢复精确长度、真实连接差一族口令逐字节确定性、
+/// 源码锚点证明认证路径零 `-1` 长度算术。与 CVE-2026-43859 划界：本文件
+/// 拥有长度差一轴，43859 拥有 NUL 截断轴。结论：免疫证明，未发现缺口。
+///
+/// [`cve_2026_43860`]: self::cve_2026_43860
+#[cfg(test)]
+#[path = "CVE-2026-43860.rs"]
+mod cve_2026_43860;
+
+/// CVE-2026-43861 — mutt < 2.3.2 `url_pct_decode` 不检查解码产物中的
+/// NUL（CWE-158）攻击模拟（issue #210）：mailto 地址轴 `%00` 曾被地址
+/// 解析器静默截断（实际收件人与 URI 文本分叉）、hfield 轴 `%00` 曾把
+/// NUL 保真穿透到出站消息、收件头字面 NUL 曾经回复/转发穿透 wire 门；
+/// 三缺口修复回归（mutt 12f54fe 同款拒绝语义 + finalise chokepoint）。
+/// URL 显示/提取/启动与 list-unsubscribe 轴为免疫证明（字节保真、
+/// 无解码分叉、启动门对内嵌 NUL fail-closed）。结论：检出并修复三处
+/// 真实缺口。
+///
+/// [`cve_2026_43861`]: self::cve_2026_43861
+#[cfg(test)]
+#[path = "CVE-2026-43861.rs"]
+mod cve_2026_43861;
+/// CVE-2026-43863 — mutt < 2.3.2 crypt-gpgme `data_object_to_stream` 死循
+/// 环（CWE-253：`gpgme_data_read` 的 -1 错误返回被 `while (nread)` 当
+/// 数据，内层指针步进越过 4096 缓冲区打印内存、外层永不退出）攻击模
+/// 拟（issue #212）。等价面取「数据对象 → 汇拷贝循环的终止性与游标
+/// 推进」：mutt 脆弱循环忠实模型还原（探测上限证明不退出 + 越界）、
+/// std `read_to_end` 汇对 CVE 输入族（零长度/立即 EOF/1 字节短读/
+/// 探针与 8 KiB 边界/1 MiB+1/中途错误）的终止/保真/单调/fail-closed
+/// 断言、真 gpgme mem 数据对象回放、真引擎解密/加密端到端（一次性
+/// 密钥，CRLF 逐字节保真 + 敌意密文族预算内干净 Err）、CLI 参考脚本
+/// 复放与 `timeout=2` 锚点、`gpgme_data_read` 唯一调用点 `>= 0` 判定
+/// 的结构锚点。结论：免疫证明，未发现缺口。
+///
+/// [`cve_2026_43863`]: self::cve_2026_43863
+#[cfg(test)]
+#[path = "CVE-2026-43863.rs"]
+mod cve_2026_43863;
+/// CVE-2026-43862 — mutt < 2.3.2 IMAP GSSAPI 安全级协商数据未校验即消费
+/// （CWE-843）攻击模拟（Gitea issue #211）。meli 无 GSSAPI：按 issue 约定
+/// 映射到等价「认证安全级协商不可被服务器/中间人降级」面——oauth2 机制门
+/// 与 TLS 门均先于凭据解析、固定机制全集、LOGIN 兜底由配置通道决定、
+/// LOGINDISABLED/PREAUTH/失败取消全部 fail-closed、半认证流不复用且重连
+/// 重推导同一机制。L0 还原 mutt 截断 token / 64 位 `long` 两缺陷，L1 以
+/// 真实 loopback 敌意服务器驱动真实 `ImapStream::new_connection` 与
+/// `ImapConnection`，L2 源码锚点锁定机制词素、字节序与取消 token。
+/// 结论：发现并修复 1 个认证状态严格性缺口（PREAUTH 前缀无词边界，畸形
+/// greeting 不再跳过登录流）；T10b/T11 分别锁定该修复与 STARTTLS 拒绝面。
+///
+/// [`cve_2026_43862`]: self::cve_2026_43862
+#[cfg(test)]
+#[path = "CVE-2026-43862.rs"]
+mod cve_2026_43862;
+
+/// CVE-2026-43864 — mutt < 2.3.2 `show_sig_summary` NULL 指针解引用
+/// （CWE-476，CVSS 2.5 DoS；修复 commit ebfa296904）攻击模拟（issue #213）：
+/// 签名状态摘要的某可选字段为空时未判空即使用。等价面映射两层：melib
+/// gpgme FFI 边界——`gpgme_signature_t::fpr` 可空（无法归属的签名段交出
+/// NULL），转换曾把它裸喂 `CStr::from_ptr`（合成零化条目复放 = SIGSEGV，
+/// 修复为 `NonNull::new` 判空降级空 key id）；汇点显示——空指纹 + Ok 状态
+/// 曾渲染成 `good signature by [?]`（无法归属签名呈现为已验证，修复为
+/// 整体 fail-closed Err）。L0 mutt 崩溃模型还原（触发形 panic / 补丁形降级
+/// 0）、L1 结构锚点、L2 JSON 契约字段缺失/空值族 + 空摘要族（裁决载体是
+/// 显式 status：诚实 GOODSIG 空摘要形仍 good，空指纹绝不 good；撤销/过期
+/// 令牌必须呈现）+ catch_unwind 全语料 panic-free/确定/有界扫描、L3 真 gpg
+/// 一次性密钥矩阵（好/篡改/缺钥 ERRSIG+NO_PUBKEY/撤销 REVKEYSIG/过期
+/// EXPKEYSIG/畸形族）+ 契约翻译进汇点、L4 CLI 脚本 shim 复放（悬挂
+/// NEWSIG 段、空状态流、缺指纹行、矛盾退出码形）。与 #119/#172 划界：
+/// 那两件拥有 status 契约与多签名聚合；本文件拥有「摘要/指纹可选字段
+/// 空值 → 崩溃/无法归属呈现」轴。结论：检出并修复两处真实缺口。
+///
+/// [`cve_2026_43864`]: self::cve_2026_43864
+#[cfg(test)]
+#[path = "CVE-2026-43864.rs"]
+mod cve_2026_43864;
+/// CVE-2026-96869（Thunderbird < 157，Networking 组件，CWE-200，CVSS 4.3，
+/// Mozilla 未公开根因）**网络栈错误消息/日志面信息泄露** regression
+/// （issue #193）。
+///
+/// issue #193 按等价面做免疫证明与缺口检测：错误消息与日志面不得回显明文
+/// 口令与 URL userinfo；认证字节只在 TLS 建立后上线；凭据不随重定向跨主机
+/// 重放。侦察确认两处真缺口并已修复：G1 `Secret` 派生 `Debug` 泄露明文口令
+/// （`melib/src/conf/field_types.rs` 去掉 derive、手写脱敏 Debug）；
+/// G2 `validate_transport_url` 放行 `scheme://user:pass@host/`（JMAP 与
+/// WebDAV 两份 gate 均新增 userinfo 拒绝，错误只回显 scheme://host:port）。
+/// TLS 先于认证（CVE-2020-15954 / CVE-2021-38373）与重定向跨主机
+/// （`RedirectPolicy::None` + `redirect_target`）两轴经行为/源码断言确认免疫。
+///
+/// [`cve_2026_96869`] 分层：L1 纯模型复刻「错误串内嵌完整 URL + Debug
+/// 派生口令」的旧客户端并对照加固模型；L2 锁定 `Secret` 与
+/// IMAP/SMTP/JMAP/NNTP 配置的 Debug 脱敏、JMAP `validate_transport_url`
+/// 与 `validate_session_urls` 的 userinfo 拒绝矩阵（含 source 链全走查）
+/// 及回环/https 正常 URL 放行；L3 用 127.0.0.1 敌意服务器锁定 IMAP
+/// STARTTLS 伪造 OK/拒绝、NNTP STARTTLS 拒绝、SMTP
+/// require_auth+STARTTLS 拒绝四场景的错误链与线上字节零口令；L4 源码扫描
+/// 三个带凭据客户端的 `RedirectPolicy::None`、`redirect_target` 的
+/// userinfo 剥离先于 origin 比较、`patch_retrieve` 无凭据 builder、
+/// `Secret` 手写 Debug、JMAP URL 回显位于 gate 下游、WebDAV gate 同构，
+/// 以及全仓 `tracing!`/`format!` 行无 Secret 承载配置的 `{:?}`。
+///
+/// 结论：**修复 G1/G2 两个真缺口，其余两轴免疫**；未新增依赖，未改动
+/// `.gitea/`、CHANGELOG 或 AGENTS.md。
+///
+/// [`cve_2026_96869`]: self::cve_2026_96869
+#[cfg(test)]
+#[path = "CVE-2026-96869.rs"]
+mod cve_2026_96869;

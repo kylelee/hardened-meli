@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use futures::lock::Mutex as FutureMutex;
-use isahc::AsyncReadResponseExt;
+use super::connection::BoundedResponseText;
 
 use crate::{
     error::{Error, ErrorKind, Result},
@@ -87,7 +87,7 @@ impl JmapOp {
                 None,
             )?)
             .await?
-            .text()
+            .text_bounded()
             .await?;
 
         self.store

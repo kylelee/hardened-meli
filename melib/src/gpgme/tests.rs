@@ -166,3 +166,91 @@ fn run_gpgme_keylist() {
         .import_key(gpgme_ctx.new_data_mem(PRIVKEY).unwrap())
         .unwrap_err();
 }
+
+/// CVE-2026-43864 (mutt < 2.3.2, CWE-476) regression: `show_sig_summary`
+/// crashed dereferencing the (absent) key object of a signature whose
+/// summary bits demanded rendering key detail. The melib-side equivalent
+/// nullable per-signature data is `gpgme_signature_t::fpr`: gpgme may
+/// hand out a NULL pointer for a signature it could not attribute to a
+/// key (e.g. a segment opened by a NEWSIG status line that never received
+/// a verdict). The gpgme→melib conversion must degrade it to an empty key
+/// id instead of feeding the NULL pointer to `CStr::from_ptr`.
+#[test]
+fn gpgme_null_fpr_signature_degrades_to_empty_keyid() {
+    use crate::{
+        email::pgp::Summary,
+        gpgme::{
+            bindings::{
+                _gpgme_signature, gpgme_hash_algo_t, gpgme_pubkey_algo_t, gpgme_signature_t,
+                gpgme_sigsum_t, gpgme_validity_t,
+            },
+            sign::SignaturesIter,
+        },
+    };
+
+    // The zeroed-entry conversion below never calls into the library
+    // handle (`gpgme_error_to_string` is only reached when status > 0 or
+    // validity_reason > 0, neither of which a NEWSIG-opened entry
+    // carries), so any loadable shared object serves as the iterator's
+    // handle on hosts without a dlopen-able libgpgme; prefer the real one.
+    let lib = [
+        "libgpgme.so.11",
+        "libgpgme.so.45",
+        "libgpgme.so",
+        "libc.so.6",
+        "libc.so",
+    ]
+    .iter()
+    .find_map(|name| unsafe { libloading::Library::new(name).ok() })
+    .map(std::sync::Arc::new);
+    let Some(lib) = lib else {
+        eprintln!("INFO: no loadable shared object for the gpgme library handle, skipping.");
+        return;
+    };
+
+    // The zeroed entry gpgme allocates for a NEWSIG-opened segment that
+    // never received a verdict line: fpr == NULL, status == 0 (no error),
+    // summary zero (then armed with the very bits mutt crashed on).
+    let entry = Box::new(_gpgme_signature {
+        next: std::ptr::null_mut(),
+        summary: gpgme_sigsum_t(
+            gpgme_sigsum_t::GPGME_SIGSUM_KEY_EXPIRED.0 | gpgme_sigsum_t::GPGME_SIGSUM_KEY_MISSING.0,
+        ),
+
+        fpr: std::ptr::null_mut(),
+        status: 0,
+        notations: std::ptr::null_mut(),
+        timestamp: 0,
+        exp_timestamp: 0,
+        _bitfield_align_1: [],
+        _bitfield_1: Default::default(),
+        validity: gpgme_validity_t::GPGME_VALIDITY_UNKNOWN,
+        validity_reason: 0,
+        pubkey_algo: gpgme_pubkey_algo_t::GPGME_PK_RSA,
+        hash_algo: gpgme_hash_algo_t::GPGME_MD_NONE,
+        pka_address: std::ptr::null_mut(),
+        key: std::ptr::null_mut(),
+    });
+    let raw = Box::into_raw(entry);
+    let mut iter = SignaturesIter::new(raw as gpgme_signature_t, false, lib);
+    let sig = iter
+        .next()
+        .expect("the NULL-fpr entry must convert, not crash");
+    assert!(
+        sig.cert.keyid.is_empty(),
+        "a NULL fpr must degrade to an empty key id: {:?}",
+        sig.cert.keyid
+    );
+    assert!(
+        sig.cert.status.is_ok(),
+        "the zeroed entry carries no error status"
+    );
+    assert_eq!(
+        sig.summary,
+        Summary::KEY_EXPIRED | Summary::KEY_MISSING,
+        "summary bits must survive the conversion"
+    );
+    assert!(iter.next().is_none(), "the chain ends at the NULL next");
+    drop(iter);
+    drop(unsafe { Box::from_raw(raw) });
+}

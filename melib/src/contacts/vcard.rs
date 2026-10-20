@@ -46,25 +46,25 @@ use crate::{
 };
 
 /* Supported vcard versions */
-pub trait VCardVersion: std::fmt::Debug {
+pub trait VCardVersion: Clone + std::fmt::Debug {
     const NAME: &str;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct VCardVersionUnknown;
 impl VCardVersion for VCardVersionUnknown {
     const NAME: &str = "Unknown";
 }
 
 /// Version 4 <https://tools.ietf.org/html/rfc6350>
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct VCardVersion4;
 impl VCardVersion for VCardVersion4 {
     const NAME: &str = "4";
 }
 
 /// <https://tools.ietf.org/html/rfc2426>
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct VCardVersion3;
 impl VCardVersion for VCardVersion3 {
     const NAME: &str = "3";
@@ -79,17 +79,17 @@ const FOOTER_LF: &str = "END:VCARD\n";
 const HEADER: &str = "BEGIN:VCARD"; //VERSION:4.0";
 const FOOTER: &str = "END:VCARD";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct VCard<T: VCardVersion>(
     IndexMap<String, ContentLine>,
-    std::marker::PhantomData<*const T>,
+    std::marker::PhantomData<fn() -> T>,
 );
 
 impl<V: VCardVersion> VCard<V> {
     pub fn new_v4() -> VCard<impl VCardVersion> {
         VCard(
             IndexMap::default(),
-            std::marker::PhantomData::<*const VCardVersion4>,
+            std::marker::PhantomData::<fn() -> VCardVersion4>,
         )
     }
 
@@ -103,6 +103,7 @@ pub struct ContentLine {
     group: Option<String>,
     params: Vec<String>,
     value: String,
+    others: Vec<Self>,
 }
 
 impl CardDeserializer {
@@ -143,7 +144,7 @@ impl CardDeserializer {
             &input[HEADER_LF.len()..input.len() - footer.len()]
         };
 
-        let mut ret = IndexMap::default();
+        let mut ret: IndexMap<String, ContentLine> = IndexMap::default();
 
         enum Stage {
             Group,
@@ -210,15 +211,42 @@ impl CardDeserializer {
                 .set_kind(ErrorKind::ValueError));
             }
             el.value = l[value_start..].replace("\\:", ":");
-            ret.insert(name, el);
+            if ret.contains_key(&name) {
+                ret.entry(name).or_default().others.push(el);
+            } else {
+                ret.insert(name, el);
+            }
         }
-        Ok(VCard(ret, std::marker::PhantomData::<*const VCardVersion4>))
+        Ok(VCard(
+            ret,
+            std::marker::PhantomData::<fn() -> VCardVersion4>,
+        ))
     }
+}
+
+/// Return `true` when `value` starts with an RFC 3986 URI scheme, i.e.
+/// `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"`.
+///
+/// This is a dependency-free equivalent of the upstream `url::Url::parse`
+/// check used to decide whether a `SOCIALPROFILE` value is a URI or a bare
+/// username; the `url` crate is an optional dependency here and must stay off.
+fn has_uri_scheme(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 impl<V: VCardVersion> TryInto<Card> for VCard<V> {
     type Error = crate::error::Error;
 
+    /// Lossily convert according to `RFC9555`.
+    ///
+    /// `Loffredo, M. and R. Stepanek, "JSContact: Converting from and to vCard",
+    /// RFC 9555, DOI 10.17487/RFC9555, May 2024,
+    /// <https://www.rfc-editor.org/info/rfc9555/>.`
     fn try_into(mut self) -> Result<Card> {
         let mut card = Card::new();
         card.set_id(CardId::Hash({
@@ -239,8 +267,55 @@ impl<V: VCardVersion> TryInto<Card> for VCard<V> {
         } else {
             return Err(Error::new("FN entry missing in VCard.").set_kind(ErrorKind::ValueError));
         }
-        if let Some(val) = self.0.swap_remove("NICKNAME") {
-            card.set_additionalname(val.value);
+        if let Some(mut val) = self.0.swap_remove("NICKNAME") {
+            use crate::contacts::jscontact::json_types::Nickname;
+
+            let add_nick =
+                |card: &'_ mut Card, val: ContentLine, ctr: &mut u32| -> (String, Nickname) {
+                    let ContentLine {
+                        group,
+                        value,
+                        others,
+                        params,
+                    } = val;
+                    debug_assert!(others.is_empty());
+
+                    let mut group = group.unwrap_or_else(|| format!("NICK-{ctr}"));
+                    let pref = params
+                        .iter()
+                        .find_map(|p| p.strip_prefix("PREF=")?.parse::<u64>().ok());
+                    let contexts = params
+                        .iter()
+                        .find_map(|p| Some((p.strip_prefix("TYPE=")?.to_string(), true)))
+                        .into_iter()
+                        .collect();
+                    while card.nicknames.contains_key(&group) {
+                        *ctr += 1;
+                        group = format!("NICK-{ctr}");
+                    }
+                    *ctr += 1;
+                    (
+                        group,
+                        Nickname {
+                            name: value,
+                            contexts,
+                            pref,
+                            ..Nickname::default()
+                        },
+                    )
+                };
+
+            let first_value = val.value.clone();
+            let mut ctr = 1;
+            let others = std::mem::take(&mut val.others);
+            let (group, entry) = add_nick(&mut card, val, &mut ctr);
+            card.nicknames.insert(group, entry);
+            for val in others {
+                let (group, entry) = add_nick(&mut card, val, &mut ctr);
+                card.nicknames.insert(group, entry);
+            }
+            // Keep the old single-value display semantics.
+            card.set_additionalname(first_value);
         }
         if let Some(val) = self.0.swap_remove("BDAY") {
             /* 4.3.4.  DATE-AND-OR-TIME
@@ -270,14 +345,262 @@ impl<V: VCardVersion> TryInto<Card> for VCard<V> {
                 crate::utils::datetime::timestamp_from_string(val.value.as_str(), "%Y%m%d\0")
                     .unwrap_or_default();
         }
-        if let Some(val) = self.0.swap_remove("EMAIL") {
-            card.set_email(val.value);
+        if let Some(mut val) = self.0.swap_remove("EMAIL") {
+            use crate::contacts::jscontact::json_types::EmailAddress;
+
+            let add_email =
+                |card: &'_ mut Card, val: ContentLine, ctr: &mut u32| -> (String, EmailAddress) {
+                    let ContentLine {
+                        group,
+                        value,
+                        others,
+                        params,
+                    } = val;
+                    debug_assert!(others.is_empty());
+
+                    let mut group = group.unwrap_or_else(|| format!("EMAIL-{ctr}"));
+                    let pref = params
+                        .iter()
+                        .find_map(|p| p.strip_prefix("PREF=")?.parse::<u64>().ok());
+                    let contexts = params
+                        .iter()
+                        .find_map(|p| Some((p.strip_prefix("TYPE=")?.to_string(), true)))
+                        .into_iter()
+                        .collect();
+                    while card.emails.contains_key(&group) {
+                        *ctr += 1;
+                        group = format!("EMAIL-{ctr}");
+                    }
+                    *ctr += 1;
+                    (
+                        group,
+                        EmailAddress {
+                            address: value,
+                            pref,
+                            contexts,
+                            ..EmailAddress::default()
+                        },
+                    )
+                };
+
+            let first_value = val.value.clone();
+            let mut ctr = 1;
+            let others = std::mem::take(&mut val.others);
+            let (group, entry) = add_email(&mut card, val, &mut ctr);
+            card.emails.insert(group, entry);
+            for val in others {
+                let (group, entry) = add_email(&mut card, val, &mut ctr);
+                card.emails.insert(group, entry);
+            }
+            // Keep the old single-value display semantics.
+            card.set_email(first_value);
         }
-        if let Some(val) = self.0.swap_remove("URL") {
-            card.set_url(val.value);
+        if let Some(val) = self.0.swap_remove("CATEGORIES") {
+            let ContentLine {
+                group: _,
+                value,
+                others,
+                ..
+            } = val;
+            if !value.is_empty() {
+                card.keywords.insert(value, true);
+            }
+            for val in others {
+                let ContentLine { value, others, .. } = val;
+                debug_assert!(others.is_empty());
+                card.keywords.insert(value, true);
+            }
         }
-        if let Some(val) = self.0.swap_remove("KEY") {
-            card.set_key(val.value);
+        if let Some(mut val) = self.0.swap_remove("URL") {
+            use crate::contacts::jscontact::json_types::{Link, Resource};
+
+            let add_link =
+                |card: &'_ mut Card, val: ContentLine, ctr: &mut u32| -> (String, Link) {
+                    let ContentLine {
+                        group,
+                        value,
+                        others,
+                        params,
+                    } = val;
+                    debug_assert!(others.is_empty());
+
+                    let mut group = group.unwrap_or_else(|| format!("LINK-{ctr}"));
+                    let pref = params
+                        .iter()
+                        .find_map(|p| p.strip_prefix("PREF=")?.parse::<u64>().ok());
+                    let contexts = params
+                        .iter()
+                        .find_map(|p| Some((p.strip_prefix("TYPE=")?.to_string(), true)))
+                        .into_iter()
+                        .collect();
+                    while card.links.contains_key(&group) {
+                        *ctr += 1;
+                        group = format!("LINK-{ctr}");
+                    }
+                    *ctr += 1;
+                    (
+                        group,
+                        Link {
+                            resource: Resource {
+                                uri: value,
+                                pref,
+                                contexts,
+                                ..Resource::default()
+                            },
+                            ..Link::default()
+                        },
+                    )
+                };
+
+            let first_value = val.value.clone();
+            let mut ctr = 1;
+            let others = std::mem::take(&mut val.others);
+            let (group, entry) = add_link(&mut card, val, &mut ctr);
+            card.links.insert(group, entry);
+            for val in others {
+                let (group, entry) = add_link(&mut card, val, &mut ctr);
+                card.links.insert(group, entry);
+            }
+            // Keep the old single-value display semantics.
+            card.set_url(first_value);
+        }
+
+        {
+            use crate::contacts::jscontact::json_types::OnlineService;
+
+            let add_os =
+                |card: &'_ mut Card, val: ContentLine, ctr: &mut u32| -> (String, OnlineService) {
+                    let ContentLine {
+                        group,
+                        value,
+                        others,
+                        params,
+                    } = val;
+                    debug_assert!(others.is_empty());
+
+                    let mut group = group.unwrap_or_else(|| format!("OS-{ctr}"));
+                    let service = params
+                        .iter()
+                        .find_map(|p| Some(p.strip_prefix("SERVICE-TYPE=")?.to_string()))
+                        .unwrap_or_default();
+                    let user = params
+                        .iter()
+                        .find_map(|p| Some(p.strip_prefix("USERNAME=")?.to_string()))
+                        .unwrap_or_default();
+                    let pref = params
+                        .iter()
+                        .find_map(|p| p.strip_prefix("PREF=")?.parse::<u64>().ok());
+                    let contexts = params
+                        .iter()
+                        .find_map(|p| Some((p.strip_prefix("TYPE=")?.to_string(), true)))
+                        .into_iter()
+                        .collect();
+                    while card.online_services.contains_key(&group) {
+                        *ctr += 1;
+                        group = format!("OS-{ctr}");
+                    }
+                    *ctr += 1;
+                    (
+                        group,
+                        OnlineService {
+                            service,
+                            uri: value,
+                            user,
+                            pref,
+                            contexts,
+                            ..OnlineService::default()
+                        },
+                    )
+                };
+            if let Some(mut val) = self.0.swap_remove("IMPP") {
+                let mut ctr = 1;
+                let others = std::mem::take(&mut val.others);
+                let (group, mut entry) = add_os(&mut card, val, &mut ctr);
+                entry.extra.insert("vCardName".into(), "impp".into());
+                card.online_services.insert(group, entry);
+                for val in others {
+                    let (group, mut entry) = add_os(&mut card, val, &mut ctr);
+                    entry.extra.insert("vCardName".into(), "impp".into());
+                    card.online_services.insert(group, entry);
+                }
+            }
+
+            if let Some(mut val) = self.0.swap_remove("SOCIALPROFILE") {
+                let mut ctr = 1;
+                let others = std::mem::take(&mut val.others);
+                let (group, mut entry) = add_os(&mut card, val, &mut ctr);
+                if !has_uri_scheme(&entry.uri) {
+                    std::mem::swap(&mut entry.user, &mut entry.uri);
+                }
+                entry
+                    .extra
+                    .insert("vCardName".into(), "socialprofile".into());
+                card.online_services.insert(group, entry);
+                for val in others {
+                    let (group, mut entry) = add_os(&mut card, val, &mut ctr);
+                    if !has_uri_scheme(&entry.uri) {
+                        std::mem::swap(&mut entry.user, &mut entry.uri);
+                    }
+                    entry
+                        .extra
+                        .insert("vCardName".into(), "socialprofile".into());
+                    card.online_services.insert(group, entry);
+                }
+            }
+        }
+
+        if let Some(mut val) = self.0.swap_remove("KEY") {
+            use crate::contacts::jscontact::json_types::{CryptoKey, Resource};
+
+            let add_key =
+                |card: &'_ mut Card, val: ContentLine, ctr: &mut u32| -> (String, CryptoKey) {
+                    let ContentLine {
+                        group,
+                        value,
+                        others,
+                        params,
+                    } = val;
+                    debug_assert!(others.is_empty());
+
+                    let mut group = group.unwrap_or_else(|| format!("KEY-{ctr}"));
+                    let pref = params
+                        .iter()
+                        .find_map(|p| p.strip_prefix("PREF=")?.parse::<u64>().ok());
+                    let contexts = params
+                        .iter()
+                        .find_map(|p| Some((p.strip_prefix("TYPE=")?.to_string(), true)))
+                        .into_iter()
+                        .collect();
+                    while card.crypto_keys.contains_key(&group) {
+                        *ctr += 1;
+                        group = format!("KEY-{ctr}");
+                    }
+                    *ctr += 1;
+                    (
+                        group,
+                        CryptoKey {
+                            __type: None,
+                            resource: Resource {
+                                uri: value,
+                                contexts,
+                                pref,
+                                ..Resource::default()
+                            },
+                        },
+                    )
+                };
+
+            let first_value = val.value.clone();
+            let mut ctr = 1;
+            let others = std::mem::take(&mut val.others);
+            let (group, entry) = add_key(&mut card, val, &mut ctr);
+            card.crypto_keys.insert(group, entry);
+            for val in others {
+                let (group, entry) = add_key(&mut card, val, &mut ctr);
+                card.crypto_keys.insert(group, entry);
+            }
+            // Keep the old single-value display semantics.
+            card.set_key(first_value);
         }
         for (k, v) in self.0.into_iter() {
             if k.eq_ignore_ascii_case("VERSION") || k.eq_ignore_ascii_case("N") {
@@ -311,52 +634,60 @@ fn parse_card<'a>() -> impl Parser<'a, Vec<&'a str>> {
 }
 
 pub fn load_cards(p: &std::path::Path) -> Result<Vec<Card>> {
-    let vcf_dir = std::fs::read_dir(p);
+    /// Read and parse a single `.vcf` file, pushing one result per card.
+    ///
+    /// Read errors (including non-UTF-8 contents: a vCard is a UTF-8 text
+    /// format) must cost only that file. Propagating them with `?` used to
+    /// abort the whole address book load and drop every card from every other
+    /// file too (CWE-754), so they are downgraded to warnings here.
+    fn read_file(
+        f: &std::path::Path,
+        ret: &mut Vec<Result<Card>>,
+        contents: &mut String,
+        is_any_valid: &mut bool,
+    ) {
+        use std::io::Read as _;
+        contents.clear();
+        if let Err(err) = std::fs::File::open(f)
+            .map_err(|err| err.to_string())
+            .and_then(|mut file| file.read_to_string(contents).map_err(|err| err.to_string()))
+        {
+            tracing::warn!("Could not read vcard file {}: {}", f.display(), err);
+            return;
+        }
+        match parse_card().parse(contents.as_str()) {
+            Ok((_, c)) => {
+                for s in c {
+                    ret.push(
+                        CardDeserializer::try_from_str(s)
+                            .and_then(TryInto::try_into)
+                            .map(|mut card| {
+                                Card::set_external_resource(&mut card, true);
+                                *is_any_valid = true;
+                                card
+                            }),
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!("Could not parse vcard from {}: {}", f.display(), err);
+            }
+        }
+    }
+
     let mut ret: Vec<Result<_>> = Vec::new();
     let mut is_any_valid = false;
-    if vcf_dir.is_ok() {
-        let mut contents = String::with_capacity(256);
-        for f in vcf_dir? {
+    let mut contents = String::with_capacity(256);
+    if !p.is_dir() {
+        read_file(p, &mut ret, &mut contents, &mut is_any_valid);
+    } else if let Ok(vcf_dir) = std::fs::read_dir(p) {
+        for f in vcf_dir {
             if f.is_err() {
                 continue;
             }
             let f = f?.path();
             if f.is_file() {
-                use std::io::Read;
-                contents.clear();
-                // One unreadable or non-UTF-8 file (a vCard is a UTF-8 text
-                // format, so binary garbage fails `read_to_string`) must cost
-                // only that file. Propagating the error with `?` used to abort
-                // the whole address book load and drop every card from every
-                // other file too (CWE-754).
-                if let Err(err) = std::fs::File::open(&f)
-                    .map_err(|err| err.to_string())
-                    .and_then(|mut file| {
-                        file.read_to_string(&mut contents)
-                            .map_err(|err| err.to_string())
-                    })
-                {
-                    tracing::warn!("Could not read vcard file {}: {}", f.display(), err);
-                    continue;
-                }
-                match parse_card().parse(contents.as_str()) {
-                    Ok((_, c)) => {
-                        for s in c {
-                            ret.push(
-                                CardDeserializer::try_from_str(s)
-                                    .and_then(TryInto::try_into)
-                                    .map(|mut card| {
-                                        Card::set_external_resource(&mut card, true);
-                                        is_any_valid = true;
-                                        card
-                                    }),
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!("Could not parse vcard from {}: {}", f.display(), err);
-                    }
-                }
+                read_file(&f, &mut ret, &mut contents, &mut is_any_valid);
             }
         }
     }
@@ -451,26 +782,31 @@ fn test_vcard_v4_parse() {
             group: None,
             params: vec![],
             value: "4.0".to_string(),
+            others: vec![],
         },
         "N".to_string() => ContentLine {
             group: None,
             params: vec![],
             value: "Gump;Forrest;;Mr.;".to_string(),
+            others: vec![],
         },
         "FN".to_string() => ContentLine {
             group: None,
             params: vec![],
             value: "Forrest Gump".to_string(),
+            others: vec![],
         },
         "ORG".to_string() => ContentLine {
             group: None,
             params: vec![],
             value: "Bubba Gump Shrimp Co.".to_string(),
+            others: vec![],
         },
         "TITLE".to_string() => ContentLine {
             group: None,
             params: vec![],
             value: "Shrimp Man".to_string(),
+            others: vec![],
         },
         "PHOTO".to_string() => ContentLine {
             group: None,
@@ -478,37 +814,57 @@ fn test_vcard_v4_parse() {
                 "MEDIATYPE=image/gif".to_string(),
             ],
             value: "http://www.example.com/dir_photos/my_photo.gif".to_string(),
+            others: vec![],
         },
         "TEL".to_string() => ContentLine {
             group: None,
-            params: vec![
-                "TYPE=home,voice".to_string(),
-                "VALUE=uri".to_string(),
-            ],
-            value: "tel:+1-404-555-1212".to_string(),
+            params: vec!["TYPE=work,voice".into(), "VALUE=uri".into()],
+            value: "tel:+1-111-555-1212".into(),
+            others: vec![ContentLine {
+                group: None,
+                params: vec![
+                    "TYPE=home,voice".to_string(),
+                    "VALUE=uri".to_string(),
+                ],
+                value: "tel:+1-404-555-1212".to_string(),
+                others: vec![],
+            }],
         },
         "ADR".to_string() => ContentLine {
             group: None,
             params: vec![
-                "TYPE=HOME".to_string(),
-                "LABEL=\"42 Plantation St.\\nBaytown\\, LA 30314\\nUnited States of America\"".to_string(),
+                "TYPE=WORK".to_string(),
+                "PREF=1".to_string(),
+                "LABEL=\"100 Waters Edge\\nBaytown\\, LA 30314\\nUnited States of America\"".to_string(),
             ],
-            value: ";;42 Plantation St.;Baytown;LA;30314;United States of America".to_string(),
+            value: ";;100 Waters Edge;Baytown;LA;30314;United States of America".to_string(),
+            others: vec![ContentLine {
+                group: None,
+                params: vec![
+                    "TYPE=HOME".to_string(),
+                    "LABEL=\"42 Plantation St.\\nBaytown\\, LA 30314\\nUnited States of America\"".to_string(),
+                ],
+                value: ";;42 Plantation St.;Baytown;LA;30314;United States of America".to_string(),
+                others: vec![],
+            }],
         },
         "EMAIL".to_string() => ContentLine {
             group: None,
             params: vec![],
             value: "forrestgump@example.com".to_string(),
+            others: vec![],
         },
         "REV".to_string() => ContentLine {
             group: None,
             params: vec![],
             value: "20080424T195243Z".to_string(),
+            others: vec![],
         },
         "x-qq".to_string() => ContentLine {
             group: None,
             params: vec![],
             value: "21588891".to_string(),
+            others: vec![],
         },
     };
     assert_eq!(parsed.version(), VCardVersion4::NAME);
@@ -660,4 +1016,105 @@ fn test_vcard_load_cards_isolates_unreadable_files() {
     let cards = load_cards(tempdir.path()).unwrap();
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].name, "Good");
+}
+
+#[test]
+fn test_vcard_v4_multiple_values() {
+    let j = "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Forrest Gump\r\n\
+             NICKNAME;TYPE=work;PREF=1:Forrest\r\n\
+             NICKNAME;TYPE=home:Forresty\r\n\
+             EMAIL;TYPE=work,voice;PREF=1:forrest@work.example\r\n\
+             EMAIL;TYPE=home:forrest@home.example\r\n\
+             URL;TYPE=work:https://work.example/forrest\r\n\
+             URL;TYPE=home:https://home.example/forrest\r\n\
+             CATEGORIES:friends\r\n\
+             CATEGORIES:colleagues\r\n\
+             IMPP;SERVICE-TYPE=matrix;USERNAME=@forrest:matrix:@forrest:example.org\r\n\
+             SOCIALPROFILE;SERVICE-TYPE=github:https://github.com/forrest\r\n\
+             KEY;TYPE=work;PREF=2:https://keys.example/forrest.asc\r\n\
+             KEY:https://keys.example/forrest2.asc\r\n\
+             END:VCARD\r\n";
+    let card: Card = CardDeserializer::try_from_str(j)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    // Single-value accessors keep returning the first entry.
+    assert_eq!(card.name, "Forrest Gump");
+    assert_eq!(card.additionalname, "Forrest");
+    assert_eq!(card.email, "forrest@work.example");
+    assert_eq!(card.url, "https://work.example/forrest");
+    assert_eq!(card.key, "https://keys.example/forrest.asc");
+
+    assert_eq!(card.nicknames.len(), 2);
+    let (_, nick) = card.nicknames.get_index(0).unwrap();
+    assert_eq!(nick.name, "Forrest");
+    assert_eq!(nick.pref, Some(1));
+    assert!(nick.contexts.contains_key("work"));
+    let (_, nick) = card.nicknames.get_index(1).unwrap();
+    assert_eq!(nick.name, "Forresty");
+    assert!(nick.contexts.contains_key("home"));
+
+    assert_eq!(card.emails.len(), 2);
+    let (_, email) = card.emails.get_index(0).unwrap();
+    assert_eq!(email.address, "forrest@work.example");
+    assert_eq!(email.pref, Some(1));
+    assert!(email.contexts.contains_key("work,voice"));
+    let (_, email) = card.emails.get_index(1).unwrap();
+    assert_eq!(email.address, "forrest@home.example");
+    assert!(email.contexts.contains_key("home"));
+
+    assert_eq!(card.links.len(), 2);
+    let (_, link) = card.links.get_index(0).unwrap();
+    assert_eq!(link.resource.uri, "https://work.example/forrest");
+    assert!(link.resource.contexts.contains_key("work"));
+    let (_, link) = card.links.get_index(1).unwrap();
+    assert_eq!(link.resource.uri, "https://home.example/forrest");
+
+    assert_eq!(card.keywords.len(), 2);
+    assert!(card.keywords.contains_key("friends"));
+    assert!(card.keywords.contains_key("colleagues"));
+    // CATEGORIES is consumed as a keyword and must not leak into extras.
+    assert!(!card.extra_properties.contains_key("CATEGORIES"));
+
+    assert_eq!(card.online_services.len(), 2);
+    let (_, service) = card.online_services.get_index(0).unwrap();
+    assert_eq!(service.service, "matrix");
+    assert_eq!(service.user, "@forrest");
+    assert_eq!(service.uri, "matrix:@forrest:example.org");
+    assert_eq!(service.extra.get("vCardName").unwrap(), "impp");
+    let (_, service) = card.online_services.get_index(1).unwrap();
+    assert_eq!(service.service, "github");
+    assert_eq!(service.uri, "https://github.com/forrest");
+    assert_eq!(service.extra.get("vCardName").unwrap(), "socialprofile");
+
+    assert_eq!(card.crypto_keys.len(), 2);
+    let (_, key) = card.crypto_keys.get_index(0).unwrap();
+    assert_eq!(key.resource.uri, "https://keys.example/forrest.asc");
+    assert_eq!(key.resource.pref, Some(2));
+    assert!(key.resource.contexts.contains_key("work"));
+    let (_, key) = card.crypto_keys.get_index(1).unwrap();
+    assert_eq!(key.resource.uri, "https://keys.example/forrest2.asc");
+
+    // Everything else was consumed; only VERSION and N are skipped.
+    assert!(card.extra_properties.is_empty());
+}
+
+#[test]
+fn test_vcard_load_cards_single_file() {
+    // `load_cards` accepts a single `.vcf` path, not just a directory, and a
+    // multi-card file still yields every card.
+    let tempdir = tempfile::tempdir().unwrap();
+    let path = tempdir.path().join("contacts.vcf");
+    std::fs::write(
+        &path,
+        "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:One\r\nEMAIL:one@x.example\r\nEND:VCARD\r\n\
+         BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Two\r\nEMAIL:two@x.example\r\nEND:VCARD\r\n",
+    )
+    .unwrap();
+    let cards = load_cards(&path).unwrap();
+    let mut names: Vec<_> = cards.iter().map(|c| c.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["One", "Two"]);
+    assert!(cards.iter().all(Card::external_resource));
 }

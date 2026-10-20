@@ -30,7 +30,7 @@ use futures::lock::{MappedMutexGuard as FutureMappedMutexGuard, Mutex as FutureM
 use indexmap::IndexMap;
 use isahc::{
     config::{Configurable, RedirectPolicy},
-    http, AsyncReadResponseExt, HttpClient,
+    http, HttpClient,
 };
 use url::Url;
 
@@ -49,6 +49,7 @@ use crate::{
         session::Session,
         validate_session_urls, validate_transport_url, JmapServerConf, Store,
     },
+    utils::connections::enforce_response_size_limit,
     BackendEvent, Flag, RefreshEvent, RefreshEventKind,
 };
 
@@ -66,6 +67,51 @@ pub struct JmapConnection {
 /// Maximum number of redirects followed manually per request before giving
 /// up with an error.
 const MAX_REDIRECTS: usize = 5;
+
+/// Read an entire HTTP response body as text while enforcing the same
+/// server-response size cap the line-oriented IMAP/SMTP/NNTP readers use.
+///
+/// `isahc`'s `AsyncReadResponseExt::text` accumulates the whole body with no
+/// upper bound: a malicious or compromised JMAP server can answer a single
+/// API request with an endless (chunked) body and make the client allocate
+/// without limit (CWE-400; the CVE-2026-110249 equivalent surface). JMAP API
+/// responses are JSON documents whose legitimate size is far below
+/// [`crate::utils::connections::Connection::MAX_SERVER_RESPONSE_SIZE`], so
+/// every text read of a JMAP response goes through this method: the byte
+/// count is checked after each chunk, and exceeding the cap fails closed
+/// with the same `ProtocolViolation` error kind as the other protocol
+/// readers.
+pub(crate) trait BoundedResponseText {
+    /// Read the remaining body as UTF-8 text, failing closed past the
+    /// crate-wide server-response size cap.
+    fn text_bounded(&mut self) -> impl std::future::Future<Output = Result<String>> + Send;
+}
+
+impl BoundedResponseText for isahc::Response<isahc::AsyncBody> {
+    async fn text_bounded(&mut self) -> Result<String> {
+        use futures::io::AsyncReadExt as _;
+
+        let body = self.body_mut();
+        let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            let n = body.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            // Check *before* appending so the buffer itself can never grow
+            // past the cap by more than one chunk.
+            enforce_response_size_limit(buf.len() + n)?;
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok(String::from_utf8(buf).unwrap_or_else(|err| {
+            // Only valid UTF-8 can be JSON (RFC 8259 §8.1); lossy decoding
+            // keeps the error text readable and lets serde report the
+            // malformed document instead of panicking.
+            String::from_utf8_lossy(err.as_bytes()).into_owned()
+        }))
+    }
+}
 
 /// HTTP status codes whose responses are treated as redirects.
 fn is_redirect_status(status: http::StatusCode) -> bool {
@@ -186,7 +232,7 @@ impl JmapConnection {
 
         if !resp.status().is_success() {
             let kind: crate::error::NetworkErrorKind = resp.status().into();
-            let res_text = resp.text().await.unwrap_or_default();
+            let res_text = resp.text_bounded().await.unwrap_or_default();
             let mut err = Error::new(format!(
                 "Could not connect to JMAP server endpoint for {}. Reply from server: {res_text}",
                 self.server_conf.server_url
@@ -261,7 +307,7 @@ impl JmapConnection {
             return Err(err);
         }
 
-        let res_text = match resp.text().await {
+        let res_text = match resp.text_bounded().await {
             Err(err) => {
                 let err = Error::new(format!(
                     "Could not connect to JMAP server endpoint for {}. Is your server url setting \
@@ -361,7 +407,7 @@ impl JmapConnection {
             let res_text = self
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -417,7 +463,7 @@ impl JmapConnection {
             let res_text = self
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let _: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -436,7 +482,7 @@ impl JmapConnection {
             let res_text = self
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                 Err(err) => {
@@ -529,7 +575,7 @@ impl JmapConnection {
             let res_text = self
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
             if self.server_conf.trace {
                 tracing::trace!("email_since_state(): response {res_text:?}");
@@ -642,7 +688,7 @@ impl JmapConnection {
         if self.server_conf.trace {
             tracing::trace!("send_request(): request {:?}", request);
         }
-        let res_text = self.post_async(None, request).await?.text().await?;
+        let res_text = self.post_async(None, request).await?.text_bounded().await?;
         if self.server_conf.trace {
             tracing::trace!("send_request(): response {:?}", res_text);
         }
@@ -755,7 +801,7 @@ impl JmapConnection {
         };
         if !resp.status().is_success() {
             let kind: crate::error::NetworkErrorKind = resp.status().into();
-            let res_text = resp.text().await.unwrap_or_default();
+            let res_text = resp.text_bounded().await.unwrap_or_default();
             let err = Error::new(format!(
                 "Could not connect to JMAP server endpoint for {}. Reply from server: {res_text}",
                 self.server_conf.server_url
@@ -835,7 +881,7 @@ impl JmapConnection {
         };
         if !resp.status().is_success() {
             let kind: crate::error::NetworkErrorKind = resp.status().into();
-            let res_text = resp.text().await.unwrap_or_default();
+            let res_text = resp.text_bounded().await.unwrap_or_default();
             let err = Error::new(format!(
                 "Could not connect to JMAP server endpoint for {}. Reply from server: {res_text}",
                 self.server_conf.server_url

@@ -768,6 +768,13 @@ impl Attachment {
         ret
     }
 
+    pub fn parts(&self) -> &[Self] {
+        match &self.content_type {
+            ContentType::Multipart { parts, .. } => parts.as_slice(),
+            _ => &[],
+        }
+    }
+
     pub fn count_attachments(&self) -> usize {
         self.attachments().len()
     }
@@ -826,7 +833,13 @@ impl Attachment {
     }
 
     pub fn into_raw(&self) -> String {
-        let mut ret = String::with_capacity(2 * self.raw.len());
+        // `2 * len` is the classic wrapping capacity product at a buffer
+        // growth point (CWE-190; CVE-2026-110247, issue #188): on 32-bit
+        // targets a mail of 1 GiB or more pushed it past `isize::MAX` and
+        // aborted the process with a capacity overflow while serializing.
+        // Saturate instead — the estimate being short only costs
+        // reallocations, never correctness.
+        let mut ret = String::with_capacity(self.raw.len().saturating_mul(2));
         fn into_raw_helper(a: &Attachment, ret: &mut String) {
             match &a.content_type {
                 ContentType::Text {
@@ -1256,6 +1269,31 @@ impl Attachment {
     pub fn size(&self) -> usize {
         self.raw.len()
     }
+
+    /// Returns value of `Content-ID` header if set.
+    pub fn content_id(&self) -> Option<Cow<'_, str>> {
+        let (_, (headers, _)) = parser::attachments::attachment(&self.raw).ok()?;
+        for (name, value) in headers {
+            if name == HeaderName::CONTENT_ID {
+                let mut value = value.trim();
+                if value.starts_with(b"<") && value.ends_with(b">") {
+                    value = value
+                        .strip_prefix(b"<")
+                        .unwrap_or(value)
+                        .strip_suffix(b">")
+                        .unwrap_or(value);
+                }
+                if let Ok((_, v)) = crate::email::parser::encodings::phrase(value, false) {
+                    if let Ok(v) = String::from_utf8(v) {
+                        return Some(Cow::Owned(v));
+                    }
+                }
+                return Some(String::from_utf8_lossy(value));
+            }
+        }
+
+        None
+    }
 }
 
 /// Helper struct to return slices from a struct field on demand.
@@ -1501,5 +1539,55 @@ Content-Disposition: inline
         let encoding = ContentTransferEncoding::from(&b"\xff\xfe"[..]);
         let _ = encoding.to_string();
         let _ = format!("{encoding:?}");
+    }
+
+    /// RFC 2392 `cid:` references need the `Content-ID` of an attachment part
+    /// without its `<>` angle brackets (upstream 5a3160bd). Both the
+    /// bracketed form and a bare `Content-ID` must yield the bare id, and a
+    /// part without the header yields `None`.
+    #[test]
+    fn test_attachment_content_id() {
+        let bracketed = b"Content-Type: multipart/mixed; boundary=\"CIDB\"\r\n\r\npre\r\n--CIDB\r\nContent-Type: text/plain\r\nContent-ID: <abc@def>\r\n\r\nfirst body\r\n--CIDB\r\nContent-Type: text/plain\r\n\r\nsecond body\r\n--CIDB--\r\n";
+        let att = AttachmentBuilder::new(bracketed).build();
+        let parts = att.parts();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0].content_id().as_deref(),
+            Some("abc@def"),
+            "angle brackets must be stripped"
+        );
+        assert_eq!(
+            parts[1].content_id(),
+            None,
+            "a part without Content-ID has no content id"
+        );
+
+        let bare = b"Content-Type: text/plain\r\nContent-ID: abc@def\r\n\r\nbody\r\n";
+        let att = AttachmentBuilder::new(bare).build();
+        assert_eq!(
+            att.content_id().as_deref(),
+            Some("abc@def"),
+            "a bare (unbracketed) Content-ID is returned as-is"
+        );
+
+        let none = b"Content-Type: text/plain\r\n\r\nbody\r\n";
+        let att = AttachmentBuilder::new(none).build();
+        assert_eq!(att.content_id(), None);
+    }
+
+    /// `parts()` exposes the direct children of a `multipart/*` attachment
+    /// and an empty slice for leaves (upstream 3827316e).
+    #[test]
+    fn test_attachment_parts_accessor() {
+        let raw = b"Content-Type: multipart/mixed; boundary=\"PRTB\"\r\n\r\npre\r\n--PRTB\r\nContent-Type: text/plain\r\n\r\nfirst\r\n--PRTB\r\nContent-Type: text/plain\r\n\r\nsecond\r\n--PRTB--\r\n";
+        let att = AttachmentBuilder::new(raw).build();
+        assert!(matches!(att.content_type(), ContentType::Multipart { .. }));
+        let parts = att.parts();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].text(Text::Plain).trim(), "first");
+        assert_eq!(parts[1].text(Text::Plain).trim(), "second");
+
+        let leaf = AttachmentBuilder::new(b"Content-Type: text/plain\r\n\r\nbody\r\n").build();
+        assert!(leaf.parts().is_empty());
     }
 }

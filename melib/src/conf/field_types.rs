@@ -174,7 +174,7 @@ impl<'de> Deserialize<'de> for ActionFlag {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 /// String value type for secrets (i.e. passwords/usernames)
 pub enum Secret {
     /// Literal string value
@@ -184,6 +184,30 @@ pub enum Secret {
         command: String,
         store_in_memory: bool,
     },
+}
+
+// CVE-2026-96869 (CWE-200): `Secret` used to derive `Debug`, so a
+// `format!("{:?}", conf)` / `tracing::debug!("{:?}", conf)` on any protocol
+// configuration (`ImapServerConf`, `SmtpServerConf`, `JmapServerConf`,
+// `NntpServerConf`, `WebDAVServerConf`, `SmtpAuth`) printed the plaintext
+// password into `./log/` and, with `MELI_DEBUG_STDERR=yes`, onto stderr. The
+// derived representation is replaced by this redacting one; the
+// `Evaluate` command is redacted too, exactly like the cached value.
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // CVE-2026-96869: neither the literal value nor the evaluation
+        // command may cross the Debug boundary.
+        match self {
+            Self::Value(_) => fmt.write_str("Secret(<redacted>)"),
+            Self::Evaluate {
+                store_in_memory, ..
+            } => write!(
+                fmt,
+                "Secret(Evaluate {{ command: <redacted>, store_in_memory: \
+                 {store_in_memory} }})"
+            ),
+        }
+    }
 }
 
 impl Secret {

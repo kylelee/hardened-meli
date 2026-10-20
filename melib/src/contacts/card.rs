@@ -30,6 +30,9 @@ use std::{
 use indexmap::IndexMap;
 use uuid::Uuid;
 
+use super::jscontact::json_types::{
+    CryptoKey, EmailAddress, Link, Nickname, OnlineService, Organization,
+};
 use crate::{
     contacts::CardId,
     email::Address,
@@ -48,6 +51,20 @@ pub struct Card {
     pub email: String,
     pub url: String,
     pub key: String,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub emails: IndexMap<String, EmailAddress>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub nicknames: IndexMap<String, Nickname>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub organizations: IndexMap<String, Organization>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub keywords: IndexMap<String, bool>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub links: IndexMap<String, Link>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub online_services: IndexMap<String, OnlineService>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub crypto_keys: IndexMap<String, CryptoKey>,
     pub color: u8,
     pub last_edited: UnixTimestamp,
     pub extra_properties: IndexMap<String, String>,
@@ -138,6 +155,13 @@ impl Card {
             email: String::new(),
             url: String::new(),
             key: String::new(),
+            emails: IndexMap::default(),
+            nicknames: IndexMap::default(),
+            organizations: IndexMap::default(),
+            keywords: IndexMap::default(),
+            links: IndexMap::default(),
+            online_services: IndexMap::default(),
+            crypto_keys: IndexMap::default(),
 
             last_edited: now(),
             external_resource: false,

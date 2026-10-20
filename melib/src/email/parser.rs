@@ -91,6 +91,62 @@ pub fn has_unfoldable_newline(value: &str) -> bool {
     false
 }
 
+/// Neutralizes every unfoldable line break in `value`.
+///
+/// The exact set [`has_unfoldable_newline`] flags — every `CR`, `LF` or
+/// `CRLF` that is not part of a valid RFC 5322 folding sequence — is
+/// replaced with a single space. Fold continuations (`CR`/`LF`/`CRLF`
+/// immediately followed by `SP` or `HTAB`, e.g. the `References` values
+/// [`Draft::new_reply`] builds) are preserved verbatim.
+///
+/// This is the armoring counterpart of the [`has_unfoldable_newline`]
+/// predicate for serialization paths that cannot fail loudly because they
+/// return plain text: [`Draft::to_edit_string`] writes header values into
+/// the `$EDITOR` buffer, and an unfoldable break inside a value re-parses
+/// as a *new header line* (or hijacks the value of a default header such as
+/// `Bcc:`) when the buffer is read back through [`Draft::update`],
+/// bypassing the fail-closed chokepoint of [`Draft::finalise`]
+/// (CVE-2026-75004 regression, issue #198: a rule-name-shaped Subject
+/// decoded from an RFC 2047 `=0D=0A` payload smuggled a `Bcc:` header into
+/// the reply draft through exactly this round-trip).
+///
+/// [`Draft::to_edit_string`]: crate::email::compose::Draft::to_edit_string
+/// [`Draft::new_reply`]: crate::email::compose::Draft::new_reply
+/// [`Draft::update`]: crate::email::compose::Draft::update
+/// [`Draft::finalise`]: crate::email::compose::Draft::finalise
+pub fn neutralize_unfoldable_newline(value: &str) -> Cow<'_, str> {
+    if !has_unfoldable_newline(value) {
+        return Cow::Borrowed(value);
+    }
+    let bytes = value.as_bytes();
+    let mut ret = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\r' || b == b'\n' {
+            let mut next = i + 1;
+            if b == b'\r' && bytes.get(next) == Some(&b'\n') {
+                next += 1;
+            }
+            match bytes.get(next) {
+                // A line break followed by whitespace is header folding:
+                // keep it verbatim so folded values round-trip unchanged.
+                Some(b' ') | Some(b'\t') => ret.push_str(&value[i..next]),
+                // Any other line break would terminate the header line when
+                // re-parsed: collapse it to a single space so the value
+                // stays one logical line.
+                _ => ret.push(' '),
+            }
+            i = next;
+            continue;
+        }
+        let step = value[i..].chars().next().map_or(1, char::len_utf8);
+        ret.push_str(&value[i..i + step]);
+        i += step;
+    }
+    Cow::Owned(ret)
+}
+
 pub struct ParsingError<I> {
     pub input: I,
     pub error: Cow<'static, str>,
@@ -1073,6 +1129,11 @@ pub mod generic {
         let mut body = None;
         let mut headers = HeaderMap::empty();
         let mut address: Vec<Address>;
+        // Set when the address part was rejected specifically for containing
+        // a decoded NUL; the lenient `mailto:?hfield` fallback below must not
+        // swallow that rejection (NUL in a decoded product fails the whole
+        // URI, as mutt's url_pct_decode does since CVE-2026-43861).
+        let mut address_nul_rejected = false;
 
         // [ref:TODO]: Validate header content (e.g. test address containing Headers for valid address,
         // so that the following would return an error:
@@ -1129,6 +1190,25 @@ pub mod generic {
                          mailto URIs (RFC6068)",
                     ).into()));
                     }
+                    // A percent-encoded %00 decodes to NUL, which is invalid in
+                    // an addr-spec (RFC 5322) and in the SMTP DATA stream (RFC
+                    // 5321). The address parser stops at it silently, so
+                    // without this check `mailto:a@b%00c.example` would be
+                    // truncated to `a@b`: the recipient actually used would
+                    // diverge from the URI text — the CWE-158 NUL-truncation
+                    // face (mutt CVE-2026-43861, fixed in mutt 2.3.2 by
+                    // rejecting NUL in url_pct_decode products). Reject.
+                    if s.contains('\0') {
+                        address_nul_rejected = true;
+                        return Err(nom::Err::Error(
+                            (
+                                input,
+                                "mailto(): NUL characters are not allowed in the address part of \
+                         mailto URIs (RFC6068/RFC5322)",
+                            )
+                                .into(),
+                        ));
+                    }
                     Address::list_try_from(s.as_bytes()).map_err(|_| {
                         nom::Err::Error(ParsingError::<&[u8]>::new(
                             input,
@@ -1143,6 +1223,15 @@ pub mod generic {
             } else {
                 &decoded[end_or_len + 1..]
             };
+        } else if address_nul_rejected {
+            return Err(nom::Err::Error(
+                (
+                    input,
+                    "mailto(): NUL characters are not allowed in the address part of mailto URIs \
+                 (RFC6068/RFC5322)",
+                )
+                    .into(),
+            ));
         } else if end.is_some() {
             decoded = &decoded[1..];
             address = vec![];
@@ -1207,6 +1296,25 @@ pub mod generic {
             else {
                 return Err(nom::Err::Error((input, "mailto(): invalid UTF-8.").into()));
             };
+            // A percent-encoded %00 decodes to NUL: NUL is invalid in
+            // header values (RFC 5322) and in the body (the SMTP DATA stream
+            // cannot carry NUL octets, RFC 5321 §4), so downstream C-string
+            // consumers would silently truncate the value at it — the CWE-158
+            // face of mutt CVE-2026-43861. mutt 2.3.2 rejects NUL in
+            // url_pct_decode products; reject the whole URI here too.
+            if value.contains('\0') {
+                return Err(nom::Err::Error(
+                    (
+                        input,
+                        format!(
+                            "mailto(): NUL characters are not allowed in the value of mailto \
+                             header `{}` (RFC6068/RFC5322)",
+                            String::from_utf8_lossy(tag)
+                        ),
+                    )
+                        .into(),
+                ));
+            }
             // RFC6068 forbids CR/LF control characters in mailto hfield
             // values; percent-encoded %0d/%0a (in any case combination) would
             // otherwise be decoded into a header value, enabling header
@@ -2449,11 +2557,22 @@ pub mod encodings {
     }
 
     pub fn encoded_word_list(input: &[u8]) -> IResult<&[u8], SmallVec<[u8; 64]>> {
-        let (input, list) = separated_list1(space, encoded_word).parse(input)?;
-        let list_len = list.iter().fold(0, |mut acc, x| {
-            acc += x.len();
-            acc
-        });
+        // The separator must consume at least one byte: `space`
+        // (`take_while`) also matches empty, and nom 7's infinite-loop
+        // guard then fails the whole `separated_list1` — which made this
+        // parser error on *every* input that ends exactly at the last
+        // encoded word (the well-formed case), so the RFC 2047 join path
+        // was dead and `address_list` always fell back to the raw
+        // `ascii_token` bytes (CVE-2026-110247, issue #188).
+        let (input, list) = separated_list1(is_a(" \t\r\n"), encoded_word).parse(input)?;
+        // Capacity fold over N attacker-controlled segment lengths (the
+        // header-unfolding growth point): saturate so the estimate can
+        // never wrap the way libmime's 32-bit growth arithmetic did
+        // (CWE-190; CVE-2026-110247, issue #188). An undersized estimate
+        // only costs a reallocation, never correctness.
+        let list_len = list
+            .iter()
+            .fold(0usize, |acc, x| acc.saturating_add(x.len()));
         Ok((
             input,
             list.iter()
@@ -2908,11 +3027,15 @@ pub mod address {
         ))
         .parse(input)?;
         let list: Vec<&[u8]> = list.split(|c| *c == b',').collect();
-        let string_len = list.iter().fold(0, |mut acc, x| {
-            acc += x.trim().len();
-            acc
-        }) + list.len()
-            - 1;
+        // Same checked-semantics rule as `encoded_word_list`'s capacity
+        // fold above (CVE-2026-110247, issue #188): `split` always yields
+        // at least one segment, so the saturating chain is exact for every
+        // representable input.
+        let string_len = list
+            .iter()
+            .fold(0usize, |acc, x| acc.saturating_add(x.trim().len()))
+            .saturating_add(list.len())
+            .saturating_sub(1);
         let list_len = list.len();
         let mut i = 0;
         Ok((

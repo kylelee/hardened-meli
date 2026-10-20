@@ -1366,6 +1366,168 @@ fn test_get_included_configs_parentless_path_does_not_panic() {
     }
 }
 
+mod preprocessing_tests {
+    use super::*;
+    use crate::{
+        conf::preprocessing::{get_included_configs, pp},
+        utilities::tests::{env_lock, EnvGuard},
+    };
+
+    /// `pp` discovers theme files under `$XDG_CONFIG_DIRS/meli/themes`; point
+    /// `HOME` and the `XDG_*` config locations at an empty temporary directory
+    /// so the developer's real themes cannot leak into an expansion test.
+    fn isolated_env() -> (EnvGuard, tempfile::TempDir) {
+        let guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        std::env::set_var("XDG_CONFIG_DIRS", dir.path());
+        (guard, dir)
+    }
+
+    #[test]
+    fn test_preprocessing_nested_includes() {
+        let (_env, dir) = isolated_env();
+        // `a` includes `b` and `b` includes `c`, both via relative paths.
+        fs::write(
+            dir.path().join("b.conf"),
+            "b_line = 1\ninclude(\"c.conf\")\nb_after = 1\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("c.conf"), "c_line = 1\n").unwrap();
+        let a = ConfigFile::new("a_line = 1\ninclude(\"b.conf\")\na_after = 1\n", &dir).unwrap();
+
+        let expanded = pp(&a.path).expect("nested includes must be expanded");
+        let order = [
+            "a_line = 1",
+            "b_line = 1",
+            "c_line = 1",
+            "b_after = 1",
+            "a_after = 1",
+        ]
+        .map(|needle| {
+            expanded
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing `{needle}` in expanded config:\n{expanded}"))
+        });
+        assert!(
+            order.windows(2).all(|pair| pair[0] < pair[1]),
+            "expanded lines out of order: {order:?}\n{expanded}"
+        );
+
+        let mut included = get_included_configs(&a.path).unwrap();
+        included.sort_unstable();
+        let mut expected = vec![
+            a.path.clone(),
+            dir.path().join("b.conf"),
+            dir.path().join("c.conf"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(included, expected);
+    }
+
+    #[test]
+    fn test_preprocessing_cyclic_include_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.conf");
+        let b = dir.path().join("b.conf");
+        fs::write(&a, "include(\"b.conf\")\n").unwrap();
+        fs::write(&b, "include(\"a.conf\")\n").unwrap();
+
+        for err in [pp(&a).unwrap_err(), get_included_configs(&a).unwrap_err()] {
+            assert!(
+                err.to_string().contains("Maximum recursion limit reached"),
+                "cyclic include must hit the fork's recursion guard, got: {err}"
+            );
+        }
+
+        // A file that includes itself hits the same guard.
+        let self_include = dir.path().join("self.conf");
+        fs::write(&self_include, "include(\"self.conf\")\n").unwrap();
+        for err in [
+            pp(&self_include).unwrap_err(),
+            get_included_configs(&self_include).unwrap_err(),
+        ] {
+            assert!(
+                err.to_string().contains("Maximum recursion limit reached"),
+                "self include must hit the fork's recursion guard, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_preprocessing_missing_include_reports_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = ConfigFile::new("include(\"missing.conf\")\n", &dir).unwrap();
+
+        let err = pp(&main.path).unwrap_err().to_string();
+        assert!(err.contains("missing.conf"), "{err}");
+        assert!(err.contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn test_preprocessing_include_directory_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+        let main = ConfigFile::new("include(\"subdir\")\n", &dir).unwrap();
+
+        let err = pp(&main.path).unwrap_err().to_string();
+        assert!(err.contains("is a directory, not a text file"), "{err}");
+    }
+
+    #[test]
+    fn test_preprocessing_non_utf8_include_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bad.conf"), b"\xff\xfe\x00invalid").unwrap();
+        let main = ConfigFile::new("include(\"bad.conf\")\n", &dir).unwrap();
+
+        assert!(
+            pp(&main.path).is_err(),
+            "a non-UTF-8 include target must be reported as an error"
+        );
+    }
+
+    #[test]
+    fn test_preprocessing_malformed_include_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = ConfigFile::new("include(\"x\" junk\n", &dir).unwrap();
+
+        let err = pp(&main.path).unwrap_err().to_string();
+        assert!(err.contains("Malformed include directive"), "{err}");
+    }
+
+    #[test]
+    fn test_preprocessing_does_not_shell_out() {
+        let _env = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        for var in ["HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS"] {
+            std::env::set_var(var, dir.path());
+        }
+        fs::write(dir.path().join("included.conf"), "included_line = 1\n").unwrap();
+        let main = ConfigFile::new("main_line = 1\ninclude(\"included.conf\")\n", &dir).unwrap();
+
+        // With no `PATH`, a subprocess (such as the old `m4` pipeline) cannot
+        // be found; preprocessing must still work because it is pure Rust.
+        let saved_path = std::env::var_os("PATH");
+        std::env::remove_var("PATH");
+        let result = pp(&main.path);
+        // Restore PATH before asserting so a failure cannot poison the
+        // environment of sibling tests.
+        match saved_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let expanded = result.expect("preprocessing must not need a subprocess");
+        assert!(expanded.contains("main_line = 1\n"), "{expanded}");
+        assert!(expanded.contains("included_line = 1\n"), "{expanded}");
+        assert!(
+            expanded.find("main_line = 1").unwrap() < expanded.find("included_line = 1").unwrap(),
+            "{expanded}"
+        );
+    }
+}
+
 mod toggle_theme_ui {
     use super::*;
     use crate::command::{parse_command, Action};

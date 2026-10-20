@@ -27,12 +27,14 @@ smtp = ["melib/smtp"]
 sqlite3 = ["dep:rusqlite", "melib/sqlite3"]
 
 [dependencies]
+base64 = { version = "0.23" }
 flate2 = { workspace = true }
 futures = { workspace = true }
 imap-codec = { workspace = true, optional = true }
 imap-types = { workspace = true, optional = true }
 indexmap = { workspace = true }
 isahc = { workspace = true, optional = true }
+native-tls = { version = "0.2", default-features = false }
 melib = { path = "../melib" }
 nix = { workspace = true }
 regex = { workspace = true }

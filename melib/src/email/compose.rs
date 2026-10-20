@@ -323,7 +323,17 @@ impl Draft {
         }
 
         for (k, v) in self.headers.deref() {
-            ret.push_str(&format!("{k}: {v}\n"));
+            // CVE-2026-75004 regression (issue #198): mail-derived header
+            // values (Subject/To from an RFC 2047-decoded rule-name-shaped
+            // payload) must not carry an unfoldable CR/LF into the `$EDITOR`
+            // buffer — `Draft::update` would re-parse the smuggled line as a
+            // new header (e.g. a valued `Bcc:`), bypassing `finalise`'s
+            // fail-closed chokepoint. Collapse the unfoldable breaks; fold
+            // continuations stay verbatim.
+            ret.push_str(&format!(
+                "{k}: {}\n",
+                parser::neutralize_unfoldable_newline(v)
+            ));
         }
 
         if let Some((_, post)) = self.wrap_header_preamble.as_ref() {
@@ -374,6 +384,17 @@ impl Draft {
             if parser::has_unfoldable_newline(v) {
                 return Err(Error::new(format!(
                     "refusing to finalise: CR/LF in header value of {k}"
+                ))
+                .set_kind(ErrorKind::ValueError));
+            }
+            // A NUL octet in a header value is invalid RFC 5322 and cannot
+            // ride the SMTP DATA stream (RFC 5321): downstream C-string
+            // consumers would truncate at it (CWE-158, mutt
+            // CVE-2026-43861). Entry paths that copy received-mail bytes
+            // verbatim (reply/forward subjects) rely on this wire gate.
+            if v.contains('\0') {
+                return Err(Error::new(format!(
+                    "refusing to finalise: NUL in header value of {k}"
                 ))
                 .set_kind(ErrorKind::ValueError));
             }

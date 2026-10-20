@@ -1895,6 +1895,7 @@ dependencies = [
 name = "melib-test"
 version = "0.11.0"
 dependencies = [
+ "base64 0.23.1",
  "flate2",
  "futures",
  "imap-codec",
@@ -1902,6 +1903,7 @@ dependencies = [
  "indexmap",
  "isahc",
  "melib",
+ "native-tls",
  "nix 0.31.3",
  "regex",
  "rusqlite",

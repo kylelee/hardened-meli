@@ -38,6 +38,60 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## Sync log
 
+## 2026-10-20 (UTC+8)
+
+- Method: per-commit semantic port (task T6 of the `1ada94c3..1e66d41e` range, conf preprocessing)
+- Upstream range: `1ada94c3..1e66d41e` (upstream `9a9fee81` only)
+- Conflicts: none (fork-kept deviations: depth>7 cyclic-include guard, infallible `xdg::BaseDirectories::with_prefix`, melib-root import style; upstream's `expand_config` removal adopted — fork had no external callers)
+- Accounting kinds: see the notes column
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `9a9fee81` | port | refactor(meli/conf) | remove m4 runtime dependency: `Preprocessed`/`Spanned` + stack-based (`VecDeque`) pure-Rust include expansion replaces both `Command::new("m4")` pipelines; `M4_PREAMBLE`s and `expand_config` deleted; missing-directory include errors unified on upstream's line-numbered message (more informative than the fork's two divergent styles); fork's recursion guard kept where upstream dropped it; docs: `meli.conf.5` include directive wording no longer references m4, `BUILD.md` termux pkg list drops m4; tests: nested/cyclic/self/missing/directory/non-UTF-8/malformed includes + no-`PATH` no-subprocess proof (issue #186) |
+
+## 2026-10-20 (UTC+8)
+
+- Method: per-commit semantic port (task T5 of the `1ada94c3..1e66d41e` range, melib misc improvements)
+- Upstream range: `1ada94c3..1e66d41e` (RFC2369 / thread subject trim / percent_encoding / attachment accessors only)
+- Conflicts: none; all fork callers adapted mechanically to the owned `ListAction` API (`meli/src/mail/{view,compose}`, `meli/src/mail/view/envelope.rs`, seven CVE corpus suites, `meli-test/tests/test_unsubscribe_confirm.rs`) without adopting upstream's dialog-based UI
+- Accounting kinds: see the SKIP/PARTIAL notes in the table
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `f819b9d5` | port | feat(melib/list_management) | RFC2369 full support: `ListAction` owned `Vec<u8>`, `HeaderName`-keyed lookup, six `List-*` action headers (`Archive`/`Post`/`Unsubscribe`/`Subscribe`/`Help`/`Owner`), empty options filtered, `is_url()`/`is_email()`; `List-Archive` now parsed as an RFC 2369 options list (stricter: bare unbracketed values no longer accepted); `mailto.rs` `TryFrom` error `String`→`Error` with `set_details`. Upstream's view-layer unsubscribe-selection dialog is UI design and NOT ported (fork keeps its confirmation dialog + CVE-2023-23397 scheme gate) |
+| — | `b61be3d6` | port | fix(melib/thread) | `SubjectPrefix::strip_prefixes` FIXME: per-character `"`/`\t`/`\r` loop replaced by `trim_ascii_start()` — every ASCII whitespace kind (`\n`, `\x0c` included) after `Re:`/`Fwd:` prefixes is now trimmed; fork's `&str` impl delegates to the bytes impl so one site covers both |
+| — | `9d0c3e9a` | port | feat(melib/percent_encoding) | `RESERVED` ASCII set from RFC 3986 §2.2 (gen-delims + sub-delims); upstream's duplicate `.add(b'(')` typo corrected to the intended `.add(b'\'')` so the set is exactly `!#$&'()*+,/:;=?@[]` |
+| — | `e596371b` | port | refactor(melib/percent_encoding) | `percent_encode`/`utf8_percent_encode`/`PercentEncode` take `&'s AsciiSet` (any lifetime, runtime-constructible sets); existing `&'static` call sites unchanged |
+| — | `5a3160bd` (melib side) | port | feat(melib/attachments) | `Attachment::content_id()` — parses the part's `Content-ID`, strips `<>`, RFC 2047 phrase-decodes |
+| — | `3827316e` (melib side) | port | feat(melib/attachments) | `Attachment::parts()` instance accessor; upstream's view/filters path-from-root rewiring is UI and NOT ported |
+| — | `b52a8675` | **SKIP** | chore(melib) | remove public dep re-exports: the fork no longer has those re-exports |
+| — | `e1272d9f` | **SKIP** | fix(melib/logging) | debug logs not written to file: the fork's tracing-based logging is an intentional deviation |
+| — | `d54dff03` | **SKIP** | chore | assert_cmd 2.2.2 upgrade: fork's `Cargo.lock` already resolves `assert_cmd` 2.2.2 |
+| — | (VERIFY/TODO/clippy cosmetic commits in range) | **SKIP** | style | pure appearance cleanups outside this task's scope |
+
+## 2026-10-20 (UTC+8)
+
+- Method: per-commit semantic port (task T2 of the `1ada94c3..1e66d41e` range)
+- Upstream range: `1ada94c3..1e66d41e` (IMAP/ManageSieve cluster only)
+- Conflicts: none (test harness reimplemented under fork conventions: tracing instead of `log`, no `rusty_fork`, mock-server flags instead of upstream's event-queue redesign)
+- Accounting kinds: see the SKIP/PARTIAL notes in the table
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `3b5670e9` | port | feat(melib/imap) | PREAUTH greeting: `ImapStream::preauthed` + skip login/lazy-CAPABILITY/ID + `AccountStateChange` with the server message; detection scans the `M1 CAPABILITY` reply buffer (the fork, like upstream, sends `CAPABILITY` before anything else, so the greeting rides along in that reply) |
+| — | `0b501a1f` | **PARTIAL** | feat(melib/imap) | OAUTHBEARER (RFC 7628) alongside XOAUTH2: capability-based selection, TLS requirement, SASL string built from username+token with legacy base64-string recovery, SASL-IR and continuation forms, SASL failure continuation decoded into error details with the mechanism's cancel token; token resolved from `Secret` only at send time (fork redaction policy). NOT ported: the `new_connection`→`new`+`authenticate()` split and `UIDStore::preauth_capabilities` — the fork's inline auth keeps connection-pool hardening intact and already merges pre/post-auth capabilities in one set (documented in issue #182); docs example updated to the raw-token command form |
+| — | `c063b4a8c` | **SKIP** | fix(melib/imap/untagged) | skip fetch on `(0, 0)` EXISTS: fork's cache-first model already early-returns on `current_exists >= n` |
+| — | `747676ab1` | port | fix(melib/imap/untagged) | equal-count EXISTS (`current_exists == n`) probes the highest MSN once (`FETCH n`), catching an expunge+arrival swap whose total is unchanged; the probe is best-effort (a stale EXISTS may reference an expunged MSN; the UID resync stays authoritative) and dedup by UID suppresses duplicate Create events |
+| — | `2e408a029` | port | fix(melib/imap/managesieve) | literal framing via `send_raw` (no doubled CRLF), replies read with `read_lines(Some(b"OK"))`, `getscript` parses `{N+}` non-synchronizing literals (local parser extension), `ManageSieveConnection::connect()` added; `havespace`/`renamescript` fake-`Ok` stubs did not exist in the fork (removed earlier), nothing to fix; upstream's `putscript` drops the `OK` line it validates against (`keep_termination_string = false`) — the fork keeps it so `response_oknobye` can parse the reply |
+| — | `4cc43b035` | port | feat(meli) | `tools managesieve-shell` REPL subcommand (CLI smoke test for `--help`); upstream's `tools/src/managesieve.rs` binary never existed in the fork |
+| — | `0d23bddf7` | port | test(melib-test/imap) | 72 mock-server `eprintln!`s converted to `tracing::debug!`/`trace!` (fork tracing convention; output visible through `melib_test::init_test_logging`) |
+| — | `79a8c8291` | port | test(melib-test/imap) | TLS support: `ImapServerStream::new_with_tls` wraps the accepted socket in `Connection::new_tls` (WouldBlock handshake loop); negative cert-validation case, PLAIN/OAUTHBEARER/XOAUTH2 over TLS |
+| — | `7092d90cf` | port | test(melib-test/imap) | SASL continuation form: the mock answers the bare `AUTHENTICATE` with `+ ` and asserts the base64 exchange line (byte-exact RFC 7628 form) |
+| — | `43b0a52e4` | port | test(melib-test/imap) | `send_capabilities_on_auth` mock mode: capabilities glued to the auth reply; the client must not re-send `CAPABILITY` (asserted via the handshake command log) |
+| — | `6ef74bf8f` | **SKIP** | test(melib-test/imap) | exit stream recv on client disconnect: the fork's `read_line` already distinguishes EOF (`ReadOutcome::Eof` breaks the loop); read *errors* are now also mapped to EOF instead of panicking |
+| — | `5fddcb89a` | **SKIP** | test(melib-test) | `test_imap_fetch` cache-enabled check: the fork's cache-dependent tests are already `#[cfg(feature = "sqlite3")]`-gated |
+
+
 
 ## 2026-10-13 20:00 (UTC+8)
 
@@ -284,3 +338,14 @@ kept tree-identical to this repository at each publish).
 - Superseded in the mirror by this publish: its interim self-directed upstream sync (`aea4508b..168410ab`, 73 commits — aggregate-Contacts design, v0.12.0, UI ports, sequoia backend, frozen-CVE-corpus assertion edits), removed by the align commit (visible deletions: `melib/src/sequoia.rs`, `meli/src/version_migrations/v0_12_0.rs`)
 - Verification in the mirror repo: `make lint`, full `cargo test --workspace` (28 suites), `cargo test -p cve` **1174/1174**, sensitive-info scan clean (no internal domains/private IPs/credentials in messages or historical blobs)
 - Publish: force-push to `origin/master` pending (sandbox has no `ssh`; to be run from the user's shell)
+
+### 2026-10-20 (UTC+8)
+
+- Method: atomic publish — `git cherry-pick -x -X theirs 7fce2bf..b87b971a3` (43 commits; 1 merge node skipped), one explicit `align` commit, one baseline clippy fix landed here first and picked, one `--no-ff --signoff` merge to `master`
+- Outcome: **41 picks** with `-x` provenance lines + **1 empty-drop** (the 2026-10-13 ledger entry, already content-equivalent on the mirror) + 1 align + 1 merge; the 4 AGENTS doc commits expected to drop empty replayed instead as converging picks (the mirror-side equivalents sat at intermediate wording states; final trees identical either way)
+- Replay fix (align): `-X theirs` let the `cve_2026_96869` module block land at a divergent position and a later pick drop it; the align commit restored it at the source-tip position (backed by the diff=0 gate)
+- Baseline fix: the fork tip carried a clippy break in `cve_2026_43864` (`unreachable_pub` x5, `useless_format`, `bool_comparison`) — fixed here first (visibility narrowed to `pub(super)`, the `format!`-escaped literal inlined unescaped, `== false` turned into a negation) and cherry-picked to the mirror; module tests 6/6
+- Identity unification: `611ada51` re-authored post-pick to Kyle Lee <kylelee@users.noreply.github.com> (sign-off rewritten, author name kept); new-range author/committer/sign-off verified unique
+- Hard gate: `git diff` against this fork's `main` tip = **0** (tree-identical, re-verified on the published tip)
+- Verification in the mirror repo: `make lint`, full `cargo test --workspace` (29 suites, 2634 tests), `cargo test -p cve` **1427/1427**, sensitive-info scan clean (new-range commit messages and both trees: no internal domains/repo names)
+- Publish: push to `origin/master` pending (fast-forward, no history rewritten; to be run from the user's shell)

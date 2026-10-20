@@ -199,8 +199,25 @@ pub fn signatures_into_error(metadata: SignaturesMetadata) -> Result<Option<Stri
             cleartext,
         } = sig;
         if let Err(err) = status {
-            return Err(Error::new(format!("BAD signature from {fingerprint}")).set_source(Some(Box::new(err)))
+            return Err(Error::new(format!("BAD signature from {fingerprint}"))
+                .set_source(Some(Box::new(err)))
                 .set_kind(ErrorKind::ValueError));
+        }
+        if fingerprint.is_empty() {
+            // CVE-2026-43864 (mutt < 2.3.2, CWE-476): mutt's
+            // `show_sig_summary()` dereferenced the (absent) key object of
+            // a signature whose summary demanded rendering key detail. The
+            // meli-side rendering of the same "optional per-signature data
+            // is missing" shape fails closed: a signature the backend
+            // could not attribute to any fingerprint or key id (gpgme's
+            // NULL `fpr`, e.g. a NEWSIG-opened segment that never received
+            // a verdict line) is presented as unverified — never as
+            // `good signature by ` with nothing after the "by".
+            return Err(Error::new(
+                "signature with no fingerprint/key id reported by the PGP backend; refusing to \
+                 present an unattributable signature as verified",
+            )
+            .set_kind(ErrorKind::NotFound));
         }
         if cleartext {
             comment = format!("{comment}[SAFETY WARNING: Cleartext signature!]");

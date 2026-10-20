@@ -39,7 +39,7 @@ use futures::{
     stream::StreamExt,
 };
 use indexmap::{IndexMap, IndexSet};
-use isahc::AsyncReadResponseExt;
+use connection::BoundedResponseText;
 use serde_json::{json, Value};
 use url::Url;
 
@@ -120,16 +120,32 @@ mod tests;
 
 pub fn deserialize_from_str<'de, T: serde::de::Deserialize<'de>>(s: &'de str) -> Result<T> {
     let jd = &mut serde_json::Deserializer::from_str(s);
-    match serde_path_to_error::deserialize(jd) {
-        Ok(v) => Ok(v),
-        Err(err) => Err(Error::new(format!(
+    let value = match serde_path_to_error::deserialize(&mut *jd) {
+        Ok(v) => v,
+        Err(err) => {
+            return Err(Error::new(format!(
+                "BUG: Could not deserialize server JSON response properly, please report this!\nError \
+                 {err} at {path}. Reply from server: {s}",
+                path = err.path(),
+            ))
+            .set_source(Some(Box::new(err)))
+            .set_kind(ErrorKind::Bug));
+        }
+    };
+    // CVE-2026-35537 regression (issue #204): the untrusted server response
+    // must be exactly one JSON document. A value followed by trailing bytes
+    // (`{...}35537`, a second concatenated document) is a lenient-parse gap:
+    // `serde_path_to_error::deserialize` alone stops after the first value
+    // and would silently ignore the rest. Trailing whitespace stays legal.
+    if let Err(err) = jd.end() {
+        return Err(Error::new(format!(
             "BUG: Could not deserialize server JSON response properly, please report this!\nError \
-             {err} at {path}. Reply from server: {s}",
-            path = err.path(),
+             {err}. Reply from server: {s}"
         ))
         .set_source(Some(Box::new(err)))
-        .set_kind(ErrorKind::Bug)),
+        .set_kind(ErrorKind::Bug));
     }
+    Ok(value)
 }
 
 #[derive(Debug, Default)]
@@ -164,6 +180,19 @@ fn is_loopback_host(url: &Url) -> bool {
     }
 }
 
+/// Render a URL for an error message without its userinfo section.
+///
+/// CVE-2026-96869: a URL such as `https://user:password@host/` must never
+/// have its embedded credentials echoed into a configuration error or a log
+/// line, so error messages print only the scheme, host and port.
+fn transport_endpoint(url: &Url) -> String {
+    match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+        (Some(host), None) => format!("{}://{host}", url.scheme()),
+        (None, _) => url.scheme().to_string(),
+    }
+}
+
 /// CVE-2024-50624 hardening: every JMAP transport URL must use `https`.
 ///
 /// Plaintext `http` is only tolerated for loopback hosts, where the traffic
@@ -177,12 +206,28 @@ pub fn validate_transport_url(url: &Url, what: &str) -> Result<()> {
         "http" if is_loopback_host(url) => Ok(()),
         scheme => Err(Error::new(format!(
             "Configuration error: {what} must use `https` (plaintext `http` is only allowed \
-             for loopback hosts such as 127.0.0.1 or localhost), got scheme `{scheme}` in \
-             `{url}`: over a plaintext connection a man-in-the-middle can answer session \
-             discovery with attacker-controlled endpoints (CVE-2024-50624)."
+             for loopback hosts such as 127.0.0.1 or localhost), got scheme `{scheme}` for \
+             `{endpoint}`: over a plaintext connection a man-in-the-middle can answer session \
+             discovery with attacker-controlled endpoints (CVE-2024-50624).",
+            endpoint = transport_endpoint(url),
         ))
         .set_kind(ErrorKind::Configuration)),
+    }?;
+    // CVE-2026-96869 (CWE-200): a `scheme://user:password@host` URL makes the
+    // HTTP engine send transport-level Basic credentials on its own, bypassing
+    // meli's credential management, and every error / log line that renders
+    // the URL would echo them. Reject URL userinfo outright and never format
+    // it back into the error.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::new(format!(
+            "Configuration error: {what} must not embed credentials in the URL authority \
+             section; remove them and configure the account credentials separately. Embedded \
+             URL credentials are never used (CVE-2026-96869). Endpoint: `{endpoint}`.",
+            endpoint = transport_endpoint(url),
+        ))
+        .set_kind(ErrorKind::Configuration));
     }
+    Ok(())
 }
 
 /// Validate the transport URLs the server returned in the JMAP session
@@ -809,7 +854,7 @@ impl MailBackend for JmapType {
                     bytes,
                 )
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mailbox_id: Id<mailbox::MailboxObject> = {
@@ -848,7 +893,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -931,7 +976,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1093,7 +1138,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1282,7 +1327,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1414,7 +1459,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1535,7 +1580,7 @@ impl MailBackend for JmapType {
             let res_text = conn
                 .post_async(None, serde_json::to_string(&req)?)
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let mut v: MethodResponse = match deserialize_from_str(&res_text) {
@@ -1656,7 +1701,7 @@ impl MailBackend for JmapType {
                     bytes,
                 )
                 .await?
-                .text()
+                .text_bounded()
                 .await?;
 
             let upload_response: UploadResponse = match deserialize_from_str(&res_text) {
@@ -1688,7 +1733,7 @@ impl MailBackend for JmapType {
                 let res_text = conn
                     .post_async(None, serde_json::to_string(&req)?)
                     .await?
-                    .text()
+                    .text_bounded()
                     .await?;
                 let mut v: MethodResponse = match deserialize_from_str(&res_text) {
                     Err(err) => {
@@ -1749,7 +1794,7 @@ impl MailBackend for JmapType {
                 let res_text = conn
                     .post_async(None, serde_json::to_string(&req)?)
                     .await?
-                    .text()
+                    .text_bounded()
                     .await?;
 
                 // [ref:TODO] parse/return any error.

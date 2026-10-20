@@ -985,6 +985,15 @@ impl EnvelopeView {
 /// constructors scrub via `strip_spoofing_invisibles`); unparseable values
 /// are scrubbed directly. Faces already shown via `show_extra_headers`
 /// are skipped to avoid double rows.
+///
+/// The resent faces (`Resent-From`/`Resent-Sender`, RFC 5322 §3.6.5/§3.6.6)
+/// join the list as the CVE-2026-62644 (issue #195) gap closure: nothing in
+/// meli consumes them, but they are resend-chain identity claims that many
+/// MUAs treat as the effective origin — an attacker forging `From: trusted`
+/// over `Resent-From: attacker` kept the divergence invisible while other
+/// MUAs showed the attacker as the sender. Same rule as every other face:
+/// display-only annotation of a genuine divergence, never a substitution
+/// for the `From` identity.
 fn address_faces_disagreeing_with_from(
     envelope: &Mail,
     show_extra_headers: &[HeaderName],
@@ -997,6 +1006,8 @@ fn address_faces_disagreeing_with_from(
     let mut rows = Vec::new();
     for name in [
         HeaderName::SENDER,
+        HeaderName::RESENT_FROM,
+        HeaderName::RESENT_SENDER,
         HeaderName::MAIL_REPLY_TO,
         HeaderName::REPLY_TO,
     ] {
@@ -1199,6 +1210,7 @@ impl Component for EnvelopeView {
                     ref archive,
                     ref post,
                     ref unsubscribe,
+                    ..
                 }) = list_management::ListActions::detect(envelope)
                 {
                     let mut x = 0;
@@ -2004,9 +2016,13 @@ impl Component for EnvelopeView {
                 let mut path = std::path::Path::new(path).to_path_buf().expand();
 
                 if path.is_dir() {
-                    let mut filename = self.mail.message_id().to_string().into();
-                    crate::sanitize_filename(&mut filename);
-                    path.push(format!("{filename}.eml",));
+                    // The Message-ID is mail-controlled: derive the same
+                    // bounded, generated-name-backstopped component the
+                    // thread export uses (CVE-2026-73573: a multi-KiB
+                    // identifier must not push the save past `NAME_MAX`;
+                    // CVE-2003-0376 length budget, CVE-2024-43604
+                    // sanitization).
+                    path.push(crate::eml_filename(self.mail.message_id().as_str()));
                 }
                 if path.is_relative() {
                     path = context.current_dir().join(&path);
