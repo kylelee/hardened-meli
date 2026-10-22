@@ -136,7 +136,9 @@ pub fn test_config(path: Option<PathOrStdio>) -> Result<()> {
             conf::FileSettings::validate_string(input, false)?;
             return Ok(());
         }
-        Some(PathOrStdio::Path(path)) => path.expand(),
+        Some(PathOrStdio::Path(path)) => {
+            path.expand().canonicalize().chain_err_related_path(&path)?
+        }
         None => conf::get_config_file()?,
     };
     conf::FileSettings::validate(config_path, false)?;
@@ -154,8 +156,8 @@ pub fn view(
     receiver: Receiver<ThreadEvent>,
     job_executor: std::sync::Arc<crate::jobs::JobExecutor>,
 ) -> Result<State> {
-    let path = path.expand();
-    if !path.exists() {
+    let path = path.expand().canonicalize().chain_err_related_path(&path)?;
+    if !matches!(path.try_exists(), Ok(true)) {
         return Err(Error::new(format!(
             "`{}` is not a valid path",
             path.display()
@@ -226,7 +228,7 @@ pub fn tool(path: Option<PathBuf>, opt: ToolOpt) -> Result<()> {
         account: &str,
     ) -> Result<(conf::FileAccount, conf::AccountConf)> {
         let config_path = if let Some(path) = path {
-            path.expand()
+            path.expand().canonicalize().chain_err_related_path(&path)?
         } else {
             conf::get_config_file()?
         };

@@ -182,7 +182,7 @@ pub enum Action {
     SetEnv(String, String),
     PrintEnv(String),
     CurrentDirectory,
-    ChangeCurrentDirectory(PathBuf),
+    ChangeCurrentDirectory(String),
     Compose(ComposeAction),
     Mailbox(AccountName, MailboxOperation),
     AccountAction(AccountName, AccountAction),

@@ -581,3 +581,53 @@ fn test_command_parser_help() {
     // It must not shadow the `man` command or any other parser.
     assert!(parse_command(b"manpage").is_err());
 }
+
+/// `cd` parses its argument as a raw string (kept unexpanded until the
+/// state layer validates it), and rejects missing arguments.
+#[test]
+fn test_command_parser_cd() {
+    assert_eq!(
+        parse_command(b"cd /tmp").unwrap(),
+        Action::ChangeCurrentDirectory("/tmp".to_string())
+    );
+    // Tilde and relative forms are preserved verbatim.
+    assert_eq!(
+        parse_command(b"cd ~/mail").unwrap(),
+        Action::ChangeCurrentDirectory("~/mail".to_string())
+    );
+    assert_eq!(
+        parse_command(b"cd ..").unwrap(),
+        Action::ChangeCurrentDirectory("..".to_string())
+    );
+    // Interior spaces survive (paths may contain them); trailing
+    // whitespace is trimmed like every other command.
+    assert_eq!(
+        parse_command(b"cd /tmp/my folder  ").unwrap(),
+        Action::ChangeCurrentDirectory("/tmp/my folder".to_string())
+    );
+    // `cd` requires an argument.
+    assert!(matches!(
+        parse_command(b"cd").unwrap_err(),
+        CommandError::WrongNumberOfArguments { .. }
+    ));
+    assert!(matches!(
+        parse_command(b"cd ").unwrap_err(),
+        CommandError::WrongNumberOfArguments { .. }
+    ));
+    // The rest of the line is taken as one path string, spaces included.
+    assert_eq!(
+        parse_command(b"cd one two").unwrap(),
+        Action::ChangeCurrentDirectory("one two".to_string())
+    );
+}
+
+/// `pwd`/`cwd` keep parsing to the argument-less `CurrentDirectory`.
+#[test]
+fn test_command_parser_pwd() {
+    assert_eq!(parse_command(b"pwd").unwrap(), Action::CurrentDirectory);
+    assert_eq!(parse_command(b"cwd").unwrap(), Action::CurrentDirectory);
+    assert!(matches!(
+        parse_command(b"pwd extra").unwrap_err(),
+        CommandError::WrongNumberOfArguments { .. }
+    ));
+}

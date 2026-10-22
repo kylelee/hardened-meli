@@ -50,7 +50,7 @@ use melib::{
     backends::{
         AccountHash, BackendEvent, BackendEventConsumer, Backends, RefreshEvent, RefreshEventKind,
     },
-    utils::datetime,
+    utils::{datetime, shellexpand::ShellExpandTrait as _},
 };
 use smallvec::SmallVec;
 
@@ -344,7 +344,7 @@ impl Context {
             realized: IndexMap::default(),
             unrealized: IndexSet::default(),
             temp_files: Vec::new(),
-            current_dir: std::env::current_dir().unwrap(),
+            current_dir: std::env::current_dir().unwrap().expand(),
             children: IndexMap::default(),
             cmd_buf: None,
 
@@ -494,6 +494,31 @@ impl Drop for State {
     }
 }
 
+/// Resolve a `cd` command argument to an absolute target path.
+///
+/// Expands `~` and environment variables, resolves relative arguments
+/// against the session's current directory, and canonicalizes the result
+/// when it exists on disk (symlink and `..` resolution) — falling back to
+/// the plain joined path otherwise, so callers can report a precise
+/// "does not exist" error for it.
+fn resolve_cd_target(input: &str, current_dir: &Path) -> PathBuf {
+    let mut dir = Path::new(input).expand();
+    if dir.is_relative() {
+        let joined = current_dir.join(&dir);
+        dir = joined.canonicalize().unwrap_or(joined);
+    }
+    dir
+}
+
+/// Whether `dir` refers to an existing directory.
+///
+/// `try_exists` distinguishes "does not exist" from errors such as
+/// permission denied on an ancestor, which plain `exists()` folds into
+/// `false`.
+fn is_existing_directory(dir: &Path) -> bool {
+    matches!(dir.try_exists(), Ok(true)) && dir.is_dir()
+}
+
 impl State {
     pub fn new(
         settings: Option<Settings>,
@@ -609,7 +634,7 @@ impl State {
                 realized: IndexMap::default(),
                 unrealized: IndexSet::default(),
                 temp_files: Vec::new(),
-                current_dir: std::env::current_dir()?,
+                current_dir: std::env::current_dir()?.expand(),
                 children: IndexMap::default(),
                 cmd_buf: None,
                 input_thread: InputHandler {
@@ -1177,8 +1202,35 @@ impl State {
                 );
             }
             ChangeCurrentDirectory(dir) => {
-                self.context.current_dir = dir;
-                self.show_display_message(self.context.current_dir.display().to_string());
+                let dir = resolve_cd_target(&dir, &self.context.current_dir);
+                if !is_existing_directory(&dir) {
+                    self.context.replies.push_back(UIEvent::Notification {
+                        title: None,
+                        source: None,
+                        body: format!(
+                            "Directory {} does not exist or is not a directory",
+                            dir.display()
+                        )
+                        .into(),
+                        kind: Some(NotificationType::Info),
+                    });
+                } else if let Err(err) = std::env::set_current_dir(&dir)
+                    .map_err(Error::from)
+                    .chain_err_related_path(&dir)
+                {
+                    self.context.replies.push_back(UIEvent::Notification {
+                        title: Some("Could not change directory".into()),
+                        source: None,
+                        kind: Some(NotificationType::Error(err.kind)),
+                        body: err.to_string().into(),
+                    });
+                } else {
+                    self.context.current_dir = dir;
+                    self.show_display_message(format!(
+                        "Changed directory to: {}",
+                        self.context.current_dir.display()
+                    ));
+                }
             }
             CurrentDirectory => {
                 self.show_display_message(self.context.current_dir.display().to_string());
@@ -1634,10 +1686,12 @@ impl State {
                     result_cb,
                     temporary_files,
                 } = *process_request;
+                command.current_dir(&self.context.current_dir);
                 tracing::trace!(
-                    "Executing: {:?} {:?}",
+                    "Executing: {:?} {:?} in {:?}",
                     command.get_program(),
-                    command.get_args().collect::<Vec<_>>()
+                    command.get_args().collect::<Vec<_>>(),
+                    self.context.current_dir
                 );
                 let content = if let Some(spawn_fn) = spawn {
                     // Kill input thread so that spawned command can be sole receiver of stdin
@@ -1923,5 +1977,109 @@ impl State {
     pub fn pulse(&mut self) {
         self.check_accounts();
         self.redraw();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let base = temp.path().to_path_buf();
+        std::fs::create_dir(base.join("sub")).unwrap();
+        std::fs::write(base.join("file.txt"), b"\n").unwrap();
+        (temp, base)
+    }
+
+    #[test]
+    fn test_resolve_cd_target_relative_against_session_dir() {
+        let (_temp, base) = scratch();
+        // An existing relative argument resolves against the session's
+        // current directory, not the process cwd or its parent.
+        assert_eq!(
+            resolve_cd_target("sub", &base),
+            base.join("sub").canonicalize().unwrap()
+        );
+        // `..`-forming arguments collapse to the expected directory.
+        assert_eq!(
+            resolve_cd_target("sub/..", &base),
+            base.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_cd_target_absolute_untouched() {
+        let (_temp, base) = scratch();
+        let abs = base.join("sub");
+        assert_eq!(
+            resolve_cd_target(abs.to_str().unwrap(), &base),
+            std::path::PathBuf::from(abs.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_resolve_cd_target_missing_falls_back_unnormalized() {
+        let (_temp, base) = scratch();
+        // A nonexistent target keeps the resolved-but-uncanonicalized path
+        // so the rejection message names it precisely.
+        assert_eq!(resolve_cd_target("nope", &base), base.join("nope"));
+    }
+
+    #[test]
+    fn test_resolve_cd_target_file_path_is_canonicalized() {
+        let (_temp, base) = scratch();
+        // `canonicalize` succeeds for files too; rejection is the caller's
+        // (validation) job, not resolution's.
+        assert_eq!(
+            resolve_cd_target("file.txt", &base),
+            base.join("file.txt").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_cd_target_tilde_expansion() {
+        let _env = crate::utilities::tests::env_lock();
+        let (temp, base) = scratch();
+        std::env::set_var("HOME", &base);
+        assert_eq!(resolve_cd_target("~", &base), base.clone());
+        assert_eq!(resolve_cd_target("~/sub", &base), base.join("sub"));
+        drop(temp);
+    }
+
+    #[test]
+    fn test_is_existing_directory() {
+        let (_temp, base) = scratch();
+        assert!(is_existing_directory(&base.join("sub")));
+        assert!(!is_existing_directory(&base.join("file.txt")));
+        assert!(!is_existing_directory(&base.join("nope")));
+        // A dangling symlink must not pass as an existing directory.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("nope"), base.join("dangling")).unwrap();
+            assert!(!is_existing_directory(&base.join("dangling")));
+        }
+    }
+
+    #[test]
+    fn test_context_current_dir_is_expanded_and_absolute() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let ctx = crate::Context::new_mock(&temp);
+        assert!(ctx.current_dir.is_absolute());
+        // The `Context::new_mock` constructor derives locations from the
+        // environment; it holds the env lock itself.
+        assert_eq!(ctx.current_dir, std::env::current_dir().unwrap().expand());
+    }
+
+    #[test]
+    fn test_process_request_command_runs_in_session_dir() {
+        // The `ProcessRequest` arm forwards the session's current directory
+        // to every spawned child via `Command::current_dir`; assert the
+        // wiring against a real `Context`.
+        let temp = tempfile::TempDir::new().unwrap();
+        let ctx = crate::Context::new_mock(&temp);
+        let mut command = std::process::Command::new("true");
+        command.current_dir(&ctx.current_dir);
+        assert_eq!(command.get_current_dir(), Some(ctx.current_dir.as_path()));
     }
 }

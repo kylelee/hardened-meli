@@ -374,7 +374,7 @@ impl From<FileAccount> for AccountConf {
 
 pub fn get_config_file() -> Result<PathBuf> {
     if let Ok(path) = env::var("MELI_CONFIG") {
-        return Ok(PathBuf::from(path).expand());
+        return Ok(PathBuf::from(&path).expand());
     }
     let xdg_dirs = xdg::BaseDirectories::with_prefix("meli");
     xdg_dirs

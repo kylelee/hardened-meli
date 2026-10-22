@@ -40,6 +40,69 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-23 (UTC+8)
 
+- Method: per-commit semantic port (task S6 of the `1ada94c3..3b543312` range, cd/current-dir hardening)
+- Upstream range: `8cf35137`, `0229a1c4`, `42bff4b3`
+- Conflicts: fork-kept deviations — cd resolution expands via the fork's `ShellExpandTrait::expand()` (`~` + `$VAR`) because the fork has no upstream's `expand_tilde`; relative `cd` arguments resolve against `context.current_dir` itself instead of upstream's `current_dir.parent()` join (upstream's join sends a plain `cd sub` to a sibling directory and `cd ..` two levels up — semantically wrong, so not ported verbatim); `create-config` deliberately not canonicalized since its target is expected to not exist yet
+
+| Upstream commit | Port/Skip | Type | Notes |
+| --- | --- | --- | --- |
+| `8cf35137` | port | feat(meli/state) | `ChangeCurrentDirectory` holds the raw `String`; the state arm expands, resolves, validates (`try_exists` + `is_dir`) and only then switches — an invalid target pushes an `Info` notification and keeps the old directory, a failed `set_current_dir` pushes an `Error` notification; resolution/validation extracted into unit-tested helpers `resolve_cd_target`/`is_existing_directory` |
+| `0229a1c4` | port | fix(meli/state) | `Context::current_dir` expanded (`.expand()`) at both init sites; `ProcessRequest` arm sets `command.current_dir(&self.context.current_dir)` so spawned children run in the displayed session directory (fork previously left them in the startup cwd, diverging from `pwd`) and the exec trace logs the directory |
+| `42bff4b3` | port | fix(meli/subcommands) | `test_config`/`view`/`tool` canonicalize the user-supplied path (failure chained with `chain_err_related_path`) so a later cwd change cannot invalidate an open target; `view` existence check via `try_exists`; `conf.rs::get_config_file` borrows instead of moving (`PathBuf::from(&path)`) |
+
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S9 of the `1ada94c3..3b543312` range, NNTP UID)
+- Upstream range: `4110a0ff` only
+- Conflicts: none (fork-kept deviations: `over_article`'s early ASCII-digit fail-fast guard retained; hash construction already used the raw string bytes, so no hash-input change was needed)
+- Accounting kinds: see the notes column
+
+| Upstream commit | Port/Skip | Type | Notes |
+| --- | --- | --- | --- |
+| `4110a0ff` | port | refactor(melib/nntp) | `UID` `usize`→`NonZeroU32`: `over_article` now parses the article number as `u32` and rejects 0 and values > 2^31-1 as `nom::Err::Failure` (RFC 3977 §6 range); `NntpOp.uid: UID`; sqlite store params use explicit `uid.get()` (rusqlite 0.40). Hash compatibility: fork's `over_article` already hashed the raw article-number string bytes + Message-ID bytes (same as upstream) → **COVERED**, golden-value test pins the env hash to the legacy formula (SipHash-1-3 keys (0,0) = 9367683063824860863 for the fixture line), cache keys stay valid |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S8 of the `1ada94c3..3b543312` range, IMAP UID type)
+- Upstream range: `1ada94c3..3b543312` (`dcec9887`, `8bf479b4` + `042bb21d` decision)
+- Conflicts: fork-kept deviations — cache pagination stays count-typed (`batch_size: usize`, fork's cache-first paging untouched per non-goals); `MessageSequenceNumberMap` does not exist in the fork (upstream's hunk there n/a); panic-path `SequenceSet::try_from(..).unwrap()` deduplicated into `uids_to_sequence_set()` helper with let-else call sites instead of upstream's duplicated blocks; NNTP untouched (parallel task S9)
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `dcec9887` | port | refactor(melib/imap) | `ImapNum`/`UID`/`UIDVALIDITY`/`MessageSequenceNumber` usize→u32 (rusqlite 0.40 dropped `usize: ToSql`; the `sqlite3_cache.rs` `params![env_lastseenuid]` breakpoint disappears since `Option<u32>` implements `ToSql`); mechanical sweep across fetch/protocol_parser/sync/{mod,cache,sqlite3_cache}/watch/connection/untagged + tests (1-based MSN from `enumerate`, msn vec index casts, counters `as usize`); `ResponseCode::Unseen` parses `u32`; `generate_envelope_hash` via `write_usize(uid as usize)`; `copy_messages`/`set_flags`/`delete_messages` UID→`NonZeroU32` conversion collapsed (no more `u32::try_from` hop, "UID exceeded u32" error branch is unrepresentable); empty-uids `SequenceSet::try_from(..).unwrap()` panic path replaced by `uids_to_sequence_set()` returning `Ok(None)` on empty (let-else no-op at call sites, upstream semantics). Regression: `uids_to_sequence_set` rejects 0, accepts full u32 range incl. `u32::MAX`, empty → no-op |
+| — | `8bf479b4` | port | fix(melib/imap/sqlite3_cache) | cache miss resets max_uid: `lastseenuid()` now compares the envelopes-table `MAX(uid)` against the mailbox-table `max_uid` unconditionally and resets `max_uid` to 0 when the envelopes table is empty (the old `if let (Some(env_lastseenuid), true)` pattern left the stale baseline and the next incremental sync trusted a nonexistent `UID FETCH <stale+1>:*` window); in-memory `uid_store.lastseenuid` entry removed on miss, and the same compare-and-reset ported on the `mailbox_state()` read path (fork's analogue of upstream's init-side hunk): reachable fork path — the quarantine flow moves rows out of `envelopes` without touching `max_uid`, so a session arming its baseline from the stored `max_uid` (sync reads the in-memory map) would drive `UID FETCH <stale+1>:*` and permanently skip the missing rows; reconcile on load resets it (fork's `init_mailbox` resets `max_uid` by construction via DELETE+cascading INSERT, so only the read path needed the port). Regression: `test_imap_sync_sqlite3_lastseenuid_cache_miss_resets_max_uid` covering both the cache-miss and the stale-highest-UID-quarantine `mailbox_state()` shapes (fails without the fix, red-green verified) |
+| — | `042bb21d` | **SKIP** | refactor(melib/imap) | UID → `NonZero<u32>`: deliberately deferred per sync decision; this task only lands the `usize`→`u32` step; `uids_to_sequence_set()` already funnels all `NonZeroU32` conversions for the later cutover |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S1 of the `1ada94c3..3b543312` range, embedded terminal / subprocess chain)
+- Upstream range: `1ada94c3..3b543312` (the five embedded/ProcessRequest commits only)
+- Conflicts: none textual; semantic adaptations are listed per row (fork-kept deviations: synchronous ProcessRequest execution in `State`, tracing logging, `find_sh_path` hardening, per-arm `arg_init!` command parsing untouched)
+- Verification: `cargo build`, `cargo test -p meli --lib` **662/662** (incl. new `sh_trampoline_args_*` ×3, `stderr_capture_tests` ×3, `embedded_editor_exit_notification_carries_stderr` e2e), `cargo clippy -p meli --all-features -- -D warnings`
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| `e45a74872` | `f9e8ce82` | port | feat(types, ProcessRequest): `owner` → `Option<ComponentId>`; `State` handler gains the `None` branch (no `IntraComm` delivery, temporary files dropped, `update_size`); fork's StatusBar has no `ProcessRequest` construction (upstream's `utilities.rs` hunk not applicable); mailcap tests assert `Some(owner)` |
+| `6f13938e9` | `f69ad24b` | port | feat(terminal, embedded): child stderr → dedicated `pipe()` instead of the pty; fork goes beyond upstream's `[ref:TODO]`: a per-pty drain thread continuously empties the pipe into a bounded `StderrCapture` (4 KiB, head-kept, `STDERR_CAPTURE_LIMIT`), so a chatty child can never block on a full pipe; exit + SIGTERM notifications carry `stderr: <content>`; `Terminal::new` signature extended; 3 drain unit tests |
+| `fe8207680` | `588c2341` | port | feat(state, ForkedProcess): `Embedded` gains `on_exit: OnExitNotifyFn`; `try_wait(&mut Option<UIEvent>)` forwards the wait status as `UIEvent::IntraComm` to the owning component; the `Key::Null` `EmbeddedInput` hack in `try_wait_on_main_child` is deleted (notification instead when no event was produced); fork keeps its EIO write-failure probe but both detection paths converge on the new shared `Composer::process_wait`; e2e regression test asserts the exit notification carries the child's stderr and the `on_exit` → `IntraComm` wiring; review hardening: the `Exited` and Ctrl-C-on-stopped arms tolerate an already-reaped pty (log + cleanup) instead of unwrapping |
+| `7c0ff6a6a` | `71123f33` | port | refactor(terminal, create_pty): `command: &str` → `Vec<String>`; the `sh -c '<bin> "$@"' <bin> <args…>` trampoline is assembled once inside `create_pty` (`sh_trampoline_args`, matching the fork's non-embedded editor shape) instead of upstream's caller-side pre-wrap; argument paths (draft file, editor arguments) reach the child verbatim through the quoted `"$@"`; the program word stays interpolated unquoted (whitespace-free requirement, same as non-embedded `composing.editor_command`); empty-command `ValueError`; 3 pure-function unit tests |
+| `55df8a0c3` | `6d88d6a7` | port | fix(state, ProcessRequest): owner-less requests redraw immediately (`render()` after `update_size()`) |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S4 of the `1ada94c3..3b543312` range)
+- Upstream range: `1ada94c3..3b543312` (Pipe/PipeAttachment whole-line-command commits only)
+- Conflicts: none taken on `ProcessRequest.owner` (task S1 owns its Option-ization; both sites here keep the fork's plain `ComponentId`) and none on the `cd` cluster (task S6)
+- Accounting kinds: see the notes column
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `ae26e8db` | port | fix(meli/command, mail/view) | `PipeAttachment(usize, String, Vec<String>)` → `PipeAttachment { index, command }`: `pipe-attachment INDEX COMMAND` takes the whole rest of the line (`not_line_ending`, mid-line CR/LF still rejected) so pipes/quotes/spacey paths ride into `sh -c`; execution runs `sh -c` via the fork's existing `ProcessRequest`+`SpawnInteractionFn`+`result_cb` channel (fork's `EnvelopeViewMessage::PipeAttachmentExit` notification path kept); ported upstream's reordering so `index == 0` pipes the whole mail without `open_attachment`'s attachment-kind filter and its spurious not-found notification; parser tests for whole-line/quote/pipe forms and kept arg-count errors |
+| — | `a2569faf` | port | refactor(meli/command, utilities) | `Pipe(String, Vec<String>)` → `Pipe { command }`: same whole-line parse for `pipe COMMAND`; the pager's synchronous `Command::new(bin).args(args)` spawn replaced by the fork's `ProcessRequest` async channel (`sh -c`, stdin piped, stdout/stderr inherited — the old piped-but-unread stdout deadlock face is gone), broken-pipe writes (e.g. `head -1`) reported through `result_cb` instead of panicking; shared `ProcessRequest::shell_command` constructor keeps both call sites' spawn parameterization in one tested place; completion desc `pipe EXECUTABLE ARGS` → `pipe COMMAND`; CVE-2025-49113 regression corpus adapted to the typed whole-line action |
+
+## 2026-10-23 (UTC+8)
+
 - Method: per-commit semantic port (task S5 of the `1ada94c3..3b543312` range, small fixes batch)
 - Upstream range: `1ada94c3..3b543312` (this task: `ad6f2b68`, `d2470aa8`, `eec57247`, `8180e9c2`, `e4b5d4d1`, `2bb886ee`, `a5d5e862`, `ef05916a`)
 - Conflicts: none (fork-kept deviations: byte-input command parsers with fork `argcheck` convention, `ShortcutKeys` binding type instead of bare `Key`, fork's `CmdInput`+`ChangeMode` command-input chain, `server_password_command` config format in tests, `PASSED` flag keeps its `$passed` keyword mapping). Intentional behavior change for the release notes: the help/shortcuts panel search trigger key moved from `listing.search` (`/` or `F3`) to `general.search` (`/` only), so a user remap of `listing.search`'s `F3` no longer opens the help-panel search)
