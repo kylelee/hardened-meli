@@ -25,10 +25,9 @@ use std::cmp;
 use melib::{backends::AccountHash, text::TextProcessing, Card, CardId, Draft};
 
 use crate::{
-    account_settings, conf, contacts::editor::ContactManager, shortcut, terminal::*,
-    Action::Tab, Component,
-    ComponentId, Composer, Context, DataColumns, PageMovement, ScrollContext, ScrollUpdate,
-    ShortcutMaps, Shortcuts, StatusEvent, TabAction, ThemeAttribute, UIEvent, UIMode,
+    account_settings, conf, contacts::editor::ContactManager, shortcut, terminal::*, Action::Tab,
+    Component, ComponentId, Composer, Context, DataColumns, PageMovement, ScrollContext,
+    ScrollUpdate, ShortcutMaps, Shortcuts, StatusEvent, TabAction, ThemeAttribute, UIEvent, UIMode,
 };
 
 #[derive(Debug)]
