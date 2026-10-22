@@ -38,6 +38,16 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## Sync log
 
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S9 of the `1ada94c3..3b543312` range, NNTP UID)
+- Upstream range: `4110a0ff` only
+- Conflicts: none (fork-kept deviations: `over_article`'s early ASCII-digit fail-fast guard retained; hash construction already used the raw string bytes, so no hash-input change was needed)
+- Accounting kinds: see the notes column
+
+| Upstream commit | Port/Skip | Type | Notes |
+| --- | --- | --- | --- |
+| `4110a0ff` | port | refactor(melib/nntp) | `UID` `usize`→`NonZeroU32`: `over_article` now parses the article number as `u32` and rejects 0 and values > 2^31-1 as `nom::Err::Failure` (RFC 3977 §6 range); `NntpOp.uid: UID`; sqlite store params use explicit `uid.get()` (rusqlite 0.40). Hash compatibility: fork's `over_article` already hashed the raw article-number string bytes + Message-ID bytes (same as upstream) → **COVERED**, golden-value test pins the env hash to the legacy formula (SipHash-1-3 keys (0,0) = 9367683063824860863 for the fixture line), cache keys stay valid |
 ## 2026-10-20 (UTC+8)
 
 - Method: per-commit semantic port (task T6 of the `1ada94c3..1e66d41e` range, conf preprocessing)
