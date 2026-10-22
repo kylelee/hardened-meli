@@ -40,16 +40,15 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-23 (UTC+8)
 
-- Method: per-commit semantic port (task S6 of the `1ada94c3..3b543312` range, cd/current-dir hardening)
-- Upstream range: `8cf35137`, `0229a1c4`, `42bff4b3`
-- Conflicts: fork-kept deviations — cd resolution expands via the fork's `ShellExpandTrait::expand()` (`~` + `$VAR`) because the fork has no upstream's `expand_tilde`; relative `cd` arguments resolve against `context.current_dir` itself instead of upstream's `current_dir.parent()` join (upstream's join sends a plain `cd sub` to a sibling directory and `cd ..` two levels up — semantically wrong, so not ported verbatim); `create-config` deliberately not canonicalized since its target is expected to not exist yet
+- Method: per-commit semantic port (task S3 of the `1ada94c3..3b543312` range, embedded terminal dirty bitmap)
+- Upstream range: `83c7889c` only
+- Conflicts: none textual. Fork-kept deviations: `CellBuffer::buf`/`cellvec`/`cellvec_mut`, `Area`/`ScreenGeneration` and the PUA width handling are untouched; `EmbeddedGrid::set_terminal_size` keeps its `(cols, rows)` tuple signature (the upstream two-arg signature change in `embedded.rs`/`pager.rs` is API-only and was not applied). The dirty bitmap is purely additive. Rendering adaptation: the composer no longer clears the whole embedded area before copying and resizes the grid before reading the bitmap, so the per-row copy is actually incremental (upstream cleared the full area and its `set_dirty(false)` re-filled the bitmap, which degenerated to a full copy); `EmbeddedGrid::set_dirty(false)` acknowledges/clears the bitmap instead.
+- Accounting kinds: see the notes column
+- Baseline prerequisite: `meli/src/accounts/tests.rs` cold-start fixture adapted (`&uid` → `&(uid as u32)`) as in main `96f875a03`; without it the `usize`→`u32` UID port already merged in this base makes the lib test target fail to compile, unrelated to this task
 
-| Upstream commit | Port/Skip | Type | Notes |
+| Local commit | Upstream commit | Type | Notes |
 | --- | --- | --- | --- |
-| `8cf35137` | port | feat(meli/state) | `ChangeCurrentDirectory` holds the raw `String`; the state arm expands, resolves, validates (`try_exists` + `is_dir`) and only then switches — an invalid target pushes an `Info` notification and keeps the old directory, a failed `set_current_dir` pushes an `Error` notification; resolution/validation extracted into unit-tested helpers `resolve_cd_target`/`is_existing_directory` |
-| `0229a1c4` | port | fix(meli/state) | `Context::current_dir` expanded (`.expand()`) at both init sites; `ProcessRequest` arm sets `command.current_dir(&self.context.current_dir)` so spawned children run in the displayed session directory (fork previously left them in the startup cwd, diverging from `pwd`) and the exec trace logs the directory |
-| `42bff4b3` | port | fix(meli/subcommands) | `test_config`/`view`/`tool` canonicalize the user-supplied path (failure chained with `chain_err_related_path`) so a later cwd change cannot invalidate an open target; `view` existence check via `try_exists`; `conf.rs::get_config_file` borrows instead of moving (`PathBuf::from(&path)`) |
-
+| — | `83c7889c` | port | `DirtyBitmap` row-major cell bitmap on `CellBuffer` (hooks in `copy_area`/`write_string`/`clear_area`/`change_colors`/`change_theme`/`scroll_*`/`IndexMut`/`resize`/`clear`/`empty`, `dirty_areas()` returns merged inclusive `(start, end)` spans per row); `EmbeddedGrid::{dirty_areas,buffer_mut}` and `set_dirty` bitmap sync; the composer copies only dirty spans and pushes those spans as dirty flush areas; unit tests cover single/multi-row writes, interval merging across a word boundary without cross-row bleed, clear/reset/resize, and end-to-end `process_byte` partial writes on the embedded grid |
 
 ## 2026-10-23 (UTC+8)
 

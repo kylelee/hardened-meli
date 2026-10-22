@@ -1460,12 +1460,32 @@ impl Component for Composer {
             if embedded_pty.is_dirty() {
                 if embedded_pty.running {
                     let mut guard = embedded_pty.lock().unwrap();
-                    grid.clear_area(embedded_area, theme_default);
-
-                    grid.copy_area(guard.grid.buffer(), embedded_area, guard.grid.area());
+                    // Resize the embedded grid before reading its dirty
+                    // bitmap: a resize reallocates the buffer and marks it
+                    // fully dirty, which must be part of this frame's copy.
                     guard.set_terminal_size((embedded_area.width(), embedded_area.height()));
+
+                    // Copy only the rows the embedded grid reported as dirty
+                    // instead of the whole screen. `dirty_areas()` returns
+                    // inclusive `(start, end)` column bounds, so the copied
+                    // width is `end - start + 1`. The destination area is
+                    // deliberately not cleared first: untouched cells still
+                    // hold the previous frame's (identical) content, and
+                    // clearing them would require a full-screen copy to
+                    // restore them.
+                    for (y, (start, end)) in guard.grid.dirty_areas() {
+                        let width = end.saturating_sub(start) + 1;
+                        let src = guard
+                            .grid
+                            .area()
+                            .nth_row(y)
+                            .skip_cols(start)
+                            .take_cols(width);
+                        let dest = embedded_area.nth_row(y).skip_cols(start).take_cols(width);
+                        grid.copy_area(guard.grid.buffer(), dest, src);
+                        context.dirty_areas.push_back(dest);
+                    }
                     guard.grid.set_dirty(false);
-                    context.dirty_areas.push_back(embedded_area);
                     self.dirty = false;
                 } else {
                     let mut guard = embedded_pty.lock().unwrap();

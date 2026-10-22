@@ -370,6 +370,10 @@ impl EmbeddedGrid {
     #[inline]
     pub fn set_dirty(&mut self, value: bool) {
         self.dirty = value;
+        // Keep the fine-grained bitmap in sync with the coarse flag: a
+        // `true` forces a full repaint, a `false` acknowledges (clears) the
+        // rows that were just copied to the screen.
+        self.buffer_mut().set_dirty(value);
     }
 
     #[inline]
@@ -377,11 +381,25 @@ impl EmbeddedGrid {
         self.dirty
     }
 
+    /// Return the dirty column ranges of the active screen buffer, one entry
+    /// per dirty row (see [`CellBuffer::dirty_areas`]).
+    pub fn dirty_areas(&mut self) -> SmallVec<[(usize, (usize, usize)); 2]> {
+        self.buffer().dirty_areas().into_iter().collect()
+    }
+
     #[inline]
     pub fn buffer(&self) -> &CellBuffer {
         match self.screen_buffer {
             ScreenBuffer::Normal => self.normal_screen.grid(),
             ScreenBuffer::Alternate => self.alternate_screen.grid(),
+        }
+    }
+
+    #[inline]
+    pub fn buffer_mut(&mut self) -> &mut CellBuffer {
+        match self.screen_buffer {
+            ScreenBuffer::Normal => self.normal_screen.grid_mut(),
+            ScreenBuffer::Alternate => self.alternate_screen.grid_mut(),
         }
     }
 
@@ -400,6 +418,10 @@ impl EmbeddedGrid {
         self.terminal_size = new_val;
         self.cursor = (0, 0);
         self.wrap_next = false;
+        // Resizing reallocates the buffers and clears their bitmaps; the
+        // destination screen has to be repainted in full.
+        self.normal_screen.grid_mut().set_dirty(true);
+        self.alternate_screen.grid_mut().set_dirty(true);
     }
 
     pub fn set_tab_width(&mut self, new_val: u8) {
@@ -444,12 +466,12 @@ impl EmbeddedGrid {
             ref mut dirty,
             ref tab_width,
         } = self;
-        let mut screen = normal_screen;
+        let mut screen = &mut *normal_screen;
 
         let is_alternate = match *screen_buffer {
             ScreenBuffer::Normal => false,
             _ => {
-                screen = alternate_screen;
+                screen = &mut *alternate_screen;
                 true
             }
         };
@@ -466,6 +488,9 @@ impl EmbeddedGrid {
                         ) {
                             return;
                         }
+                        // A resize reallocates the grid and clears its dirty
+                        // bitmap: force a full repaint of the grown screen.
+                        screen.grid_mut().set_dirty(true);
                         scroll_region.bottom += 1;
                         terminal_size.1 += 1;
                     }
@@ -514,6 +539,24 @@ impl EmbeddedGrid {
         macro_rules! area {
             () => {{
                 screen.area()
+            }};
+        }
+
+        /// Mark the cell under the cursor as dirty.
+        macro_rules! set_dirty_cell {
+            () => {{
+                let (x, y) = cursor_val!();
+                screen.grid_mut().dirty_bitmap_mut().set(x, y);
+                *dirty = true;
+            }};
+            ($area:expr) => {{
+                let area = $area;
+                for row in screen.grid().bounds_iter(area) {
+                    for (x, y) in row {
+                        screen.grid_mut().dirty_bitmap_mut().set(x, y);
+                    }
+                }
+                *dirty = true;
             }};
         }
 
@@ -644,7 +687,7 @@ impl EmbeddedGrid {
                         .set_fg(*fg_color)
                         .set_bg(*bg_color)
                         .set_attrs(*attrs);
-                    *dirty = true;
+                    set_dirty_cell!();
                 }
             }};
         }
@@ -929,7 +972,11 @@ impl EmbeddedGrid {
                             std::cmp::max(1, terminal_size.0),
                             std::cmp::max(1, terminal_size.1),
                         );
+                        // The alternate buffer replaces the visible grid in
+                        // full, so it needs a complete repaint.
+                        alternate_screen.grid_mut().set_dirty(true);
                         *screen_buffer = ScreenBuffer::Alternate;
+                        *dirty = true;
                     }
                     _ => {
                         tracing::trace!(
@@ -973,7 +1020,11 @@ impl EmbeddedGrid {
                         *dirty = true;
                     }
                     b"1047" | b"1049" => {
+                        // The normal buffer replaces the visible grid in
+                        // full, so it needs a complete repaint.
+                        normal_screen.grid_mut().set_dirty(true);
                         *screen_buffer = ScreenBuffer::Normal;
+                        *dirty = true;
                     }
                     _ => {
                         tracing::trace!(
@@ -2016,6 +2067,73 @@ mod hardening_tests {
         bytes.extend(vec![b'9'; 100_000]);
         bytes.push(b'G');
         feed(&mut grid, &bytes);
+    }
+}
+
+#[cfg(test)]
+mod dirty_bitmap_tests {
+    use super::*;
+
+    fn feed(grid: &mut EmbeddedGrid, bytes: &[u8]) {
+        let mut sink = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .expect("/dev/null is writable");
+        for &byte in bytes {
+            grid.process_byte(&mut sink, byte);
+        }
+    }
+
+    fn new_grid(cols: usize, rows: usize) -> EmbeddedGrid {
+        let mut grid = EmbeddedGrid::new();
+        grid.set_terminal_size((cols, rows));
+        grid
+    }
+
+    fn dirty_areas(grid: &mut EmbeddedGrid) -> Vec<(usize, (usize, usize))> {
+        grid.dirty_areas().into_iter().collect()
+    }
+
+    /// A resized grid needs a full repaint; after acknowledging that, a
+    /// partial write must only report the rows it actually touched.
+    #[test]
+    fn embedded_grid_partial_write_only_marks_affected_rows() {
+        let mut grid = new_grid(10, 4);
+        assert_eq!(
+            dirty_areas(&mut grid).len(),
+            4,
+            "a resized grid starts fully dirty"
+        );
+
+        grid.set_dirty(false);
+        assert!(dirty_areas(&mut grid).is_empty());
+
+        feed(&mut grid, b"hi");
+        assert_eq!(dirty_areas(&mut grid), vec![(0, (0, 1))]);
+
+        grid.set_dirty(false);
+        assert!(dirty_areas(&mut grid).is_empty());
+
+        feed(&mut grid, b"\r\n\r\nz");
+        assert_eq!(
+            dirty_areas(&mut grid),
+            vec![(2, (0, 0))],
+            "moving the cursor must not dirty rows; only the written cell does"
+        );
+    }
+
+    /// `ESC[2J` clears every cell, so the whole grid becomes dirty.
+    #[test]
+    fn embedded_grid_clear_marks_all_rows() {
+        let mut grid = new_grid(10, 4);
+        grid.set_dirty(false);
+        assert!(dirty_areas(&mut grid).is_empty());
+
+        feed(&mut grid, b"\x1b[2J");
+        assert_eq!(
+            dirty_areas(&mut grid),
+            vec![(0, (0, 9)), (1, (0, 9)), (2, (0, 9)), (3, (0, 9))]
+        );
     }
 }
 
