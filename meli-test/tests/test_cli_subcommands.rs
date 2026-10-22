@@ -333,14 +333,15 @@ server_password_command = "false"
             .output()
             .unwrap()
             .assert();
+        // `test_config` canonicalizes the user-supplied path first (issue
+        // hardening: a later cwd change cannot invalidate an open target), so
+        // a missing file fails at that gate and the error is the bare
+        // OS-error chain with the related path — still a clean exit 1.
         output.code(1).stderr(predicate::eq(
             format!(
                 concat!(
-                    "Configuration error: Could not preprocess configuration file\n",
-                    "Related path: {path}\n",
-                    "Caused by:\n",
-                    "[2] OS error 2: No such file or directory: No such file or directory \
-                     (os error 2)\n",
+                    "OS error 2: No such file or directory: No such file or \
+                     directory (os error 2)\n",
                     "Related path: {path}\n",
                 ),
                 path = f.display()
