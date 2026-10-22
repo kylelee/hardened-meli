@@ -40,15 +40,19 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-23 (UTC+8)
 
-- Method: per-commit semantic port (task S4 of the `1ada94c3..3b543312` range)
-- Upstream range: `1ada94c3..3b543312` (Pipe/PipeAttachment whole-line-command commits only)
-- Conflicts: none taken on `ProcessRequest.owner` (task S1 owns its Option-ization; both sites here keep the fork's plain `ComponentId`) and none on the `cd` cluster (task S6)
-- Accounting kinds: see the notes column
+- Method: per-commit semantic port (task S1 of the `1ada94c3..3b543312` range, embedded terminal / subprocess chain)
+- Upstream range: `1ada94c3..3b543312` (the five embedded/ProcessRequest commits only)
+- Conflicts: none textual; semantic adaptations are listed per row (fork-kept deviations: synchronous ProcessRequest execution in `State`, tracing logging, `find_sh_path` hardening, per-arm `arg_init!` command parsing untouched)
+- Verification: `cargo build`, `cargo test -p meli --lib` **662/662** (incl. new `sh_trampoline_args_*` ×3, `stderr_capture_tests` ×3, `embedded_editor_exit_notification_carries_stderr` e2e), `cargo clippy -p meli --all-features -- -D warnings`
 
 | Local commit | Upstream commit | Type | Notes |
 | --- | --- | --- | --- |
-| — | `ae26e8db` | port | fix(meli/command, mail/view) | `PipeAttachment(usize, String, Vec<String>)` → `PipeAttachment { index, command }`: `pipe-attachment INDEX COMMAND` takes the whole rest of the line (`not_line_ending`, mid-line CR/LF still rejected) so pipes/quotes/spacey paths ride into `sh -c`; execution runs `sh -c` via the fork's existing `ProcessRequest`+`SpawnInteractionFn`+`result_cb` channel (fork's `EnvelopeViewMessage::PipeAttachmentExit` notification path kept); ported upstream's reordering so `index == 0` pipes the whole mail without `open_attachment`'s attachment-kind filter and its spurious not-found notification; parser tests for whole-line/quote/pipe forms and kept arg-count errors |
-| — | `a2569faf` | port | refactor(meli/command, utilities) | `Pipe(String, Vec<String>)` → `Pipe { command }`: same whole-line parse for `pipe COMMAND`; the pager's synchronous `Command::new(bin).args(args)` spawn replaced by the fork's `ProcessRequest` async channel (`sh -c`, stdin piped, stdout/stderr inherited — the old piped-but-unread stdout deadlock face is gone), broken-pipe writes (e.g. `head -1`) reported through `result_cb` instead of panicking; shared `ProcessRequest::shell_command` constructor keeps both call sites' spawn parameterization in one tested place; completion desc `pipe EXECUTABLE ARGS` → `pipe COMMAND`; CVE-2025-49113 regression corpus adapted to the typed whole-line action |
+| `e45a74872` | `f9e8ce82` | port | feat(types, ProcessRequest): `owner` → `Option<ComponentId>`; `State` handler gains the `None` branch (no `IntraComm` delivery, temporary files dropped, `update_size`); fork's StatusBar has no `ProcessRequest` construction (upstream's `utilities.rs` hunk not applicable); mailcap tests assert `Some(owner)` |
+| `6f13938e9` | `f69ad24b` | port | feat(terminal, embedded): child stderr → dedicated `pipe()` instead of the pty; fork goes beyond upstream's `[ref:TODO]`: a per-pty drain thread continuously empties the pipe into a bounded `StderrCapture` (4 KiB, head-kept, `STDERR_CAPTURE_LIMIT`), so a chatty child can never block on a full pipe; exit + SIGTERM notifications carry `stderr: <content>`; `Terminal::new` signature extended; 3 drain unit tests |
+| `fe8207680` | `588c2341` | port | feat(state, ForkedProcess): `Embedded` gains `on_exit: OnExitNotifyFn`; `try_wait(&mut Option<UIEvent>)` forwards the wait status as `UIEvent::IntraComm` to the owning component; the `Key::Null` `EmbeddedInput` hack in `try_wait_on_main_child` is deleted (notification instead when no event was produced); fork keeps its EIO write-failure probe but both detection paths converge on the new shared `Composer::process_wait`; e2e regression test asserts the exit notification carries the child's stderr and the `on_exit` → `IntraComm` wiring |
+| `7c0ff6a6a` | `71123f33` | port | refactor(terminal, create_pty): `command: &str` → `Vec<String>`; the `sh -c '<bin> "$@"' <bin> <args…>` trampoline is assembled once inside `create_pty` (`sh_trampoline_args`, matching the fork's non-embedded editor shape) instead of upstream's caller-side pre-wrap; whitespace paths (editor binary, draft file) reach the child unsplit; empty-command `ValueError`; 3 pure-function unit tests |
+| `55df8a0c3` | `6d88d6a7` | port | fix(state, ProcessRequest): owner-less requests redraw immediately (`render()` after `update_size()`) |
+
 
 ## 2026-10-20 (UTC+8)
 
