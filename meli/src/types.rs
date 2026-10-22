@@ -331,7 +331,10 @@ impl std::fmt::Display for NotificationType {
 
 #[derive(Debug)]
 pub struct ProcessRequest {
-    pub owner: ComponentId,
+    /// The component that spawned the request, if any; `None` when the
+    /// request originates from `State` itself and its result has no
+    /// component to be delivered to.
+    pub owner: Option<ComponentId>,
     pub command: std::process::Command,
     pub spawn: Option<SpawnInteractionFn>,
     pub result_cb: ProcessResultFn,

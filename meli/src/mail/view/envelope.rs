@@ -2088,7 +2088,7 @@ impl Component for EnvelopeView {
                 context
                     .replies
                     .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
-                        owner: self.id,
+                        owner: Some(self.id),
                         command: {
                             let mut cmd = Command::new("sh");
                             cmd.args(["-c", command])
@@ -2128,7 +2128,7 @@ impl Component for EnvelopeView {
                 context
                     .replies
                     .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
-                        owner: self.id,
+                        owner: Some(self.id),
                         command: {
                             let mut cmd = Command::new(&bin);
                             cmd.args(&args)

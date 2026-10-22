@@ -1691,18 +1691,22 @@ impl State {
                 if let Some(content) = content {
                     if content.is::<UIEvent>() {
                         self.rcv_event(*content.downcast::<UIEvent>().unwrap());
-                    } else {
+                        return;
+                    } else if let Some(owner) = owner {
                         self.rcv_event(UIEvent::IntraComm {
                             from: owner,
                             to: owner,
                             content,
                         });
+                        return;
                     }
                 }
-                // The temporary files must not be deleted before the process
-                // has run and its result callback has completed; drop them
-                // here, together with the handled request.
+                // No owner, so set ourselves dirty. The temporary files must
+                // not be deleted before the process has run and its result
+                // callback has completed; drop them here, together with the
+                // handled request.
                 drop(temporary_files);
+                self.screen.update_size();
                 return;
             }
             _ => {}
