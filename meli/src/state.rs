@@ -1707,6 +1707,7 @@ impl State {
                 // handled request.
                 drop(temporary_files);
                 self.screen.update_size();
+                self.render();
                 return;
             }
             _ => {}
