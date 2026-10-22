@@ -2098,7 +2098,7 @@ impl ImapConnection {
                         let msn_index: BTreeMap<MessageSequenceNumber, UID> = cached_msn_index
                             .into_iter()
                             .enumerate()
-                            .filter_map(|(msn, uid)| uid.map(|uid| (msn, uid)))
+                            .filter_map(|(msn, uid)| uid.map(|uid| (msn as u32, uid)))
                             .collect();
                         self.uid_store
                             .msn_index
@@ -2137,9 +2137,12 @@ impl ImapConnection {
                     match msn_index_lck.get(&mailbox_hash) {
                         Some(index) if !index.is_empty() => {
                             let mut vec =
-                                vec![None; index.keys().next_back().copied().unwrap_or(0) + 1];
+                                vec![
+                                    None;
+                                    index.keys().next_back().copied().unwrap_or(0) as usize + 1
+                                ];
                             for (&msn, &uid) in index.iter() {
-                                if let Some(slot) = vec.get_mut(msn) {
+                                if let Some(slot) = vec.get_mut(msn as usize) {
                                     *slot = Some(uid);
                                 }
                             }
@@ -2288,7 +2291,7 @@ impl ImapConnection {
     async fn create_uid_msn_cache(
         &mut self,
         mailbox_hash: MailboxHash,
-        low: usize,
+        low: MessageSequenceNumber,
         _select_response: &SelectResponse,
     ) -> Result<()> {
         debug_assert!(low > 0);
@@ -2311,7 +2314,8 @@ impl ImapConnection {
             protocol_parser::search_results(&response)?
                 .1
                 .into_iter()
-                .enumerate(),
+                .enumerate()
+                .map(|(msn, uid)| (msn as u32, uid)),
         );
         Ok(())
     }

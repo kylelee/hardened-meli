@@ -80,7 +80,7 @@ use crate::{
     utils::futures::timeout,
 };
 
-pub type ImapNum = usize;
+pub type ImapNum = u32;
 pub type UID = ImapNum;
 pub type UIDVALIDITY = UID;
 pub type MessageSequenceNumber = ImapNum;
@@ -142,6 +142,33 @@ async fn copy_or_move_uids(
         }
     }
     Ok(())
+}
+
+/// Convert cached UIDs to a `UID STORE`/`UID EXPUNGE` sequence set.
+///
+/// Returns `Ok(None)` when `uids` is empty, meaning no command needs to be
+/// sent; errors when a UID is `0`, which cannot be represented as a
+/// `NonZeroU32`. UIDs are `u32`, so values beyond `u32::MAX` are
+/// unrepresentable by construction.
+fn uids_to_sequence_set(uids: &[UID]) -> Result<Option<SequenceSet>> {
+    if uids.is_empty() {
+        return Ok(None);
+    }
+    let mut tmp = Vec::with_capacity(uids.len());
+
+    for uid in uids.iter() {
+        if let Ok(uid) = NonZeroU32::try_from(*uid) {
+            tmp.push(uid);
+        } else {
+            return Err(Error::new("Application error: UID was 0"));
+        }
+    }
+
+    Ok(Some(SequenceSet::try_from(tmp).map_err(|err| {
+        Error::new(format!(
+            "Application error: could not build sequence set: {err}"
+        ))
+    })?))
 }
 
 pub static SUPPORTED_CAPABILITIES: &[&str] = &[
@@ -879,30 +906,9 @@ impl MailBackend for ImapType {
                 .collect()
         };
 
-        if uids.is_empty() {
+        let Some(sequence_set) = uids_to_sequence_set(&uids)? else {
+            // `uids` is empty.
             return Ok(Box::pin(async move { Ok(()) }));
-        }
-
-        // Conversion from UID (usize) to UID (NonZeroU32).
-        // TODO: Directly use NonZeroU32 for UID everywhere?
-        let sequence_set = {
-            let mut tmp = Vec::new();
-
-            for uid in uids.iter() {
-                if let Ok(uid) = u32::try_from(*uid) {
-                    if let Ok(uid) = NonZeroU32::try_from(uid) {
-                        tmp.push(uid);
-                    } else {
-                        return Err(Error::new("Application error: UID was 0"));
-                    }
-                } else {
-                    return Err(Error::new("Application error: UID exceeded u32"));
-                }
-            }
-
-            // Safety: We know this can't fail due to the `is_empty` check above.
-            // TODO: This could be too easy to overlook.
-            SequenceSet::try_from(tmp).unwrap()
         };
 
         Ok(Box::pin(async move {
@@ -1107,30 +1113,9 @@ impl MailBackend for ImapType {
                         .collect()
                 };
 
-                if uids.is_empty() {
+                let Some(sequence_set) = uids_to_sequence_set(&uids)? else {
+                    // `uids` is empty.
                     return Ok(());
-                }
-
-                // Conversion from UID (usize) to UID (NonZeroU32).
-                // TODO: Directly use NonZeroU32 for UID everywhere?
-                let sequence_set = {
-                    let mut tmp = Vec::new();
-
-                    for uid in uids.iter() {
-                        if let Ok(uid) = u32::try_from(*uid) {
-                            if let Ok(uid) = NonZeroU32::try_from(uid) {
-                                tmp.push(uid);
-                            } else {
-                                return Err(Error::new("Application error: UID was 0"));
-                            }
-                        } else {
-                            return Err(Error::new("Application error: UID exceeded u32"));
-                        }
-                    }
-
-                    // Safety: We know this can't fail due to the `is_empty` check above.
-                    // TODO: This could be too easy to overlook.
-                    SequenceSet::try_from(tmp).unwrap()
                 };
 
                 conn.send_command(CommandBody::ExpungeUid { sequence_set })
@@ -1781,10 +1766,10 @@ impl ImapType {
                     let entry = mailboxes.entry(mailbox_hash).or_default();
                     let mut counters = entry.counters.lock().unwrap();
                     if let Some(total) = status.messages {
-                        counters.total.set_not_yet_seen(total);
+                        counters.total.set_not_yet_seen(total as usize);
                     }
                     if let Some(total) = status.unseen {
-                        counters.unseen.set_not_yet_seen(total);
+                        counters.unseen.set_not_yet_seen(total as usize);
                     }
                 }
             }
@@ -2451,5 +2436,26 @@ mod tests {
                 "{text:?} must not be treated as a missing-message error"
             );
         }
+    }
+
+    /// UIDs are `u32`; a `UID STORE`/`UID EXPUNGE` sequence set must accept
+    /// the whole `u32` range and reject `0` (not a `NonZeroU32`) without
+    /// panicking, and treat an empty input as a no-op for the caller.
+    /// Regression for the upstream `dcec9887` `usize`→`u32` conversion.
+    #[test]
+    fn test_uids_to_sequence_set_rejects_zero_and_accepts_u32_range() {
+        // Empty input: the caller skips sending any command.
+        assert!(uids_to_sequence_set(&[]).unwrap().is_none());
+        // UID 0 is not representable as a `NonZeroU32`.
+        assert!(uids_to_sequence_set(&[0]).is_err());
+        assert!(uids_to_sequence_set(&[1, 0, 2]).is_err());
+        // The whole `u32` range is representable; values beyond `u32::MAX`
+        // cannot exist in a `UID` by construction.
+        let sequence_set = uids_to_sequence_set(&[1, u32::MAX]).unwrap().unwrap();
+        let collected: Vec<u32> = sequence_set
+            .iter(NonZeroU32::MAX)
+            .map(|uid| uid.get())
+            .collect();
+        assert_eq!(collected, vec![1, u32::MAX]);
     }
 }

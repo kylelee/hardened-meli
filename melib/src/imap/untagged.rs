@@ -121,7 +121,8 @@ impl ImapConnection {
                             super::protocol_parser::search_results(&response)?
                                 .1
                                 .into_iter()
-                                .enumerate(),
+                                .enumerate()
+                                .map(|(msn, uid)| (msn as u32, uid)),
                         );
                     }
                     let mut uid_events = vec![];
@@ -191,7 +192,7 @@ impl ImapConnection {
                     .unwrap()
                     .entry(mailbox_hash)
                     .or_default()
-                    .remove(&TryInto::<usize>::try_into(n).unwrap().saturating_sub(1))
+                    .remove(&n.saturating_sub(1))
                 else {
                     return Ok(None);
                 };
@@ -252,8 +253,8 @@ impl ImapConnection {
                 // reference an MSN the server has since expunged, so the
                 // probe must stay best-effort instead of poisoning the
                 // session; the UID-based resync paths remain authoritative.
-                let probe_only = current_exists == n;
-                let sequence_set = if current_exists > n {
+                let probe_only = current_exists == n as usize;
+                let sequence_set = if current_exists > n as usize {
                     // We know more mails than the server reports: EXPUNGE
                     // responses were missed. The UID-based resync paths own
                     // the full reconciliation against server truth, so there
@@ -266,7 +267,7 @@ impl ImapConnection {
                         current_exists
                     );
                     return Ok(None);
-                } else if current_exists == n {
+                } else if current_exists == n as usize {
                     if n == 0 {
                         // Nothing to do.
                         return Ok(None);

@@ -274,11 +274,11 @@ impl ImapCache for Sqlite3Cache {
             drop(stmt);
             ret
         };
-        if let (Some(env_lastseenuid), true) = (env_lastseenuid, lastseenuid != env_lastseenuid) {
-            lastseenuid = Some(env_lastseenuid);
+        if lastseenuid != env_lastseenuid {
+            lastseenuid = env_lastseenuid;
             tx.execute(
                 "UPDATE mailbox SET max_uid=?1 where mailbox_hash = ?2;",
-                sqlite3::params![env_lastseenuid, mailbox_hash],
+                sqlite3::params![env_lastseenuid.unwrap_or(0), mailbox_hash],
             )?;
             tx.commit()?;
         }
@@ -288,6 +288,12 @@ impl ImapCache for Sqlite3Cache {
                 .lock()
                 .unwrap()
                 .insert(mailbox_hash, lastseenuid);
+        } else {
+            self.uid_store
+                .lastseenuid
+                .lock()
+                .unwrap()
+                .remove(&mailbox_hash);
         }
         Ok(lastseenuid)
     }
@@ -504,7 +510,13 @@ impl ImapCache for Sqlite3Cache {
                     .lock()
                     .unwrap()
                     .insert(mailbox_hash, lastseenuid);
-            };
+            } else {
+                self.uid_store
+                    .lastseenuid
+                    .lock()
+                    .unwrap()
+                    .remove(&mailbox_hash);
+            }
             let retval = CachedState {
                 highestmodseq,
                 uidvalidity,
