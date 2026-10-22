@@ -2447,8 +2447,8 @@ mod tests {
         // Empty input: the caller skips sending any command.
         assert!(uids_to_sequence_set(&[]).unwrap().is_none());
         // UID 0 is not representable as a `NonZeroU32`.
-        assert!(uids_to_sequence_set(&[0]).is_err());
-        assert!(uids_to_sequence_set(&[1, 0, 2]).is_err());
+        uids_to_sequence_set(&[0]).unwrap_err();
+        uids_to_sequence_set(&[1, 0, 2]).unwrap_err();
         // The whole `u32` range is representable; values beyond `u32::MAX`
         // cannot exist in a `UID` by construction.
         let sequence_set = uids_to_sequence_set(&[1, u32::MAX]).unwrap().unwrap();

@@ -606,7 +606,7 @@ fn test_command_parser_help() {
         CommandError::WrongNumberOfArguments { .. }
     ));
     // It must not shadow the `man` command or any other parser.
-    assert!(parse_command(b"manpage").is_err());
+    parse_command(b"manpage").unwrap_err();
 }
 
 /// `cd` parses its argument as a raw string (kept unexpanded until the
