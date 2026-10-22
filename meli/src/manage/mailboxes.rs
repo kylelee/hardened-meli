@@ -20,7 +20,7 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
-use crate::components::prelude::*;
+use crate::{account_settings, components::prelude::*};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MailboxAction {
@@ -738,7 +738,9 @@ impl Component for MailboxManager {
 
         map.insert(
             Shortcuts::GENERAL,
-            context.settings.shortcuts.general.key_values(),
+            // Respect the account-level `shortcuts.general` override
+            // (upstream #226).
+            account_settings!(context[self.account_hash].shortcuts.general).key_values(),
         );
 
         map

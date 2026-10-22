@@ -338,6 +338,8 @@ impl<T: 'static + PartialEq + std::fmt::Debug + Clone + Sync + Send> Component f
 
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
         let mut map = ShortcutMaps::default();
+        // Dialogs are account-agnostic; upstream resolves the general
+        // section with `general_shortcuts(None)`, i.e. the global values.
         map.insert(
             Shortcuts::GENERAL,
             context.settings.shortcuts.general.key_values(),
@@ -535,6 +537,8 @@ impl Component for UIConfirmationDialog {
 
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
         let mut map = ShortcutMaps::default();
+        // Dialogs are account-agnostic; upstream resolves the general
+        // section with `general_shortcuts(None)`, i.e. the global values.
         map.insert(
             Shortcuts::GENERAL,
             context.settings.shortcuts.general.key_values(),

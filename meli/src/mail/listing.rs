@@ -2179,10 +2179,22 @@ impl Component for Listing {
         // non-key events per second.
         let shortcuts = if matches!(event, UIEvent::Input(_)) {
             let mut m = self.shortcuts(context);
-            m.insert(
-                Shortcuts::GENERAL,
-                context.settings.shortcuts.general.key_values(),
-            );
+            // Keep a focused child's own GENERAL section (e.g. the account
+            // status page) instead of shadowing it with the global values;
+            // otherwise resolve the account/mailbox override of the open
+            // mailbox (upstream #226).
+            if !m.contains_key(Shortcuts::GENERAL) {
+                let (account_hash, mailbox_hash) = self.component.coordinates();
+                m.insert(
+                    Shortcuts::GENERAL,
+                    if mailbox_settings!(context has [account_hash][&mailbox_hash]) {
+                        mailbox_settings!(context[account_hash][&mailbox_hash].shortcuts.general)
+                            .key_values()
+                    } else {
+                        context.settings.shortcuts.general.key_values()
+                    },
+                );
+            }
             m
         } else {
             ShortcutMaps::default()
@@ -3434,9 +3446,14 @@ impl Component for Listing {
         } else {
             self.component.shortcuts(context)
         });
-        let mut config_map = context.settings.shortcuts.listing.key_values();
         let (account_hash, mailbox_hash) = self.component.coordinates();
-        if mailbox_settings!(context has [account_hash][&mailbox_hash]) {
+        let has_mailbox_entry = mailbox_settings!(context has [account_hash][&mailbox_hash]);
+        let mut config_map = if has_mailbox_entry {
+            mailbox_settings!(context[account_hash][&mailbox_hash].shortcuts.listing).key_values()
+        } else {
+            context.settings.shortcuts.listing.key_values()
+        };
+        if has_mailbox_entry {
             for command in mailbox_settings!(
                 context[account_hash][&mailbox_hash]
                     .shortcuts
@@ -7278,6 +7295,98 @@ mod listing_menu_tests {
             pending_refresh_target(&ctx),
             Some(archive_hash),
             "refresh must target the mailbox under the cursor"
+        );
+    }
+    /// Upstream `3b543312` (meli#226) regression: the listings'
+    /// `Component::shortcuts` implementations must resolve per-account and
+    /// per-mailbox `shortcuts` overrides instead of always reading the
+    /// global values, while accounts without an override keep the global
+    /// values.
+    #[test]
+    fn listing_shortcuts_respect_config_overrides() {
+        let mut ctx = mock_context();
+        let (account_hash, inbox_hash, archive_hash) = register_two_mailboxes(&mut ctx);
+        let other_hash = register_second_account(&mut ctx);
+        let other_inbox_hash = register_account_inbox(&mut ctx, other_hash);
+
+        // Override one listing shortcut at the account level of the first
+        // account; the second account stays on the global values.
+        ctx.accounts
+            .get_mut(&account_hash)
+            .unwrap()
+            .settings
+            .conf_override
+            .shortcuts
+            .listing = Some(crate::conf::ListingShortcuts {
+            scroll_up: Key::Char('Z').into(),
+            ..Default::default()
+        });
+        // …and a different one at the mailbox level of `Archive`, which
+        // replaces the whole listing section for that mailbox.
+        ctx.accounts
+            .get_mut(&account_hash)
+            .unwrap()
+            .mailbox_entries
+            .get_mut(&archive_hash)
+            .unwrap()
+            .conf
+            .conf_override
+            .shortcuts
+            .listing = Some(crate::conf::ListingShortcuts {
+            scroll_down: Key::Char('X').into(),
+            ..Default::default()
+        });
+
+        let account_listings: Vec<Box<dyn Component>> = vec![
+            CompactListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx),
+            PlainListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx),
+            ConversationsListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx),
+            ThreadListing::new(ComponentId::default(), (account_hash, inbox_hash), &ctx),
+        ];
+        for listing in &account_listings {
+            let map = listing.shortcuts(&ctx);
+            assert_eq!(
+                map[Shortcuts::LISTING]["scroll_up"],
+                Key::Char('Z').into(),
+                "account-level override must win for the overridden account"
+            );
+            assert_eq!(
+                map[Shortcuts::LISTING]["scroll_down"],
+                ctx.settings.shortcuts.listing.scroll_down,
+                "fields not overridden keep the global values"
+            );
+        }
+
+        // The mailbox-level override replaces the whole section for its own
+        // mailbox only.
+        let archive_map =
+            CompactListing::new(ComponentId::default(), (account_hash, archive_hash), &ctx)
+                .shortcuts(&ctx);
+        assert_eq!(
+            archive_map[Shortcuts::LISTING]["scroll_down"],
+            Key::Char('X').into(),
+            "mailbox-level override must win for its mailbox"
+        );
+
+        // The `Listing` wrapper (the actual sidebar+grid surface) resolves
+        // the same override for the open mailbox.
+        let listing = Listing::new(&mut ctx);
+        let map = listing.shortcuts(&ctx);
+        assert_eq!(
+            map[Shortcuts::LISTING]["scroll_up"],
+            Key::Char('Z').into(),
+            "Listing wrapper must resolve the account override for the open mailbox"
+        );
+
+        // The other account has no override: its listings keep the global
+        // values.
+        let other_map =
+            PlainListing::new(ComponentId::default(), (other_hash, other_inbox_hash), &ctx)
+                .shortcuts(&ctx);
+        assert_eq!(
+            other_map[Shortcuts::LISTING]["scroll_up"],
+            ctx.settings.shortcuts.listing.scroll_up,
+            "account without an override must fall back to the global values"
         );
     }
 }

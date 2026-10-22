@@ -25,7 +25,8 @@ use std::cmp;
 use melib::{backends::AccountHash, text::TextProcessing, Card, CardId, Draft};
 
 use crate::{
-    conf, contacts::editor::ContactManager, shortcut, terminal::*, Action::Tab, Component,
+    account_settings, conf, contacts::editor::ContactManager, shortcut, terminal::*,
+    Action::Tab, Component,
     ComponentId, Composer, Context, DataColumns, PageMovement, ScrollContext, ScrollUpdate,
     ShortcutMaps, Shortcuts, StatusEvent, TabAction, ThemeAttribute, UIEvent, UIMode,
 };
@@ -945,14 +946,15 @@ impl Component for ContactList {
         } else {
             ShortcutMaps::default()
         };
+        let account_hash = context.accounts[self.account_pos].hash();
 
         map.insert(
             Shortcuts::CONTACT_LIST,
-            context.settings.shortcuts.contact_list.key_values(),
+            account_settings!(context[account_hash].shortcuts.contact_list).key_values(),
         );
         map.insert(
             Shortcuts::GENERAL,
-            context.settings.shortcuts.general.key_values(),
+            account_settings!(context[account_hash].shortcuts.general).key_values(),
         );
 
         map

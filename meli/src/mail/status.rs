@@ -25,7 +25,7 @@ use std::borrow::Cow;
 use melib::{MailBackendExtensionStatus, SpecialUsageMailbox};
 
 use super::*;
-use crate::accounts::JobRequest;
+use crate::{account_settings, accounts::JobRequest};
 
 #[derive(Debug)]
 pub struct AccountStatus {
@@ -522,9 +522,12 @@ impl Component for AccountStatus {
 
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
         let mut ret: ShortcutMaps = ShortcutMaps::default();
+        let account_hash = context.accounts[self.account_pos].hash();
         ret.insert(
             Shortcuts::GENERAL,
-            context.settings.shortcuts.general.key_values(),
+            // Respect the account-level `shortcuts.general` override
+            // (upstream #226).
+            account_settings!(context[account_hash].shortcuts.general).key_values(),
         );
         ret
     }

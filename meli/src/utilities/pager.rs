@@ -1304,6 +1304,10 @@ impl Component for Pager {
     }
 
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
+        // The pager has no account/mailbox context (it is shared by the
+        // composer, the mail view, etc.), so the global values are the only
+        // meaningful resolution here; upstream also passes `None` for this
+        // component.
         let mut ret: ShortcutMaps = Default::default();
         ret.insert(
             Shortcuts::PAGER,

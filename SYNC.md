@@ -40,14 +40,13 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-23 (UTC+8)
 
-- Method: per-commit semantic port (task S9 of the `1ada94c3..3b543312` range, NNTP UID)
-- Upstream range: `4110a0ff` only
-- Conflicts: none (fork-kept deviations: `over_article`'s early ASCII-digit fail-fast guard retained; hash construction already used the raw string bytes, so no hash-input change was needed)
-- Accounting kinds: see the notes column
+- Method: per-commit semantic port (task S7 of the `1ada94c3..3b543312` range, shortcut config overrides)
+- Conflicts: none at the text level; upstream's `Context::{general,listing,…}_shortcuts` method layer is deliberately not ported (fork resolves overrides via the `account_settings!`/`mailbox_settings!` macros on its whole-struct `ShortcutsOverride` model, `meli/src/conf/overrides.rs` is @generated); `conf/shortcuts.rs` key definitions untouched (S5 touches them in parallel)
 
-| Upstream commit | Port/Skip | Type | Notes |
+| Local commit | Upstream commit | Type | Notes |
 | --- | --- | --- | --- |
-| `4110a0ff` | port | refactor(melib/nntp) | `UID` `usize`→`NonZeroU32`: `over_article` now parses the article number as `u32` and rejects 0 and values > 2^31-1 as `nom::Err::Failure` (RFC 3977 §6 range); `NntpOp.uid: UID`; sqlite store params use explicit `uid.get()` (rusqlite 0.40). Hash compatibility: fork's `over_article` already hashed the raw article-number string bytes + Message-ID bytes (same as upstream) → **COVERED**, golden-value test pins the env hash to the legacy formula (SipHash-1-3 keys (0,0) = 9367683063824860863 for the fixture line), cache keys stay valid |
+| — | `3b543312` | port | fix(meli) | Respect shortcut config overrides (upstream #226), 11 sites switched from global `context.settings.shortcuts` reads to override-aware resolution: the four listing kinds' `Component::shortcuts` (`compact.rs`/`plain.rs`/`conversations.rs`/`listing/thread.rs`) and `Listing::shortcuts`' LISTING section (which used to overwrite the children's maps with the global one) now resolve `mailbox_settings!` (mailbox → account → global, `context has` guard so still-loading accounts don't panic); `Listing::process_event` keeps a focused child's own GENERAL section and otherwise resolves the open mailbox's override (upstream's `contains_key` guard); `ContactList` (`contacts/list.rs`), `AccountMailboxManager` (`manage/mailboxes.rs`) and `AccountStatus` (`mail/status.rs`) resolve account-level `contact_list`/`general` via `account_settings!`. Account-agnostic components keep the global reads with a comment, matching upstream which passes `None` (global) for them too: `Pager`, `Tabbed`, `UIDialog`/`UIConfirmationDialog`, `JobManager`. COVERED (fork already override-aware, upstream's diff there was a mechanical refactor onto its new Context methods): `mail/compose.rs` + `compose/edit_attachments.rs` (`account_settings!`), `mail/view/thread.rs` + `mail/view.rs` + `mail/view/state.rs` (`mailbox_settings!` for thread_view/envelope_view), listing `commands` dispatch in `mail/listing.rs` (guarded `mailbox_settings!`); `utilities/listings.rs` has no fork equivalent. NOT ported: upstream's 682-line `Context::{general,listing,composing,envelope_view,thread_view,contact_list,pager}_shortcuts`/`*_commands` layer and per-field `Option<Key>` `*ShortcutsOverride` structs — under the fork's whole-struct override model an override block replaces the whole section (unset fields take the hardcoded defaults, not the global values), which is the fork's pre-existing config semantics, unchanged here; fork-specific quit pre-arm reads (`utilities.rs`, `mail/listing.rs`) stay on global settings (no upstream counterpart). Regression test `mail::listing::listing_menu_tests::listing_shortcuts_respect_config_overrides` (red before the fix, green after) |
+
 ## 2026-10-20 (UTC+8)
 
 - Method: per-commit semantic port (task T6 of the `1ada94c3..1e66d41e` range, conf preprocessing)

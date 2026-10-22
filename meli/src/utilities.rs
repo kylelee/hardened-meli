@@ -2028,6 +2028,9 @@ impl Component for Tabbed {
         // the general section. The StatusBar reads this map for its
         // hints segment and needs both layers.
         let mut map = ShortcutMaps::default();
+        // The tab container is account-agnostic; upstream resolves the
+        // general section with `general_shortcuts(None)`, i.e. the global
+        // values.
         map.insert(
             Shortcuts::GENERAL,
             context.settings.shortcuts.general.key_values(),
