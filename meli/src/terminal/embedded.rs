@@ -23,7 +23,7 @@
 #[cfg(target_os = "macos")]
 use std::os::fd::OwnedFd;
 use std::{
-    ffi::{CStr, CString, OsStr},
+    ffi::{CString, OsStr},
     mem::ManuallyDrop,
     os::{
         fd::AsFd as _,
@@ -77,15 +77,53 @@ ioctl_none_bad!(
     TIOCSCTTY
 );
 
+/// Assemble the `sh -c '<bin> "$@"' <bin> <args…>` argument vector that
+/// executes `command` under a POSIX shell trampoline.
+///
+/// Handing the whole command line over as an argument vector (instead of a
+/// single pre-joined string the shell re-tokenizes) keeps every argument
+/// verbatim: an editor binary such as `/opt/my tools/editor` or a draft
+/// file inside a directory with spaces arrives at the child unsplit.
+///
+/// `command` must not be empty; the caller rejects that case beforehand.
+fn sh_trampoline_args(command: &[String]) -> Vec<String> {
+    let (bin, args) = command.split_first().expect("non-empty command");
+    let mut execv_args = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!("{bin} \"$@\""),
+        bin.clone(),
+    ];
+    execv_args.extend(args.iter().cloned());
+    execv_args
+}
+
 /// Create a new pseudoterminal (PTY) with given width, size and execute
 /// `command` in it.
-pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mutex<Terminal>>> {
-    let command_cstr = CString::new(command)
+///
+/// `command` is the program to run plus its arguments, passed as an
+/// argument vector; see [`sh_trampoline_args`] for how it is executed.
+pub fn create_pty(
+    width: usize,
+    height: usize,
+    command: Vec<String>,
+) -> Result<Arc<Mutex<Terminal>>> {
+    if command.is_empty() {
+        return Err(
+            Error::new("Cannot call create_pty() with empty command argument")
+                .set_kind(ErrorKind::ValueError),
+        );
+    }
+    let execv_args = sh_trampoline_args(&command)
+        .iter()
+        .map(String::as_str)
+        .map(CString::new)
+        .collect::<std::result::Result<Vec<_>, _>>()
         .chain_err_kind(ErrorKind::ValueError)
         .chain_err_summary(|| {
             format!(
-                "Could not convert command `{command}` into a C string; it should contain no NUL \
-                 bytes."
+                "Could not convert command `{command:?}` into a C string; it should contain no \
+                 NUL bytes."
             )
         })?;
 
@@ -133,7 +171,8 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
         .stdout;
     let Some(sh_path) = find_sh_path(&path_var) else {
         return Err(Error::new(format!(
-            "Could not execute `{command}`: did not find the standard POSIX sh shell in PATH = {}",
+            "Could not execute `{command:?}`: did not find the standard POSIX sh shell in PATH = \
+             {}",
             String::from_utf8_lossy(&path_var)
         )));
     };
@@ -171,24 +210,23 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
             match unsafe { set_controlling_terminal(backend_fd.as_raw_fd()) } {
                 Ok(c) if c < 0 => {
                     tracing::error!(
-                        "Could not execute `{command}`: ioctl(fd, TIOCSCTTY, NULL) returned {c}",
+                        "Could not execute `{command:?}`: ioctl(fd, TIOCSCTTY, NULL) returned {c}",
                     );
                     std::process::exit(c);
                 }
                 Ok(_) => {}
                 Err(err) => {
                     tracing::error!(
-                        "Could not execute `{command}`: ioctl(fd, TIOCSCTTY, NULL) returned {err}",
+                        "Could not execute `{command:?}`: ioctl(fd, TIOCSCTTY, NULL) returned \
+                         {err}",
                     );
                     std::process::exit(-1);
                 }
             }
-            const SH: &CStr = c"sh";
-            const COMMAND_FLAG: &CStr = c"-c";
-            // nix::unistd::execv never fails, returns `Result<Infallible>` because it
+            // nix::unistd::execv never fails if the first argument exists, and we
+            // checked that earlier, returns `Result<Infallible>` because it
             // never returns.
-            nix::unistd::execv(&shell_path, &[SH, COMMAND_FLAG, &command_cstr])
-                .expect("Infallible");
+            nix::unistd::execv(&shell_path, &execv_args).expect("Infallible");
             // We are in a separate process, so doing exit(-1) here won't affect the parent
             // process.
             #[allow(unreachable_code)]
@@ -259,6 +297,69 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("meli-t26-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The `sh -c '<bin> "$@"'` trampoline must pass the program and every
+    /// argument verbatim: this is the regression test for whitespace inside
+    /// the editor path or the draft file path, which the old
+    /// `[editor, path].join(" ")` string form used to split apart.
+    #[test]
+    fn sh_trampoline_args_preserve_whitespace_paths() {
+        let command = vec![
+            "/opt/my tools/editor".to_owned(),
+            "/home/user/My Drafts/2026 draft.eml".to_owned(),
+        ];
+        assert_eq!(
+            sh_trampoline_args(&command),
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "/opt/my tools/editor \"$@\"".to_owned(),
+                "/opt/my tools/editor".to_owned(),
+                "/home/user/My Drafts/2026 draft.eml".to_owned(),
+            ]
+        );
+    }
+
+    /// A single-program command (no arguments) still runs under the
+    /// trampoline with the program doubled as `sh`'s `$0`, mirroring the
+    /// non-embedded editor invocation shape
+    /// (`sh -c '<editor> "$@"' <editor> <file>`).
+    #[test]
+    fn sh_trampoline_args_single_program() {
+        let command = vec!["vi".to_owned()];
+        assert_eq!(
+            sh_trampoline_args(&command),
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "vi \"$@\"".to_owned(),
+                "vi".to_owned(),
+            ]
+        );
+    }
+
+    /// Arguments after the first are appended verbatim and in order.
+    #[test]
+    fn sh_trampoline_args_append_all_arguments_in_order() {
+        let command = vec![
+            "editor".to_owned(),
+            "-a".to_owned(),
+            "b c".to_owned(),
+            "-d".to_owned(),
+        ];
+        assert_eq!(
+            sh_trampoline_args(&command),
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "editor \"$@\"".to_owned(),
+                "editor".to_owned(),
+                "-a".to_owned(),
+                "b c".to_owned(),
+                "-d".to_owned(),
+            ]
+        );
     }
 
     #[test]

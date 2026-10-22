@@ -2567,11 +2567,10 @@ impl Component for Composer {
                 };
 
                 if *account_settings!(context[self.account_hash].composing.embedded_pty) {
-                    let command = [editor, f.path().display().to_string()].join(" ");
                     match crate::terminal::embedded::create_pty(
                         self.embedded_dimensions.0,
                         self.embedded_dimensions.1,
-                        &command,
+                        vec![editor.clone(), f.path().display().to_string()],
                     ) {
                         Ok(terminal) => {
                             self.embedded_pty = Some(EmbeddedPty {
@@ -2588,7 +2587,7 @@ impl Component for Composer {
                                 .replies
                                 .push_back(UIEvent::Fork(ForkedProcess::Embedded {
                                     id: "editor".into(),
-                                    command: Some(command.into()),
+                                    command: Some(editor.into()),
                                     pid: self
                                         .embedded_pty
                                         .as_ref()
