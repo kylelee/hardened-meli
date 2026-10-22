@@ -1261,7 +1261,19 @@ impl State {
                     owner: None,
                     command: cmd,
                     spawn: Some(Default::default()),
-                    result_cb: Default::default(),
+                    // Surface spawn failures (e.g. a `$SHELL` that does not
+                    // exist) instead of silently flashing back to the
+                    // interface; a successful session stays silent.
+                    result_cb: ProcessResultFn(Box::new(|output| {
+                        output.err().map(|err| {
+                            Box::new(UIEvent::Notification {
+                                title: None,
+                                source: None,
+                                body: format!("Could not launch terminal: {err}").into(),
+                                kind: Some(NotificationType::Error(ErrorKind::External)),
+                            }) as Box<_>
+                        })
+                    })),
                     temporary_files: vec![],
                 })));
             }
