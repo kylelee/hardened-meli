@@ -470,7 +470,7 @@ impl ImapCache for Sqlite3Cache {
             ))
         })?;
         if let Some(v) = ret.next() {
-            let (uidvalidity, lastseenuid, flags, highestmodseq): (
+            let (uidvalidity, mut lastseenuid, flags, highestmodseq): (
                 UIDVALIDITY,
                 Option<UID>,
                 Vec<u8>,
@@ -478,6 +478,31 @@ impl ImapCache for Sqlite3Cache {
             ) = v?;
             drop(ret);
             drop(stmt);
+            // Upstream `8bf479b4`: reconcile the cached baseline against the
+            // envelopes table on (re)load. Rows can vanish from `envelopes`
+            // without a matching `max_uid` reset — the quarantine flow moves
+            // malformed rows out, expunges delete them — so a session arming
+            // its baseline from the stored `max_uid` would drive the next
+            // incremental sync with a bogus `UID FETCH <stale+1>:*` window
+            // that permanently skips the missing messages.
+            let env_lastseenuid: Option<UID> = {
+                let mut stmt =
+                    tx.prepare("SELECT MAX(uid) FROM envelopes WHERE mailbox_hash = ?1;")?;
+
+                let ret: Option<UID> = stmt.query_row(sqlite3::params![mailbox_hash], |row| {
+                    row.get(0).map(|i: Option<Sqlite3UID>| i.map(|i| i as UID))
+                })?;
+                drop(stmt);
+                ret
+            };
+            if lastseenuid != env_lastseenuid {
+                lastseenuid = env_lastseenuid;
+                tx.execute(
+                    "UPDATE mailbox SET max_uid=?1 where mailbox_hash = ?2;",
+                    sqlite3::params![env_lastseenuid.unwrap_or(0), mailbox_hash],
+                )?;
+                tx.commit()?;
+            }
             self.uid_store
                 .highestmodseqs
                 .lock()

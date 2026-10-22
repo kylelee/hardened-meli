@@ -242,19 +242,58 @@ fn test_imap_sync_sqlite3_lastseenuid_cache_miss_resets_max_uid() {
     assert_eq!(read_max_uid(&db_path), Some(0));
     // The in-memory baseline must be dropped as well, or `sync()` would
     // still take the incremental path from the stale value.
-    assert!(
-        uid_store
-            .lastseenuid
-            .lock()
-            .unwrap()
-            .get(&mailbox_hash)
-            .is_none()
-    );
+    assert!(uid_store
+        .lastseenuid
+        .lock()
+        .unwrap()
+        .get(&mailbox_hash)
+        .is_none());
 
     // The self-healing is stable: re-reporting the missing cache keeps the
     // reset state and returns `None`.
     assert_eq!(value.lastseenuid(mailbox_hash).unwrap(), None);
     assert_eq!(read_max_uid(&db_path), Some(0));
+
+    // Same reconciliation on the `mailbox_state()` read path (upstream's
+    // second `8bf479b4` hunk): a session that arms its baseline from a
+    // stale stored `max_uid` — reachable when the quarantine flow moves the
+    // highest-UID row out of `envelopes` without touching `max_uid` — must
+    // be reconciled against `MAX(uid)` on load.
+    let mut value2 =
+        sync::sqlite3_cache::Sqlite3Cache::get(Arc::clone(&uid_store), Some(tempdir.path()))
+            .unwrap();
+    // Rebuild a cache holding uids 1..=2, then plant the quarantine shape:
+    // the stored `max_uid` still claims 5 (the pre-quarantine maximum) while
+    // the envelopes table only reaches 2.
+    let fetches2: Vec<_> = (1..=2)
+        .map(|uid| {
+            fetch_response_for(
+                uid,
+                &healthy_envelope(&format!("lastseenuid-mailbox-state-{uid}")),
+            )
+        })
+        .collect();
+    value2.insert_envelopes(mailbox_hash, &fetches2).unwrap();
+    assert_eq!(read_max_uid(&db_path), Some(2));
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE mailbox SET max_uid = 5 WHERE mailbox_hash = ?1;",
+            rusqlite::params![mailbox_hash.0 as i64],
+        )
+        .unwrap();
+    }
+    // `value2` has not loaded this mailbox's state yet (`insert_envelopes`
+    // does not populate the loaded-state memo), so `mailbox_state()` must
+    // perform the full read and reconcile.
+    assert!(value2.mailbox_state(mailbox_hash).unwrap().is_some());
+    // The stale `max_uid` 5 must be reset to the envelopes maximum 2, and
+    // the in-memory baseline must carry the reconciled value.
+    assert_eq!(read_max_uid(&db_path), Some(2));
+    assert_eq!(
+        uid_store.lastseenuid.lock().unwrap().get(&mailbox_hash),
+        Some(&2)
+    );
     _ = tempdir.close();
 }
 
