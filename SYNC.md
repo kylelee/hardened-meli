@@ -38,6 +38,79 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## Sync log
 
+
+## 2026-10-23 (UTC+8)
+
+- Method: closing accounting (task S11; makes the `1ada94c3..3b543312` **full-sync** claim auditable — every one of the 120 commits now has a row either here or in the S1–S10 blocks above; verdicts from three parallel scout reports with file:line evidence on both sides, plus follow-up checks)
+- Accounting kinds: `ported-earlier` (already landed in the 2026-10-20 session without a ledger row), `COVERED` (fork has an equivalent or stronger implementation), `SKIP-UI` (fork ships its own UI architecture), `SKIP-DIVERGED` (porting would regress a deliberate fork design), `SKIP-cosmetic` (comment/clippy/docs churn on fork-diverged shapes)
+
+| Upstream commit | Verdict | Notes |
+| --- | --- | --- |
+| `0d63a4f3` | ported-earlier | SMTP AUTH LOGIN bare-write + flush, in `cae8f93e4` (2026-10-20) |
+| `a7fab116` | ported-earlier | SMTP OAUTHBEARER + capability negotiation, in `cae8f93e4` |
+| `5e6cd019` | ported-earlier | BDAT space + pipeline drain, in `cae8f93e4` |
+| `1cbc4618` | ported-earlier | RCPT accepts 251, in `cae8f93e4` |
+| `6e5d5554` + `c2a70993` + `53900afb` | ported-earlier | v0_9_0 SmtpAuth password/token-command migrations + is_applicable fine-tune, in `639096cac` |
+| `02c40650` | ported-earlier | vCard multi-value fields, in `f7d48b199` |
+| `1e66d41e` | COVERED | SMTP auth test — fork's `melib-test/tests/smtp` auth suite is a superset (530/LOGIN fail-no-leak/PLAIN/OAUTHBEARER + no-token-leak branches) |
+| `468f7f76` | COVERED | slice-indexing guard — fork's `smtp.rs` uses bounds-guarded `&ret[i..i+3]` + `.get(..3)` with the same chain_err_summary |
+| `139af09e` | COVERED | binarymime-requires-chunking gate exists (incl. dedicated mock test) |
+| `28635485` | COVERED | BDAT wire format pinned by byte-exact test assertions |
+| `799a5913` | COVERED | send_command flushes at tail; DATA/BDAT termination flushed |
+| `8b8fbbde` | COVERED | `SmtpExtensionSupport::validate()` verbatim + warn-log call site + unit test |
+| `ed0c84d3` | COVERED | all 8 extension fields already `pub` |
+| `0f19405d` | COVERED | reply code in error details + fork adds ErrorKind mapping |
+| `89b51d84` | COVERED | no unused vars remain; pipelining drain rewritten without them |
+| `90317fca` | COVERED | pipelining test ported + fork extras (rcpt-rejection texts) |
+| `6897f044` | COVERED | mock `ServerState` extensions incl. auth/disable flags (superset) |
+| `31bb8173` | COVERED | mock server on tracing; `eprintln!` count zero |
+| `53d7784b` | SKIP-DIVERGED | test-structure refactor only; fork's tokio_test entry is equivalent |
+| `4f0e2613` | SKIP-DIVERGED | mock over `Connection` — fork mock stays raw `Async<TcpStream>` with tracing + redaction already |
+| `7dbe25fb` | COVERED | jscontact `Link`/`LinkType`/`LinkKind` + vcard conversion integration |
+| `fe34a9df` | COVERED | jscontact type surface is a superset (Nickname/Note/Author beyond upstream) |
+| `8b1ada34` | COVERED | `From<Card>` round-trip superset incl. multi-value backfill + tests |
+| `bb47d9b5` | SKIP-cosmetic | rustdoc/unused-code churn on the fork-diverged jscontact module |
+| `edeedfef` | SKIP-DIVERGED | upstream's destructive Card→JSContact storage migration + 464-line data migration + UI rewrite; fork keeps native Card with a full JSContact interop layer (equal interoperability, no user-data migration) |
+| `752de8e6` | COVERED | `load_cards()` accepts single files (with non-UTF-8 graceful degradation) |
+| `e155009f` | COVERED | contact search covers nicknames/organizations/keywords + tests |
+| `e08ebb60` | COVERED | corrupted-database path is single-call + match (no unwrap); graceful-error test |
+| `24cd0ffa` | COVERED | errno at target version; libc one patch behind (lock freshness only) |
+| `277b9995` | COVERED | workspace already on rusqlite 0.40 (this sync fixed the last usize-ToSql latent site, see S8) |
+| `4af30c36` + `52b4e0b8` | COVERED | rusty-fork removal + test-utils cleanup predate upstream (fork-wide per-crate lock model) |
+| `cf7b10cd` | COVERED | quit command and shortcut share the single `can_quit_cleanly` gate |
+| `ba9b6a35` | SKIP-DIVERGED | Synchronized Output DEC 2026 — fork deliberately rejects the probe (test-pinned: late replies stall the input parser) |
+| `a66a1d81` | SKIP-UI | theme key for the form widget |
+| `121e7f94` | SKIP-UI | FormWidget generic refactor |
+| `8eb120f3` | SKIP-UI | ComposeEvent removal |
+| `b568d84e` | SKIP-UI | UIEvent::cloned helper |
+| `6fd02aa0` | SKIP-UI | event_interest plumbing |
+| `6062855a` | SKIP-UI | ContactBackendStatusChange event |
+| `da608345` | SKIP-UI | DictField set support (keywords editing) |
+| `9aa89256` | SKIP-UI | quit_confirmation setting (fork's layered quit: double-key + can_quit_cleanly chain) |
+| `1edf8ab2` | SKIP-UI | component_states |
+| `e413c046` | SKIP-UI | FormWidget::height |
+| `c3c1f4e2` | SKIP-UI | OverlayComponent trait |
+| `4b4581b4` | SKIP-UI | autocomplete module move |
+| `6c3e794a` | SKIP-UI | contact import dialog (melib prerequisite already covered) |
+| `ef136970` | SKIP-UI | open_entry help text |
+| `f146d61c` | SKIP-UI | box ViewMode components |
+| `225e91c6` | SKIP-UI | form shortcuts tidy |
+| `a423b042` | SKIP-UI | dialog cursor methods |
+| `de4b005b` | SKIP-UI | form padding |
+| `2a775ca5` | SKIP-UI | Selector highlighted_attrs |
+| `6d6463c8` | SKIP-UI | default Component methods |
+| `c3270209` | SKIP-UI | dialog catch-all scrolling |
+| `344c9d04` | SKIP-UI | compose form focus |
+| `4330d49e` | SKIP-UI | delete-confirmation dialog |
+| `e6caa857` | SKIP-UI | pager title field |
+| `3695d8b0` | SKIP-cosmetic | background-query rename |
+| `defbaa09` | SKIP-UI | Screen::set_color_scheme call |
+| `ab8f2129` | SKIP-cosmetic | trace-log removal on fork-diverged terminal code |
+| `5c3dac99` | SKIP-cosmetic | man COMMAND-shortcuts table — fork's COMMAND line is rewritten (palette/history); copying upstream's table would misdocument |
+| `243c4509` | SKIP-cosmetic | rustdoc footnote warning fix |
+| `e8d4a2be` | SKIP-cosmetic | smtp comment formatting |
+| `d2a3689c` + `4a3956c0` + `435bab2a` + `7814078f` + `1cd88abf` + `1dd52e9d` + `2d1bb5fd` | SKIP-cosmetic | obsolete TODO/VERIFY comment and clippy-allow removals on fork-diverged shapes |
+
 ## 2026-10-23 (UTC+8)
 
 - Method: integration patch (task S10; 类型适配收尾, no upstream commit — S8/S9/S1 的集成补丁 over main@`b4d8a3703`)
