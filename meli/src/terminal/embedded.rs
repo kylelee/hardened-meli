@@ -81,9 +81,12 @@ ioctl_none_bad!(
 /// executes `command` under a POSIX shell trampoline.
 ///
 /// Handing the whole command line over as an argument vector (instead of a
-/// single pre-joined string the shell re-tokenizes) keeps every argument
-/// verbatim: an editor binary such as `/opt/my tools/editor` or a draft
-/// file inside a directory with spaces arrives at the child unsplit.
+/// single pre-joined string the shell re-tokenizes) keeps every *argument*
+/// verbatim: a draft file inside a directory with spaces reaches the child
+/// unsplit, because the arguments are substituted through the quoted
+/// `"$@"`. The program word (`bin`) itself is interpolated into the shell
+/// script unquoted, so it must not contain shell whitespace — the same
+/// constraint as the non-embedded `composing.editor_command` setting.
 ///
 /// `command` must not be empty; the caller rejects that case beforehand.
 fn sh_trampoline_args(command: &[String]) -> Vec<String> {
@@ -299,12 +302,15 @@ mod tests {
         dir
     }
 
-    /// The `sh -c '<bin> "$@"'` trampoline must pass the program and every
-    /// argument verbatim: this is the regression test for whitespace inside
-    /// the editor path or the draft file path, which the old
-    /// `[editor, path].join(" ")` string form used to split apart.
+    /// The `sh -c '<bin> "$@"'` trampoline must keep every *argument*
+    /// verbatim (substituted through the quoted `"$@"`): this is the
+    /// regression test for whitespace inside argument paths, which the old
+    /// `[editor, path].join(" ")` string form used to split apart. The
+    /// program word is deliberately not quoted (see `sh_trampoline_args`),
+    /// so the assembled *argv* carries a whitespace-y program name through
+    /// unchanged even though the shell script itself would not.
     #[test]
-    fn sh_trampoline_args_preserve_whitespace_paths() {
+    fn sh_trampoline_args_keep_argument_paths_verbatim() {
         let command = vec![
             "/opt/my tools/editor".to_owned(),
             "/home/user/My Drafts/2026 draft.eml".to_owned(),

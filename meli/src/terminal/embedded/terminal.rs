@@ -160,7 +160,11 @@ impl std::io::Write for Terminal {
 }
 
 impl Terminal {
-    pub fn new(stdin: ManuallyDrop<File>, stderr: StderrCapture, child_pid: nix::unistd::Pid) -> Self {
+    pub fn new(
+        stdin: ManuallyDrop<File>,
+        stderr: StderrCapture,
+        child_pid: nix::unistd::Pid,
+    ) -> Self {
         Self {
             grid: EmbeddedGrid::new(),
             stdin,
@@ -2070,9 +2074,7 @@ mod stderr_capture_tests {
         let drain_capture = capture.clone();
         let thread = std::thread::spawn(move || drain_stderr(reader, &drain_capture));
         writer.write_all(b"HEAD-MARKER").unwrap();
-        writer
-            .write_all(&vec![b'y'; STDERR_CAPTURE_LIMIT])
-            .unwrap();
+        writer.write_all(&vec![b'y'; STDERR_CAPTURE_LIMIT]).unwrap();
         drop(writer);
         thread.join().unwrap();
         let captured = capture.captured();

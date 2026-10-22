@@ -1242,28 +1242,37 @@ To: {}
                     .push_back(UIEvent::ChangeMode(UIMode::Normal));
             }
             Ok(WaitStatus::Exited(_, exit_code)) => {
-                let embedded_pty = self.embedded_pty.take().unwrap();
-                let stderr = String::from_utf8_lossy(
-                    &embedded_pty.terminal.lock().unwrap().stderr.captured(),
-                )
-                .into_owned();
+                // The pty can already be gone: e.g. a stopped child was
+                // killed through the Ctrl-C path and its exit is only now
+                // reported through the `on_exit` notification. Tolerate
+                // that window instead of panicking.
+                if let Some(embedded_pty) = self.embedded_pty.take() {
+                    let stderr = String::from_utf8_lossy(
+                        &embedded_pty.terminal.lock().unwrap().stderr.captured(),
+                    )
+                    .into_owned();
 
-                if *exit_code != 0 {
-                    context.replies.push_back(UIEvent::Notification {
-                        title: Some(
-                            format!("Subprocess has exited with exit code {exit_code}",).into(),
-                        ),
-                        source: None,
-                        body: format!("stderr: {stderr}").into(),
-                        kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
-                    });
-                } else if let EmbeddedPty {
-                    running: true,
-                    file,
-                    ..
-                } = embedded_pty
-                {
-                    self.update_from_file(&file, context);
+                    if *exit_code != 0 {
+                        context.replies.push_back(UIEvent::Notification {
+                            title: Some(
+                                format!("Subprocess has exited with exit code {exit_code}",).into(),
+                            ),
+                            source: None,
+                            body: format!("stderr: {stderr}").into(),
+                            kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
+                        });
+                    } else if let EmbeddedPty {
+                        running: true,
+                        file,
+                        ..
+                    } = embedded_pty
+                    {
+                        self.update_from_file(&file, context);
+                    }
+                } else {
+                    tracing::debug!(
+                        "embedded editor already reaped; ignoring late exit code {exit_code}"
+                    );
                 }
                 self.mode = ViewMode::Edit;
                 self.set_dirty(true);
@@ -2454,24 +2463,34 @@ impl Component for Composer {
                     .as_ref()
                     .is_some_and(|pty| pty.is_stopped()) =>
             {
-                let EmbeddedPty {
+                // The stopped pty is usually still there, but it can be
+                // gone already (its exit reported and reaped through the
+                // `on_exit` notification in between); tolerate the narrow
+                // window instead of panicking.
+                if let Some(EmbeddedPty {
                     running: _,
                     terminal,
                     file,
-                } = self.embedded_pty.take().unwrap();
-                let stderr = {
-                    let guard = terminal.lock().unwrap();
-                    guard.wake_up();
-                    guard.terminate();
-                    String::from_utf8_lossy(&guard.stderr.captured()).into_owned()
-                };
-                self.update_from_file(&file, context);
-                context.replies.push_back(UIEvent::Notification {
-                    title: Some("Subprocess was killed by SIGTERM signal".into()),
-                    source: None,
-                    body: format!("stderr: {stderr}").into(),
-                    kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
-                });
+                }) = self.embedded_pty.take()
+                {
+                    let stderr = {
+                        let guard = terminal.lock().unwrap();
+                        guard.wake_up();
+                        guard.terminate();
+                        String::from_utf8_lossy(&guard.stderr.captured()).into_owned()
+                    };
+                    self.update_from_file(&file, context);
+                    context.replies.push_back(UIEvent::Notification {
+                        title: Some("Subprocess was killed by SIGTERM signal".into()),
+                        source: None,
+                        body: format!("stderr: {stderr}").into(),
+                        kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
+                    });
+                } else {
+                    tracing::debug!(
+                        "Ctrl-C on an already-reaped embedded editor; nothing left to terminate"
+                    );
+                }
                 self.mode = ViewMode::Edit;
                 context
                     .replies
@@ -4513,17 +4532,14 @@ exit 3
         // reaped, so the notification below cannot race the capture.
         assert!(
             wait_until(Duration::from_secs(30), || {
-                composer
-                    .embedded_pty
-                    .as_ref()
-                    .is_some_and(|pty| {
-                        pty.lock()
-                            .unwrap()
-                            .stderr
-                            .captured()
-                            .windows(b"STDERR-MARKER-9F2".len())
-                            .any(|w| w == b"STDERR-MARKER-9F2")
-                    })
+                composer.embedded_pty.as_ref().is_some_and(|pty| {
+                    pty.lock()
+                        .unwrap()
+                        .stderr
+                        .captured()
+                        .windows(b"STDERR-MARKER-9F2".len())
+                        .any(|w| w == b"STDERR-MARKER-9F2")
+                })
             }),
             "stderr marker was never captured"
         );
