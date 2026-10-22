@@ -361,6 +361,23 @@ pub struct ProcessRequest {
     pub temporary_files: Vec<Arc<File>>,
 }
 
+impl ProcessRequest {
+    /// Build the `sh -c <command>` invocation for whole-line shell actions
+    /// (`pipe`, `pipe-attachment`): the entire user-typed line rides as one
+    /// argument to `-c`, so shell syntax (pipes, quotes, paths with spaces)
+    /// is interpreted by the shell and nothing is re-split at spawn time.
+    /// Standard input is piped (the caller feeds it bytes through
+    /// [`SpawnInteractionFn`]) while output goes to the terminal.
+    pub fn shell_command(command: &str) -> std::process::Command {
+        let mut ret = std::process::Command::new("sh");
+        ret.args(["-c", command])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+        ret
+    }
+}
+
 #[derive(Debug)]
 pub enum UIEvent {
     /// Request to exit the application, emitted when the quit binding
@@ -700,6 +717,35 @@ pub struct Link<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole-line shell action must be spawned as exactly
+    /// `sh -c <command>`: program `sh`, one `-c` flag, the entire user-typed
+    /// line as a single argument, never re-split into bin/args.
+    #[test]
+    fn test_process_request_shell_command_parameterization() {
+        for command in [
+            "cat 'foo bar' | wc -c",
+            "git am -3",
+            "less \"quoted path with spaces.txt\"",
+            "sh -c echo nested",
+        ] {
+            let cmd = ProcessRequest::shell_command(command);
+            assert_eq!(
+                cmd.get_program(),
+                "sh",
+                "program must be sh for {command:?}"
+            );
+            let args = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                args,
+                vec!["-c".to_string(), command.to_string()],
+                "the whole line must ride as one -c argument for {command:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_rate_limit_expire_grants_next_tick_before_rate_elapses() {

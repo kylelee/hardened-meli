@@ -829,41 +829,23 @@ pub fn forward_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, Command
     let (input, _) = eof(input.trim())?;
     Ok((input, Ok(Compose(ComposeAction::ForwardAttachment))))
 }
-pub fn pipe<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandError>> {
-    alt((
-        |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
-            let mut check = arg_init! { min_arg:1, max_arg: { u8::MAX }, pipe};
-            let (input, _) = tag("pipe").parse(input.trim())?;
-            arg_chk!(start check, input);
-            let (input, _) = is_a(" ").parse(input)?;
-            arg_chk!(inc check, input);
-            let (input, bin) = quoted_argument(input)?;
-            let (input, _) = is_a(" ").parse(input)?;
-            arg_chk!(inc check, input);
-            let (input, args) = separated_list1(is_a(" "), quoted_argument).parse(input)?;
-            arg_chk!(finish check, input);
-            let (input, _) = eof(input)?;
-            Ok((
-                input,
-                Ok(View(Pipe(
-                    bin.to_string(),
-                    args.into_iter().map(String::from).collect::<Vec<String>>(),
-                ))),
-            ))
-        },
-        |input: &'a [u8]| -> IResult<&'a [u8], Result<Action, CommandError>> {
-            let mut check = arg_init! { min_arg:1, max_arg: 1, pipe};
-            let (input, _) = tag("pipe").parse(input.trim())?;
-            arg_chk!(start check, input);
-            let (input, _) = is_a(" ").parse(input)?;
-            arg_chk!(inc check, input);
-            let (input, bin) = quoted_argument(input.trim())?;
-            arg_chk!(finish check, input);
-            let (input, _) = eof(input)?;
-            Ok((input, Ok(View(Pipe(bin.to_string(), Vec::new())))))
-        },
+pub fn pipe(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:1, max_arg: { u8::MAX }, pipe};
+    let (input, _) = tag("pipe").parse(input.trim())?;
+    arg_chk!(start check, input);
+    let (input, _) = is_a(" ").parse(input)?;
+    arg_chk!(inc check, input);
+    // The whole rest of the line is the command: `sh -c` gets to interpret
+    // quotes, pipes and spaces, so there is no bin/args split here.
+    let (input, command) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
+    let (input, _) = eof(input)?;
+    arg_chk!(finish check, input);
+    Ok((
+        input,
+        Ok(View(Pipe {
+            command: command.to_string(),
+        })),
     ))
-    .parse(input)
 }
 pub fn filter(input: &'_ [u8]) -> IResult<&'_ [u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:0, max_arg:255, filter};
@@ -1208,35 +1190,26 @@ pub fn save_all_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, Comman
     Ok((input, Ok(View(SaveAllAttachments))))
 }
 
-pub fn pipe_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandError>> {
+pub fn pipe_attachment(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:2, max_arg:{u8::MAX}, pipe_attachment};
     let (input, _) = tag("pipe-attachment").parse(input.trim())?;
     arg_chk!(start check, input);
     let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, idx) = map_res(quoted_argument, usize::from_str).parse(input)?;
+    let (input, index) = map_res(quoted_argument, usize::from_str).parse(input)?;
     let (input, _) = is_a(" ").parse(input)?;
     arg_chk!(inc check, input);
-    let (input, bin) = quoted_argument(input)?;
-    arg_chk!(inc check, input);
-    let (input, args) = alt((
-        |input: &'a [u8]| -> IResult<&'a [u8], Vec<String>> {
-            let (input, _) = is_a(" ").parse(input)?;
-            let (input, args) = separated_list1(is_a(" "), quoted_argument).parse(input)?;
-            let (input, _) = eof(input)?;
-            Ok((
-                input,
-                args.into_iter().map(String::from).collect::<Vec<String>>(),
-            ))
-        },
-        |input: &'a [u8]| -> IResult<&'a [u8], Vec<String>> {
-            let (input, _) = eof(input)?;
-            Ok((input, Vec::with_capacity(0)))
-        },
-    ))
-    .parse(input)?;
+    // Like `pipe`, the command is the whole rest of the line.
+    let (input, command) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
+    let (input, _) = eof(input)?;
     arg_chk!(finish check, input);
-    Ok((input, Ok(View(PipeAttachment(idx, bin.to_string(), args)))))
+    Ok((
+        input,
+        Ok(View(PipeAttachment {
+            index,
+            command: command.to_string(),
+        })),
+    ))
 }
 pub fn export_mail(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, export_mail};

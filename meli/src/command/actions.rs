@@ -123,11 +123,11 @@ pub enum MailingListAction {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ViewAction {
-    Pipe(String, Vec<String>),
+    Pipe { command: String },
     Filter(Option<String>),
     SaveAttachment(usize, FileAction),
     SaveAllAttachments,
-    PipeAttachment(usize, String, Vec<String>),
+    PipeAttachment { index: usize, command: String },
     ExportMail(String),
     ExportThread(String),
     ExportThreadMbox(Option<melib::mbox::MboxFormat>, PathBuf),

@@ -105,6 +105,61 @@ fn test_command_parser_all() {
     );
 }
 
+/// `pipe` and `pipe-attachment` must carry the whole rest of the line as a
+/// single command string: shell syntax (quotes, pipes, paths with spaces)
+/// rides verbatim into `sh -c` and is never split into bin/args. Errors on
+/// missing or malformed arguments must keep erroring.
+#[test]
+fn test_command_parser_pipe_whole_line() {
+    assert_eq!(
+        parse_command(b"pipe cat 'foo bar' | wc -c").unwrap(),
+        View(ViewAction::Pipe {
+            command: "cat 'foo bar' | wc -c".to_string(),
+        }),
+    );
+    assert_eq!(
+        parse_command(b"pipe /usr/local/bin/my-filter --opt \"a b\"").unwrap(),
+        View(ViewAction::Pipe {
+            command: "/usr/local/bin/my-filter --opt \"a b\"".to_string(),
+        }),
+    );
+    // A single binary without arguments still parses.
+    assert_eq!(
+        parse_command(b"pipe less").unwrap(),
+        View(ViewAction::Pipe {
+            command: "less".to_string(),
+        }),
+    );
+    // An empty command is a missing argument, not an empty command line.
+    parse_command(b"pipe").unwrap_err();
+    parse_command(b"pipe ").unwrap_err();
+
+    assert_eq!(
+        parse_command(b"pipe-attachment 0 git am -3").unwrap(),
+        View(ViewAction::PipeAttachment {
+            index: 0,
+            command: "git am -3".to_string(),
+        }),
+    );
+    assert_eq!(
+        parse_command(b"pipe-attachment 1 chafa --scale 2x --polite on").unwrap(),
+        View(ViewAction::PipeAttachment {
+            index: 1,
+            command: "chafa --scale 2x --polite on".to_string(),
+        }),
+    );
+    // Missing index or command, or a non-numeric index, keep erroring.
+    parse_command(b"pipe-attachment").unwrap_err();
+    parse_command(b"pipe-attachment 0").unwrap_err();
+    parse_command(b"pipe-attachment 0 ").unwrap_err();
+    parse_command(b"pipe-attachment x git am").unwrap_err();
+
+    // CR/LF must never ride into the action: a mid-line newline fails the
+    // parse outright.
+    parse_command(b"pipe cat\nrm -rf ~").unwrap_err();
+    parse_command(b"pipe-attachment 0 cat\necho pwned").unwrap_err();
+}
+
 #[test]
 fn test_command_parser_raw_search() {
     use super::{Action::*, ListingAction::*};

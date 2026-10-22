@@ -33,7 +33,6 @@ use melib::{
         character::complete::{digit1, not_line_ending},
         combinator::{map, map_res},
         error::Error as NomError,
-        multi::separated_list1,
         sequence::{pair, preceded, separated_pair},
         IResult, Parser,
     },
@@ -230,7 +229,7 @@ define_commands!([
                 },
                 /* Pipe pager contents to binary */
                 { tags: ["pipe "],
-                  desc: "pipe EXECUTABLE ARGS",
+                  desc: "pipe COMMAND",
                   parser: parser::pipe
                 },
                 /* Filter pager contents through binary */

@@ -40,21 +40,15 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-23 (UTC+8)
 
-- Method: per-commit semantic port (task S5 of the `1ada94c3..3b543312` range, small fixes batch)
-- Upstream range: `1ada94c3..3b543312` (this task: `ad6f2b68`, `d2470aa8`, `eec57247`, `8180e9c2`, `e4b5d4d1`, `2bb886ee`, `a5d5e862`, `ef05916a`)
-- Conflicts: none (fork-kept deviations: byte-input command parsers with fork `argcheck` convention, `ShortcutKeys` binding type instead of bare `Key`, fork's `CmdInput`+`ChangeMode` command-input chain, `server_password_command` config format in tests, `PASSED` flag keeps its `$passed` keyword mapping)
-- Accounting kinds: see the SKIP notes in the table
+- Method: per-commit semantic port (task S4 of the `1ada94c3..3b543312` range)
+- Upstream range: `1ada94c3..3b543312` (Pipe/PipeAttachment whole-line-command commits only)
+- Conflicts: none taken on `ProcessRequest.owner` (task S1 owns its Option-ization; both sites here keep the fork's plain `ComponentId`) and none on the `cd` cluster (task S6)
+- Accounting kinds: see the notes column
 
 | Local commit | Upstream commit | Type | Notes |
 | --- | --- | --- | --- |
-| — | `ad6f2b68` | port | feat(command) \| `help` command as alias for `man meli.7`: new `parser::help` arm (fork's `arg_init!`/`arg_chk!` byte-parser style, `ManPages::Guide`, `CommandError::Other` when built without `cli-docs`), member of the `new_tab` alt chain, `define_commands!` palette entry; tests: parse `help`/whitespace/no-arg-count/no-shadowing |
-| — | `d2470aa8` | port | feat(shortcuts) \| `general.search` (`/`) shortcut so pager search entry no longer borrows `listing.search`: `GeneralShortcuts` field, `Tabbed` shortcuts view reads `GENERAL`, `Pager` arm opens command mode via the fork's `CmdInput(Key::Paste("search "))`+`ChangeMode(Command)` chain (not upstream's bare `CmdInput`), `meli.conf.5` entry; `listing.search` default (`/`+`F3`) untouched; tests: default value, TOML override, listing default intact |
-| — | `eec57247` | port | fix(keys) \| `parse_key` accepts any single-character string: the single-char check counts `chars()` instead of bytes in the catch-all arm, so multi-byte characters (`é`,`你`,`🦀`) deserialize to `Key::Char`; multi-character strings and `M-é` still error with the fork's `Err(format!(..))` message; tests in `test_key_serde`/`test_shortcut_keys_serde` |
-| — | `8180e9c2` | port | chore(ci) \| `actions/cache` v4→v6 in `build.yaml`/`lints.yaml`/`manifest_lints.yaml`; `if: cache-hit != 'true'` guards dropped from the cache-save steps (v6 saves unconditionally and idempotently); setup-step guards kept, matching upstream |
-| — | `e4b5d4d1` | port | test(cli) \| `meli-test/tests/test_cli_subcommands.rs` gains `test_subcommand_config_file`: `create-config <file>` success (content equals `FileSettings::EXAMPLE_CONFIG`), re-create rejected, `test-config <file>` fails on the sample config then passes after appending an `[accounts.imap]` block (fork's `server_password_command` form), and missing-file error; assertion texts captured from this fork's actual output (fork error-chain rendering differs from upstream) |
-| — | `2bb886ee` | port | refactor(melib/jmap) \| deduplicate the `Flag`→JMAP keyword matches in `set_flags` behind a private `const fn keyword_from_flag(Flag) -> Option<&'static str>`; behavior frozen at the fork's semantics (`PASSED` still maps to `$passed`; upstream's simultaneous "$passed is not used in JMAP" change is not adopted) |
-| — | `a5d5e862` | SKIP | melib ToggleFlag `internal_true`/`internal_false` constructors: the fork has no `#[serde(default = "ToggleFlag::…")]` call sites, adding them would be dead code |
-| — | `ef05916a` | SKIP-UI | conf/terminal use of the ToggleFlag default constructors: fork's `TerminalSettings::default` sets the fields with explicit `ToggleFlag::InternalVal(…)` literals and has no named default functions to convert |
+| — | `ae26e8db` | port | fix(meli/command, mail/view) | `PipeAttachment(usize, String, Vec<String>)` → `PipeAttachment { index, command }`: `pipe-attachment INDEX COMMAND` takes the whole rest of the line (`not_line_ending`, mid-line CR/LF still rejected) so pipes/quotes/spacey paths ride into `sh -c`; execution runs `sh -c` via the fork's existing `ProcessRequest`+`SpawnInteractionFn`+`result_cb` channel (fork's `EnvelopeViewMessage::PipeAttachmentExit` notification path kept); ported upstream's reordering so `index == 0` pipes the whole mail without `open_attachment`'s attachment-kind filter and its spurious not-found notification; parser tests for whole-line/quote/pipe forms and kept arg-count errors |
+| — | `a2569faf` | port | refactor(meli/command, utilities) | `Pipe(String, Vec<String>)` → `Pipe { command }`: same whole-line parse for `pipe COMMAND`; the pager's synchronous `Command::new(bin).args(args)` spawn replaced by the fork's `ProcessRequest` async channel (`sh -c`, stdin piped, stdout/stderr inherited — the old piped-but-unread stdout deadlock face is gone), broken-pipe writes (e.g. `head -1`) reported through `result_cb` instead of panicking; shared `ProcessRequest::shell_command` constructor keeps both call sites' spawn parameterization in one tested place; completion desc `pipe EXECUTABLE ARGS` → `pipe COMMAND`; CVE-2025-49113 regression corpus adapted to the typed whole-line action |
 
 ## 2026-10-20 (UTC+8)
 
