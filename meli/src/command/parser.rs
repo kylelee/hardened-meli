@@ -181,8 +181,7 @@ pub fn parse_command(input: &[u8]) -> Result<Action, CommandError> {
         subsort,
         close,
         mailinglist,
-        setenv,
-        alt((printenv, currentdir, change_currentdir)),
+        alt((setenv, printenv, terminal, currentdir, change_currentdir)),
         view,
         create_mailbox,
         sub_mailbox,
@@ -739,6 +738,28 @@ pub fn change_currentdir(input: &[u8]) -> IResult<&[u8], Result<Action, CommandE
     arg_chk!(finish check, input);
     let (input, _) = eof(input)?;
     Ok((input, Ok(ChangeCurrentDirectory(d.into()))))
+}
+pub fn terminal(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg:{ u8::MAX }, terminal};
+    let (input, _) = tag("terminal").parse(input.trim())?;
+    arg_chk!(start check, input);
+    if let Ok((input, _)) = eof(input) {
+        arg_chk!(finish check, input);
+        return Ok((input, Ok(Terminal(None))));
+    }
+    let (input, _) = is_a(" ").parse(input)?;
+    arg_chk!(inc check, input);
+    // The whole rest of the line is the command: `sh -c` gets to interpret
+    // quotes, pipes and spaces, so there is no bin/args split here.
+    let (input, command) = map_res(not_line_ending, std::str::from_utf8).parse(input)?;
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input)?;
+    let val = if command.trim().is_empty() {
+        None
+    } else {
+        Some(command.to_string())
+    };
+    Ok((input, Ok(Terminal(val))))
 }
 pub fn mailto(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
     let mut check = arg_init! { min_arg:1, max_arg: 1, mailto};

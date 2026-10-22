@@ -195,6 +195,10 @@ define_commands!([
                   desc: "printenv VAR",
                   parser: parser::printenv
                 },
+                { tags: ["terminal "],
+                  desc: "terminal [EXECUTABLE [ARGS]], Launch a $SHELL process or the provided executable and arguments in the current directory of the meli process",
+                  parser: parser::terminal
+                },
                 { tags: ["mailto "],
                   desc: "mailto MAILTO_ADDRESS",
                   parser: parser::mailto

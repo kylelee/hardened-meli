@@ -1235,6 +1235,36 @@ impl State {
             CurrentDirectory => {
                 self.show_display_message(self.context.current_dir.display().to_string());
             }
+            Terminal(command) => {
+                // Interactive shell session over the real terminal: the
+                // `spawn` interaction channel below kills the input thread,
+                // hands the tty to the child and restores the interface
+                // when it exits. With `owner: None` the request's
+                // completion resizes and redraws the screen instead of
+                // delivering a result to a component.
+                use std::process::Stdio;
+
+                let mut cmd = if let Some(command) = command {
+                    let mut cmd = std::process::Command::new("sh");
+                    cmd.args(["-c", &command]);
+                    cmd
+                } else {
+                    std::process::Command::new(
+                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+                    )
+                };
+                cmd.stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .current_dir(self.context.current_dir.clone());
+                self.rcv_event(UIEvent::ProcessRequest(Box::new(ProcessRequest {
+                    owner: None,
+                    command: cmd,
+                    spawn: Some(Default::default()),
+                    result_cb: Default::default(),
+                    temporary_files: vec![],
+                })));
+            }
             Mailbox(account_name, op) => {
                 if let Some(account) = self
                     .context
@@ -1647,6 +1677,17 @@ impl State {
             {
                 self.message_box.show_next();
                 return;
+            }
+            UIEvent::Input(ref key)
+                if self
+                    .context
+                    .settings
+                    .shortcuts
+                    .general
+                    .open_terminal
+                    .contains(key) =>
+            {
+                return self.exec_command(Action::Terminal(None));
             }
             UIEvent::Notification {
                 ref title,

@@ -160,6 +160,33 @@ fn test_command_parser_pipe_whole_line() {
     parse_command(b"pipe-attachment 0 cat\necho pwned").unwrap_err();
 }
 
+/// `terminal` with no arguments maps to `Terminal(None)` (whitespace-only
+/// tails included); everything after the first space rides as one whole
+/// command line for `sh -c`, and a non-space boundary (`terminalx`) must
+/// not parse as `terminal`.
+#[test]
+fn test_command_parser_terminal() {
+    assert_eq!(parse_command(b"terminal").unwrap(), Terminal(None));
+    assert_eq!(parse_command(b"terminal    ").unwrap(), Terminal(None));
+    assert_eq!(
+        parse_command(b"terminal git status | less").unwrap(),
+        Terminal(Some("git status | less".into())),
+    );
+    parse_command(b"terminalx").unwrap_err();
+}
+
+/// The command palette's completion table must advertise the `terminal`
+/// command, and its listed parser must resolve to the exact `Action`.
+#[test]
+fn test_command_completion_terminal_entry() {
+    let (_, _, parser) = COMMAND_COMPLETION
+        .iter()
+        .find(|(tag, _, _)| *tag == "terminal ")
+        .expect("terminal command must be listed in the command completion table");
+    let (_, parsed) = parser(b"terminal git status | less").unwrap();
+    assert_eq!(parsed.unwrap(), Terminal(Some("git status | less".into())));
+}
+
 #[test]
 fn test_command_parser_raw_search() {
     use super::{Action::*, ListingAction::*};

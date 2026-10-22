@@ -40,15 +40,14 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-23 (UTC+8)
 
-- Method: per-commit semantic port (task S3 of the `1ada94c3..3b543312` range, embedded terminal dirty bitmap)
-- Upstream range: `83c7889c` only
-- Conflicts: none textual. Fork-kept deviations: `CellBuffer::buf`/`cellvec`/`cellvec_mut`, `Area`/`ScreenGeneration` and the PUA width handling are untouched; `EmbeddedGrid::set_terminal_size` keeps its `(cols, rows)` tuple signature (the upstream two-arg signature change in `embedded.rs`/`pager.rs` is API-only and was not applied). The dirty bitmap is purely additive. Rendering adaptation: the composer no longer clears the whole embedded area before copying and resizes the grid before reading the bitmap, so the per-row copy is actually incremental (upstream cleared the full area and its `set_dirty(false)` re-filled the bitmap, which degenerated to a full copy); `EmbeddedGrid::set_dirty(false)` acknowledges/clears the bitmap instead.
-- Accounting kinds: see the notes column
-- Baseline prerequisite: `meli/src/accounts/tests.rs` cold-start fixture adapted (`&uid` → `&(uid as u32)`) as in main `96f875a03`; without it the `usize`→`u32` UID port already merged in this base makes the lib test target fail to compile, unrelated to this task
+- Method: per-commit semantic port (task S2 of the `1ada94c3..3b543312` range, terminal command + open_terminal shortcut)
+- Upstream range: `b7b75cc8` only
+- Conflicts: none textual; semantic adaptations listed per row (fork-kept deviations: `Terminal` rides the fork's existing `ProcessRequest` + `SpawnInteractionFn` interactive spawn channel instead of upstream's inherited-stdio exec arm — the observable behavior (kill input thread → tty to child → restore + redraw via the S1 owner-`None` branch) is the same; `$SHELL` unset falls back to `/bin/sh` instead of upstream's error notification; fork has no Ctrl-Z suspend, so that clause is dropped from meli.1)
+- Verification: `cargo build`, `cargo test -p meli --lib` **671/671** (incl. new `test_command_parser_terminal`, `test_command_completion_terminal_entry`, `test_conf_general_open_terminal_shortcut_default`; golden `shortcuts_help_overlay` re-recorded for the new shortcut row), `cargo clippy -p meli --all-features -- -D warnings`, `cargo fmt --check` file set identical to main baseline. Baseline note: picked up main's `96f875a03` (identical u32 test-signature fix) so the suite compiles
 
-| Local commit | Upstream commit | Type | Notes |
+| Upstream commit | Port/Skip | Type | Notes |
 | --- | --- | --- | --- |
-| — | `83c7889c` | port | `DirtyBitmap` row-major cell bitmap on `CellBuffer` (hooks in `copy_area`/`write_string`/`clear_area`/`change_colors`/`change_theme`/`scroll_*`/`IndexMut`/`resize`/`clear`/`empty`, `dirty_areas()` returns merged inclusive `(start, end)` spans per row); `EmbeddedGrid::{dirty_areas,buffer_mut}` and `set_dirty` bitmap sync; the composer copies only dirty spans and pushes those spans as dirty flush areas; unit tests cover single/multi-row writes, interval merging across a word boundary without cross-row bleed, clear/reset/resize, and end-to-end `process_byte` partial writes on the embedded grid |
+| `b7b75cc8` | port | feat(command, terminal) | `Action::Terminal(Option<String>)`; `terminal` parser in fork's per-arm `arg_init!` style (`&[u8]` winnow, whole-line command like `pipe`, no-arg → `Terminal(None)`); command-palette entry; `ProcessResultFn` gains `Default` (as upstream); state arm builds `ProcessRequest { owner: None, spawn: Some(Default::default()), result_cb: Default::default() }` with `SHELL` (fallback `/bin/sh`) or `sh -c <line>`, `cwd = context.current_dir` (fork addition over upstream), stdio inherited; `open_terminal` general shortcut defaults `C-t` (`ShortcutKeys::single`); Input arm triggers `Terminal(None)`; docs meli.1 (MODES pointer + COMMAND entry; upstream's cd/pwd doc lines belong to task S6) + meli.conf.5 |
 
 ## 2026-10-23 (UTC+8)
 

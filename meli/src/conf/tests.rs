@@ -606,6 +606,45 @@ search = "?"
     }
 }
 
+/// `general.open_terminal` (launch `$SHELL` in the current directory)
+/// defaults to `C-t` and parses from `[shortcuts.general]`.
+#[test]
+fn test_conf_general_open_terminal_shortcut_default() {
+    let general = GeneralShortcuts::default().key_values();
+    assert_eq!(
+        general.get("open_terminal"),
+        Some(&ShortcutKeys::single(Key::Ctrl('t'))),
+        "general.open_terminal must default to C-t"
+    );
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = format!(
+        r#"
+[accounts.shortcut-test]
+root_mailbox = "{}"
+format = "maildir"
+send_mail = 'false'
+identity = "username@hostname.local"
+
+[shortcuts.general]
+open_terminal = "C-y"
+"#,
+        tempdir.path().display()
+    );
+    let new_file = ConfigFile::new(&config, &tempdir).unwrap();
+    let config = FileSettings::validate(new_file.path.clone(), true)
+        .expect("could not parse general open_terminal shortcut config");
+    assert_eq!(
+        config.shortcuts.general.key_values().get("open_terminal"),
+        Some(&ShortcutKeys::single(Key::Ctrl('y'))),
+        "open_terminal must parse from [shortcuts.general]"
+    );
+
+    if let Err(err) = tempdir.close() {
+        eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+
 #[test]
 fn test_conf_theme_parsing() {
     /* MUST SUCCEED: default themes should be valid */
