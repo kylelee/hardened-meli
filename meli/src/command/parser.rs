@@ -162,7 +162,14 @@ pub fn view(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 }
 
 pub fn new_tab(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    alt((manage_mailboxes, manage_jobs, compose_action, view_manpage)).parse(input)
+    alt((
+        manage_mailboxes,
+        manage_jobs,
+        compose_action,
+        view_manpage,
+        help,
+    ))
+    .parse(input)
 }
 
 pub fn parse_command(input: &[u8]) -> Result<Action, CommandError> {
@@ -1423,6 +1430,28 @@ pub fn view_manpage(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>
                 }),
             )),
         }
+    }
+    #[cfg(not(feature = "cli-docs"))]
+    {
+        Ok((
+            input,
+            Err(CommandError::Other {
+                inner: "this meli binary has not been compiled with the cli-docs feature".into(),
+            }),
+        ))
+    }
+}
+
+/// `help`: alias for `man meli.7`, the general guide.
+pub fn help(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
+    let mut check = arg_init! { min_arg:0, max_arg: 0, help};
+    let (input, _) = tag("help").parse(input.trim())?;
+    arg_chk!(start check, input);
+    arg_chk!(finish check, input);
+    let (input, _) = eof(input)?;
+    #[cfg(feature = "cli-docs")]
+    {
+        Ok((input, Ok(Tab(Man(crate::manpages::ManPages::Guide)))))
     }
     #[cfg(not(feature = "cli-docs"))]
     {

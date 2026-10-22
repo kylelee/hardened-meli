@@ -699,7 +699,7 @@ impl StatusBar {
     /// | `GridThreads`    | Maillist Up | Maillist Down | hidden            | hidden              | Focus Box      | Focus Threads  | Search   |
     /// | `ThreadList`     | Thread Up   | Thread Down   | hidden            | hidden              | Focus Maillist | Focus Content  | Search   |
     /// | `MailView`       | hidden      | hidden        | hidden            | hidden              | hidden         | hidden         | hidden   |
-    /// | `None`           | Scroll Up   | Scroll Down   | hidden            | hidden              | Focus Left     | Focus Right    | Search   |
+    /// | `None`           | Scroll Up   | Scroll Down   | hidden            | hidden              | Focus Left     | Focus Right    | hidden   |
     ///
     /// `MailView` (the mail detail state of the single-mail and thread
     /// layouts) additionally appends three mail actions after the
@@ -707,9 +707,10 @@ impl StatusBar {
     /// `reply_to_all`/`Reply All` (envelope-view bindings) and
     /// `open_in_new_tab`/`Open in Tab` (thread-view binding). The
     /// `None` row covers non-listing views (contacts, composing, ...)
-    /// and keeps the default labels. Every other entry (`Help`,
-    /// `Command`, `Send Mail`, `Close View`, `Quit` and the appended
-    /// mail actions) has one fixed label in all focuses.
+    /// and keeps the default labels; those views embed no pager, so the
+    /// `general.search` catch-all stays unadvertised there. Every other
+    /// entry (`Help`, `Command`, `Send Mail`, `Close View`, `Quit` and
+    /// the appended mail actions) has one fixed label in all focuses.
     ///
     /// Bindings missing from the active view are skipped silently. Every
     /// key glyph comes from the *configured* binding (remapping a
@@ -1961,7 +1962,7 @@ impl Component for Tabbed {
             }
             UIEvent::Input(ref key)
                 if self.show_shortcuts
-                    && shortcut!(key == shortcuts[Shortcuts::LISTING]["search"]) =>
+                    && shortcut!(key == shortcuts[Shortcuts::GENERAL]["search"]) =>
             {
                 context
                     .replies
@@ -2112,7 +2113,9 @@ fn scenario_hint_labels(hint_focus: Option<HintFocus>) -> [Option<&'static str>;
     match hint_focus {
         // Non-listing views (contacts, composing, ...): default labels.
         // The page keys carry no listing-specific wording, so they stay
-        // hidden here.
+        // hidden here. `general.search` fills the Search pick as a
+        // catch-all, but these views embed no pager, so the hint stays
+        // hidden (like the sidebar below, there is nothing to search).
         None => [
             Some("Scroll Up"),
             Some("Scroll Down"),
@@ -2120,7 +2123,7 @@ fn scenario_hint_labels(hint_focus: Option<HintFocus>) -> [Option<&'static str>;
             None,
             Some("Focus Left"),
             Some("Focus Right"),
-            Some("Search"),
+            None,
         ],
         // Layout1 sidebar: the scroll keys walk the mailbox tree and the
         // page keys jump to the previous/next mailbox group (account);

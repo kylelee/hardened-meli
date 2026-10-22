@@ -561,6 +561,51 @@ close = "C-x"
     }
 }
 
+/// `general.search` (pager search entry) defaults to `/` and parses from
+/// `[shortcuts.general]`; it is distinct from `listing.search`, which keeps
+/// its own binding for the mail list.
+#[test]
+fn test_conf_general_search_shortcut_default() {
+    let general = GeneralShortcuts::default().key_values();
+    assert_eq!(
+        general.get("search"),
+        Some(&ShortcutKeys::single(Key::Char('/'))),
+        "general.search must default to /"
+    );
+    assert_eq!(
+        ListingShortcuts::default().key_values().get("search"),
+        Some(&ShortcutKeys::double(Key::Char('/'), Key::F(3))),
+        "listing.search must keep its own / (or F3) binding"
+    );
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = format!(
+        r#"
+[accounts.shortcut-test]
+root_mailbox = "{}"
+format = "maildir"
+send_mail = 'false'
+identity = "username@hostname.local"
+
+[shortcuts.general]
+search = "?"
+"#,
+        tempdir.path().display()
+    );
+    let new_file = ConfigFile::new(&config, &tempdir).unwrap();
+    let config = FileSettings::validate(new_file.path.clone(), true)
+        .expect("could not parse general search shortcut config");
+    assert_eq!(
+        config.shortcuts.general.key_values().get("search"),
+        Some(&ShortcutKeys::single(Key::Char('?'))),
+        "search must parse from [shortcuts.general]"
+    );
+
+    if let Err(err) = tempdir.close() {
+        eprintln!("Could not cleanup tempdir: {err}");
+    }
+}
+
 #[test]
 fn test_conf_theme_parsing() {
     /* MUST SUCCEED: default themes should be valid */

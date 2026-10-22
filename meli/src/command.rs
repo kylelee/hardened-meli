@@ -350,6 +350,10 @@ define_commands!([
                   desc: "read documentation",
                   parser: parser::view_manpage
                 },
+                { tags: ["help"],
+                  desc: "read the general guide (like man meli.7)",
+                  parser: parser::help
+                },
                 { tags: ["manage-jobs"],
                   desc: "view and manage jobs",
                   parser: parser::manage_jobs

@@ -1380,38 +1380,16 @@ impl MailBackend for JmapType {
             for op in flags.iter() {
                 match op {
                     FlagOp::Set(f) => {
-                        update_keywords.insert(
-                            format!(
-                                "keywords/{}",
-                                match *f {
-                                    Flag::DRAFT => "$draft",
-                                    Flag::FLAGGED => "$flagged",
-                                    Flag::SEEN => "$seen",
-                                    Flag::REPLIED => "$answered",
-                                    Flag::TRASHED => "$junk",
-                                    Flag::PASSED => "$passed",
-                                    _ => continue, // [ref:VERIFY]
-                                }
-                            ),
-                            serde_json::json!(true),
-                        );
+                        if let Some(keyword) = keyword_from_flag(*f) {
+                            update_keywords
+                                .insert(format!("keywords/{keyword}"), serde_json::json!(true));
+                        }
                     }
                     FlagOp::UnSet(f) => {
-                        update_keywords.insert(
-                            format!(
-                                "keywords/{}",
-                                match *f {
-                                    Flag::DRAFT => "$draft",
-                                    Flag::FLAGGED => "$flagged",
-                                    Flag::SEEN => "$seen",
-                                    Flag::REPLIED => "$answered",
-                                    Flag::TRASHED => "$junk",
-                                    Flag::PASSED => "$passed",
-                                    _ => continue, // [ref:VERIFY]
-                                }
-                            ),
-                            serde_json::json!(null),
-                        );
+                        if let Some(keyword) = keyword_from_flag(*f) {
+                            update_keywords
+                                .insert(format!("keywords/{keyword}"), serde_json::json!(null));
+                        }
                     }
                     FlagOp::SetTag(t) => {
                         update_keywords.insert(format!("keywords/{t}"), serde_json::json!(true));
@@ -1809,6 +1787,21 @@ impl MailBackend for JmapType {
             Ok(())
         }))
     }
+}
+
+/// Maps a message flag to its JMAP keyword, or `None` for flags without a
+/// JMAP counterpart; flags that JMAP spells differently (`$junk` for
+/// `Flag::TRASHED`) are translated here, once.
+const fn keyword_from_flag(f: Flag) -> Option<&'static str> {
+    Some(match f {
+        Flag::DRAFT => "$draft",
+        Flag::FLAGGED => "$flagged",
+        Flag::SEEN => "$seen",
+        Flag::REPLIED => "$answered",
+        Flag::TRASHED => "$junk",
+        Flag::PASSED => "$passed",
+        _ => return None, // [ref:VERIFY]
+    })
 }
 
 impl JmapType {

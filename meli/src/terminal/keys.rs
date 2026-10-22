@@ -212,7 +212,6 @@ pub fn parse_key(s: &str) -> Result<Key, String> {
         "Enter" | "enter" => Ok(Key::Char('\n')),
         "Tab" | "tab" => Ok(Key::Char('\t')),
         "Esc" | "esc" => Ok(Key::Esc),
-        s if s.len() == 1 => Ok(Key::Char(s.chars().next().unwrap())),
         s if s.starts_with('F') && (s.len() == 2 || s.len() == 3) => {
             use std::str::FromStr;
 
@@ -263,9 +262,18 @@ pub fn parse_key(s: &str) -> Result<Key, String> {
                 &s[2..]
             ))
         }
-        _ => Err(format!(
-            "Cannot derive shortcut from `{s}`. Please consult the manual for valid key inputs."
-        )),
+        s => {
+            let mut chars = s.chars();
+            if let Some(c) = chars.next() {
+                if chars.next().is_none() {
+                    return Ok(Key::Char(c));
+                }
+            }
+
+            Err(format!(
+                "Cannot derive shortcut from `{s}`. Please consult the manual for valid key inputs."
+            ))
+        }
     }
 }
 
@@ -539,6 +547,28 @@ fn test_key_serde() {
     assert_de_tokens(&Key::Char('1'), &[Token::Str("1")]);
     assert_ser_tokens(&Key::Char('1'), &[Token::Char('1')]);
 
+    // Multi-byte single characters are accepted in their string form: the
+    // single-character check must count chars, not bytes.
+    assert_de_tokens(&Key::Char('é'), &[Token::Str("é")]);
+    assert_de_tokens(&Key::Char('你'), &[Token::Str("你")]);
+    assert_de_tokens(&Key::Char('🦀'), &[Token::Str("🦀")]);
+
+    // Several characters (multi-byte or not) are still not a key.
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("éé")],
+        "Cannot derive shortcut from `éé`. Please consult the manual for valid key inputs.",
+    );
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("你好")],
+        "Cannot derive shortcut from `你好`. Please consult the manual for valid key inputs.",
+    );
+    // A modifier prefix with a multi-byte key is not a valid Alt binding
+    // (`M-` takes exactly one ASCII lowercase alphanumeric key).
+    assert_de_tokens_error::<Key>(
+        &[Token::Str("M-é")],
+        "Cannot derive shortcut from `M-é`. Please consult the manual for valid key inputs.",
+    );
+
     assert_de_tokens_error::<Key>(
         &[Token::Str("C-V")],
         "`V` should be a lowercase and alphanumeric character instead.",
@@ -613,6 +643,8 @@ fn test_shortcut_keys_serde() {
         &[Token::Str("Up,F13")],
         "`13` should be a number 1 <= n <= 12 instead.",
     );
+    // A multi-byte single character is a valid single binding.
+    assert_de_tokens(&ShortcutKeys::single(Key::Char('é')), &[Token::Str("é")]);
 }
 
 /// `Key::hint_display` / `ShortcutKeys::hint_display_iter`: the status-bar

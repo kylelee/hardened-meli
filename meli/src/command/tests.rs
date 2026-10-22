@@ -494,3 +494,35 @@ fn test_command_parser_public_inbox_import() {
     // Trailing junk after the message ID fails to parse.
     parse_command(b"public-inbox import foo bar <m@example.com> baz").unwrap_err();
 }
+
+/// `help` opens the general guide (`meli.7`), accepts no arguments, and is
+/// reachable from the `new-tab` parser chain like its `man` sibling.
+#[test]
+fn test_command_parser_help() {
+    #[cfg(feature = "cli-docs")]
+    {
+        assert_eq!(
+            parse_command(b"help").unwrap(),
+            Action::Tab(TabAction::Man(crate::manpages::ManPages::Guide))
+        );
+        // Leading/trailing whitespace is trimmed, like every other command.
+        assert_eq!(
+            parse_command(b"  help  ").unwrap(),
+            Action::Tab(TabAction::Man(crate::manpages::ManPages::Guide))
+        );
+    }
+    #[cfg(not(feature = "cli-docs"))]
+    {
+        assert_eq!(
+            parse_command(b"help").unwrap_err().to_string(),
+            "this meli binary has not been compiled with the cli-docs feature"
+        );
+    }
+    // `help` takes no arguments.
+    assert!(matches!(
+        parse_command(b"help me").unwrap_err(),
+        CommandError::WrongNumberOfArguments { .. }
+    ));
+    // It must not shadow the `man` command or any other parser.
+    assert!(parse_command(b"manpage").is_err());
+}
