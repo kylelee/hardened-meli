@@ -2135,6 +2135,113 @@ mod dirty_bitmap_tests {
             vec![(0, (0, 9)), (1, (0, 9)), (2, (0, 9)), (3, (0, 9))]
         );
     }
+
+    /// Copy exactly the rows/spans [`EmbeddedGrid::dirty_areas`] reports,
+    /// mirroring `Composer::draw`'s incremental copy.
+    fn copy_dirty_areas(grid: &mut EmbeddedGrid, dest: &mut CellBuffer) {
+        let dest_area = dest.area();
+        for (y, (start, end)) in grid.dirty_areas() {
+            let width = end.saturating_sub(start) + 1;
+            let src = grid.area().nth_row(y).skip_cols(start).take_cols(width);
+            let dst = dest_area.nth_row(y).skip_cols(start).take_cols(width);
+            dest.copy_area(grid.buffer(), dst, src);
+        }
+    }
+
+    fn assert_cells_eq(actual: &CellBuffer, expected: &CellBuffer, context: &str) {
+        let area = expected.area();
+        for y in 0..area.height() {
+            for x in 0..area.width() {
+                assert_eq!(
+                    actual[(x, y)],
+                    expected[(x, y)],
+                    "{context}: cell ({x}, {y}) differs"
+                );
+            }
+        }
+    }
+
+    fn assert_cells_ne(actual: &CellBuffer, expected: &CellBuffer) -> bool {
+        let area = expected.area();
+        (0..area.height()).any(|y| (0..area.width()).any(|x| actual[(x, y)] != expected[(x, y)]))
+    }
+
+    /// Incremental copying is only sound while the destination still holds
+    /// the previous frame: starting from an intact frame it reproduces a
+    /// full `copy_area` cell-for-cell, but once the destination has been
+    /// cleared the same dirty-row copy cannot restore the clean rows.
+    #[test]
+    fn incremental_dirty_copy_matches_full_copy_only_on_intact_destination() {
+        let mut grid = new_grid(10, 4);
+        feed(&mut grid, b"aa\r\nbb\r\ncc\r\ndd");
+        grid.set_dirty(false);
+
+        let area = grid.area();
+        let mut target = CellBuffer::new(Cell::new_default(), area);
+        target.copy_area(grid.buffer(), target.area(), area);
+
+        // A partial write touches row 0 only; rows 1..=3 stay clean.
+        feed(&mut grid, b"\x1b[1;1HXY");
+        assert_eq!(dirty_areas(&mut grid), vec![(0, (0, 1))]);
+
+        let mut full = CellBuffer::new(Cell::new_default(), area);
+        full.copy_area(grid.buffer(), full.area(), grid.area());
+
+        copy_dirty_areas(&mut grid, &mut target);
+        assert_cells_eq(
+            &target,
+            &full,
+            "incremental copy over the previous frame must equal a full copy",
+        );
+
+        // Next frame: the composer acknowledges the bitmap, the pty touches
+        // row 0 again, and the destination is cleared by external code (the
+        // composer's clear block). Copying only the dirty row leaves rows
+        // 1..=3 blank, so the result must differ from a full copy.
+        grid.set_dirty(false);
+        feed(&mut grid, b"\x1b[1;1HZZ");
+        assert_eq!(dirty_areas(&mut grid), vec![(0, (0, 1))]);
+        target.clear(None);
+
+        let mut full_after_clear = CellBuffer::new(Cell::new_default(), area);
+        full_after_clear.copy_area(grid.buffer(), full_after_clear.area(), grid.area());
+
+        copy_dirty_areas(&mut grid, &mut target);
+        assert!(
+            assert_cells_ne(&target, &full_after_clear),
+            "a dirty-row-only copy must not reconstruct an externally cleared destination"
+        );
+    }
+
+    /// `Composer::draw` propagates its component-level dirty flag into the
+    /// embedded grid before reading `dirty_areas()` (e.g. on `ConfigReload`
+    /// with an unchanged terminal size); the incremental path must then
+    /// degenerate to a full repaint and recover an already-cleared frame.
+    #[test]
+    fn component_dirty_forces_full_repaint_through_incremental_copy() {
+        let mut grid = new_grid(10, 4);
+        feed(&mut grid, b"aa\r\nbb\r\ncc\r\ndd");
+        grid.set_dirty(false);
+
+        let area = grid.area();
+        let mut target = CellBuffer::new(Cell::new_default(), area);
+        // The composer's clear block already emptied the destination.
+        target.clear(None);
+
+        // What `Composer::draw` does when `self.dirty` is set: no pty bytes
+        // are needed, the whole grid must become dirty for this frame.
+        grid.set_dirty(true);
+        assert_eq!(dirty_areas(&mut grid).len(), area.height());
+
+        copy_dirty_areas(&mut grid, &mut target);
+        let mut full = CellBuffer::new(Cell::new_default(), area);
+        full.copy_area(grid.buffer(), full.area(), grid.area());
+        assert_cells_eq(
+            &target,
+            &full,
+            "a component-dirty frame must copy the full grid",
+        );
+    }
 }
 
 #[cfg(test)]

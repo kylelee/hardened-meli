@@ -1457,13 +1457,29 @@ impl Component for Composer {
 
         if let Some(ref mut embedded_pty) = self.embedded_pty {
             let embedded_area = area;
-            if embedded_pty.is_dirty() {
+            // A dirty composer must repaint even when the embedded grid has
+            // no new output (e.g. `UIEvent::ConfigReload`): the clear block
+            // above has already wiped the whole area, so entering this branch
+            // is what restores it. The grid is then forced fully dirty below.
+            if self.dirty || embedded_pty.is_dirty() {
                 if embedded_pty.running {
                     let mut guard = embedded_pty.lock().unwrap();
                     // Resize the embedded grid before reading its dirty
                     // bitmap: a resize reallocates the buffer and marks it
                     // fully dirty, which must be part of this frame's copy.
                     guard.set_terminal_size((embedded_area.width(), embedded_area.height()));
+
+                    // Propagate the component-level dirty flag into the grid
+                    // bitmap: the header/clear block above unconditionally
+                    // clears every row, while `dirty_areas()` may only report
+                    // the rows the pty actually changed. Without this, the
+                    // rows that were cleared but not reported stay blank until
+                    // the pty happens to dirty them again. Forcing the bitmap
+                    // makes the incremental path below degenerate to a full
+                    // copy for this frame only.
+                    if self.dirty {
+                        guard.grid.set_dirty(true);
+                    }
 
                     // Copy only the rows the embedded grid reported as dirty
                     // instead of the whole screen. `dirty_areas()` returns
