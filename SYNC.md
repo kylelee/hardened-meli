@@ -40,9 +40,10 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-23 (UTC+8)
 
-- Method: per-commit semantic port (task S8 of the `1ada94c3..3b543312` range, IMAP UID type)
-- Upstream range: `1ada94c3..3b543312` (`dcec9887`, `8bf479b4` + `042bb21d` decision)
-- Conflicts: fork-kept deviations — cache pagination stays count-typed (`batch_size: usize`, fork's cache-first paging untouched per non-goals); `MessageSequenceNumberMap` does not exist in the fork (upstream's hunk there n/a); panic-path `SequenceSet::try_from(..).unwrap()` deduplicated into `uids_to_sequence_set()` helper with let-else call sites instead of upstream's duplicated blocks; NNTP untouched (parallel task S9)
+- Method: per-commit semantic port (task S5 of the `1ada94c3..3b543312` range, small fixes batch)
+- Upstream range: `1ada94c3..3b543312` (this task: `ad6f2b68`, `d2470aa8`, `eec57247`, `8180e9c2`, `e4b5d4d1`, `2bb886ee`, `a5d5e862`, `ef05916a`)
+- Conflicts: none (fork-kept deviations: byte-input command parsers with fork `argcheck` convention, `ShortcutKeys` binding type instead of bare `Key`, fork's `CmdInput`+`ChangeMode` command-input chain, `server_password_command` config format in tests, `PASSED` flag keeps its `$passed` keyword mapping). Intentional behavior change for the release notes: the help/shortcuts panel search trigger key moved from `listing.search` (`/` or `F3`) to `general.search` (`/` only), so a user remap of `listing.search`'s `F3` no longer opens the help-panel search)
+- Accounting kinds: see the SKIP notes in the table
 
 | Local commit | Upstream commit | Type | Notes |
 | --- | --- | --- | --- |

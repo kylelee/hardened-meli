@@ -1431,6 +1431,60 @@ mod tests {
         );
     }
 
+    /// The `general.search` binding (`/`) must be handled by the *pager's
+    /// own* arm, not by a listing wrapper: a standalone `Pager` (no
+    /// listing host) consumes `/` by pushing the fork's command-input
+    /// chain — `CmdInput(Key::Paste("search "))` plus
+    /// `ChangeMode(UIMode::Command)` — while `F3`, which only
+    /// `listing.search` binds, must stay unconsumed so a user's
+    /// `listing.search` remap cannot open the pager search entry.
+    #[test]
+    fn pager_slash_opens_search_command_line() {
+        let mut context = mock_context();
+        let mut pager = Pager::from_string(
+            "hello\nworld\n".to_string(),
+            &context,
+            None,
+            None,
+            ThemeAttribute::default(),
+        );
+
+        let mut event = UIEvent::Input(Key::Char('/'));
+        assert!(
+            pager.process_event(&mut event, &mut context),
+            "`/` (general.search) must be consumed by the pager itself"
+        );
+        let replies = context.replies();
+        assert!(
+            replies
+                .iter()
+                .any(|r| matches!(r, UIEvent::CmdInput(Key::Paste(s)) if s == "search ")),
+            "the pager `/` arm must prefill the command line with `search `, got {replies:?}"
+        );
+        assert!(
+            replies
+                .iter()
+                .any(|r| matches!(r, UIEvent::ChangeMode(UIMode::Command))),
+            "the pager `/` arm must switch to COMMAND mode, got {replies:?}"
+        );
+
+        // `F3` is a `listing.search`-only key: the pager must neither
+        // consume it nor react to it, keeping the two search entries
+        // distinguishable.
+        let mut event = UIEvent::Input(Key::F(3));
+        assert!(
+            !pager.process_event(&mut event, &mut context),
+            "`F3` (listing-only search binding) must not be consumed by the pager"
+        );
+        assert!(
+            !context
+                .replies()
+                .iter()
+                .any(|r| matches!(r, UIEvent::CmdInput(_))),
+            "`F3` must not open the pager command line"
+        );
+    }
+
     /// Regression test for narrow-width CJK truncation: the pager must wrap
     /// its text at the *actual* area width, not at `pager.minimum_width`
     /// (default 80), otherwise in panes narrower than `minimum_width` every
