@@ -780,18 +780,18 @@ Inspect all mailboxes of an account, subscribed or not.
 Pressing the
 .Shortcut Enter general open_entry
 shortcut allows you to rename, move, toggle subscription and delete the mailbox under the cursor.
-.It Cm terminal Oo Ar EXECUTABLE Oo Ar ARGS Oc Oc
-Launch a
-.Ev $SHELL
-process or the provided executable and arguments in the current directory of the
+.It Cm cd Ar Path
+Change current directory of the
 .Nm
 process.
-By exiting the shell you will return to
-.Nm Ns
-\&.
-If no arguments are provided this is equivalent to the
-.Shortcut Ctrl-t general open_terminal
-shortcut.
+The path is tilde-expanded and resolved against the current directory,
+and it must be an existing directory; otherwise the current directory is
+left unchanged and a notification is shown.
+Spawned commands subsequently run in this directory.
+.It Cm pwd
+Print current directory of the
+.Nm
+process.
 .El
 .Sh EXIT STATUS
 .Nm

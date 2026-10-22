@@ -40,10 +40,9 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## 2026-10-23 (UTC+8)
 
-- Method: per-commit semantic port (task S2 of the `1ada94c3..3b543312` range, terminal command + open_terminal shortcut)
-- Upstream range: `b7b75cc8` only
-- Conflicts: none textual; semantic adaptations listed per row (fork-kept deviations: `Terminal` rides the fork's existing `ProcessRequest` + `SpawnInteractionFn` interactive spawn channel instead of upstream's inherited-stdio exec arm — the observable behavior (kill input thread → tty to child → restore + redraw via the S1 owner-`None` branch) is the same; `$SHELL` unset falls back to `/bin/sh` instead of upstream's error notification, and spawn failures surface through a result-callback notification; the meli.1 MODES Ctrl-Z background-suspend clause is kept as upstream — fork's main loop implements the same `Ctrl-Z` SIGSTOP self-suspend for non-Embedded modes)
-- Verification: `cargo build`, `cargo test -p meli --lib` **671/671** (incl. new `test_command_parser_terminal`, `test_command_completion_terminal_entry`, `test_conf_general_open_terminal_shortcut_default`; golden `shortcuts_help_overlay` re-recorded for the new shortcut row), `cargo clippy -p meli --all-features -- -D warnings`, `cargo fmt --check` file set identical to main baseline. Baseline note: picked up main's `96f875a03` (identical u32 test-signature fix) so the suite compiles
+- Method: per-commit semantic port (task S6 of the `1ada94c3..3b543312` range, cd/current-dir hardening)
+- Upstream range: `8cf35137`, `0229a1c4`, `42bff4b3`
+- Conflicts: fork-kept deviations — cd resolution expands via the fork's `ShellExpandTrait::expand()` (`~` + `$VAR`) because the fork has no upstream's `expand_tilde`; relative `cd` arguments resolve against `context.current_dir` itself instead of upstream's `current_dir.parent()` join (upstream's join sends a plain `cd sub` to a sibling directory and `cd ..` two levels up — semantically wrong, so not ported verbatim); `create-config` deliberately not canonicalized since its target is expected to not exist yet; baseline adaptation — Wave1's S8 (IMAP UID `usize`→`u32`) left `accounts/tests.rs::cold_start_cached_mails` calling `generate_envelope_hash` with `&usize` (E0308 on base, blocks the whole `--lib` test compile): folded into this feature commit as a `&(uid as u32)` call-site cast rather than a prep commit, noted here
 
 | Upstream commit | Port/Skip | Type | Notes |
 | --- | --- | --- | --- |

@@ -519,6 +519,15 @@ fn is_existing_directory(dir: &Path) -> bool {
     matches!(dir.try_exists(), Ok(true)) && dir.is_dir()
 }
 
+/// Point a spawned `ProcessRequest` command at the session's current
+/// directory.
+///
+/// Children must run where the session's `pwd` reports; otherwise
+/// shell-outs observe a different filesystem position than the user.
+fn apply_session_cwd(command: &mut std::process::Command, context: &Context) {
+    command.current_dir(&context.current_dir);
+}
+
 impl State {
     pub fn new(
         settings: Option<Settings>,
@@ -1739,7 +1748,7 @@ impl State {
                     result_cb,
                     temporary_files,
                 } = *process_request;
-                command.current_dir(&self.context.current_dir);
+                apply_session_cwd(&mut command, &self.context);
                 tracing::trace!(
                     "Executing: {:?} {:?} in {:?}",
                     command.get_program(),
@@ -2127,12 +2136,12 @@ mod tests {
     #[test]
     fn test_process_request_command_runs_in_session_dir() {
         // The `ProcessRequest` arm forwards the session's current directory
-        // to every spawned child via `Command::current_dir`; assert the
+        // to every spawned child via `apply_session_cwd`; assert that
         // wiring against a real `Context`.
         let temp = tempfile::TempDir::new().unwrap();
         let ctx = crate::Context::new_mock(&temp);
         let mut command = std::process::Command::new("true");
-        command.current_dir(&ctx.current_dir);
+        apply_session_cwd(&mut command, &ctx);
         assert_eq!(command.get_current_dir(), Some(ctx.current_dir.as_path()));
     }
 }
