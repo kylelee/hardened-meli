@@ -2114,24 +2114,30 @@ impl Component for Composer {
                             }
                             Ok(WaitStatus::Exited(_, exit_code)) => {
                                 drop(embedded_guard);
-                                let embedded_pty = self.embedded_pty.take();
+                                let embedded_pty = self.embedded_pty.take().unwrap();
+                                let stderr = String::from_utf8_lossy(
+                                    &embedded_pty.terminal.lock().unwrap().stderr.captured(),
+                                )
+                                .into_owned();
                                 if exit_code != 0 {
                                     context.replies.push_back(UIEvent::Notification {
-                                        title: None,
+                                        title: Some(
+                                            format!(
+                                                "Subprocess has exited with exit code {exit_code}",
+                                            )
+                                            .into(),
+                                        ),
                                         source: None,
-                                        body: format!(
-                                            "Subprocess has exited with exit code {exit_code}",
-                                        )
-                                        .into(),
+                                        body: format!("stderr: {stderr}").into(),
                                         kind: Some(NotificationType::Error(
                                             melib::error::ErrorKind::External,
                                         )),
                                     });
-                                } else if let Some(EmbeddedPty {
+                                } else if let EmbeddedPty {
                                     running: true,
                                     file,
                                     ..
-                                }) = embedded_pty
+                                } = embedded_pty
                                 {
                                     self.update_from_file(&file, context);
                                 }
@@ -2438,21 +2444,22 @@ impl Component for Composer {
                     .as_ref()
                     .is_some_and(|pty| pty.is_stopped()) =>
             {
-                if let Some(EmbeddedPty {
+                let EmbeddedPty {
                     running: _,
                     terminal,
                     file,
-                }) = self.embedded_pty.take()
-                {
+                } = self.embedded_pty.take().unwrap();
+                let stderr = {
                     let guard = terminal.lock().unwrap();
                     guard.wake_up();
                     guard.terminate();
-                    self.update_from_file(&file, context);
-                }
+                    String::from_utf8_lossy(&guard.stderr.captured()).into_owned()
+                };
+                self.update_from_file(&file, context);
                 context.replies.push_back(UIEvent::Notification {
-                    title: None,
+                    title: Some("Subprocess was killed by SIGTERM signal".into()),
                     source: None,
-                    body: "Subprocess was killed by SIGTERM signal".into(),
+                    body: format!("stderr: {stderr}").into(),
                     kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
                 });
                 self.mode = ViewMode::Edit;

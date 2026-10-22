@@ -39,6 +39,8 @@
 //!
 //! To create a [`Terminal`], see [`create_pty`].
 
+use std::{fs::File, io::PipeReader, mem::ManuallyDrop};
+
 use melib::text::wcwidth;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 
@@ -65,10 +67,56 @@ enum CodepointBuf {
     FourCodepoints(u8, Option<u8>, Option<u8>),
 }
 
+/// Upper bound on the embedded child's stderr bytes kept for diagnostics.
+/// Further output is drained and discarded, so a chatty child can never
+/// fill the stderr pipe and block on `write(2)`.
+pub const STDERR_CAPTURE_LIMIT: usize = 4 * 1024;
+
+/// Continuously drained, bounded capture of an embedded pseudoterminal
+/// child's stderr output.
+///
+/// The child's stderr is redirected to a pipe whose read end is owned by a
+/// dedicated drain thread (spawned by
+/// [`create_pty`](super::create_pty), see [`drain_stderr`]): bytes are
+/// consumed as they arrive, at most [`STDERR_CAPTURE_LIMIT`] of them are
+/// kept, and the captured text is included in the child's exit
+/// notification.
+#[derive(Clone, Debug, Default)]
+pub struct StderrCapture(Arc<Mutex<Vec<u8>>>);
+
+impl StderrCapture {
+    /// Snapshot of the stderr bytes captured so far, in capture order.
+    pub fn captured(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// Drain `reader` into `capture` until end-of-file (every writer closed the
+/// pipe, e.g. the child exited) or a read error, keeping at most
+/// [`STDERR_CAPTURE_LIMIT`] bytes and discarding the rest. Draining as the
+/// bytes arrive is what keeps the child from ever blocking on a full pipe.
+pub(super) fn drain_stderr(mut reader: PipeReader, capture: &StderrCapture) {
+    let mut chunk = [0_u8; 4096];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut buf = capture.0.lock().unwrap();
+                let room = STDERR_CAPTURE_LIMIT.saturating_sub(buf.len());
+                buf.extend_from_slice(&chunk[..n.min(room)]);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Terminal {
     pub grid: EmbeddedGrid,
-    stdin: std::mem::ManuallyDrop<std::fs::File>,
+    stdin: ManuallyDrop<File>,
+    /// Captured stderr of the embedded process; see [`StderrCapture`].
+    pub stderr: StderrCapture,
     /// Pid of the embedded process
     pub child_pid: nix::unistd::Pid,
 }
@@ -112,10 +160,11 @@ impl std::io::Write for Terminal {
 }
 
 impl Terminal {
-    pub fn new(stdin: std::mem::ManuallyDrop<std::fs::File>, child_pid: nix::unistd::Pid) -> Self {
+    pub fn new(stdin: ManuallyDrop<File>, stderr: StderrCapture, child_pid: nix::unistd::Pid) -> Self {
         Self {
             grid: EmbeddedGrid::new(),
             stdin,
+            stderr,
             child_pid,
         }
     }
@@ -155,6 +204,7 @@ impl Terminal {
         let Self {
             ref mut grid,
             ref mut stdin,
+            stderr: _,
             child_pid: _,
         } = self;
         grid.process_byte(stdin, byte);
@@ -1962,5 +2012,71 @@ mod hardening_tests {
         bytes.extend(vec![b'9'; 100_000]);
         bytes.push(b'G');
         feed(&mut grid, &bytes);
+    }
+}
+
+#[cfg(test)]
+mod stderr_capture_tests {
+    use super::*;
+    use std::io::PipeWriter;
+
+    /// A pipe pair for driving `drain_stderr` deterministically.
+    fn pipe_pair() -> (PipeWriter, PipeReader) {
+        let (reader, writer) = std::io::pipe().unwrap();
+        (writer, reader)
+    }
+
+    /// `drain_stderr` must slurp everything written before the write end is
+    /// closed and expose it verbatim through [`StderrCapture::captured`].
+    #[test]
+    fn drain_captures_all_bytes_until_eof() {
+        let (mut writer, reader) = pipe_pair();
+        let capture = StderrCapture::default();
+        let drain_capture = capture.clone();
+        let thread = std::thread::spawn(move || drain_stderr(reader, &drain_capture));
+        writer.write_all(b"editor: cannot open file\n").unwrap();
+        // Closing the write end is what makes the drain thread reach EOF.
+        drop(writer);
+        thread.join().unwrap();
+        assert_eq!(capture.captured(), b"editor: cannot open file\n");
+    }
+
+    /// Output beyond [`STDERR_CAPTURE_LIMIT`] is dropped, not accumulated:
+    /// the capture stays bounded while the pipe keeps being drained.
+    #[test]
+    fn drain_is_bounded_but_keeps_draining() {
+        let (mut writer, reader) = pipe_pair();
+        let capture = StderrCapture::default();
+        let drain_capture = capture.clone();
+        let thread = std::thread::spawn(move || drain_stderr(reader, &drain_capture));
+        let oversized = vec![b'x'; STDERR_CAPTURE_LIMIT * 2];
+        writer.write_all(&oversized).unwrap();
+        // The child must not block on a full pipe: after the write end is
+        // closed, the drain thread must terminate promptly, proving it
+        // consumed (and discarded) the excess.
+        drop(writer);
+        thread.join().unwrap();
+        let captured = capture.captured();
+        assert_eq!(captured.len(), STDERR_CAPTURE_LIMIT);
+        assert!(captured.iter().all(|&b| b == b'x'));
+    }
+
+    /// The capture keeps the *first* [`STDERR_CAPTURE_LIMIT`] bytes: with a
+    /// small marker written first, it survives an oversized follow-up.
+    #[test]
+    fn drain_keeps_head_of_stream() {
+        let (mut writer, reader) = pipe_pair();
+        let capture = StderrCapture::default();
+        let drain_capture = capture.clone();
+        let thread = std::thread::spawn(move || drain_stderr(reader, &drain_capture));
+        writer.write_all(b"HEAD-MARKER").unwrap();
+        writer
+            .write_all(&vec![b'y'; STDERR_CAPTURE_LIMIT])
+            .unwrap();
+        drop(writer);
+        thread.join().unwrap();
+        let captured = capture.captured();
+        assert!(captured.starts_with(b"HEAD-MARKER"));
+        assert_eq!(captured.len(), STDERR_CAPTURE_LIMIT);
     }
 }

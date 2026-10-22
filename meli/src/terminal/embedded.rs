@@ -25,9 +25,12 @@ use std::os::fd::OwnedFd;
 use std::{
     ffi::{CStr, CString, OsStr},
     mem::ManuallyDrop,
-    os::unix::{
-        ffi::OsStrExt,
-        io::{AsRawFd, FromRawFd, IntoRawFd},
+    os::{
+        fd::AsFd as _,
+        unix::{
+            ffi::OsStrExt,
+            io::{AsRawFd, FromRawFd, IntoRawFd},
+        },
     },
 };
 
@@ -49,7 +52,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{
     convert::TryFrom,
-    io::{Read, Write},
+    io::{pipe, Read, Write},
     sync::{Arc, Mutex},
 };
 
@@ -58,7 +61,7 @@ use std::{
 use libc::TIOCSCTTY;
 /// ioctl request code to set window size of pty:
 use libc::TIOCSWINSZ;
-pub use terminal::{EmbeddedGrid, ScreenBuffer, Terminal};
+pub use terminal::{EmbeddedGrid, ScreenBuffer, StderrCapture, Terminal};
 
 ioctl_write_ptr_bad!(
     /// Macro generated function that calls ioctl to set window size of backend
@@ -144,6 +147,12 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
             )
         })?;
 
+    // The child's stderr is redirected to a pipe that a dedicated thread
+    // continuously drains into a bounded [`StderrCapture`]: the pipe can
+    // never fill up and block the child on `write(2)`, and the captured
+    // bytes ride along in the exit notification.
+    let (stderr_reader, stderr_writer) = pipe()?;
+
     let child_pid = match unsafe { nix::unistd::fork()? } {
         nix::unistd::ForkResult::Child => {
             #[cfg(not(target_os = "macos"))]
@@ -153,7 +162,10 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
             // assign stdin, stdout, stderr to the pty
             nix::unistd::dup2_stdin(&backend_fd).expect("could not dup2 STDIN");
             nix::unistd::dup2_stdout(&backend_fd).expect("could not dup2 STDOUT");
-            nix::unistd::dup2_stderr(&backend_fd).expect("could not dup2 STDERR");
+            nix::unistd::dup2_stderr(stderr_writer.as_fd()).expect("could not dup2 STDERR");
+            // The duplicate in fd 2 is all the child needs; leak the
+            // original writer descriptor on purpose (we are about to exec).
+            _ = stderr_writer.into_raw_fd();
             // Become session leader
             nix::unistd::setsid().expect("Forked terminal process could not become session leader");
             match unsafe { set_controlling_terminal(backend_fd.as_raw_fd()) } {
@@ -185,9 +197,22 @@ pub fn create_pty(width: usize, height: usize, command: &str) -> Result<Arc<Mute
         nix::unistd::ForkResult::Parent { child } => child,
     };
 
+    let stderr = StderrCapture::default();
+    {
+        let capture = stderr.clone();
+        // A dedicated OS thread on purpose, like the pty forward loop
+        // below: it blocks in `read(2)` on the pipe until every writer
+        // (the child included) is gone.
+        std::thread::Builder::new()
+            .spawn(move || terminal::drain_stderr(stderr_reader, &capture))
+            .chain_err_summary(|| {
+                "Could not spawn stderr drain thread for forked embedded terminal process"
+            })?;
+    }
+
     let stdin = unsafe { std::fs::File::from_raw_fd(frontend_fd.as_raw_fd()) };
     // We will let the spawned thread close frontend_fd
-    let mut embedded_pty = Terminal::new(ManuallyDrop::new(stdin), child_pid);
+    let mut embedded_pty = Terminal::new(ManuallyDrop::new(stdin), stderr, child_pid);
     embedded_pty.set_terminal_size((width, height));
     let pty = Arc::new(Mutex::new(embedded_pty));
     let pty_ = pty.clone();
