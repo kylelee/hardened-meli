@@ -431,8 +431,16 @@ fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
 /// material" — every bare token the CVE guards in [`sanitize`]'s
 /// `attribute_filter` drop, mirrored here so the CSS-decoded shadow re-check
 /// of CVE-2026-62643 / issue #194 cannot miss a family member. Keep in sync
-/// with the guards above; [`css_shadow_carries_live_material`] is the only
-/// consumer.
+/// with the guards above: a future CVE review that adds (or removes) a
+/// bare-token guard must add (or remove) the same token here in the same
+/// change — the maintenance rule is recorded in `cve/README.md`, and the
+/// `live_material_token_table_mirrors_the_inline_guards` source-scan test
+/// (in `cve/src/CVE-2026-62643.rs`, because CVE-2018-0950's invariant keeps
+/// this file free of compile-time file-include / filesystem-reference
+/// primitives), plus the
+/// `every_live_material_token_is_enforced_through_the_css_shadow` test here,
+/// fail on drift in either direction.
+/// [`css_shadow_carries_live_material`] is the only consumer.
 const LIVE_MATERIAL_TOKENS: &[&str] = &[
     "@import",
     "url(",
@@ -955,6 +963,62 @@ mod tests {
             sanitize(r#"<p title="background notes">x</p>"#),
             r#"<p title="background notes">x</p>"#,
             "a bare `background` word must survive"
+        );
+    }
+
+    /// CVE-2026-62643 / issue #194 anti-drift, behavioral complement of
+    /// the source-scan mirror test
+    /// `live_material_token_table_mirrors_the_inline_guards` in
+    /// `cve/src/CVE-2026-62643.rs`: mirroring a token on paper is not
+    /// enough — every [`LIVE_MATERIAL_TOKENS`] entry
+    /// must actually be enforced through the CSS-decode shadow. Each token
+    /// is obfuscated generically — its first character hex-escaped (the
+    /// escape's terminating whitespace is consumed, adjacency preserved:
+    /// `\75 rl(` *is* `url(`) and a `/**/` comment split after the first
+    /// character (`u/**/rl(`) — so a table entry the shadow path does not
+    /// really cover fails here, per token and per axis.
+    #[test]
+    fn every_live_material_token_is_enforced_through_the_css_shadow() {
+        fn hex_escape_first_char(token: &str) -> String {
+            let mut chars = token.chars();
+            let first = chars.next().expect("table tokens are non-empty");
+            assert!(first.is_ascii(), "table tokens are ASCII");
+            let mut value = String::with_capacity(token.len() + 3);
+            value.push('\\');
+            // The terminating space ends greedy hex-digit consumption
+            // before the rest of the token — critical where the second
+            // character is itself a hex digit (the `a` of `javascript:`).
+            value.push_str(&format!("{:x} ", u32::from(first)));
+            value.push_str(chars.as_str());
+            value
+        }
+        fn comment_split_after_first_char(token: &str) -> String {
+            let mut value = String::with_capacity(token.len() + 4);
+            value.push_str(&token[..1]);
+            value.push_str("/**/");
+            value.push_str(&token[1..]);
+            value
+        }
+        for token in LIVE_MATERIAL_TOKENS {
+            for (axis, obfuscated) in [
+                ("hex-escape", hex_escape_first_char(token)),
+                ("comment-split", comment_split_after_first_char(token)),
+            ] {
+                let input = format!(r#"<a title="{obfuscated}">x</a>"#);
+                assert_eq!(
+                    sanitize(&input),
+                    r#"<a rel="noopener noreferrer">x</a>"#,
+                    "the {axis} obfuscation of the `{token}` table token \
+                     survived the CSS shadow re-check"
+                );
+            }
+        }
+        // Control: a value with neither `\` nor `/*` never enters the
+        // shadow and must survive untouched.
+        assert_eq!(
+            sanitize(r#"<p title="an ordinary title">x</p>"#),
+            r#"<p title="an ordinary title">x</p>"#,
+            "the benign control title must survive"
         );
     }
 

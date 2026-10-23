@@ -32,6 +32,36 @@ cargo test -p cve
 The crate is a plain workspace member: lint with `make lint`, format with
 `make fmt` (both cover the whole workspace, including `cve`).
 
+## Live-material token mirror in the HTML sanitizer (CVE-2026-62643 / issue #194)
+
+`meli/src/mail/view/html_render.rs` drops every retained attribute value
+carrying a bare *live-material* token (`@import`, `url(`, `expression(`,
+`onerror`, `javascript:`, `onload`, `srcdoc`, `data:`, `ontoggle`, `eval(`,
+`atob(`, `image-set`, `srcset`) — the "no live material in sanitized output"
+precedent of issues #115/#116/#117. Because CSS hex escapes (`\75 rl(`) and
+`/*…*/` comment splits (`u/**/rl(`) revive those tokens without ever spelling
+them, the same family is re-checked against a CSS-decoded shadow of the value
+by `css_shadow_carries_live_material`, whose only input is the
+`LIVE_MATERIAL_TOKENS` constant — the **sole mirror list** of the inline
+guards.
+
+**Maintenance rule:** a future CVE review that adds (or removes) a bare-token
+guard in `attribute_filter` must add (or remove) the same token in
+`LIVE_MATERIAL_TOKENS` within the same change, recording the CVE basis in the
+guard's comment. Two tests fail on drift in either direction:
+
+- `live_material_token_table_mirrors_the_inline_guards`
+  (in [`src/CVE-2026-62643.rs`](./src/CVE-2026-62643.rs)) — re-reads
+  `html_render.rs` from disk and asserts the inline
+  `contains_ascii_ci(trimmed, …)` guard set and the table are identical. The
+  scan lives in the `cve` crate because CVE-2018-0950's invariant keeps
+  `html_render.rs` itself free of file-reference primitives such as
+  `include_str!`;
+- `every_live_material_token_is_enforced_through_the_css_shadow` (in
+  `html_render.rs`) — obfuscates every table token (first-char hex escape +
+  `/**/` comment split) and asserts `sanitize` drops it after shadow
+  decoding.
+
 ## Attack-simulation task board (issue #6)
 
 One Gitea issue per CVE of the research report (plus MFSA-2005-11), each
