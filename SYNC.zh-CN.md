@@ -293,3 +293,4 @@ git fetch upstream
 - 硬门：与本 fork `main` 尖端的 `git diff` = **0**（文件树一致，并在发布端复验）
 - 镜像仓内验证：`make lint`、全量 `cargo test --workspace`（29 套件、2634 测试）、`cargo test -p cve` **1427/1427**、敏感信息扫描清洁（新范围提交信息与两树均无内部域名/仓库名）
 - 发布：`origin/master` 推送待执行（快进式、无历史改写；由用户本机运行）
+- 增量（2026-10-23）：`ef9000f72`+`73123a592`（封闭测试基建——`Context::new_mock` 构造即把 XDG 固定到进程级共享测试沙箱，全部 mock 测试不再读写开发者真实 `~/.local/share/meli/test/contacts`；compose 地址补全测试固定 XDG 沙箱并在每条测试首尾清空通讯录，消除进程内/跨运行污染）按序 `cherry-pick -x` 拣选至 `master`（镜像提交 `effdb602`/`f7d17f3a`，规范身份，sign-off 与拣选溯源尾注保留）；镜像全量验证：`cargo nextest run` **2669 运行 / 2669 通过 / 12 跳过**（一次负载相关 flake 隔离复跑通过后全量复跑全绿）、`cargo clippy -p meli --all-targets` **0 警告**；硬门：本台账提交被拣选后与 fork `main` 尖端的 `git diff` = **0**；推送仍待用户本机执行（快进式）
