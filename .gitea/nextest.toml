@@ -6,6 +6,15 @@ global-timeout = "10m"
 # WATCH_TEST_DEADLINE = 30s: we want nextest to surface the test's panic
 # diagnostics first, then terminate it, i.e. 40s > 30s.
 slow-timeout = { period = "10s", terminate-after = 4 }
+
+# cve 的三个重渲染回归（12 MiB 嵌套表格端到端、上限监督、2 MiB 栈上
+# 50000 层 sanitize+render 探针）实测 30–90 s，且测试自身的断言预算就是
+# RENDER_BUDGET=60 s / WATCHDOG=180 s——默认 40 s 强杀比测试自己的预算
+# 还紧，会把这些合法慢测杀成 TIMEOUT。放宽到 150 s 且不 terminate（全
+# 局 10 m 上限仍然兜底）。
+[[profile.ci.overrides]]
+filter = 'test(probe_sanitize_and_render_survive_deep_nesting_on_strict_stack) + test(base64_html_mail_end_to_end_is_bounded_and_notice) + test(full_cap_nested_tables_is_bounded_within_watchdog)'
+slow-timeout = { period = "150s" }
 #
 # [[profile.ci.overrides]]
 # filter = 'test(test_notmuch_)'
