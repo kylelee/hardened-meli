@@ -20,6 +20,8 @@
  * along with meli. If not, see <http://www.gnu.org/licenses/>.
  */
 
+use std::borrow::Cow;
+
 use nom::{
     bytes::complete::{is_not, tag},
     combinator::opt,
@@ -27,7 +29,7 @@ use nom::{
 };
 
 use super::*;
-use crate::email::parser::IResult;
+use crate::email::parser::{IResult, ParsingError};
 
 pub struct NntpLineIterator<'a> {
     slice: &'a str,
@@ -98,10 +100,12 @@ pub fn over_article(input: &str) -> IResult<&str, (UID, Envelope)> {
     :lines metadata item
     */
     // Parse the article number as a non-empty run of digits, so that a
-    // non-numeric or overflowing field yields a parse error instead of a panic
-    // when it is converted below.
-    let (input, num) = is_not("\t").parse(input)?;
-    if !num.bytes().all(|b| b.is_ascii_digit()) {
+    // non-numeric field fails fast instead of surfacing as a conversion
+    // `Failure` only after the rest of the line has been consumed. The typed
+    // conversion below additionally enforces the RFC 3977 article number
+    // range.
+    let (input, num_string) = is_not("\t").parse(input)?;
+    if !num_string.bytes().all(|b| b.is_ascii_digit()) {
         return Err(nom::Err::Error(
             (input, "over_article(): invalid article number").into(),
         ));
@@ -122,12 +126,41 @@ pub fn over_article(input: &str) -> IResult<&str, (UID, Envelope)> {
     let (input, _lines) = opt(is_not("\t\r\n")).parse(input)?;
     let (input, _other_headers) = opt(is_not("\r\n")).parse(input)?;
     let (input, _) = tag("\r\n").parse(input)?;
+
+    let num = num_string.parse::<u32>().map_err(|err| {
+        nom::Err::Failure(ParsingError::<&str>::new(
+            num_string,
+            err.to_string().into(),
+        ))
+    })?;
+    if num > i32::MAX as u32 {
+        let err = ParsingError::<&str>::new(
+            num_string,
+            Cow::Borrowed(
+                "Article numbers MUST lie between 1 and 2,147,483,647, inclusive \
+                 (rfc3977#section-6)",
+            ),
+        );
+        return Err(nom::Err::Failure(err));
+    }
+    let Some(num) = std::num::NonZeroU32::new(num) else {
+        let err = ParsingError::<&str>::new(
+            num_string,
+            Cow::Borrowed(
+                "Article numbers MUST lie between 1 and 2,147,483,647, inclusive \
+                 (rfc3977#section-6)",
+            ),
+        );
+        return Err(nom::Err::Failure(err));
+    };
     Ok((
         input,
         ({
             let env_hash = {
                 let mut hasher = DefaultHasher::new();
-                hasher.write(num.as_bytes());
+                // The hash inputs must not change with the `UID` type: cached
+                // hash keys from older versions stay valid.
+                hasher.write(num_string.as_bytes());
                 hasher.write(message_id.unwrap_or_default().as_bytes());
                 EnvelopeHash(hasher.finish())
             };
@@ -160,15 +193,7 @@ pub fn over_article(input: &str) -> IResult<&str, (UID, Envelope)> {
             if let Some(message_id) = message_id {
                 env.set_message_id(message_id.as_bytes());
             }
-            let uid = match usize::from_str(num) {
-                Ok(uid) => uid,
-                Err(_) => {
-                    return Err(nom::Err::Error(
-                        (input, "over_article(): invalid article number").into(),
-                    ));
-                }
-            };
-            (uid, env)
+            (num, env)
         }),
     ))
 }
@@ -184,8 +209,44 @@ mod tests {
     fn test_over_article_article_number() {
         let (rest, (uid, env)) = over_article(VALID).expect("valid XOVER line should parse");
         assert!(rest.is_empty());
-        assert_eq!(uid, 1234);
+        assert_eq!(uid.get(), 1234);
         assert_eq!(env.message_id().as_str(), "msg@id");
+    }
+
+    #[test]
+    fn test_over_article_env_hash_matches_legacy_formula() {
+        // The envelope hash must keep its legacy inputs (the raw article
+        // number string bytes + Message-ID bytes): `UID` changing from
+        // `usize` to `NonZeroU32` must not invalidate cached hash keys.
+        let (_, (_, env)) = over_article(VALID).expect("valid XOVER line should parse");
+        let mut hasher = DefaultHasher::new();
+        hasher.write(b"1234");
+        hasher.write(b"<msg@id>");
+        assert_eq!(env.hash(), EnvelopeHash(hasher.finish()));
+        // Golden value: SipHash-1-3 with keys (0, 0) over the legacy inputs.
+        assert_eq!(env.hash(), EnvelopeHash(9367683063824860863));
+    }
+
+    #[test]
+    fn test_over_article_rfc3977_article_number_range() {
+        // 2^31 - 1 is the last valid article number (rfc3977#section-6).
+        let max = VALID.replacen("1234", "2147483647", 1);
+        let (_, (uid, _)) = over_article(&max).expect("2^31-1 must parse");
+        assert_eq!(uid.get(), i32::MAX as u32);
+        // Zero is not a valid article number.
+        let zero = VALID.replacen("1234", "0", 1);
+        let res = over_article(&zero);
+        assert!(
+            matches!(res, Err(nom::Err::Failure(_))),
+            "expected Failure for 0, got {res:?}"
+        );
+        // 2^31 lies beyond the RFC 3977 range.
+        let too_big = VALID.replacen("1234", "2147483648", 1);
+        let res = over_article(&too_big);
+        assert!(
+            matches!(res, Err(nom::Err::Failure(_))),
+            "expected Failure for 2^31, got {res:?}"
+        );
     }
 
     #[test]

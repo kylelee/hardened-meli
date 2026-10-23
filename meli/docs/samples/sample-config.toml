@@ -355,3 +355,21 @@
 #
 #[terminal]
 #theme = "dark" # or "light"
+
+## ------------------------------------------------------------
+## MCP (Model Context Protocol) server for local AI agents.
+## Start it with `meli mcp`. Read-only by default: mutations are
+## refused until listed in `allowed_mutations` below. Accounts and
+## credentials are configured here, never through MCP. See
+## meli.conf(5) "MCP" and docs/mcp.md for the full guide.
+##
+## [mcp]
+## allowed_mutations = []                     # [], ["drafts"], ["organize"], + "send"
+## send_recipient_allowlist = []              # e.g. ["*@example.org"]; empty = deny all
+## send_rate_limit_per_minute = 10
+##
+## [mcp.url_scoring]
+## low_medium_threshold = 30                  # score bands: low < 30 <= medium < 60 <= high
+## medium_high_threshold = 60
+## [mcp.url_scoring.signal_weights]
+## "ip_literal_host" = 50                     # per-signal overrides

@@ -33,7 +33,6 @@ use melib::{
         character::complete::{digit1, not_line_ending},
         combinator::{map, map_res},
         error::Error as NomError,
-        multi::separated_list1,
         sequence::{pair, preceded, separated_pair},
         IResult, Parser,
     },
@@ -196,6 +195,10 @@ define_commands!([
                   desc: "printenv VAR",
                   parser: parser::printenv
                 },
+                { tags: ["terminal "],
+                  desc: "terminal [EXECUTABLE [ARGS]], Launch a $SHELL process or the provided executable and arguments in the current directory of the meli process",
+                  parser: parser::terminal
+                },
                 { tags: ["mailto "],
                   desc: "mailto MAILTO_ADDRESS",
                   parser: parser::mailto
@@ -230,7 +233,7 @@ define_commands!([
                 },
                 /* Pipe pager contents to binary */
                 { tags: ["pipe "],
-                  desc: "pipe EXECUTABLE ARGS",
+                  desc: "pipe COMMAND",
                   parser: parser::pipe
                 },
                 /* Filter pager contents through binary */
@@ -349,6 +352,10 @@ define_commands!([
                 { tags: ["man"],
                   desc: "read documentation",
                   parser: parser::view_manpage
+                },
+                { tags: ["help"],
+                  desc: "read the general guide (like man meli.7)",
+                  parser: parser::help
                 },
                 { tags: ["manage-jobs"],
                   desc: "view and manage jobs",

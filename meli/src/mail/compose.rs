@@ -1211,6 +1211,149 @@ To: {}
             }
         }
     }
+
+    /// React to the embedded editor's wait status, however we learned
+    /// about it: either from our own probing on a failed input write or
+    /// from the `ForkedProcess::Embedded` `on_exit` notification that
+    /// `State` delivers once it reaps the child.
+    ///
+    /// Returns `true` when the caller must return early (the child is
+    /// merely stopped/continued and the event was re-queued); `false`
+    /// when the composer is done with the child.
+    fn process_wait(
+        &mut self,
+        wait: &nix::Result<nix::sys::wait::WaitStatus>,
+        context: &mut Context,
+    ) -> bool {
+        match wait {
+            Err(Errno::ECHILD) => {
+                if let Some(EmbeddedPty {
+                    running: true,
+                    file,
+                    ..
+                }) = self.embedded_pty.take()
+                {
+                    self.update_from_file(&file, context);
+                }
+                self.mode = ViewMode::Edit;
+                self.set_dirty(true);
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+            }
+            Ok(WaitStatus::Exited(_, exit_code)) => {
+                // The pty can already be gone: e.g. a stopped child was
+                // killed through the Ctrl-C path and its exit is only now
+                // reported through the `on_exit` notification. Tolerate
+                // that window instead of panicking.
+                if let Some(embedded_pty) = self.embedded_pty.take() {
+                    let stderr = String::from_utf8_lossy(
+                        &embedded_pty.terminal.lock().unwrap().stderr.captured(),
+                    )
+                    .into_owned();
+
+                    if *exit_code != 0 {
+                        context.replies.push_back(UIEvent::Notification {
+                            title: Some(
+                                format!("Subprocess has exited with exit code {exit_code}",).into(),
+                            ),
+                            source: None,
+                            body: format!("stderr: {stderr}").into(),
+                            kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
+                        });
+                    } else if let EmbeddedPty {
+                        running: true,
+                        file,
+                        ..
+                    } = embedded_pty
+                    {
+                        self.update_from_file(&file, context);
+                    }
+                } else {
+                    tracing::debug!(
+                        "embedded editor already reaped; ignoring late exit code {exit_code}"
+                    );
+                }
+                self.mode = ViewMode::Edit;
+                self.set_dirty(true);
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+            }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Ok(WaitStatus::PtraceEvent(_, _, _)) | Ok(WaitStatus::PtraceSyscall(_)) => {
+                if let Some(EmbeddedPty {
+                    running: _,
+                    terminal,
+                    file,
+                }) = self.embedded_pty.take()
+                {
+                    self.embedded_pty = Some(EmbeddedPty {
+                        running: false,
+                        terminal,
+                        file,
+                    });
+                }
+                self.mode = ViewMode::Edit;
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+                self.set_dirty(true);
+                return true;
+            }
+            Ok(WaitStatus::Stopped(_, _)) => {
+                if let Some(EmbeddedPty {
+                    running: _,
+                    terminal,
+                    file,
+                }) = self.embedded_pty.take()
+                {
+                    self.embedded_pty = Some(EmbeddedPty {
+                        running: false,
+                        terminal,
+                        file,
+                    });
+                }
+                self.mode = ViewMode::Edit;
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+                self.set_dirty(true);
+                return true;
+            }
+            Ok(WaitStatus::Continued(_)) | Ok(WaitStatus::StillAlive) => {
+                self.set_dirty(true);
+                return true;
+            }
+            Ok(WaitStatus::Signaled(_, signal, _)) => {
+                context.replies.push_back(UIEvent::Notification {
+                    title: None,
+                    source: None,
+                    body: format!("Subprocess was killed by {signal} signal").into(),
+                    kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
+                });
+                self.embedded_pty = None;
+                self.mode = ViewMode::Edit;
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+            }
+            Err(err) => {
+                context.replies.push_back(UIEvent::Notification {
+                    title: Some("Embedded editor crashed.".into()),
+                    source: None,
+                    body: format!("Subprocess has exited with reason {err}").into(),
+                    kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
+                });
+                self.embedded_pty = None;
+                self.mode = ViewMode::Edit;
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
+            }
+        }
+        false
+    }
 }
 
 impl Component for Composer {
@@ -1314,15 +1457,51 @@ impl Component for Composer {
 
         if let Some(ref mut embedded_pty) = self.embedded_pty {
             let embedded_area = area;
-            if embedded_pty.is_dirty() {
+            // A dirty composer must repaint even when the embedded grid has
+            // no new output (e.g. `UIEvent::ConfigReload`): the clear block
+            // above has already wiped the whole area, so entering this branch
+            // is what restores it. The grid is then forced fully dirty below.
+            if self.dirty || embedded_pty.is_dirty() {
                 if embedded_pty.running {
                     let mut guard = embedded_pty.lock().unwrap();
-                    grid.clear_area(embedded_area, theme_default);
-
-                    grid.copy_area(guard.grid.buffer(), embedded_area, guard.grid.area());
+                    // Resize the embedded grid before reading its dirty
+                    // bitmap: a resize reallocates the buffer and marks it
+                    // fully dirty, which must be part of this frame's copy.
                     guard.set_terminal_size((embedded_area.width(), embedded_area.height()));
+
+                    // Propagate the component-level dirty flag into the grid
+                    // bitmap: the header/clear block above unconditionally
+                    // clears every row, while `dirty_areas()` may only report
+                    // the rows the pty actually changed. Without this, the
+                    // rows that were cleared but not reported stay blank until
+                    // the pty happens to dirty them again. Forcing the bitmap
+                    // makes the incremental path below degenerate to a full
+                    // copy for this frame only.
+                    if self.dirty {
+                        guard.grid.set_dirty(true);
+                    }
+
+                    // Copy only the rows the embedded grid reported as dirty
+                    // instead of the whole screen. `dirty_areas()` returns
+                    // inclusive `(start, end)` column bounds, so the copied
+                    // width is `end - start + 1`. The destination area is
+                    // deliberately not cleared first: untouched cells still
+                    // hold the previous frame's (identical) content, and
+                    // clearing them would require a full-screen copy to
+                    // restore them.
+                    for (y, (start, end)) in guard.grid.dirty_areas() {
+                        let width = end.saturating_sub(start) + 1;
+                        let src = guard
+                            .grid
+                            .area()
+                            .nth_row(y)
+                            .skip_cols(start)
+                            .take_cols(width);
+                        let dest = embedded_area.nth_row(y).skip_cols(start).take_cols(width);
+                        grid.copy_area(guard.grid.buffer(), dest, src);
+                        context.dirty_areas.push_back(dest);
+                    }
                     guard.grid.set_dirty(false);
-                    context.dirty_areas.push_back(embedded_area);
                     self.dirty = false;
                 } else {
                     let mut guard = embedded_pty.lock().unwrap();
@@ -2095,137 +2274,19 @@ impl Component for Composer {
                 if let Some(ref mut embedded) = self.embedded_pty {
                     let mut embedded_guard = embedded.lock().unwrap();
                     if embedded_guard.write_all(b).is_err() {
-                        match embedded_guard.is_active() {
-                            Err(Errno::ECHILD) => {
-                                drop(embedded_guard);
-                                if let Some(EmbeddedPty {
-                                    running: true,
-                                    file,
-                                    ..
-                                }) = self.embedded_pty.take()
-                                {
-                                    self.update_from_file(&file, context);
-                                }
-                                self.mode = ViewMode::Edit;
-                                self.set_dirty(true);
-                                context
-                                    .replies
-                                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
-                            }
-                            Ok(WaitStatus::Exited(_, exit_code)) => {
-                                drop(embedded_guard);
-                                let embedded_pty = self.embedded_pty.take();
-                                if exit_code != 0 {
-                                    context.replies.push_back(UIEvent::Notification {
-                                        title: None,
-                                        source: None,
-                                        body: format!(
-                                            "Subprocess has exited with exit code {exit_code}",
-                                        )
-                                        .into(),
-                                        kind: Some(NotificationType::Error(
-                                            melib::error::ErrorKind::External,
-                                        )),
-                                    });
-                                } else if let Some(EmbeddedPty {
-                                    running: true,
-                                    file,
-                                    ..
-                                }) = embedded_pty
-                                {
-                                    self.update_from_file(&file, context);
-                                }
-                                self.mode = ViewMode::Edit;
-                                self.set_dirty(true);
-                                context
-                                    .replies
-                                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
-                            }
-                            #[cfg(any(target_os = "linux", target_os = "android"))]
-                            Ok(WaitStatus::PtraceEvent(_, _, _))
-                            | Ok(WaitStatus::PtraceSyscall(_)) => {
-                                drop(embedded_guard);
-                                if let Some(EmbeddedPty {
-                                    running: _,
-                                    terminal,
-                                    file,
-                                }) = self.embedded_pty.take()
-                                {
-                                    self.embedded_pty = Some(EmbeddedPty {
-                                        running: false,
-                                        terminal,
-                                        file,
-                                    });
-                                }
-                                self.mode = ViewMode::Edit;
-                                context
-                                    .replies
-                                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
-                                self.set_dirty(true);
-                                return true;
-                            }
-                            Ok(WaitStatus::Stopped(_, _)) => {
-                                drop(embedded_guard);
-                                if let Some(EmbeddedPty {
-                                    running: _,
-                                    terminal,
-                                    file,
-                                }) = self.embedded_pty.take()
-                                {
-                                    self.embedded_pty = Some(EmbeddedPty {
-                                        running: false,
-                                        terminal,
-                                        file,
-                                    });
-                                }
-                                self.mode = ViewMode::Edit;
-                                context
-                                    .replies
-                                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
-                                self.set_dirty(true);
-                                return true;
-                            }
-                            Ok(WaitStatus::Continued(_)) | Ok(WaitStatus::StillAlive) => {
-                                context
-                                    .replies
-                                    .push_back(UIEvent::EmbeddedInput((k.clone(), b.to_vec())));
-                                drop(embedded_guard);
-                                self.set_dirty(true);
-                                return true;
-                            }
-                            Ok(WaitStatus::Signaled(_, signal, _)) => {
-                                drop(embedded_guard);
-                                context.replies.push_back(UIEvent::Notification {
-                                    title: None,
-                                    source: None,
-                                    body: format!("Subprocess was killed by {signal} signal")
-                                        .into(),
-                                    kind: Some(NotificationType::Error(
-                                        melib::error::ErrorKind::External,
-                                    )),
-                                });
-                                self.embedded_pty = None;
-                                self.mode = ViewMode::Edit;
-                                context
-                                    .replies
-                                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
-                            }
-                            Err(err) => {
-                                context.replies.push_back(UIEvent::Notification {
-                                    title: Some("Embedded editor crashed.".into()),
-                                    source: None,
-                                    body: format!("Subprocess has exited with reason {err}").into(),
-                                    kind: Some(NotificationType::Error(
-                                        melib::error::ErrorKind::External,
-                                    )),
-                                });
-                                drop(embedded_guard);
-                                self.embedded_pty = None;
-                                self.mode = ViewMode::Edit;
-                                context
-                                    .replies
-                                    .push_back(UIEvent::ChangeMode(UIMode::Normal));
-                            }
+                        let wait = embedded_guard.is_active();
+                        drop(embedded_guard);
+                        if matches!(
+                            wait,
+                            Ok(WaitStatus::Continued(_)) | Ok(WaitStatus::StillAlive)
+                        ) {
+                            context
+                                .replies
+                                .push_back(UIEvent::EmbeddedInput((k.clone(), b.to_vec())));
+                        }
+                        self.set_dirty(true);
+                        if self.process_wait(&wait, context) {
+                            return true;
                         }
                     }
                 }
@@ -2438,23 +2499,34 @@ impl Component for Composer {
                     .as_ref()
                     .is_some_and(|pty| pty.is_stopped()) =>
             {
+                // The stopped pty is usually still there, but it can be
+                // gone already (its exit reported and reaped through the
+                // `on_exit` notification in between); tolerate the narrow
+                // window instead of panicking.
                 if let Some(EmbeddedPty {
                     running: _,
                     terminal,
                     file,
                 }) = self.embedded_pty.take()
                 {
-                    let guard = terminal.lock().unwrap();
-                    guard.wake_up();
-                    guard.terminate();
+                    let stderr = {
+                        let guard = terminal.lock().unwrap();
+                        guard.wake_up();
+                        guard.terminate();
+                        String::from_utf8_lossy(&guard.stderr.captured()).into_owned()
+                    };
                     self.update_from_file(&file, context);
+                    context.replies.push_back(UIEvent::Notification {
+                        title: Some("Subprocess was killed by SIGTERM signal".into()),
+                        source: None,
+                        body: format!("stderr: {stderr}").into(),
+                        kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
+                    });
+                } else {
+                    tracing::debug!(
+                        "Ctrl-C on an already-reaped embedded editor; nothing left to terminate"
+                    );
                 }
-                context.replies.push_back(UIEvent::Notification {
-                    title: None,
-                    source: None,
-                    body: "Subprocess was killed by SIGTERM signal".into(),
-                    kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
-                });
                 self.mode = ViewMode::Edit;
                 context
                     .replies
@@ -2550,11 +2622,10 @@ impl Component for Composer {
                 };
 
                 if *account_settings!(context[self.account_hash].composing.embedded_pty) {
-                    let command = [editor, f.path().display().to_string()].join(" ");
                     match crate::terminal::embedded::create_pty(
                         self.embedded_dimensions.0,
                         self.embedded_dimensions.1,
-                        &command,
+                        vec![editor.clone(), f.path().display().to_string()],
                     ) {
                         Ok(terminal) => {
                             self.embedded_pty = Some(EmbeddedPty {
@@ -2566,11 +2637,12 @@ impl Component for Composer {
                             context
                                 .replies
                                 .push_back(UIEvent::ChangeMode(UIMode::Embedded));
+                            let id = self.id();
                             context
                                 .replies
                                 .push_back(UIEvent::Fork(ForkedProcess::Embedded {
                                     id: "editor".into(),
-                                    command: Some(command.into()),
+                                    command: Some(editor.into()),
                                     pid: self
                                         .embedded_pty
                                         .as_ref()
@@ -2578,6 +2650,17 @@ impl Component for Composer {
                                         .lock()
                                         .unwrap()
                                         .child_pid,
+                                    // When `State` reaps the child, deliver
+                                    // the wait status back to us as an
+                                    // event so we can react to it (see
+                                    // `Composer::process_wait`).
+                                    on_exit: OnExitNotifyFn(Box::new(move |wait_result| {
+                                        Some(UIEvent::IntraComm {
+                                            from: id,
+                                            to: id,
+                                            content: Box::new(wait_result),
+                                        })
+                                    })),
                                 }));
                             self.mode = ViewMode::EmbeddedPty;
                         }
@@ -2603,7 +2686,7 @@ impl Component for Composer {
                 context
                     .replies
                     .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
-                        owner: self.id,
+                        owner: Some(self.id),
                         command: {
                             let mut cmd = Command::new("sh");
                             cmd.args(["-c", &editor_command])
@@ -2653,7 +2736,7 @@ impl Component for Composer {
                     context
                         .replies
                         .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
-                            owner: self.id,
+                            owner: Some(self.id),
                             command: {
                                 let mut cmd = Command::new("sh");
                                 cmd.args(["-c", command])
@@ -2726,7 +2809,7 @@ impl Component for Composer {
                     context
                         .replies
                         .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
-                            owner: self.id,
+                            owner: Some(self.id),
                             command: {
                                 let mut cmd = Command::new("sh");
                                 cmd.args(["-c", command])
@@ -2923,6 +3006,14 @@ impl Component for Composer {
                             self.set_dirty(true);
                         }
                     },
+                }
+                if let Some(wait) =
+                    content.downcast_ref::<nix::Result<nix::sys::wait::WaitStatus>>()
+                {
+                    self.set_dirty(true);
+                    if self.process_wait(wait, context) {
+                        return true;
+                    }
                 }
                 return true;
             }
@@ -4357,6 +4448,176 @@ exit 0
             got, expected,
             "editor stdin log differs from the encode_key byte matrix (note: Ctrl-z must NOT \
              appear; meli consumes it)"
+        );
+    }
+
+    /// The embedded editor's exit notification must carry the child's
+    /// stderr: a shim that writes a marker to stderr and exits non-zero
+    /// produces a notification titled with the real exit code and whose
+    /// body is `stderr: <marker>` (fed by the bounded `StderrCapture`
+    /// pipe drain). Also asserts the `ForkedProcess::Embedded` `on_exit`
+    /// wiring: `State`'s reap is translated into an `IntraComm` event
+    /// addressed back to this composer.
+    #[test]
+    fn embedded_editor_exit_notification_carries_stderr() {
+        use crate::components::Component;
+        use crate::terminal::ratatui_bridge::encode_key;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        fn wait_until(deadline: Duration, mut pred: impl FnMut() -> bool) -> bool {
+            let start = Instant::now();
+            let mut spins = 0_u64;
+            loop {
+                if pred() {
+                    return true;
+                }
+                assert!(
+                    start.elapsed() < deadline,
+                    "condition not reached within {deadline:?}"
+                );
+                spins += 1;
+                if spins < 1_000 {
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("stderr-shim.sh");
+        let shim = r#"#!/bin/sh
+# meli embedded-compose stderr shim (generated by a test; do not edit).
+printf 'STDERR-MARKER-9F2\n' >&2
+exit 3
+"#;
+        std::fs::write(&script, shim).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut ctx = crate::golden::mock_context();
+        let account_hash = *ctx.accounts.iter().next().unwrap().0;
+        ctx.settings.composing.editor_command = Some(script.display().to_string());
+        ctx.settings.composing.embedded_pty = true;
+
+        let mut composer = Composer::with_account(account_hash, &ctx);
+        composer.realize(None, &mut ctx);
+        let mut screen = crate::golden::golden_screen(&ctx, 80, 24);
+        let area = screen.area();
+        composer.draw(screen.grid_mut(), area, &mut ctx);
+        for _ in 0..8 {
+            if ctx.replies().is_empty() {
+                break;
+            }
+        }
+
+        // Focus the body so the `edit` shortcut spawns the editor.
+        for _ in 0..8 {
+            if matches!(composer.focus, Focus::Body) {
+                break;
+            }
+            let mut ev = UIEvent::Input(crate::terminal::keys::Key::Down);
+            composer.process_event(&mut ev, &mut ctx);
+            for _ in 0..8 {
+                if ctx.replies().is_empty() {
+                    break;
+                }
+            }
+        }
+        assert!(
+            matches!(composer.focus, Focus::Body),
+            "could not focus the compose body"
+        );
+
+        // Spawn the embedded editor.
+        let mut ev = UIEvent::Input(crate::terminal::keys::Key::Char('e'));
+        assert!(composer.process_event(&mut ev, &mut ctx));
+        let mut on_exit: Option<crate::types::OnExitNotifyFn> = None;
+        for event in ctx.replies() {
+            match event {
+                UIEvent::ChangeMode(_) => {}
+                UIEvent::Fork(ForkedProcess::Embedded { on_exit: cb, .. }) => {
+                    on_exit = Some(cb);
+                }
+                _ => {}
+            }
+        }
+        let on_exit = on_exit.expect("spawning the editor must fork an Embedded process");
+
+        // `on_exit` wiring: State's reap becomes an IntraComm event back to
+        // this composer carrying the wait status.
+        let status = Ok(nix::sys::wait::WaitStatus::Exited(
+            nix::unistd::Pid::from_raw(1),
+            3,
+        ));
+        let Some(event) = (on_exit.0)(status) else {
+            panic!("on_exit callback must produce an event");
+        };
+        let UIEvent::IntraComm { from, to, content } = event else {
+            panic!("on_exit callback must produce an IntraComm event");
+        };
+        assert_eq!((from, to), (composer.id(), composer.id()));
+        assert!(
+            content
+                .downcast_ref::<nix::Result<nix::sys::wait::WaitStatus>>()
+                .is_some(),
+            "IntraComm content must be the child's wait status"
+        );
+
+        // The drain thread must have captured the marker before the exit is
+        // reaped, so the notification below cannot race the capture.
+        assert!(
+            wait_until(Duration::from_secs(30), || {
+                composer.embedded_pty.as_ref().is_some_and(|pty| {
+                    pty.lock()
+                        .unwrap()
+                        .stderr
+                        .captured()
+                        .windows(b"STDERR-MARKER-9F2".len())
+                        .any(|w| w == b"STDERR-MARKER-9F2")
+                })
+            }),
+            "stderr marker was never captured"
+        );
+
+        // Drive the exit-detection path: after the child is gone, the pty
+        // write fails with EIO and the composer reaps it, emitting the
+        // exit notification with the captured stderr.
+        let mut notification: Option<(Option<Cow<'static, str>>, Cow<'static, str>)> = None;
+        let mut changed_modes = vec![];
+        assert!(
+            wait_until(Duration::from_secs(30), || {
+                let key = crate::terminal::keys::Key::Char('x');
+                let mut ev = UIEvent::EmbeddedInput((key.clone(), encode_key(&key)));
+                let _ = composer.process_event(&mut ev, &mut ctx);
+                for event in ctx.replies() {
+                    match event {
+                        UIEvent::Notification { title, body, .. } => {
+                            notification = Some((title, body));
+                        }
+                        UIEvent::ChangeMode(mode) => changed_modes.push(mode),
+                        mut other => {
+                            let _ = composer.process_event(&mut other, &mut ctx);
+                        }
+                    }
+                }
+                notification.is_some()
+            }),
+            "exit notification never arrived"
+        );
+        let (title, body) = notification.unwrap();
+        assert_eq!(
+            title.as_deref(),
+            Some("Subprocess has exited with exit code 3"),
+            "unexpected notification title"
+        );
+        assert!(
+            body.starts_with("stderr: ") && body.contains("STDERR-MARKER-9F2"),
+            "notification body must carry the child's stderr, got {body:?}"
+        );
+        assert!(
+            changed_modes.contains(&UIMode::Normal),
+            "composer must return to UIMode::Normal after the child exits, got {changed_modes:?}"
         );
     }
 

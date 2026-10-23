@@ -1782,10 +1782,18 @@ impl Component for ConversationsListing {
 
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
         let mut map = ShortcutMaps::default();
+        let (account_hash, mailbox_hash) = self.coordinates();
 
         map.insert(
             Shortcuts::LISTING,
-            context.settings.shortcuts.listing.key_values(),
+            if mailbox_settings!(context has [account_hash][&mailbox_hash]) {
+                mailbox_settings!(context[account_hash][&mailbox_hash].shortcuts.listing)
+                    .key_values()
+            } else {
+                // The mailbox entry is not built yet (account still loading);
+                // resolve the global map.
+                context.settings.shortcuts.listing.key_values()
+            },
         );
 
         map

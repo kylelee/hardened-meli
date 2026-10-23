@@ -105,6 +105,88 @@ fn test_command_parser_all() {
     );
 }
 
+/// `pipe` and `pipe-attachment` must carry the whole rest of the line as a
+/// single command string: shell syntax (quotes, pipes, paths with spaces)
+/// rides verbatim into `sh -c` and is never split into bin/args. Errors on
+/// missing or malformed arguments must keep erroring.
+#[test]
+fn test_command_parser_pipe_whole_line() {
+    assert_eq!(
+        parse_command(b"pipe cat 'foo bar' | wc -c").unwrap(),
+        View(ViewAction::Pipe {
+            command: "cat 'foo bar' | wc -c".to_string(),
+        }),
+    );
+    assert_eq!(
+        parse_command(b"pipe /usr/local/bin/my-filter --opt \"a b\"").unwrap(),
+        View(ViewAction::Pipe {
+            command: "/usr/local/bin/my-filter --opt \"a b\"".to_string(),
+        }),
+    );
+    // A single binary without arguments still parses.
+    assert_eq!(
+        parse_command(b"pipe less").unwrap(),
+        View(ViewAction::Pipe {
+            command: "less".to_string(),
+        }),
+    );
+    // An empty command is a missing argument, not an empty command line.
+    parse_command(b"pipe").unwrap_err();
+    parse_command(b"pipe ").unwrap_err();
+
+    assert_eq!(
+        parse_command(b"pipe-attachment 0 git am -3").unwrap(),
+        View(ViewAction::PipeAttachment {
+            index: 0,
+            command: "git am -3".to_string(),
+        }),
+    );
+    assert_eq!(
+        parse_command(b"pipe-attachment 1 chafa --scale 2x --polite on").unwrap(),
+        View(ViewAction::PipeAttachment {
+            index: 1,
+            command: "chafa --scale 2x --polite on".to_string(),
+        }),
+    );
+    // Missing index or command, or a non-numeric index, keep erroring.
+    parse_command(b"pipe-attachment").unwrap_err();
+    parse_command(b"pipe-attachment 0").unwrap_err();
+    parse_command(b"pipe-attachment 0 ").unwrap_err();
+    parse_command(b"pipe-attachment x git am").unwrap_err();
+
+    // CR/LF must never ride into the action: a mid-line newline fails the
+    // parse outright.
+    parse_command(b"pipe cat\nrm -rf ~").unwrap_err();
+    parse_command(b"pipe-attachment 0 cat\necho pwned").unwrap_err();
+}
+
+/// `terminal` with no arguments maps to `Terminal(None)` (whitespace-only
+/// tails included); everything after the first space rides as one whole
+/// command line for `sh -c`, and a non-space boundary (`terminalx`) must
+/// not parse as `terminal`.
+#[test]
+fn test_command_parser_terminal() {
+    assert_eq!(parse_command(b"terminal").unwrap(), Terminal(None));
+    assert_eq!(parse_command(b"terminal    ").unwrap(), Terminal(None));
+    assert_eq!(
+        parse_command(b"terminal git status | less").unwrap(),
+        Terminal(Some("git status | less".into())),
+    );
+    parse_command(b"terminalx").unwrap_err();
+}
+
+/// The command palette's completion table must advertise the `terminal`
+/// command, and its listed parser must resolve to the exact `Action`.
+#[test]
+fn test_command_completion_terminal_entry() {
+    let (_, _, parser) = COMMAND_COMPLETION
+        .iter()
+        .find(|(tag, _, _)| *tag == "terminal ")
+        .expect("terminal command must be listed in the command completion table");
+    let (_, parsed) = parser(b"terminal git status | less").unwrap();
+    assert_eq!(parsed.unwrap(), Terminal(Some("git status | less".into())));
+}
+
 #[test]
 fn test_command_parser_raw_search() {
     use super::{Action::*, ListingAction::*};
@@ -493,4 +575,86 @@ fn test_command_parser_public_inbox_import() {
     parse_command(b"public-inbox import foo").unwrap_err();
     // Trailing junk after the message ID fails to parse.
     parse_command(b"public-inbox import foo bar <m@example.com> baz").unwrap_err();
+}
+
+/// `help` opens the general guide (`meli.7`), accepts no arguments, and is
+/// reachable from the `new-tab` parser chain like its `man` sibling.
+#[test]
+fn test_command_parser_help() {
+    #[cfg(feature = "cli-docs")]
+    {
+        assert_eq!(
+            parse_command(b"help").unwrap(),
+            Action::Tab(TabAction::Man(crate::manpages::ManPages::Guide))
+        );
+        // Leading/trailing whitespace is trimmed, like every other command.
+        assert_eq!(
+            parse_command(b"  help  ").unwrap(),
+            Action::Tab(TabAction::Man(crate::manpages::ManPages::Guide))
+        );
+    }
+    #[cfg(not(feature = "cli-docs"))]
+    {
+        assert_eq!(
+            parse_command(b"help").unwrap_err().to_string(),
+            "this meli binary has not been compiled with the cli-docs feature"
+        );
+    }
+    // `help` takes no arguments.
+    assert!(matches!(
+        parse_command(b"help me").unwrap_err(),
+        CommandError::WrongNumberOfArguments { .. }
+    ));
+    // It must not shadow the `man` command or any other parser.
+    parse_command(b"manpage").unwrap_err();
+}
+
+/// `cd` parses its argument as a raw string (kept unexpanded until the
+/// state layer validates it), and rejects missing arguments.
+#[test]
+fn test_command_parser_cd() {
+    assert_eq!(
+        parse_command(b"cd /tmp").unwrap(),
+        Action::ChangeCurrentDirectory("/tmp".to_string())
+    );
+    // Tilde and relative forms are preserved verbatim.
+    assert_eq!(
+        parse_command(b"cd ~/mail").unwrap(),
+        Action::ChangeCurrentDirectory("~/mail".to_string())
+    );
+    assert_eq!(
+        parse_command(b"cd ..").unwrap(),
+        Action::ChangeCurrentDirectory("..".to_string())
+    );
+    // Interior spaces survive (paths may contain them); trailing
+    // whitespace is trimmed like every other command.
+    assert_eq!(
+        parse_command(b"cd /tmp/my folder  ").unwrap(),
+        Action::ChangeCurrentDirectory("/tmp/my folder".to_string())
+    );
+    // `cd` requires an argument.
+    assert!(matches!(
+        parse_command(b"cd").unwrap_err(),
+        CommandError::WrongNumberOfArguments { .. }
+    ));
+    assert!(matches!(
+        parse_command(b"cd ").unwrap_err(),
+        CommandError::WrongNumberOfArguments { .. }
+    ));
+    // The rest of the line is taken as one path string, spaces included.
+    assert_eq!(
+        parse_command(b"cd one two").unwrap(),
+        Action::ChangeCurrentDirectory("one two".to_string())
+    );
+}
+
+/// `pwd`/`cwd` keep parsing to the argument-less `CurrentDirectory`.
+#[test]
+fn test_command_parser_pwd() {
+    assert_eq!(parse_command(b"pwd").unwrap(), Action::CurrentDirectory);
+    assert_eq!(parse_command(b"cwd").unwrap(), Action::CurrentDirectory);
+    assert!(matches!(
+        parse_command(b"pwd extra").unwrap_err(),
+        CommandError::WrongNumberOfArguments { .. }
+    ));
 }

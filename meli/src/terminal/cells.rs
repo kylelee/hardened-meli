@@ -67,6 +67,7 @@ pub struct CellBuffer {
     pub cols: usize,
     pub rows: usize,
     pub buf: Vec<Cell>,
+    dirty_bitmap: DirtyBitmap,
     pub default_cell: Cell,
     /// ASCII-only flag.
     pub ascii_drawing: bool,
@@ -116,6 +117,7 @@ impl CellBuffer {
             cols: 0,
             rows: 0,
             buf: vec![],
+            dirty_bitmap: DirtyBitmap::default(),
             default_cell: Cell::new_default(),
             growable: false,
             ascii_drawing: false,
@@ -140,6 +142,11 @@ impl CellBuffer {
             cols,
             rows,
             buf: vec![default_cell; cols * rows],
+            dirty_bitmap: {
+                let mut dirty_bitmap = DirtyBitmap::default();
+                dirty_bitmap.resize(cols, rows);
+                dirty_bitmap
+            },
             default_cell,
             growable: false,
             ascii_drawing: false,
@@ -205,6 +212,7 @@ impl CellBuffer {
         self.buf = vec![self.default_cell; newlen];
         self.cols = newcols;
         self.rows = newrows;
+        self.dirty_bitmap.resize(newcols, newrows);
         true
     }
 
@@ -227,6 +235,7 @@ impl CellBuffer {
         }
         self.cols = newcols;
         self.rows = newrows;
+        self.dirty_bitmap.resize(newcols, newrows);
         true
     }
 
@@ -235,17 +244,52 @@ impl CellBuffer {
     }
 
     pub fn empty(&mut self) {
+        self.dirty_bitmap.reset();
         self.buf.clear();
         self.cols = 0;
         self.rows = 0;
     }
 
+    /// Mark every cell as dirty (`true`) or clean (`false`).
+    ///
+    /// This is a coarse-grained escape hatch for callers that need a full
+    /// repaint (or that have just consumed [`Self::dirty_areas`]).
+    pub fn set_dirty(&mut self, value: bool) {
+        if value {
+            self.dirty_bitmap.fill_ones();
+        } else {
+            self.dirty_bitmap.clear();
+        }
+    }
+
     /// Clears `self`, using the given `Cell` as a blank.
     pub fn clear(&mut self, blank: Option<Cell>) {
         let blank = blank.unwrap_or(self.default_cell);
-        for cell in self.cellvec_mut().iter_mut() {
+        for cell in self.buf.iter_mut() {
             *cell = blank;
         }
+        // Every cell changed, so the whole buffer needs to be considered
+        // dirty. Unlike a resize, clearing does not reallocate the bitmap.
+        self.dirty_bitmap.fill_ones();
+    }
+
+    /// Get a reference to the buffer's [`DirtyBitmap`].
+    pub fn dirty_bitmap(&self) -> &DirtyBitmap {
+        &self.dirty_bitmap
+    }
+
+    /// Get a mutable reference to the buffer's [`DirtyBitmap`].
+    pub fn dirty_bitmap_mut(&mut self) -> &mut DirtyBitmap {
+        &mut self.dirty_bitmap
+    }
+
+    /// Return the dirty ranges of the buffer, grouped by row.
+    ///
+    /// Each entry is `(y, (start, end))` with both column bounds inclusive;
+    /// all dirty cells of a row are merged into a single range (a fully
+    /// up-to-date caller may copy the range verbatim).
+    pub fn dirty_areas(&self) -> Vec<(usize, (usize, usize))> {
+        self.dirty_bitmap.dirty_areas()
     }
 
     pub fn pos_to_index(&self, x: usize, y: usize) -> Option<usize> {
@@ -354,6 +398,7 @@ impl CellBuffer {
         for y in top..top + offset {
             for x in l..r {
                 self[(x, y)] = Cell::default();
+                self.dirty_bitmap.set(x, y);
             }
         }
         // If the whole region was cleared there is nothing left to shift;
@@ -364,6 +409,8 @@ impl CellBuffer {
                     let temp = self[(x, y)];
                     self[(x, y)] = self[(x, y + offset)];
                     self[(x, y + offset)] = temp;
+                    self.dirty_bitmap.set(x, y);
+                    self.dirty_bitmap.set(x, y + offset);
                 }
             }
         }
@@ -421,6 +468,7 @@ impl CellBuffer {
         for y in (bottom + 1 - offset)..=bottom {
             for x in 0..cols {
                 self[(x, y)] = Cell::default();
+                self.dirty_bitmap.set(x, y);
             }
         }
 
@@ -430,6 +478,8 @@ impl CellBuffer {
                     let temp = self[(x, y)];
                     self[(x, y)] = self[(x, y - offset)];
                     self[(x, y - offset)] = temp;
+                    self.dirty_bitmap.set(x, y);
+                    self.dirty_bitmap.set(x, y - offset);
                 }
             }
         }
@@ -568,6 +618,7 @@ impl CellBuffer {
                     .set_fg(attributes.fg)
                     .set_bg(attributes.bg)
                     .set_attrs(attributes.attrs);
+                self.dirty_bitmap.set(c.0, c.1);
             }
         }
     }
@@ -577,6 +628,7 @@ impl CellBuffer {
         for row in self.bounds_iter(area) {
             for c in row {
                 self[c].set_fg(fg_color).set_bg(bg_color);
+                self.dirty_bitmap.set(c.0, c.1);
             }
         }
     }
@@ -589,6 +641,7 @@ impl CellBuffer {
                     .set_fg(theme.fg)
                     .set_bg(theme.bg)
                     .set_attrs(theme.attrs);
+                self.dirty_bitmap.set(c.0, c.1);
             }
         }
     }
@@ -677,6 +730,7 @@ impl CellBuffer {
                     tag_offset += 1;
                 }
                 self[(x, y)] = grid_src[(src_x, src_y)];
+                self.dirty_bitmap.set(x, y);
                 for t in &stack {
                     if let Some(fg) = t.fg {
                         self[(x, y)].set_fg(fg).set_keep_fg(true);
@@ -700,6 +754,7 @@ impl CellBuffer {
                 for row in self.bounds_iter(dest.skip_rows(y + 1 - get_y(dest.upper_left()))) {
                     for c in row {
                         self[c].set_ch(' ');
+                        self.dirty_bitmap.set(c.0, c.1);
                     }
                 }
                 ret.1 = y;
@@ -831,11 +886,13 @@ impl CellBuffer {
                 if c == crate::emoji_text_presentation_selector!() {
                     let prev_attrs = self[prev_coords].attrs();
                     self[prev_coords].set_attrs(prev_attrs | Attr::FORCE_TEXT);
+                    self.dirty_bitmap.set(prev_coords.0, prev_coords.1);
                     continue 'char_loop;
                 }
                 if c == '\u{FE0F}' {
                     let prev_attrs = self[prev_coords].attrs();
                     self[prev_coords].set_attrs(prev_attrs | Attr::FORCE_EMOJI);
+                    self.dirty_bitmap.set(prev_coords.0, prev_coords.1);
                     // Emoji presentation renders the grapheme two
                     // columns wide in the terminal even when the base
                     // symbol is narrow (East Asian Ambiguous, e.g. `⌨`).
@@ -857,6 +914,7 @@ impl CellBuffer {
                                 .set_bg(bg_color)
                                 .set_attrs(attrs)
                                 .set_empty(true);
+                            self.dirty_bitmap.set(x, y);
                             x += 1;
                         }
                     }
@@ -905,9 +963,11 @@ impl CellBuffer {
                     c = ' ';
                     for _ in 0..self.tab_width {
                         cell_mut!(x, y).set_ch(' ');
+                        self.dirty_bitmap.set(x, y);
                         x += 1;
                         if let Some(c) = self.get_mut(x, y) {
                             c.set_ch(' ');
+                            self.dirty_bitmap.set(x, y);
                         } else if let Some(_x) = line_break {
                             if !(y > get_y(bottom_right) || y > get_y(bounds)) {
                                 x = if upper_left == og_upper_left {
@@ -925,6 +985,7 @@ impl CellBuffer {
                     }
                 } else {
                     cell_mut!(x, y).set_ch(c);
+                    self.dirty_bitmap.set(x, y);
                 }
                 cell_mut!(x, y)
                     .set_fg(fg_color)
@@ -948,6 +1009,7 @@ impl CellBuffer {
                     0 => {
                         // Skip drawing zero width characters
                         self[(x, y)].empty = true;
+                        self.dirty_bitmap.set(x, y);
                     }
                     w if w >= 2 => {
                         // Grapheme takes more than one column, so the next
@@ -964,6 +1026,7 @@ impl CellBuffer {
                                     .set_bg(bg_color)
                                     .set_attrs(attrs)
                                     .set_empty(true);
+                                self.dirty_bitmap.set(x, y);
                             }
                         }
                     }
@@ -1011,6 +1074,7 @@ impl Index<Pos> for CellBuffer {
 impl IndexMut<Pos> for CellBuffer {
     fn index_mut(&mut self, index: Pos) -> &mut Cell {
         let (x, y) = index;
+        self.dirty_bitmap.set(x, y);
         self.get_mut(x, y).expect("index out of bounds")
     }
 }
@@ -2127,12 +2191,126 @@ impl From<ThemeAttribute> for FormatTag {
     }
 }
 
+/// Row-major bitmap of the cells changed since the last time a consumer
+/// copied the buffer.
+///
+/// It is an additive bookkeeping structure: it never influences what gets
+/// drawn, only how much of a [`CellBuffer`] is copied to the screen. The
+/// bitmap is packed into `usize` words, one row after another, so that a row
+/// that is not dirty costs no work when scanning.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DirtyBitmap {
+    map: Vec<usize>,
+    width: usize,
+    height: usize,
+}
+
+impl DirtyBitmap {
+    const BITS: usize = usize::BITS as usize;
+
+    #[inline(always)]
+    fn words_per_row(&self) -> usize {
+        self.width.div_ceil(Self::BITS)
+    }
+
+    /// Mark cell `(x, y)` as dirty. Out-of-bounds coordinates are ignored.
+    #[inline(always)]
+    pub fn set(&mut self, x: usize, y: usize) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let word = y * self.words_per_row() + (x / Self::BITS);
+        let bit = x % Self::BITS;
+        if let Some(word) = self.map.get_mut(word) {
+            *word |= 1 << bit;
+        }
+    }
+
+    /// Whether cell `(x, y)` is marked dirty. Out-of-bounds coordinates are
+    /// reported as clean.
+    #[inline(always)]
+    pub fn is_set(&self, x: usize, y: usize) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        let word = y * self.words_per_row() + (x / Self::BITS);
+        let bit = x % Self::BITS;
+        self.map
+            .get(word)
+            .is_some_and(|word| word & (1 << bit) != 0)
+    }
+
+    /// Mark every cell as dirty.
+    #[inline(always)]
+    pub fn fill_ones(&mut self) {
+        self.map.fill(usize::MAX);
+    }
+
+    /// Mark every cell as clean, keeping the allocated bitmap.
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        self.map.fill(0);
+    }
+
+    /// Drop the bitmap entirely (used when the buffer itself is emptied).
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.map.clear();
+        self.width = 0;
+        self.height = 0;
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Reallocate the bitmap for a `cols`×`rows` buffer and clear all bits.
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        self.width = cols;
+        self.height = rows;
+        let new_size = cols.div_ceil(Self::BITS) * rows;
+        self.map.clear();
+        self.map.resize(new_size, 0);
+    }
+
+    /// Return the dirty column ranges, one entry per dirty row.
+    ///
+    /// All dirty cells of a row are merged into a single inclusive
+    /// `(start, end)` range, mirroring the upstream `dirty_areas()` contract.
+    pub fn dirty_areas(&self) -> Vec<(usize, (usize, usize))> {
+        let mut ret = Vec::new();
+        if self.width == 0 || self.height == 0 {
+            return ret;
+        }
+        for y in 0..self.height {
+            let mut start = None;
+            let mut end = 0;
+            for x in 0..self.width {
+                if self.is_set(x, y) {
+                    start.get_or_insert(x);
+                    end = x;
+                }
+            }
+            if let Some(start) = start {
+                ret.push((y, (start, end)));
+            }
+        }
+        ret
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use melib::text::{Reflow, TextProcessing};
 
-    use super::KMP;
-    use crate::terminal::{Screen, Virtual};
+    use super::{DirtyBitmap, KMP};
+    use crate::terminal::{Attr, Color, Screen, Virtual};
 
     /// A `base + VS16` cluster (emoji presentation) must occupy two grid
     /// cells — the leading cell carries the glyph plus `FORCE_EMOJI`, the
@@ -2605,5 +2783,108 @@ of the house!’ (Which was very likely true.)";
         assert!(!screen.resize(usize::MAX, usize::MAX));
         assert!(!screen.resize(usize::MAX, 2));
         assert!(screen.resize(1, 1));
+    }
+
+    /// A freshly resized buffer is clean, and writing a single cell marks
+    /// only that cell (and therefore only its row).
+    #[test]
+    fn dirty_bitmap_tracks_single_cell_write() {
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(screen.resize(8, 4));
+        assert!(
+            screen.grid().dirty_areas().is_empty(),
+            "a resized buffer starts clean"
+        );
+
+        let area = screen.area();
+        screen.grid_mut().write_string(
+            "x",
+            Color::Default,
+            Color::Default,
+            Attr::DEFAULT,
+            area.nth_row(1).skip_cols(2),
+            None,
+            None,
+        );
+
+        let grid = screen.grid();
+        assert!(grid.dirty_bitmap().is_set(2, 1));
+        assert!(!grid.dirty_bitmap().is_set(3, 1));
+        assert!(!grid.dirty_bitmap().is_set(2, 0));
+        assert_eq!(grid.dirty_areas(), vec![(1, (2, 2))]);
+    }
+
+    /// Writes confined to separate rows must produce one dirty range per
+    /// affected row, with the untouched rows absent.
+    #[test]
+    fn dirty_areas_cover_each_written_row_only() {
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(screen.resize(8, 4));
+        let area = screen.area();
+
+        screen.grid_mut().write_string(
+            "ab",
+            Color::Default,
+            Color::Default,
+            Attr::DEFAULT,
+            area,
+            None,
+            None,
+        );
+        screen.grid_mut().write_string(
+            "de",
+            Color::Default,
+            Color::Default,
+            Attr::DEFAULT,
+            area.nth_row(2).skip_cols(4),
+            None,
+            None,
+        );
+
+        assert_eq!(screen.grid().dirty_areas(), vec![(0, (0, 1)), (2, (4, 5))]);
+    }
+
+    /// Dirty cells (including non-adjacent ones) of a row are merged into a
+    /// single inclusive range; bits do not bleed between rows even when the
+    /// width crosses a machine-word boundary.
+    #[test]
+    fn dirty_areas_merge_ranges_without_cross_row_bleed() {
+        let mut bitmap = DirtyBitmap::default();
+        bitmap.resize(70, 3);
+        bitmap.set(2, 1);
+        bitmap.set(65, 1);
+        bitmap.set(10, 2);
+
+        assert!(bitmap.is_set(65, 1));
+        assert!(!bitmap.is_set(65, 2));
+        assert_eq!(bitmap.dirty_areas(), vec![(1, (2, 65)), (2, (10, 10))]);
+    }
+
+    /// `clear` dirties every cell, `set_dirty(false)` clears the bitmap, and
+    /// `resize` resets it to a clean bitmap of the new dimensions.
+    #[test]
+    fn dirty_bitmap_clear_reset_and_resize() {
+        let mut screen = Screen::<Virtual>::new(Default::default());
+        assert!(screen.resize(4, 3));
+        assert!(screen.grid().dirty_areas().is_empty());
+
+        screen.grid_mut().clear(None);
+        assert_eq!(
+            screen.grid().dirty_areas(),
+            vec![(0, (0, 3)), (1, (0, 3)), (2, (0, 3))]
+        );
+
+        screen.grid_mut().set_dirty(false);
+        assert!(screen.grid().dirty_areas().is_empty());
+
+        screen.grid_mut().dirty_bitmap_mut().set(1, 1);
+        assert_eq!(screen.grid().dirty_areas(), vec![(1, (1, 1))]);
+
+        assert!(screen.resize(6, 5));
+        assert!(
+            screen.grid().dirty_areas().is_empty(),
+            "resize must discard stale dirty bits"
+        );
+        assert!(!screen.grid().dirty_bitmap().is_set(1, 1));
     }
 }

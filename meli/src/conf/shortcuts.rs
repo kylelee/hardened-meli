@@ -213,6 +213,7 @@ shortcut_key_values! { "general",
     pub struct GeneralShortcuts {
         toggle_help |> "Toggle help and shortcuts view." |> ShortcutKeys::single(Key::Char('?')),
         enter_command_mode |> "Enter COMMAND mode." |> ShortcutKeys::double(Key::Char(':'), Key::Alt('x')),
+        open_terminal |> "Opens $SHELL in current directory." |> ShortcutKeys::single(Key::Ctrl('t')),
         quit |> "Quit meli." |> ShortcutKeys::double(Key::Esc, Key::Char('q')),
         go_to_tab |> "Go to the nth tab." |> ShortcutKeys::single(Key::Alt('n')),
         next_tab |> "Go to the next tab." |> ShortcutKeys::single(Key::Char('T')),
@@ -228,6 +229,7 @@ shortcut_key_values! { "general",
         info_message_next |> "Show next info message, if any." |> ShortcutKeys::single(Key::Char('>')),
         info_message_previous |> "Show previous info message, if any." |> ShortcutKeys::single(Key::Char('<')),
         focus_in_text_field |> "Focus on a text field." |> ShortcutKeys::single(Key::Char('\n')),
+        search |> "Search within pager." |> ShortcutKeys::single(Key::Char('/')),
         next_search_result |> "Scroll to next search result." |> ShortcutKeys::single(Key::Char('n')),
         previous_search_result |> "Scroll to previous search result." |> ShortcutKeys::single(Key::Char('N'))
     }

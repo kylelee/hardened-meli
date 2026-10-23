@@ -39,6 +39,8 @@
 //!
 //! To create a [`Terminal`], see [`create_pty`].
 
+use std::{fs::File, io::PipeReader, mem::ManuallyDrop};
+
 use melib::text::wcwidth;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 
@@ -65,10 +67,56 @@ enum CodepointBuf {
     FourCodepoints(u8, Option<u8>, Option<u8>),
 }
 
+/// Upper bound on the embedded child's stderr bytes kept for diagnostics.
+/// Further output is drained and discarded, so a chatty child can never
+/// fill the stderr pipe and block on `write(2)`.
+pub const STDERR_CAPTURE_LIMIT: usize = 4 * 1024;
+
+/// Continuously drained, bounded capture of an embedded pseudoterminal
+/// child's stderr output.
+///
+/// The child's stderr is redirected to a pipe whose read end is owned by a
+/// dedicated drain thread (spawned by
+/// [`create_pty`](super::create_pty), see [`drain_stderr`]): bytes are
+/// consumed as they arrive, at most [`STDERR_CAPTURE_LIMIT`] of them are
+/// kept, and the captured text is included in the child's exit
+/// notification.
+#[derive(Clone, Debug, Default)]
+pub struct StderrCapture(Arc<Mutex<Vec<u8>>>);
+
+impl StderrCapture {
+    /// Snapshot of the stderr bytes captured so far, in capture order.
+    pub fn captured(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// Drain `reader` into `capture` until end-of-file (every writer closed the
+/// pipe, e.g. the child exited) or a read error, keeping at most
+/// [`STDERR_CAPTURE_LIMIT`] bytes and discarding the rest. Draining as the
+/// bytes arrive is what keeps the child from ever blocking on a full pipe.
+pub(super) fn drain_stderr(mut reader: PipeReader, capture: &StderrCapture) {
+    let mut chunk = [0_u8; 4096];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut buf = capture.0.lock().unwrap();
+                let room = STDERR_CAPTURE_LIMIT.saturating_sub(buf.len());
+                buf.extend_from_slice(&chunk[..n.min(room)]);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Terminal {
     pub grid: EmbeddedGrid,
-    stdin: std::mem::ManuallyDrop<std::fs::File>,
+    stdin: ManuallyDrop<File>,
+    /// Captured stderr of the embedded process; see [`StderrCapture`].
+    pub stderr: StderrCapture,
     /// Pid of the embedded process
     pub child_pid: nix::unistd::Pid,
 }
@@ -112,10 +160,15 @@ impl std::io::Write for Terminal {
 }
 
 impl Terminal {
-    pub fn new(stdin: std::mem::ManuallyDrop<std::fs::File>, child_pid: nix::unistd::Pid) -> Self {
+    pub fn new(
+        stdin: ManuallyDrop<File>,
+        stderr: StderrCapture,
+        child_pid: nix::unistd::Pid,
+    ) -> Self {
         Self {
             grid: EmbeddedGrid::new(),
             stdin,
+            stderr,
             child_pid,
         }
     }
@@ -155,6 +208,7 @@ impl Terminal {
         let Self {
             ref mut grid,
             ref mut stdin,
+            stderr: _,
             child_pid: _,
         } = self;
         grid.process_byte(stdin, byte);
@@ -316,6 +370,10 @@ impl EmbeddedGrid {
     #[inline]
     pub fn set_dirty(&mut self, value: bool) {
         self.dirty = value;
+        // Keep the fine-grained bitmap in sync with the coarse flag: a
+        // `true` forces a full repaint, a `false` acknowledges (clears) the
+        // rows that were just copied to the screen.
+        self.buffer_mut().set_dirty(value);
     }
 
     #[inline]
@@ -323,11 +381,25 @@ impl EmbeddedGrid {
         self.dirty
     }
 
+    /// Return the dirty column ranges of the active screen buffer, one entry
+    /// per dirty row (see [`CellBuffer::dirty_areas`]).
+    pub fn dirty_areas(&mut self) -> SmallVec<[(usize, (usize, usize)); 2]> {
+        self.buffer().dirty_areas().into_iter().collect()
+    }
+
     #[inline]
     pub fn buffer(&self) -> &CellBuffer {
         match self.screen_buffer {
             ScreenBuffer::Normal => self.normal_screen.grid(),
             ScreenBuffer::Alternate => self.alternate_screen.grid(),
+        }
+    }
+
+    #[inline]
+    pub fn buffer_mut(&mut self) -> &mut CellBuffer {
+        match self.screen_buffer {
+            ScreenBuffer::Normal => self.normal_screen.grid_mut(),
+            ScreenBuffer::Alternate => self.alternate_screen.grid_mut(),
         }
     }
 
@@ -346,6 +418,10 @@ impl EmbeddedGrid {
         self.terminal_size = new_val;
         self.cursor = (0, 0);
         self.wrap_next = false;
+        // Resizing reallocates the buffers and clears their bitmaps; the
+        // destination screen has to be repainted in full.
+        self.normal_screen.grid_mut().set_dirty(true);
+        self.alternate_screen.grid_mut().set_dirty(true);
     }
 
     pub fn set_tab_width(&mut self, new_val: u8) {
@@ -390,12 +466,12 @@ impl EmbeddedGrid {
             ref mut dirty,
             ref tab_width,
         } = self;
-        let mut screen = normal_screen;
+        let mut screen = &mut *normal_screen;
 
         let is_alternate = match *screen_buffer {
             ScreenBuffer::Normal => false,
             _ => {
-                screen = alternate_screen;
+                screen = &mut *alternate_screen;
                 true
             }
         };
@@ -412,6 +488,9 @@ impl EmbeddedGrid {
                         ) {
                             return;
                         }
+                        // A resize reallocates the grid and clears its dirty
+                        // bitmap: force a full repaint of the grown screen.
+                        screen.grid_mut().set_dirty(true);
                         scroll_region.bottom += 1;
                         terminal_size.1 += 1;
                     }
@@ -460,6 +539,24 @@ impl EmbeddedGrid {
         macro_rules! area {
             () => {{
                 screen.area()
+            }};
+        }
+
+        /// Mark the cell under the cursor as dirty.
+        macro_rules! set_dirty_cell {
+            () => {{
+                let (x, y) = cursor_val!();
+                screen.grid_mut().dirty_bitmap_mut().set(x, y);
+                *dirty = true;
+            }};
+            ($area:expr) => {{
+                let area = $area;
+                for row in screen.grid().bounds_iter(area) {
+                    for (x, y) in row {
+                        screen.grid_mut().dirty_bitmap_mut().set(x, y);
+                    }
+                }
+                *dirty = true;
             }};
         }
 
@@ -590,7 +687,7 @@ impl EmbeddedGrid {
                         .set_fg(*fg_color)
                         .set_bg(*bg_color)
                         .set_attrs(*attrs);
-                    *dirty = true;
+                    set_dirty_cell!();
                 }
             }};
         }
@@ -875,7 +972,11 @@ impl EmbeddedGrid {
                             std::cmp::max(1, terminal_size.0),
                             std::cmp::max(1, terminal_size.1),
                         );
+                        // The alternate buffer replaces the visible grid in
+                        // full, so it needs a complete repaint.
+                        alternate_screen.grid_mut().set_dirty(true);
                         *screen_buffer = ScreenBuffer::Alternate;
+                        *dirty = true;
                     }
                     _ => {
                         tracing::trace!(
@@ -919,7 +1020,11 @@ impl EmbeddedGrid {
                         *dirty = true;
                     }
                     b"1047" | b"1049" => {
+                        // The normal buffer replaces the visible grid in
+                        // full, so it needs a complete repaint.
+                        normal_screen.grid_mut().set_dirty(true);
                         *screen_buffer = ScreenBuffer::Normal;
+                        *dirty = true;
                     }
                     _ => {
                         tracing::trace!(
@@ -1962,5 +2067,243 @@ mod hardening_tests {
         bytes.extend(vec![b'9'; 100_000]);
         bytes.push(b'G');
         feed(&mut grid, &bytes);
+    }
+}
+
+#[cfg(test)]
+mod dirty_bitmap_tests {
+    use super::*;
+
+    fn feed(grid: &mut EmbeddedGrid, bytes: &[u8]) {
+        let mut sink = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .expect("/dev/null is writable");
+        for &byte in bytes {
+            grid.process_byte(&mut sink, byte);
+        }
+    }
+
+    fn new_grid(cols: usize, rows: usize) -> EmbeddedGrid {
+        let mut grid = EmbeddedGrid::new();
+        grid.set_terminal_size((cols, rows));
+        grid
+    }
+
+    fn dirty_areas(grid: &mut EmbeddedGrid) -> Vec<(usize, (usize, usize))> {
+        grid.dirty_areas().into_iter().collect()
+    }
+
+    /// A resized grid needs a full repaint; after acknowledging that, a
+    /// partial write must only report the rows it actually touched.
+    #[test]
+    fn embedded_grid_partial_write_only_marks_affected_rows() {
+        let mut grid = new_grid(10, 4);
+        assert_eq!(
+            dirty_areas(&mut grid).len(),
+            4,
+            "a resized grid starts fully dirty"
+        );
+
+        grid.set_dirty(false);
+        assert!(dirty_areas(&mut grid).is_empty());
+
+        feed(&mut grid, b"hi");
+        assert_eq!(dirty_areas(&mut grid), vec![(0, (0, 1))]);
+
+        grid.set_dirty(false);
+        assert!(dirty_areas(&mut grid).is_empty());
+
+        feed(&mut grid, b"\r\n\r\nz");
+        assert_eq!(
+            dirty_areas(&mut grid),
+            vec![(2, (0, 0))],
+            "moving the cursor must not dirty rows; only the written cell does"
+        );
+    }
+
+    /// `ESC[2J` clears every cell, so the whole grid becomes dirty.
+    #[test]
+    fn embedded_grid_clear_marks_all_rows() {
+        let mut grid = new_grid(10, 4);
+        grid.set_dirty(false);
+        assert!(dirty_areas(&mut grid).is_empty());
+
+        feed(&mut grid, b"\x1b[2J");
+        assert_eq!(
+            dirty_areas(&mut grid),
+            vec![(0, (0, 9)), (1, (0, 9)), (2, (0, 9)), (3, (0, 9))]
+        );
+    }
+
+    /// Copy exactly the rows/spans [`EmbeddedGrid::dirty_areas`] reports,
+    /// mirroring `Composer::draw`'s incremental copy.
+    fn copy_dirty_areas(grid: &mut EmbeddedGrid, dest: &mut CellBuffer) {
+        let dest_area = dest.area();
+        for (y, (start, end)) in grid.dirty_areas() {
+            let width = end.saturating_sub(start) + 1;
+            let src = grid.area().nth_row(y).skip_cols(start).take_cols(width);
+            let dst = dest_area.nth_row(y).skip_cols(start).take_cols(width);
+            dest.copy_area(grid.buffer(), dst, src);
+        }
+    }
+
+    fn assert_cells_eq(actual: &CellBuffer, expected: &CellBuffer, context: &str) {
+        let area = expected.area();
+        for y in 0..area.height() {
+            for x in 0..area.width() {
+                assert_eq!(
+                    actual[(x, y)],
+                    expected[(x, y)],
+                    "{context}: cell ({x}, {y}) differs"
+                );
+            }
+        }
+    }
+
+    fn assert_cells_ne(actual: &CellBuffer, expected: &CellBuffer) -> bool {
+        let area = expected.area();
+        (0..area.height()).any(|y| (0..area.width()).any(|x| actual[(x, y)] != expected[(x, y)]))
+    }
+
+    /// Incremental copying is only sound while the destination still holds
+    /// the previous frame: starting from an intact frame it reproduces a
+    /// full `copy_area` cell-for-cell, but once the destination has been
+    /// cleared the same dirty-row copy cannot restore the clean rows.
+    #[test]
+    fn incremental_dirty_copy_matches_full_copy_only_on_intact_destination() {
+        let mut grid = new_grid(10, 4);
+        feed(&mut grid, b"aa\r\nbb\r\ncc\r\ndd");
+        grid.set_dirty(false);
+
+        let area = grid.area();
+        let mut target = CellBuffer::new(Cell::new_default(), area);
+        target.copy_area(grid.buffer(), target.area(), area);
+
+        // A partial write touches row 0 only; rows 1..=3 stay clean.
+        feed(&mut grid, b"\x1b[1;1HXY");
+        assert_eq!(dirty_areas(&mut grid), vec![(0, (0, 1))]);
+
+        let mut full = CellBuffer::new(Cell::new_default(), area);
+        full.copy_area(grid.buffer(), full.area(), grid.area());
+
+        copy_dirty_areas(&mut grid, &mut target);
+        assert_cells_eq(
+            &target,
+            &full,
+            "incremental copy over the previous frame must equal a full copy",
+        );
+
+        // Next frame: the composer acknowledges the bitmap, the pty touches
+        // row 0 again, and the destination is cleared by external code (the
+        // composer's clear block). Copying only the dirty row leaves rows
+        // 1..=3 blank, so the result must differ from a full copy.
+        grid.set_dirty(false);
+        feed(&mut grid, b"\x1b[1;1HZZ");
+        assert_eq!(dirty_areas(&mut grid), vec![(0, (0, 1))]);
+        target.clear(None);
+
+        let mut full_after_clear = CellBuffer::new(Cell::new_default(), area);
+        full_after_clear.copy_area(grid.buffer(), full_after_clear.area(), grid.area());
+
+        copy_dirty_areas(&mut grid, &mut target);
+        assert!(
+            assert_cells_ne(&target, &full_after_clear),
+            "a dirty-row-only copy must not reconstruct an externally cleared destination"
+        );
+    }
+
+    /// `Composer::draw` propagates its component-level dirty flag into the
+    /// embedded grid before reading `dirty_areas()` (e.g. on `ConfigReload`
+    /// with an unchanged terminal size); the incremental path must then
+    /// degenerate to a full repaint and recover an already-cleared frame.
+    #[test]
+    fn component_dirty_forces_full_repaint_through_incremental_copy() {
+        let mut grid = new_grid(10, 4);
+        feed(&mut grid, b"aa\r\nbb\r\ncc\r\ndd");
+        grid.set_dirty(false);
+
+        let area = grid.area();
+        let mut target = CellBuffer::new(Cell::new_default(), area);
+        // The composer's clear block already emptied the destination.
+        target.clear(None);
+
+        // What `Composer::draw` does when `self.dirty` is set: no pty bytes
+        // are needed, the whole grid must become dirty for this frame.
+        grid.set_dirty(true);
+        assert_eq!(dirty_areas(&mut grid).len(), area.height());
+
+        copy_dirty_areas(&mut grid, &mut target);
+        let mut full = CellBuffer::new(Cell::new_default(), area);
+        full.copy_area(grid.buffer(), full.area(), grid.area());
+        assert_cells_eq(
+            &target,
+            &full,
+            "a component-dirty frame must copy the full grid",
+        );
+    }
+}
+
+#[cfg(test)]
+mod stderr_capture_tests {
+    use super::*;
+    use std::io::PipeWriter;
+
+    /// A pipe pair for driving `drain_stderr` deterministically.
+    fn pipe_pair() -> (PipeWriter, PipeReader) {
+        let (reader, writer) = std::io::pipe().unwrap();
+        (writer, reader)
+    }
+
+    /// `drain_stderr` must slurp everything written before the write end is
+    /// closed and expose it verbatim through [`StderrCapture::captured`].
+    #[test]
+    fn drain_captures_all_bytes_until_eof() {
+        let (mut writer, reader) = pipe_pair();
+        let capture = StderrCapture::default();
+        let drain_capture = capture.clone();
+        let thread = std::thread::spawn(move || drain_stderr(reader, &drain_capture));
+        writer.write_all(b"editor: cannot open file\n").unwrap();
+        // Closing the write end is what makes the drain thread reach EOF.
+        drop(writer);
+        thread.join().unwrap();
+        assert_eq!(capture.captured(), b"editor: cannot open file\n");
+    }
+
+    /// Output beyond [`STDERR_CAPTURE_LIMIT`] is dropped, not accumulated:
+    /// the capture stays bounded while the pipe keeps being drained.
+    #[test]
+    fn drain_is_bounded_but_keeps_draining() {
+        let (mut writer, reader) = pipe_pair();
+        let capture = StderrCapture::default();
+        let drain_capture = capture.clone();
+        let thread = std::thread::spawn(move || drain_stderr(reader, &drain_capture));
+        let oversized = vec![b'x'; STDERR_CAPTURE_LIMIT * 2];
+        writer.write_all(&oversized).unwrap();
+        // The child must not block on a full pipe: after the write end is
+        // closed, the drain thread must terminate promptly, proving it
+        // consumed (and discarded) the excess.
+        drop(writer);
+        thread.join().unwrap();
+        let captured = capture.captured();
+        assert_eq!(captured.len(), STDERR_CAPTURE_LIMIT);
+        assert!(captured.iter().all(|&b| b == b'x'));
+    }
+
+    /// The capture keeps the *first* [`STDERR_CAPTURE_LIMIT`] bytes: with a
+    /// small marker written first, it survives an oversized follow-up.
+    #[test]
+    fn drain_keeps_head_of_stream() {
+        let (mut writer, reader) = pipe_pair();
+        let capture = StderrCapture::default();
+        let drain_capture = capture.clone();
+        let thread = std::thread::spawn(move || drain_stderr(reader, &drain_capture));
+        writer.write_all(b"HEAD-MARKER").unwrap();
+        writer.write_all(&vec![b'y'; STDERR_CAPTURE_LIMIT]).unwrap();
+        drop(writer);
+        thread.join().unwrap();
+        let captured = capture.captured();
+        assert!(captured.starts_with(b"HEAD-MARKER"));
+        assert_eq!(captured.len(), STDERR_CAPTURE_LIMIT);
     }
 }

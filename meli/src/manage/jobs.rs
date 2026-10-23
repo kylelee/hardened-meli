@@ -627,6 +627,8 @@ impl Component for JobManager {
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
         let mut map = ShortcutMaps::default();
 
+        // The job manager spans all accounts; upstream resolves the general
+        // section with `general_shortcuts(None)`, i.e. the global values.
         map.insert(
             Shortcuts::GENERAL,
             context.settings.shortcuts.general.key_values(),

@@ -1077,62 +1077,55 @@ impl Component for Pager {
             UIEvent::ChangeMode(UIMode::Normal) => {
                 self.dirty = true;
             }
-            UIEvent::Action(View(Pipe(ref bin, ref args))) => {
-                use std::{
-                    io::Write,
-                    process::{Command, Stdio},
-                };
-                let mut command_obj = match Command::new(bin)
-                    .args(args.as_slice())
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .spawn()
-                {
-                    Ok(o) => o,
-                    Err(err) => {
-                        context.replies.push_back(UIEvent::Notification {
-                            title: Some(format!("Could not pipe to {bin}").into()),
-                            source: None,
-                            body: err.to_string().into(),
-                            kind: Some(NotificationType::Error(err.kind().into())),
-                        });
-                        return true;
-                    }
-                };
-                let Some(stdin) = command_obj.stdin.as_mut() else {
-                    context.replies.push_back(UIEvent::Notification {
-                        title: Some(format!("Could not pipe to {bin}").into()),
-                        source: None,
-                        body: "the child process has no stdin pipe".into(),
-                        kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
-                    });
-                    return true;
-                };
-                if let Err(err) = stdin.write_all(self.text.as_bytes()) {
-                    // A filter command that exits without reading all of its
-                    // stdin (e.g. `head -1`) closes the pipe: report the
-                    // broken pipe instead of panicking.
-                    context.replies.push_back(UIEvent::Notification {
-                        title: Some(format!("Could not pipe to {bin}").into()),
-                        source: None,
-                        body: format!("could not write pager text to the child's stdin: {err}")
-                            .into(),
-                        kind: Some(NotificationType::Error(melib::error::ErrorKind::External)),
-                    });
-                    return true;
-                }
+            UIEvent::Action(View(Pipe { ref command })) => {
+                use std::io::Write as _;
+                let command = command.clone();
+                let bytes = self.text.clone().into_bytes();
+                context
+                    .replies
+                    .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
+                        owner: Some(self.id),
+                        command: ProcessRequest::shell_command(&command),
+                        spawn: Some(SpawnInteractionFn(Box::new({
+                            let command = command.clone();
+                            move |mut child| {
+                                let Some(mut stdin) = child.stdin.take() else {
+                                    let _ = child.wait();
+                                    return Err(Error::new(format!(
+                                        "Could not open standard input of {command}"
+                                    ))
+                                    .set_kind(ErrorKind::External));
+                                };
+                                // A command that exits without reading all of
+                                // its stdin (e.g. `head -1`) closes the pipe:
+                                // the write error is reported through the
+                                // result callback below instead of panicking.
+                                stdin.write_all(&bytes).chain_err_summary(|| {
+                                    format!("Could not write to standard input of {command}")
+                                })?;
 
-                context.replies.push_back(UIEvent::Notification {
-                    title: None,
-                    source: None,
-                    body: format!(
-                        "Pager text piped to '{bin}{}{}'",
-                        if args.is_empty() { "" } else { " " },
-                        args.join(" ")
-                    )
-                    .into(),
-                    kind: Some(NotificationType::Info),
-                });
+                                Ok(child)
+                            }
+                        }))),
+                        result_cb: ProcessResultFn(Box::new(move |output| {
+                            if let Err(err) = output {
+                                Some(Box::new(UIEvent::Notification {
+                                    title: None,
+                                    source: None,
+                                    body: format!("{command} exited with error: {err}").into(),
+                                    kind: Some(NotificationType::Error(ErrorKind::External)),
+                                }))
+                            } else {
+                                Some(Box::new(UIEvent::Notification {
+                                    title: None,
+                                    source: None,
+                                    body: format!("Pager text piped to {command}").into(),
+                                    kind: Some(NotificationType::Info),
+                                }))
+                            }
+                        })),
+                        temporary_files: vec![],
+                    })));
                 return true;
             }
             ev if matches!(ev, UIEvent::Action(View(Filter(None))))
@@ -1215,6 +1208,17 @@ impl Component for Pager {
                 });
                 self.initialised = false;
                 self.dirty = true;
+                return true;
+            }
+            UIEvent::Input(ref key)
+                if shortcut!(key == shortcuts[Shortcuts::GENERAL]["search"]) =>
+            {
+                context
+                    .replies
+                    .push_back(UIEvent::CmdInput(Key::Paste("search ".to_string())));
+                context
+                    .replies
+                    .push_back(UIEvent::ChangeMode(UIMode::Command));
                 return true;
             }
             UIEvent::Input(ref key)
@@ -1304,6 +1308,10 @@ impl Component for Pager {
     }
 
     fn shortcuts(&self, context: &Context) -> ShortcutMaps {
+        // The pager has no account/mailbox context (it is shared by the
+        // composer, the mail view, etc.), so the global values are the only
+        // meaningful resolution here; upstream also passes `None` for this
+        // component.
         let mut ret: ShortcutMaps = Default::default();
         ret.insert(
             Shortcuts::PAGER,
@@ -1420,6 +1428,60 @@ mod tests {
         assert_ne!(
             handle.job_id, first_job_id,
             "a different command must replace the in-flight job",
+        );
+    }
+
+    /// The `general.search` binding (`/`) must be handled by the *pager's
+    /// own* arm, not by a listing wrapper: a standalone `Pager` (no
+    /// listing host) consumes `/` by pushing the fork's command-input
+    /// chain — `CmdInput(Key::Paste("search "))` plus
+    /// `ChangeMode(UIMode::Command)` — while `F3`, which only
+    /// `listing.search` binds, must stay unconsumed so a user's
+    /// `listing.search` remap cannot open the pager search entry.
+    #[test]
+    fn pager_slash_opens_search_command_line() {
+        let mut context = mock_context();
+        let mut pager = Pager::from_string(
+            "hello\nworld\n".to_string(),
+            &context,
+            None,
+            None,
+            ThemeAttribute::default(),
+        );
+
+        let mut event = UIEvent::Input(Key::Char('/'));
+        assert!(
+            pager.process_event(&mut event, &mut context),
+            "`/` (general.search) must be consumed by the pager itself"
+        );
+        let replies = context.replies();
+        assert!(
+            replies
+                .iter()
+                .any(|r| matches!(r, UIEvent::CmdInput(Key::Paste(s)) if s == "search ")),
+            "the pager `/` arm must prefill the command line with `search `, got {replies:?}"
+        );
+        assert!(
+            replies
+                .iter()
+                .any(|r| matches!(r, UIEvent::ChangeMode(UIMode::Command))),
+            "the pager `/` arm must switch to COMMAND mode, got {replies:?}"
+        );
+
+        // `F3` is a `listing.search`-only key: the pager must neither
+        // consume it nor react to it, keeping the two search entries
+        // distinguishable.
+        let mut event = UIEvent::Input(Key::F(3));
+        assert!(
+            !pager.process_event(&mut event, &mut context),
+            "`F3` (listing-only search binding) must not be consumed by the pager"
+        );
+        assert!(
+            !context
+                .replies()
+                .iter()
+                .any(|r| matches!(r, UIEvent::CmdInput(_))),
+            "`F3` must not open the pager command line"
         );
     }
 

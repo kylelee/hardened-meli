@@ -231,7 +231,7 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
             // the EXAMINE response we just got may be the only signal.
             // Compensate by re-syncing before entering IDLE.
             let current_exists = mailbox.counters.lock().unwrap().total.len();
-            if select_response.exists > current_exists {
+            if select_response.exists as usize > current_exists {
                 tracing::trace!(
                     "IDLE compensating resync: mailbox {} reports {} EXISTS but {} are known \
                      locally",
@@ -549,11 +549,11 @@ pub async fn examine_updates(
                             let mut counters = mailbox.counters.lock().unwrap();
                             if let Some(total) = status.messages {
                                 counters.total.clear();
-                                counters.total.set_not_yet_seen(total);
+                                counters.total.set_not_yet_seen(total as usize);
                             }
                             if let Some(total) = status.unseen {
                                 counters.unseen.clear();
-                                counters.unseen.set_not_yet_seen(total);
+                                counters.unseen.set_not_yet_seen(total as usize);
                             }
                             break;
                         }
@@ -567,7 +567,9 @@ pub async fn examine_updates(
                 let unseen_count = protocol_parser::search_results(&response)?.1.len();
                 let mut counters = mailbox.counters.lock().unwrap();
                 counters.total.clear();
-                counters.total.set_not_yet_seen(select_response.exists);
+                counters
+                    .total
+                    .set_not_yet_seen(select_response.exists as usize);
                 counters.unseen.clear();
                 counters.unseen.set_not_yet_seen(unseen_count);
             }
@@ -594,7 +596,7 @@ pub async fn examine_updates(
                 .await?;
             conn.read_response(&mut response, required_responses)
                 .await?;
-        } else if select_response.exists > current_exists {
+        } else if select_response.exists as usize > current_exists {
             let min = current_exists.max(1);
 
             let (required_responses, attributes) = common_attributes();

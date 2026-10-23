@@ -1586,6 +1586,10 @@ pub mod server {
                 // RFC 9051 §7.1.5: the connection is already authenticated;
                 // no login flow must follow.
                 block_on(tcp_stream.write_all(b"* PREAUTH logged in\r\n")).unwrap();
+            } else {
+                // RFC 3501 §7.1: every IMAP session starts with a greeting;
+                // the unauthenticated flavor is `* OK <text>`.
+                block_on(tcp_stream.write_all(b"* OK melib-test mock ready\r\n")).unwrap();
             }
             // Stage 1: the pre-auth capability request. The reply's
             // capability list is parameterized by the server state flags
@@ -3287,7 +3291,7 @@ pub mod server {
                                 let response = Response::Data(Data::Fetch {
                                     seq: msn,
                                     items: vec![
-                                        MessageDataItem::Uid((uid as u32).try_into().unwrap()),
+                                        MessageDataItem::Uid(uid.try_into().unwrap()),
                                         MessageDataItem::Flags(mail.as_flags()),
                                         MessageDataItem::Envelope(mail.as_envelope()),
                                         MessageDataItem::BodyStructure(mail.as_bodystructure()),
@@ -3358,10 +3362,10 @@ pub mod server {
                                 rest.split_once(' ').unwrap_or((rest, ""));
                             let destination = destination.trim_matches('"').to_string();
                             let sequence_set = Self::parse_sequence_set(sequence_set_str);
-                            let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
+                            let largest = state.lock().unwrap().next_uid.saturating_sub(1);
                             let requested: Vec<UID> = sequence_set
                                 .iter(largest.try_into().unwrap())
-                                .map(|uid| uid.get() as usize)
+                                .map(|uid| uid.get())
                                 .collect();
                             let move_no_alert_mails_not_exist =
                                 state.lock().unwrap().move_no_alert_mails_not_exist;
@@ -3422,18 +3426,16 @@ pub mod server {
                                 "{name} loop_handler got UID FETCH envelope-only \
                                  {sequence_set:?}"
                             );
-                            let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
+                            let largest = state.lock().unwrap().next_uid.saturating_sub(1);
                             'uid_fetch_envelope_only: for uid in
                                 sequence_set.iter(largest.try_into().unwrap())
                             {
                                 let (msn, mail) = {
                                     let st = state.lock().unwrap();
-                                    let Some(index) =
-                                        st.envelopes.get_index_of(&(uid.get() as usize))
-                                    else {
+                                    let Some(index) = st.envelopes.get_index_of(&uid.get()) else {
                                         continue 'uid_fetch_envelope_only;
                                     };
-                                    (index + 1, st.envelopes[&(uid.get() as usize)].clone())
+                                    (index + 1, st.envelopes[&uid.get()].clone())
                                 };
                                 let response = Response::Data(Data::Fetch {
                                     seq: (msn as u32).try_into().unwrap(),
@@ -3484,16 +3486,12 @@ pub mod server {
                                     .unwrap(),
                             );
                             tracing::debug!("{name} loop_handler got UID FETCH flags {sequence_set:?}");
-                            let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
+                            let largest = state.lock().unwrap().next_uid.saturating_sub(1);
                             'uid_fetch_flags: for uid in
                                 sequence_set.iter(largest.try_into().unwrap())
                             {
-                                let Some(mail) = state
-                                    .lock()
-                                    .unwrap()
-                                    .envelopes
-                                    .get(&(uid.get() as usize))
-                                    .cloned()
+                                let Some(mail) =
+                                    state.lock().unwrap().envelopes.get(&uid.get()).cloned()
                                 else {
                                     continue 'uid_fetch_flags;
                                 };
@@ -3582,7 +3580,7 @@ pub mod server {
                             let sequence_set = Self::parse_sequence_set(sequence_set_str);
 
                             tracing::debug!("{name} loop_handler got UID FETCH {sequence_set:?}");
-                            let largest = state.lock().unwrap().next_uid.saturating_sub(1) as u32;
+                            let largest = state.lock().unwrap().next_uid.saturating_sub(1);
                             // `fetch_underdelivers` /
                             // `fetch_drop_connection_on_nth` emulate the
                             // observed Coremail 网易 163 behaviour; see the
@@ -3616,12 +3614,8 @@ pub mod server {
                                     Self::reset_connection(&tcp_stream);
                                     break 'outer;
                                 }
-                                let Some(mail) = state
-                                    .lock()
-                                    .unwrap()
-                                    .envelopes
-                                    .get(&(uid.get() as usize))
-                                    .cloned()
+                                let Some(mail) =
+                                    state.lock().unwrap().envelopes.get(&uid.get()).cloned()
                                 else {
                                     continue 'uid_fetch;
                                 };
@@ -4352,7 +4346,7 @@ hello world 3.
         use std::{collections::hash_map::DefaultHasher, hash::Hasher};
 
         let mut h = DefaultHasher::new();
-        h.write_usize(uid);
+        h.write_usize(uid as usize);
         h.write(mailbox_path.as_bytes());
         EnvelopeHash(h.finish())
     }
@@ -15159,8 +15153,8 @@ kfcMJpFWNRl6P2sUcsOhR6g=
                     let n = tcp.read(&mut buf).unwrap();
                     assert_eq!(&buf[..n], b"M1 CAPABILITY\r\n");
                     tcp.write_all(
-                        b"* CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=OAUTHBEARER SASL-IR\r\nM1 OK \
-                         CAPABILITY completed\r\n",
+                        b"* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=OAUTHBEARER \
+                         SASL-IR\r\nM1 OK CAPABILITY completed\r\n",
                     )
                     .unwrap();
                     // The client fails locally; it sends nothing more.
@@ -15201,8 +15195,8 @@ kfcMJpFWNRl6P2sUcsOhR6g=
                     let n = tcp.read(&mut buf).unwrap();
                     assert_eq!(&buf[..n], b"M1 CAPABILITY\r\n");
                     tcp.write_all(
-                        b"* CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR\r\nM1 OK CAPABILITY \
-                         completed\r\n",
+                        b"* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR\r\nM1 OK \
+                         CAPABILITY completed\r\n",
                     )
                     .unwrap();
                     let _ = tcp.read(&mut buf);

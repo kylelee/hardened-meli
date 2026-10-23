@@ -840,7 +840,7 @@ fn cold_start_cached_mails() -> Vec<(usize, melib::Envelope)> {
             );
             let mail = melib::email::Mail::new(bytes.into_bytes(), None).unwrap();
             let mut env = mail.envelope;
-            env.set_hash(generate_envelope_hash("inbox", &uid));
+            env.set_hash(generate_envelope_hash("inbox", &(uid as u32)));
             (uid, env)
         })
         .collect()
@@ -1223,7 +1223,10 @@ fn test_account_contacts_backends_merge_into_account_contacts() {
     let sources_loaded = |ctx: &crate::Context| {
         let account = &ctx.accounts[&account_hash];
         !account.contacts.search("foobar@example.com").is_empty()
-            && !account.contacts.search("forrestgump@example.com").is_empty()
+            && !account
+                .contacts
+                .search("forrestgump@example.com")
+                .is_empty()
             && !account.contacts.search("legacy@example.com").is_empty()
     };
     assert!(

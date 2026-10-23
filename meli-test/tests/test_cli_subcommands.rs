@@ -220,6 +220,137 @@ server_password_command = "false"
     }
 }
 
+fn test_subcommand_config_file(env: &Env, dir: &Path) {
+    let f = dir
+        .canonicalize()
+        .unwrap()
+        .join("test_subcommand_config_file.toml");
+    {
+        let mut cmd = Command::cargo_bin("meli").unwrap();
+        let output = cmd
+            .env_clear()
+            .envs(env)
+            .arg("create-config")
+            .arg(&f)
+            .output()
+            .unwrap()
+            .assert();
+        output.code(0).stdout(predicate::eq(
+            format!(
+                "Written example configuration to {path}\n",
+                path = f.display()
+            )
+            .as_str(),
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            meli::conf::FileSettings::EXAMPLE_CONFIG
+        );
+    }
+    {
+        let mut cmd = Command::cargo_bin("meli").unwrap();
+        let output = cmd
+            .env_clear()
+            .envs(env)
+            .arg("create-config")
+            .arg(&f)
+            .output()
+            .unwrap()
+            .assert();
+        output.code(1).stderr(predicate::eq(
+            format!(
+                "File `{path}` already exists.\nMaybe you meant to specify another path?\n",
+                path = f.display()
+            )
+            .as_str(),
+        ));
+    }
+    {
+        let mut cmd = Command::cargo_bin("meli").unwrap();
+        let output = cmd
+            .env_clear()
+            .envs(env)
+            .arg("test-config")
+            .arg(&f)
+            .output()
+            .unwrap()
+            .assert();
+        output.code(1).stderr(predicate::eq(
+            format!(
+                concat!(
+                    "Configuration error: {path}: Config file contains errors\n",
+                    "Caused by:\n",
+                    "[2] TOML parse error at line 1, column 1\n",
+                    "  |\n",
+                    "1 | ## Look into meli.conf(5) for all valid configuration options, their\n",
+                    "  | ^\n",
+                    "missing field `accounts`\n",
+                    "\n",
+                ),
+                path = f.display()
+            )
+            .as_str(),
+        ));
+        let mut conf_file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(false)
+            .open(&f)
+            .unwrap();
+        conf_file
+            .write_all(
+                br#"
+[accounts.imap]
+root_mailbox = "INBOX"
+format = "imap"
+send_mail = 'false'
+identity="username@example.com"
+server_username = "null"
+server_hostname = "example.com"
+server_password_command = "false"
+    "#,
+            )
+            .unwrap();
+
+        let mut cmd = Command::cargo_bin("meli").unwrap();
+        let output = cmd
+            .env_clear()
+            .envs(env)
+            .arg("test-config")
+            .arg(&f)
+            .output()
+            .unwrap()
+            .assert();
+        output.code(0).stdout(predicates::str::is_empty());
+    }
+    std::fs::remove_file(&f).unwrap();
+    {
+        let mut cmd = Command::cargo_bin("meli").unwrap();
+        let output = cmd
+            .env_clear()
+            .envs(env)
+            .arg("test-config")
+            .arg(&f)
+            .output()
+            .unwrap()
+            .assert();
+        // `test_config` canonicalizes the user-supplied path first (issue
+        // hardening: a later cwd change cannot invalidate an open target), so
+        // a missing file fails at that gate and the error is the bare
+        // OS-error chain with the related path — still a clean exit 1.
+        output.code(1).stderr(predicate::eq(
+            format!(
+                concat!(
+                    "OS error 2: No such file or directory: No such file or \
+                     directory (os error 2)\n",
+                    "Related path: {path}\n",
+                ),
+                path = f.display()
+            )
+            .as_str(),
+        ));
+    }
+}
+
 fn test_subcommand_man(env: &Env) {
     for (man, title) in [
         ("meli.1", "MELI(1)"),
@@ -344,6 +475,7 @@ fn run_cli_subcommands() {
         test_subcommand_succeeds(&common_env, "man");
         test_subcommand_man(&common_env);
         test_subcommand_config_stdio(&common_env);
+        test_subcommand_config_file(&common_env, tmp_dir.path());
         tmp_dir.close().unwrap();
     }
 

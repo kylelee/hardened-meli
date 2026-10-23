@@ -156,6 +156,7 @@ pub use crate::conf::{
 };
 
 #[cfg(feature = "sqlite3")]
+pub mod mcp;
 pub mod sqlite3;
 
 pub mod jobs;

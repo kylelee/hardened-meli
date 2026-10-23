@@ -879,7 +879,7 @@ impl MailcapEntry<'static> {
                 let test = candidate.test.remove(0);
                 let (_, test_string) = expand_args(&test, None, &mut temporary_files, &a)?;
                 return Ok(ProcessRequest {
-                    owner,
+                    owner: Some(owner),
                     command: {
                         let mut cmd = Command::new("sh");
                         cmd.args(["-c", &test_string])
@@ -982,7 +982,7 @@ impl MailcapEntry<'_> {
         };
         let ret = if self.copiousoutput {
             ProcessRequest {
-                owner,
+                owner: Some(owner),
                 command: {
                     let mut cmd = Command::new("sh");
                     cmd.args(["-c", &cmd_string])
@@ -1024,7 +1024,7 @@ impl MailcapEntry<'_> {
 
                         Some(Box::new(UIEvent::ProcessRequest(Box::new(
                             ProcessRequest {
-                                owner,
+                                owner: Some(owner),
                                 command: {
                                     let mut cmd = Command::new("sh");
                                     cmd.args(["-c", &pager_cmd])
@@ -1052,7 +1052,7 @@ impl MailcapEntry<'_> {
             }
         } else if let Some(decoded_bytes) = decoded_bytes {
             ProcessRequest {
-                owner,
+                owner: Some(owner),
                 command: {
                     let mut cmd = Command::new("sh");
                     cmd.args(["-c", &cmd_string])
@@ -1075,7 +1075,7 @@ impl MailcapEntry<'_> {
             }
         } else {
             ProcessRequest {
-                owner,
+                owner: Some(owner),
                 command: {
                     let mut cmd = Command::new("sh");
                     cmd.args(["-c", &cmd_string])
@@ -2786,7 +2786,7 @@ text/html; less; needsterminal;
             else {
                 panic!("Unexpected UIEvent: {process_request:?}");
             };
-            assert_eq!(reply_owner, owner);
+            assert_eq!(reply_owner, Some(owner));
             assert_eq!(command.get_program(), "sh");
             let args: Vec<&str> = command
                 .get_args()
@@ -2826,7 +2826,7 @@ text/html; less; needsterminal;
             else {
                 panic!("Unexpected UIEvent: {process_request:?}");
             };
-            assert_eq!(reply_owner, owner);
+            assert_eq!(reply_owner, Some(owner));
             assert_eq!(command.get_program(), "sh");
             let args: Vec<&str> = command
                 .get_args()
@@ -2865,7 +2865,7 @@ text/html; less; needsterminal;
             else {
                 panic!("Unexpected UIEvent: {process_request:?}");
             };
-            assert_eq!(*reply_owner, owner);
+            assert_eq!(*reply_owner, Some(owner));
             assert_eq!(command.get_program(), "sh");
             let args: Vec<&str> = command
                 .get_args()
@@ -2893,7 +2893,7 @@ text/html; less; needsterminal;
             else {
                 panic!("Unexpected UIEvent: {process_request:?}");
             };
-            assert_eq!(reply_owner, owner);
+            assert_eq!(reply_owner, Some(owner));
             assert_eq!(command.get_program(), "sh");
             let args: Vec<&str> = command
                 .get_args()
@@ -2931,7 +2931,7 @@ text/html; less; needsterminal;
             else {
                 panic!("Unexpected UIEvent: {process_request:?}");
             };
-            assert_eq!(*reply_owner, owner);
+            assert_eq!(*reply_owner, Some(owner));
             assert_eq!(command.get_program(), "sh");
             let args: Vec<&str> = command
                 .get_args()

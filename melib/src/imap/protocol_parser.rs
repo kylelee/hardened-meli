@@ -316,7 +316,7 @@ impl ResponseCode {
             )
         } else if val.starts_with(b"UNSEEN") {
             Self::Unseen(
-                usize::from_str(&String::from_utf8_lossy(
+                u32::from_str(&String::from_utf8_lossy(
                     val.find(b"]")
                         .and_then(|end| val.get(b"UNSEEN ".len()..end))
                         .unwrap_or(b"0".as_slice()),
@@ -2331,7 +2331,7 @@ fn ctl(input: &[u8]) -> IResult<&[u8], u8> {
 
 pub fn generate_envelope_hash(mailbox_path: &str, uid: &UID) -> EnvelopeHash {
     let mut h = DefaultHasher::new();
-    h.write_usize(*uid);
+    h.write_usize(*uid as usize);
     h.write(mailbox_path.as_bytes());
     EnvelopeHash(h.finish())
 }

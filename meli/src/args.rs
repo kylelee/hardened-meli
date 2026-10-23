@@ -122,6 +122,10 @@ pub enum SubCommand {
         #[structopt(value_name = "INPUT", parse(from_os_str))]
         path: PathBuf,
     },
+    /// Run a local MCP (Model Context Protocol) server on stdio for AI
+    /// agents. Read-only by default; mutations are enabled in the meli
+    /// configuration (see meli.conf(5)).
+    Mcp,
 }
 
 #[derive(Debug, StructOpt)]
@@ -242,6 +246,7 @@ impl Opt {
         }
         Some(match self.subcommand? {
             SubCommand::View { .. } => { return None ; }
+            SubCommand::Mcp => subcommands::mcp(),
             SubCommand::TestConfig { path } => {
                 subcommands::test_config(path)
             }

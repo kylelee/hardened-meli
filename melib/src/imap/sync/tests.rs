@@ -181,6 +181,124 @@ fn test_imap_sync_sqlite3_count_envelopes() {
 
 #[cfg(feature = "sqlite3")]
 #[test]
+fn test_imap_sync_sqlite3_lastseenuid_cache_miss_resets_max_uid() {
+    // Upstream `8bf479b4`: when the `envelopes` table yields no
+    // `MAX(uid)` (cache miss) while the `mailbox` row still holds a stale
+    // `max_uid`, the stale value must be reset: the next incremental sync
+    // must not trust a baseline whose cached envelopes are gone.
+    use crate::{backends::MailboxHash, imap::*, utils::sqlite3::rusqlite};
+
+    let (tempdir, uid_store, mut value) = sqlite3_cache_handle();
+    let mailbox_hash = MailboxHash::from(b"test".as_slice());
+    value
+        .init_mailbox(mailbox_hash, &SelectResponse::default())
+        .unwrap();
+
+    // Cache envelopes with uids 1..=3; `insert_envelopes` reconciles
+    // `max_uid` to the cached maximum.
+    let fetches: Vec<_> = (1..=3)
+        .map(|uid| {
+            fetch_response_for(
+                uid,
+                &healthy_envelope(&format!("lastseenuid-cache-miss-{uid}")),
+            )
+        })
+        .collect();
+    value.insert_envelopes(mailbox_hash, &fetches).unwrap();
+    assert_eq!(value.lastseenuid(mailbox_hash).unwrap(), Some(3));
+
+    let db_path = tempdir.path().join("test_header_cache.db");
+    let read_max_uid = |path: &std::path::Path| -> Option<i64> {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT max_uid FROM mailbox WHERE mailbox_hash = ?1;",
+                rusqlite::params![mailbox_hash.0 as i64],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(read_max_uid(&db_path), Some(3));
+    assert_eq!(
+        uid_store.lastseenuid.lock().unwrap().get(&mailbox_hash),
+        Some(&3)
+    );
+
+    // Cache miss: every envelope row disappears (for example quarantined or
+    // expunged) while the `mailbox` row keeps the stale `max_uid`.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "DELETE FROM envelopes WHERE mailbox_hash = ?1;",
+            rusqlite::params![mailbox_hash.0 as i64],
+        )
+        .unwrap();
+    }
+
+    // The reported baseline must drop to `None` so the caller falls back to
+    // a full sync instead of an incremental `UID FETCH 4:*` window.
+    assert_eq!(value.lastseenuid(mailbox_hash).unwrap(), None);
+    // The persisted `max_uid` must be reset, not left stale at 3.
+    assert_eq!(read_max_uid(&db_path), Some(0));
+    // The in-memory baseline must be dropped as well, or `sync()` would
+    // still take the incremental path from the stale value.
+    assert!(uid_store
+        .lastseenuid
+        .lock()
+        .unwrap()
+        .get(&mailbox_hash)
+        .is_none());
+
+    // The self-healing is stable: re-reporting the missing cache keeps the
+    // reset state and returns `None`.
+    assert_eq!(value.lastseenuid(mailbox_hash).unwrap(), None);
+    assert_eq!(read_max_uid(&db_path), Some(0));
+
+    // Same reconciliation on the `mailbox_state()` read path (upstream's
+    // second `8bf479b4` hunk): a session that arms its baseline from a
+    // stale stored `max_uid` — reachable when the quarantine flow moves the
+    // highest-UID row out of `envelopes` without touching `max_uid` — must
+    // be reconciled against `MAX(uid)` on load.
+    let mut value2 =
+        sync::sqlite3_cache::Sqlite3Cache::get(Arc::clone(&uid_store), Some(tempdir.path()))
+            .unwrap();
+    // Rebuild a cache holding uids 1..=2, then plant the quarantine shape:
+    // the stored `max_uid` still claims 5 (the pre-quarantine maximum) while
+    // the envelopes table only reaches 2.
+    let fetches2: Vec<_> = (1..=2)
+        .map(|uid| {
+            fetch_response_for(
+                uid,
+                &healthy_envelope(&format!("lastseenuid-mailbox-state-{uid}")),
+            )
+        })
+        .collect();
+    value2.insert_envelopes(mailbox_hash, &fetches2).unwrap();
+    assert_eq!(read_max_uid(&db_path), Some(2));
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE mailbox SET max_uid = 5 WHERE mailbox_hash = ?1;",
+            rusqlite::params![mailbox_hash.0 as i64],
+        )
+        .unwrap();
+    }
+    // `value2` has not loaded this mailbox's state yet (`insert_envelopes`
+    // does not populate the loaded-state memo), so `mailbox_state()` must
+    // perform the full read and reconcile.
+    assert!(value2.mailbox_state(mailbox_hash).unwrap().is_some());
+    // The stale `max_uid` 5 must be reset to the envelopes maximum 2, and
+    // the in-memory baseline must carry the reconciled value.
+    assert_eq!(read_max_uid(&db_path), Some(2));
+    assert_eq!(
+        uid_store.lastseenuid.lock().unwrap().get(&mailbox_hash),
+        Some(&2)
+    );
+    _ = tempdir.close();
+}
+
+#[cfg(feature = "sqlite3")]
+#[test]
 fn test_imap_sync_sqlite3_status_migration() {
     use crate::{
         backends::{IsSubscribedFn, MailboxHash},
@@ -773,7 +891,7 @@ fn test_imap_sync_sqlite3_poison_row_isolated() {
     for (i, env) in healthy_envs.iter().chain(poison_envs.iter()).enumerate() {
         fetches.push(FetchResponse {
             uid: Some(i as UID + 1),
-            message_sequence_number: i + 1,
+            message_sequence_number: i as UID + 1,
             modseq: None,
             flags: None,
             body: None,
@@ -964,7 +1082,7 @@ fn test_imap_sync_sqlite3_all_rows_poison_no_reset() {
     for (i, env) in poison_envs.iter().enumerate() {
         fetches.push(FetchResponse {
             uid: Some(i as UID + 1),
-            message_sequence_number: i + 1,
+            message_sequence_number: i as UID + 1,
             modseq: None,
             flags: None,
             body: None,
@@ -1062,7 +1180,7 @@ fn test_imap_sync_sqlite3_healthy_rows_unchanged() {
     for (i, env) in healthy_envs.iter().enumerate() {
         fetches.push(FetchResponse {
             uid: Some(i as UID + 1),
-            message_sequence_number: i + 1,
+            message_sequence_number: i as UID + 1,
             modseq: None,
             flags: None,
             body: None,
@@ -1165,7 +1283,7 @@ fn fetch_response_for(
 ) -> crate::imap::FetchResponse<'static> {
     crate::imap::FetchResponse {
         uid: Some(uid as crate::imap::UID),
-        message_sequence_number: uid,
+        message_sequence_number: uid as crate::imap::UID,
         modseq: None,
         flags: None,
         body: None,

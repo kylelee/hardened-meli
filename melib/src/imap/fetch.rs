@@ -681,20 +681,13 @@ impl FetchState {
                     // `NonZeroU32` rejects 0 (RFC 3501 §2.3.1.1:
                     // uid ranges are positive) and the `UID SEARCH`
                     // parser only yields positive values, so the only
-                    // failure modes are an unexpected 0 (server bug) or
-                    // a UID above `u32::MAX` (also a server bug); both
-                    // are surfaced as `ErrorKind::Bug`.
+                    // remaining failure mode is an unexpected 0 (server
+                    // bug); it is surfaced as `ErrorKind::Bug`. UIDs are
+                    // `u32`, so nothing above `u32::MAX` is representable.
                     let nz: Vec<NonZeroU32> = to_fetch
                         .iter()
                         .map(|&uid| {
-                            let v = u32::try_from(uid).map_err(|_| {
-                                Error::new(format!(
-                                    "IMAP UID {uid} does not fit in u32 (u32::MAX); server \
-                                     returned an out-of-range UID"
-                                ))
-                                .set_kind(ErrorKind::Bug)
-                            })?;
-                            NonZeroU32::new(v).ok_or_else(|| {
+                            NonZeroU32::new(uid).ok_or_else(|| {
                                 Error::new("IMAP UID 0 returned by server").set_kind(ErrorKind::Bug)
                             })
                         })
@@ -938,7 +931,7 @@ impl FetchState {
         let Ok(cached_env_count) = uid_store.count_envelopes(mailbox_hash) else {
             return false;
         };
-        if cached_env_count.unwrap_or(0) >= self.last_select_exists {
+        if cached_env_count.unwrap_or(0) >= self.last_select_exists as usize {
             return false;
         }
         // The deficit is only actionable when it sits below `lastseenuid`:

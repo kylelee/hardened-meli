@@ -276,7 +276,7 @@ impl ImapConnection {
         // and never rebuild the mailbox.
         let cache_covers_recorded_messages =
             match (cached_status, self.uid_store.count_envelopes(mailbox_hash)?) {
-                (Some((Some(messages), _, _)), Some(count)) => count == messages,
+                (Some((Some(messages), _, _)), Some(count)) => count == messages as usize,
                 _ => true,
             };
         match (parsed_status, cached_status) {
@@ -365,7 +365,8 @@ impl ImapConnection {
         let observed_uidnext = status_uidnext.unwrap_or(select_response.uidnext);
         let deficit_unrecoverable =
             observed_uidnext == 0 || observed_uidnext <= lastseenuid.saturating_add(1);
-        if cached_env_count.unwrap_or(0) < select_response.exists && deficit_unrecoverable {
+        if cached_env_count.unwrap_or(0) < select_response.exists as usize && deficit_unrecoverable
+        {
             // Only after a full rebuild has been triggered once for this
             // mailbox this session may the guard accept the retrievable
             // set: some servers (Coremail / 网易 163) report an `EXISTS`
@@ -791,7 +792,8 @@ impl ImapConnection {
         let cached_env_count = self.uid_store.count_envelopes(mailbox_hash)?;
         let deficit_unrecoverable = select_response.uidnext == 0
             || select_response.uidnext <= lastseenuid.saturating_add(1);
-        if cached_env_count.unwrap_or(0) < select_response.exists && deficit_unrecoverable {
+        if cached_env_count.unwrap_or(0) < select_response.exists as usize && deficit_unrecoverable
+        {
             // Session-scoped rebuild memo, same rationale as
             // `resync_basic`: some servers (Coremail / 网易 163) report an
             // `EXISTS` larger than the retrievable set. Only after the
@@ -1313,9 +1315,9 @@ impl ImapConnection {
         }
         let msn_index_vec: Vec<Option<UID>> = {
             let max_msn = msn_index.keys().next_back().copied().unwrap_or(0);
-            let mut v = vec![None; max_msn.saturating_add(1)];
+            let mut v = vec![None; max_msn as usize + 1];
             for (msn, uid) in &msn_index {
-                if let Some(slot) = v.get_mut(*msn) {
+                if let Some(slot) = v.get_mut(*msn as usize) {
                     *slot = Some(*uid);
                 }
             }
@@ -1417,7 +1419,9 @@ impl ImapConnection {
             {
                 let mut counters = counters.lock().unwrap();
                 counters.total.clear();
-                counters.total.set_not_yet_seen(select_response.exists);
+                counters
+                    .total
+                    .set_not_yet_seen(select_response.exists as usize);
             }
         }
         if select_response.exists == 0 {

@@ -10,6 +10,7 @@ Rust workspace for **meli**, a terminal e-mail client. CI runs on Gitea Actions 
 - `meli-test/`, `melib-test/` — integration test suites of `meli`/`melib` as standalone crates driven by `cargo test`.
 - Every test in the workspace (unit and integration) runs via `tokio-test`; `rusty-fork` is gone from the workspace — tests that rewrite process-global environment variables serialize on a shared per-crate lock instead of forking.
 - `cve/` — security CVE workspace: the CVE research reports (`SECURITY-CVE-RESEARCH*.md`) and the crate scaffolding for CVE-driven regression tests targeting `meli`/`melib`.
+- `SKILL.md` — AI-agent skill (`url-trust`): scores the trustworthiness of a URL lifted from e-mail content with a weighted lexical rule set; returns a confidence in the (0, 1) open interval.
 
 ## Commands
 

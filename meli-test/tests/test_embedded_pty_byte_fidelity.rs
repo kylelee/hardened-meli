@@ -234,8 +234,10 @@ fn embedded_pty_grid_renders_scripted_vt_output_and_forwards_keys() {
     }
 
     write_exec(&script, &vt_script(expected.len()));
-    let command = format!("{} {}", script.display(), log.display());
-    let pty = create_pty(80, 20, &command).expect("create_pty spawns the scripted child");
+    // The trampoline passes each element as one argv word, so the two
+    // path arguments survive verbatim even if they contain spaces.
+    let command = vec![script.display().to_string(), log.display().to_string()];
+    let pty = create_pty(80, 20, command).expect("create_pty spawns the scripted child");
 
     // The grid renders the pinned content; poll for the READY marker (the
     // child only prints it after `stty raw -echo` took effect, i.e. after

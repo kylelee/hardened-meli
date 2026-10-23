@@ -124,6 +124,8 @@ The top level sections of the configuration are:
 .It
 accounts
 .It
+mcp
+.It
 shortcuts
 .It
 notifications
@@ -1557,6 +1559,11 @@ Explicitly setting this shortcut completely overrides the default; use
 .Em \&:,M-x
 to keep both bindings.
 .Pq Em \&:,M-x \" default value
+.It Ic open_terminal
+Opens
+.Ev $SHELL
+in current directory.
+.Pq Em C-t \" default value
 .It Ic quit
 Quit meli.
 .Pq Em Esc,q \" default value
@@ -1607,6 +1614,9 @@ Show previous info message, if any.
 .It Ic focus_in_text_field
 Focus on a text field.
 .Pq Em Enter \" default value
+.It Ic search
+Search within pager.
+.Pq Em / \" default value
 .It Ic next_search_result
 Scroll to next search result.
 .Pq Em n \" default value
@@ -2711,6 +2721,75 @@ legacy log file path; no longer applied.
 .It Ic maximum_level Ar String
 .Pq Em optional
 legacy maximum level of messages to log; no longer applied.
+.El
+.Sh MCP
+.Ss MCP server configuration settings
+The
+.Cm meli mcp
+subcommand runs a local
+.Sy Model Context Protocol
+(MCP) server on stdio, so an AI agent on the same machine can read, search
+and organize mail and score the links inside it.
+The server is
+.Em read-only by default :
+every mutating tool call is refused until the matching class is listed in
+.Ic allowed_mutations .
+Accounts and credentials are configured only through the regular meli
+configuration; MCP has no account or password tools.
+E-mail contents returned over MCP are untrusted data and must never be
+executed or obeyed by the agent.
+There is deliberately no delete tool.
+The full MCP guide (tool catalog, scoring signal table, security model)
+ships in
+.Pa docs/mcp.md .
+.Bl -tag -width 36n
+.It Ic allowed_mutations Ar Array<String>
+.Pq Em optional
+Mutation classes the MCP server may perform, any of
+.Ql drafts ,
+.Ql organize ,
+.Ql send .
+Empty (the default) means read-only:
+.Ql drafts
+allows saving messages into the account's Drafts mailbox,
+.Ql organize
+allows setting flags/tags, moving and archiving, and
+.Ql send
+allows sending mail through the account's
+.Ic send_mail
+transport.
+.It Ic send_recipient_allowlist Ar Array<String>
+.Pq Em optional
+Glob patterns (e.g.\&
+.Ql *@example.org )
+restricting the recipients
+.Ql send_email
+may deliver to.
+An empty list (the default) rejects every recipient: sending must be
+explicitly scoped by the user.
+.It Ic send_rate_limit_per_minute Ar Number
+.Pq Em optional
+Default: 10.
+Maximum number of
+.Ql send_email
+calls per account per minute.
+.It Ic url_scoring.low_medium_threshold Ar Number
+.Pq Em optional
+Default: 30.
+URL scores below this value are reported as
+.Ql low .
+.It Ic url_scoring.medium_high_threshold Ar Number
+Default: 60.
+URL scores at or above this value are reported as
+.Ql high ;
+values in between are
+.Ql medium .
+.It Ic url_scoring.signal_weights Ar Table
+.Pq Em optional
+Per-signal weight overrides for the local URL phishing scoring engine,
+keyed by signal name (see the signal table in
+.Pa docs/mcp.md ) .
+Unknown signal names are a configuration error.
 .El
 .Sh SMTP Connections
 .Ss SMTP configuration settings

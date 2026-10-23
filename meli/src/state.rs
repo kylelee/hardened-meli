@@ -50,7 +50,7 @@ use melib::{
     backends::{
         AccountHash, BackendEvent, BackendEventConsumer, Backends, RefreshEvent, RefreshEventKind,
     },
-    utils::datetime,
+    utils::{datetime, shellexpand::ShellExpandTrait as _},
 };
 use smallvec::SmallVec;
 
@@ -344,7 +344,7 @@ impl Context {
             realized: IndexMap::default(),
             unrealized: IndexSet::default(),
             temp_files: Vec::new(),
-            current_dir: std::env::current_dir().unwrap(),
+            current_dir: std::env::current_dir().unwrap().expand(),
             children: IndexMap::default(),
             cmd_buf: None,
 
@@ -475,7 +475,7 @@ impl Drop for State {
             .map(|(i, v)| (std::rc::Rc::new(i), v))
             .flat_map(|(i, v)| v.into_iter().map(move |v| (i.clone(), v)))
             .filter_map(|(id, mut child)| {
-                if let Err(err) = child.try_wait() {
+                if let Err(err) = child.try_wait(&mut None) {
                     Some((id, child, err))
                 } else {
                     None
@@ -492,6 +492,40 @@ impl Drop for State {
         // When done, restore the defaults to avoid messing with the terminal.
         self.screen.switch_to_main_screen();
     }
+}
+
+/// Resolve a `cd` command argument to an absolute target path.
+///
+/// Expands `~` and environment variables, resolves relative arguments
+/// against the session's current directory, and canonicalizes the result
+/// when it exists on disk (symlink and `..` resolution) — falling back to
+/// the plain joined path otherwise, so callers can report a precise
+/// "does not exist" error for it.
+fn resolve_cd_target(input: &str, current_dir: &Path) -> PathBuf {
+    let mut dir = Path::new(input).expand();
+    if dir.is_relative() {
+        let joined = current_dir.join(&dir);
+        dir = joined.canonicalize().unwrap_or(joined);
+    }
+    dir
+}
+
+/// Whether `dir` refers to an existing directory.
+///
+/// `try_exists` distinguishes "does not exist" from errors such as
+/// permission denied on an ancestor, which plain `exists()` folds into
+/// `false`.
+fn is_existing_directory(dir: &Path) -> bool {
+    matches!(dir.try_exists(), Ok(true)) && dir.is_dir()
+}
+
+/// Point a spawned `ProcessRequest` command at the session's current
+/// directory.
+///
+/// Children must run where the session's `pwd` reports; otherwise
+/// shell-outs observe a different filesystem position than the user.
+fn apply_session_cwd(command: &mut std::process::Command, context: &Context) {
+    command.current_dir(&context.current_dir);
 }
 
 impl State {
@@ -609,7 +643,7 @@ impl State {
                 realized: IndexMap::default(),
                 unrealized: IndexSet::default(),
                 temp_files: Vec::new(),
-                current_dir: std::env::current_dir()?,
+                current_dir: std::env::current_dir()?.expand(),
                 children: IndexMap::default(),
                 cmd_buf: None,
                 input_thread: InputHandler {
@@ -1177,11 +1211,80 @@ impl State {
                 );
             }
             ChangeCurrentDirectory(dir) => {
-                self.context.current_dir = dir;
-                self.show_display_message(self.context.current_dir.display().to_string());
+                let dir = resolve_cd_target(&dir, &self.context.current_dir);
+                if !is_existing_directory(&dir) {
+                    self.context.replies.push_back(UIEvent::Notification {
+                        title: None,
+                        source: None,
+                        body: format!(
+                            "Directory {} does not exist or is not a directory",
+                            dir.display()
+                        )
+                        .into(),
+                        kind: Some(NotificationType::Info),
+                    });
+                } else if let Err(err) = std::env::set_current_dir(&dir)
+                    .map_err(Error::from)
+                    .chain_err_related_path(&dir)
+                {
+                    self.context.replies.push_back(UIEvent::Notification {
+                        title: Some("Could not change directory".into()),
+                        source: None,
+                        kind: Some(NotificationType::Error(err.kind)),
+                        body: err.to_string().into(),
+                    });
+                } else {
+                    self.context.current_dir = dir;
+                    self.show_display_message(format!(
+                        "Changed directory to: {}",
+                        self.context.current_dir.display()
+                    ));
+                }
             }
             CurrentDirectory => {
                 self.show_display_message(self.context.current_dir.display().to_string());
+            }
+            Terminal(command) => {
+                // Interactive shell session over the real terminal: the
+                // `spawn` interaction channel below kills the input thread,
+                // hands the tty to the child and restores the interface
+                // when it exits. With `owner: None` the request's
+                // completion resizes and redraws the screen instead of
+                // delivering a result to a component.
+                use std::process::Stdio;
+
+                let mut cmd = if let Some(command) = command {
+                    let mut cmd = std::process::Command::new("sh");
+                    cmd.args(["-c", &command]);
+                    cmd
+                } else {
+                    std::process::Command::new(
+                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+                    )
+                };
+                cmd.stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .current_dir(self.context.current_dir.clone());
+                self.rcv_event(UIEvent::ProcessRequest(Box::new(ProcessRequest {
+                    owner: None,
+                    command: cmd,
+                    spawn: Some(Default::default()),
+                    // Surface spawn failures (e.g. a `$SHELL` that does not
+                    // exist) instead of silently flashing back to the
+                    // interface; a successful session stays silent.
+                    result_cb: ProcessResultFn(Box::new(|output| {
+                        output.err().map(|err| {
+                            Box::new(UIEvent::Notification {
+                                title: None,
+                                source: None,
+                                body: format!("Could not launch terminal: {err}").into(),
+                                kind: Some(NotificationType::Error(ErrorKind::External)),
+                            }) as Box<_>
+                        })
+                    })),
+                    temporary_files: vec![],
+                })));
             }
             Mailbox(account_name, op) => {
                 if let Some(account) = self
@@ -1596,6 +1699,17 @@ impl State {
                 self.message_box.show_next();
                 return;
             }
+            UIEvent::Input(ref key)
+                if self
+                    .context
+                    .settings
+                    .shortcuts
+                    .general
+                    .open_terminal
+                    .contains(key) =>
+            {
+                return self.exec_command(Action::Terminal(None));
+            }
             UIEvent::Notification {
                 ref title,
                 source: _,
@@ -1634,10 +1748,12 @@ impl State {
                     result_cb,
                     temporary_files,
                 } = *process_request;
+                apply_session_cwd(&mut command, &self.context);
                 tracing::trace!(
-                    "Executing: {:?} {:?}",
+                    "Executing: {:?} {:?} in {:?}",
                     command.get_program(),
-                    command.get_args().collect::<Vec<_>>()
+                    command.get_args().collect::<Vec<_>>(),
+                    self.context.current_dir
                 );
                 let content = if let Some(spawn_fn) = spawn {
                     // Kill input thread so that spawned command can be sole receiver of stdin
@@ -1691,18 +1807,23 @@ impl State {
                 if let Some(content) = content {
                     if content.is::<UIEvent>() {
                         self.rcv_event(*content.downcast::<UIEvent>().unwrap());
-                    } else {
+                        return;
+                    } else if let Some(owner) = owner {
                         self.rcv_event(UIEvent::IntraComm {
                             from: owner,
                             to: owner,
                             content,
                         });
+                        return;
                     }
                 }
-                // The temporary files must not be deleted before the process
-                // has run and its result callback has completed; drop them
-                // here, together with the handled request.
+                // No owner, so set ourselves dirty. The temporary files must
+                // not be deleted before the process has run and its result
+                // callback has completed; drop them here, together with the
+                // handled request.
                 drop(temporary_files);
+                self.screen.update_size();
+                self.render();
                 return;
             }
             _ => {}
@@ -1803,23 +1924,34 @@ impl State {
     /// - `Some(false)` if the child is still running.
     pub fn try_wait_on_main_child(&mut self) -> Option<bool> {
         let child = self.child.as_mut()?;
-        match child.try_wait() {
+        let mut event = None;
+        let ret = match child.try_wait(&mut event) {
             Ok(false) => Some(false),
             ws @ Ok(true) | ws @ Err(_) => {
                 if let Err(err) = ws {
-                    tracing::error!("{}", err);
-                }
-                if matches!(child, ForkedProcess::Embedded { .. }) {
-                    // The check on whether the embedded process is alive is done on input, so
-                    // forward an input of '\0' to get the embedded terminal to notice its
-                    // child is dead.
-                    // [ref:TODO]: replace with a "PidExited" event or similar.
-                    self.rcv_event(UIEvent::EmbeddedInput((Key::Null, vec![0])));
+                    if event.is_none() {
+                        self.context.replies.push_back(UIEvent::Notification {
+                            title: Some("Could not wait on child process".into()),
+                            source: None,
+                            body: format!(
+                                "{id} pid {pid}: {err}",
+                                id = child.id(),
+                                pid = child.pid()
+                            )
+                            .into(),
+                            kind: Some(NotificationType::Error(err.kind)),
+                        });
+                    }
                 }
                 self.child = None;
                 Some(true)
             }
+        };
+        if let Some(event) = event {
+            self.context.replies.push_back(event);
         }
+
+        ret
     }
 
     /// Try waiting on `self.child` or `self.context`'s children.
@@ -1828,22 +1960,28 @@ impl State {
             for (id, children) in self.context.children.iter_mut() {
                 let mut i = 0;
                 while i < children.len() {
-                    match children[i].try_wait() {
+                    let mut event = None;
+                    match children[i].try_wait(&mut event) {
                         Ok(false) => {
                             i += 1;
                         }
                         ws @ Ok(true) | ws @ Err(_) => {
                             if let Err(err) = ws {
-                                tracing::error!(
-                                    "Child {}:{:?} could not be waited for: {}",
-                                    id,
-                                    children[i],
-                                    err
-                                );
+                                if event.is_none() {
+                                    tracing::error!(
+                                        "Child {}:{:?} could not be waited for: {}",
+                                        id,
+                                        children[i],
+                                        err
+                                    );
+                                }
                             }
                             tracing::trace!("Child {}:{:?} has exited.", id, children[i]);
                             children.remove(i);
                         }
+                    }
+                    if let Some(event) = event {
+                        self.context.replies.push_back(event);
                     }
                 }
             }
@@ -1901,5 +2039,109 @@ impl State {
     pub fn pulse(&mut self) {
         self.check_accounts();
         self.redraw();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let base = temp.path().to_path_buf();
+        std::fs::create_dir(base.join("sub")).unwrap();
+        std::fs::write(base.join("file.txt"), b"\n").unwrap();
+        (temp, base)
+    }
+
+    #[test]
+    fn test_resolve_cd_target_relative_against_session_dir() {
+        let (_temp, base) = scratch();
+        // An existing relative argument resolves against the session's
+        // current directory, not the process cwd or its parent.
+        assert_eq!(
+            resolve_cd_target("sub", &base),
+            base.join("sub").canonicalize().unwrap()
+        );
+        // `..`-forming arguments collapse to the expected directory.
+        assert_eq!(
+            resolve_cd_target("sub/..", &base),
+            base.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_cd_target_absolute_untouched() {
+        let (_temp, base) = scratch();
+        let abs = base.join("sub");
+        assert_eq!(
+            resolve_cd_target(abs.to_str().unwrap(), &base),
+            std::path::PathBuf::from(abs.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_resolve_cd_target_missing_falls_back_unnormalized() {
+        let (_temp, base) = scratch();
+        // A nonexistent target keeps the resolved-but-uncanonicalized path
+        // so the rejection message names it precisely.
+        assert_eq!(resolve_cd_target("nope", &base), base.join("nope"));
+    }
+
+    #[test]
+    fn test_resolve_cd_target_file_path_is_canonicalized() {
+        let (_temp, base) = scratch();
+        // `canonicalize` succeeds for files too; rejection is the caller's
+        // (validation) job, not resolution's.
+        assert_eq!(
+            resolve_cd_target("file.txt", &base),
+            base.join("file.txt").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_cd_target_tilde_expansion() {
+        let _env = crate::utilities::tests::env_lock();
+        let (temp, base) = scratch();
+        std::env::set_var("HOME", &base);
+        assert_eq!(resolve_cd_target("~", &base), base.clone());
+        assert_eq!(resolve_cd_target("~/sub", &base), base.join("sub"));
+        drop(temp);
+    }
+
+    #[test]
+    fn test_is_existing_directory() {
+        let (_temp, base) = scratch();
+        assert!(is_existing_directory(&base.join("sub")));
+        assert!(!is_existing_directory(&base.join("file.txt")));
+        assert!(!is_existing_directory(&base.join("nope")));
+        // A dangling symlink must not pass as an existing directory.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("nope"), base.join("dangling")).unwrap();
+            assert!(!is_existing_directory(&base.join("dangling")));
+        }
+    }
+
+    #[test]
+    fn test_context_current_dir_is_expanded_and_absolute() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let ctx = crate::Context::new_mock(&temp);
+        assert!(ctx.current_dir.is_absolute());
+        // The `Context::new_mock` constructor derives locations from the
+        // environment; it holds the env lock itself.
+        assert_eq!(ctx.current_dir, std::env::current_dir().unwrap().expand());
+    }
+
+    #[test]
+    fn test_process_request_command_runs_in_session_dir() {
+        // The `ProcessRequest` arm forwards the session's current directory
+        // to every spawned child via `apply_session_cwd`; assert that
+        // wiring against a real `Context`.
+        let temp = tempfile::TempDir::new().unwrap();
+        let ctx = crate::Context::new_mock(&temp);
+        let mut command = std::process::Command::new("true");
+        apply_session_cwd(&mut command, &ctx);
+        assert_eq!(command.get_current_dir(), Some(ctx.current_dir.as_path()));
     }
 }

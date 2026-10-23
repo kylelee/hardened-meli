@@ -124,6 +124,14 @@ Print log directory location.
 Testing tools such as IMAP, ManageSieve, SMTP shells for debugging.
 .It Cm view
 View mail from input file.
+.It Cm mcp
+Run a local MCP (Model Context Protocol) server on stdio for AI agents:
+read/search/organize tools plus a local, offline URL phishing scorer.
+Read-only by default; mutations and sending are enabled in the
+configuration file (see the
+.Sx MCP
+section of
+.Xr meli.conf 5 ) .
 .El
 .Sh DESCRIPTION
 .Nm
@@ -564,6 +572,18 @@ captures all input as text input, and is exited with
 .Cm Esc
 key.
 .El
+.sp
+Additionally, you can put
+.Nm
+in the background with
+.Aq Ctrl-Z
+or launch a new shell session in the current directory of the
+.Nm
+process with the
+.Cm terminal
+command or the
+.Shortcut Ctrl-t general open_terminal
+shortcut.
 .Sh COMMAND
 .Ss Mail listing commands
 .HorizontalRule
@@ -760,6 +780,30 @@ Inspect all mailboxes of an account, subscribed or not.
 Pressing the
 .Shortcut Enter general open_entry
 shortcut allows you to rename, move, toggle subscription and delete the mailbox under the cursor.
+.It Cm terminal Oo Ar EXECUTABLE Oo Ar ARGS Oc Oc
+Launch a
+.Ev $SHELL
+process or the provided executable and arguments in the current directory of the
+.Nm
+process.
+By exiting the shell you will return to
+.Nm Ns
+\&.
+If no arguments are provided this is equivalent to the
+.Shortcut Ctrl-t general open_terminal
+shortcut.
+.It Cm cd Ar Path
+Change current directory of the
+.Nm
+process.
+The path is tilde-expanded and resolved against the current directory,
+and it must be an existing directory; otherwise the current directory is
+left unchanged and a notification is shown.
+Spawned commands subsequently run in this directory.
+.It Cm pwd
+Print current directory of the
+.Nm
+process.
 .El
 .Sh EXIT STATUS
 .Nm

@@ -38,6 +38,204 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 
 ## Sync log
 
+
+## 2026-10-23 (UTC+8)
+
+- Method: closing accounting (task S11; makes the `1ada94c3..3b543312` **full-sync** claim auditable — every one of the 120 commits now has a row either here or in the S1–S10 blocks above; verdicts from three parallel scout reports with file:line evidence on both sides, plus follow-up checks)
+- Accounting kinds: `ported-earlier` (already landed in the 2026-10-20 session without a ledger row), `COVERED` (fork has an equivalent or stronger implementation), `SKIP-UI` (fork ships its own UI architecture), `SKIP-DIVERGED` (porting would regress a deliberate fork design), `SKIP-cosmetic` (comment/clippy/docs churn on fork-diverged shapes)
+
+| Upstream commit | Verdict | Notes |
+| --- | --- | --- |
+| `0d63a4f3` | ported-earlier | SMTP AUTH LOGIN bare-write + flush, in `cae8f93e4` (2026-10-20) |
+| `a7fab116` | ported-earlier | SMTP OAUTHBEARER + capability negotiation, in `cae8f93e4` |
+| `5e6cd019` | ported-earlier | BDAT space + pipeline drain, in `cae8f93e4` |
+| `1cbc4618` | ported-earlier | RCPT accepts 251, in `cae8f93e4` |
+| `6e5d5554` + `c2a70993` + `53900afb` | ported-earlier | v0_9_0 SmtpAuth password/token-command migrations + is_applicable fine-tune, in `639096cac` |
+| `02c40650` | ported-earlier | vCard multi-value fields, in `f7d48b199` |
+| `1e66d41e` | COVERED | SMTP auth test — fork's `melib-test/tests/smtp` auth suite is a superset (530/LOGIN fail-no-leak/PLAIN/OAUTHBEARER + no-token-leak branches) |
+| `468f7f76` | COVERED | slice-indexing guard — fork's `smtp.rs` uses bounds-guarded `&ret[i..i+3]` + `.get(..3)` with the same chain_err_summary |
+| `139af09e` | COVERED | binarymime-requires-chunking gate exists (incl. dedicated mock test) |
+| `28635485` | COVERED | BDAT wire format pinned by byte-exact test assertions |
+| `799a5913` | COVERED | send_command flushes at tail; DATA/BDAT termination flushed |
+| `8b8fbbde` | COVERED | `SmtpExtensionSupport::validate()` verbatim + warn-log call site + unit test |
+| `ed0c84d3` | COVERED | all 8 extension fields already `pub` |
+| `0f19405d` | COVERED | reply code in error details + fork adds ErrorKind mapping |
+| `89b51d84` | COVERED | no unused vars remain; pipelining drain rewritten without them |
+| `90317fca` | COVERED | pipelining test ported + fork extras (rcpt-rejection texts) |
+| `6897f044` | COVERED | mock `ServerState` extensions incl. auth/disable flags (superset) |
+| `31bb8173` | COVERED | mock server on tracing; `eprintln!` count zero |
+| `53d7784b` | SKIP-DIVERGED | test-structure refactor only; fork's tokio_test entry is equivalent |
+| `4f0e2613` | SKIP-DIVERGED | mock over `Connection` — fork mock stays raw `Async<TcpStream>` with tracing + redaction already |
+| `7dbe25fb` | COVERED | jscontact `Link`/`LinkType`/`LinkKind` + vcard conversion integration |
+| `fe34a9df` | COVERED | jscontact type surface is a superset (Nickname/Note/Author beyond upstream) |
+| `8b1ada34` | COVERED | `From<Card>` round-trip superset incl. multi-value backfill + tests |
+| `bb47d9b5` | SKIP-cosmetic | rustdoc/unused-code churn on the fork-diverged jscontact module |
+| `edeedfef` | SKIP-DIVERGED | upstream's destructive Card→JSContact storage migration + 464-line data migration + UI rewrite; fork keeps native Card with a full JSContact interop layer (equal interoperability, no user-data migration) |
+| `752de8e6` | COVERED | `load_cards()` accepts single files (with non-UTF-8 graceful degradation) |
+| `e155009f` | COVERED | contact search covers nicknames/organizations/keywords + tests |
+| `e08ebb60` | COVERED | corrupted-database path is single-call + match (no unwrap); graceful-error test |
+| `24cd0ffa` | COVERED | errno at target version; libc one patch behind (lock freshness only) |
+| `277b9995` | COVERED | workspace already on rusqlite 0.40 (this sync fixed the last usize-ToSql latent site, see S8) |
+| `4af30c36` + `52b4e0b8` | COVERED | rusty-fork removal + test-utils cleanup predate upstream (fork-wide per-crate lock model) |
+| `cf7b10cd` | COVERED | quit command and shortcut share the single `can_quit_cleanly` gate |
+| `ba9b6a35` | SKIP-DIVERGED | Synchronized Output DEC 2026 — fork deliberately rejects the probe (test-pinned: late replies stall the input parser) |
+| `a66a1d81` | SKIP-UI | theme key for the form widget |
+| `121e7f94` | SKIP-UI | FormWidget generic refactor |
+| `8eb120f3` | SKIP-UI | ComposeEvent removal |
+| `b568d84e` | SKIP-UI | UIEvent::cloned helper |
+| `6fd02aa0` | SKIP-UI | event_interest plumbing |
+| `6062855a` | SKIP-UI | ContactBackendStatusChange event |
+| `da608345` | SKIP-UI | DictField set support (keywords editing) |
+| `9aa89256` | SKIP-UI | quit_confirmation setting (fork's layered quit: double-key + can_quit_cleanly chain) |
+| `1edf8ab2` | SKIP-UI | component_states |
+| `e413c046` | SKIP-UI | FormWidget::height |
+| `c3c1f4e2` | SKIP-UI | OverlayComponent trait |
+| `4b4581b4` | SKIP-UI | autocomplete module move |
+| `6c3e794a` | SKIP-UI | contact import dialog (melib prerequisite already covered) |
+| `ef136970` | SKIP-UI | open_entry help text |
+| `f146d61c` | SKIP-UI | box ViewMode components |
+| `225e91c6` | SKIP-UI | form shortcuts tidy |
+| `a423b042` | SKIP-UI | dialog cursor methods |
+| `de4b005b` | SKIP-UI | form padding |
+| `2a775ca5` | SKIP-UI | Selector highlighted_attrs |
+| `6d6463c8` | SKIP-UI | default Component methods |
+| `c3270209` | SKIP-UI | dialog catch-all scrolling |
+| `344c9d04` | SKIP-UI | compose form focus |
+| `4330d49e` | SKIP-UI | delete-confirmation dialog |
+| `e6caa857` | SKIP-UI | pager title field |
+| `3695d8b0` | SKIP-cosmetic | background-query rename |
+| `defbaa09` | SKIP-UI | Screen::set_color_scheme call |
+| `ab8f2129` | SKIP-cosmetic | trace-log removal on fork-diverged terminal code |
+| `5c3dac99` | SKIP-cosmetic | man COMMAND-shortcuts table — fork's COMMAND line is rewritten (palette/history); copying upstream's table would misdocument |
+| `243c4509` | SKIP-cosmetic | rustdoc footnote warning fix |
+| `e8d4a2be` | SKIP-cosmetic | smtp comment formatting |
+| `d2a3689c` + `4a3956c0` + `435bab2a` + `7814078f` + `1cd88abf` + `1dd52e9d` + `2d1bb5fd` | SKIP-cosmetic | obsolete TODO/VERIFY comment and clippy-allow removals on fork-diverged shapes |
+
+## 2026-10-23 (UTC+8)
+
+- Method: integration patch (task S10; 类型适配收尾, no upstream commit — S8/S9/S1 的集成补丁 over main@`b4d8a3703`)
+- Upstream range: none (integration patch; 16 test files under `cve/src/` + `meli-test/tests/`, zero product-code changes)
+- Conflicts: n/a — test-only
+- Semantic alignments (expectation flips follow the new production semantics, no assertion weakened): ① S9 RFC 3977 §6 article-number gate — NNTP 文章号 0 与 > 2^31-1 由「解析成功」改为「拒绝」(CVE-2018-14361 语料 `zero`/`usize-max` 条目翻转为 Err、定长宽度扫描镜像 `u32` parse + 范围门, 合法上界降到 2^31-1); ② IMAP 合法 UID 上界 `usize::MAX` → `u32::MAX` (CVE-2018-14358: 原 `usize::MAX` 载荷改判 typed ProtocolError, 新增 `u32::MAX+1` 紧邻边界用例); ③ MSN 饱和目标 `usize::MAX` → `u32::MAX` (CVE-2003-0302/CVE-2018-14358/CVE-2020-9818; STATUS 计数最大可表示值同理, CVE-2018-14351); ④ S6 `test_config` canonicalize 前置门 — 缺配置文件的错误链由「Configuration error/预处理器」包装变为裸 `OS error 2` + `Related path` (meli-test `test_cli_subcommands` 期望文本按当前实际输出对齐, 仍 exit 1 fail-closed); ⑤ S2/S6 在 `state.rs` 落了两处合法 `Command::new` (Terminal 臂 `sh -c`/`$SHELL` 回退 + `#[cfg(test)]` cwd 探针), CVE-2026-73570 census 0→3 并新增「通知 display 串不得进 state.rs」断言, 原不变量 (display 登记串永不回执行) 保持锁死
+- Stale source anchors re-pinned to the new production text: `num_string.parse::<u32>()` + `if num > i32::MAX as u32 {` + `std::num::NonZeroU32::new(num)` + `if !num_string.bytes()…is_ascii_digit` (CVE-2018-14361 L3)、`h.write_usize(*uid as usize);` (CVE-2018-14362 L5)、`pub type ImapNum = u32` (CVE-2018-14356 L2 两处)、`counters.{total,unseen}.set_not_yet_seen({total,unseen});` (CVE-2018-14351)、`pub type UID` 定义面注释 (CVE-2018-14356 模块文档)
+- Type adaptations (值不变): UID/UIDVALIDITY/MSN/STATUS 计数 `usize` 字面量与循环下标换 `u32`/`as u32` (CVE-2020-9818/CVE-2003-0302/CVE-2018-14351/14358/14362/14363/CVE-2021-44026/CVE-2026-33369/35537/48842/110249)、NNTP uid `NonZeroU32` 比较改 `.get()`/`nz()` 助手 (CVE-2018-14361/CVE-2026-110249)、`create_pty(80, 20, &command)` → `Vec<String>` argv `vec![script, log]` 逐字传参 (meli-test `test_embedded_pty_byte_fidelity`)
+- Verification: `cargo test --workspace --all-features --no-run` 编译零错误; `cargo test -p cve --all-features` **1433/1433** (与 main 基线等值, 修复前 1428+5 失败); `cargo test -p meli-test --all-features` **39/39** 全部测试目标; `cargo clippy -p cve -p meli-test --all-features -- -D warnings` 零警告; `cargo fmt --check` 差异文件集合与 main 基线完全一致 (stable rustfmt, 既有 nightly-vs-stable 差异, 零新增)
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S2 of the `1ada94c3..3b543312` range, terminal command + open_terminal shortcut)
+- Upstream range: `b7b75cc8` only
+- Conflicts: none textual; semantic adaptations listed per row (fork-kept deviations: `Terminal` rides the fork's existing `ProcessRequest` + `SpawnInteractionFn` interactive spawn channel instead of upstream's inherited-stdio exec arm — the observable behavior (kill input thread → tty to child → restore + redraw via the S1 owner-`None` branch) is the same; `$SHELL` unset falls back to `/bin/sh` instead of upstream's error notification, and spawn failures surface through a result-callback notification; the meli.1 MODES Ctrl-Z background-suspend clause is kept as upstream — fork's main loop implements the same `Ctrl-Z` SIGSTOP self-suspend for non-Embedded modes)
+- Verification: `cargo build`, `cargo test -p meli --lib` **671/671** (incl. new `test_command_parser_terminal`, `test_command_completion_terminal_entry`, `test_conf_general_open_terminal_shortcut_default`; golden `shortcuts_help_overlay` re-recorded for the new shortcut row), `cargo clippy -p meli --all-features -- -D warnings`, `cargo fmt --check` file set identical to main baseline. Baseline note: picked up main's `96f875a03` (identical u32 test-signature fix) so the suite compiles
+
+| Upstream commit | Port/Skip | Type | Notes |
+| --- | --- | --- | --- |
+| `b7b75cc8` | port | feat(command, terminal) | `Action::Terminal(Option<String>)`; `terminal` parser in fork's per-arm `arg_init!` style (`&[u8]` winnow, whole-line command like `pipe`, no-arg → `Terminal(None)`); command-palette entry; `ProcessResultFn` gains `Default` (as upstream); state arm builds `ProcessRequest { owner: None, spawn: Some(Default::default()), result_cb: Default::default() }` with `SHELL` (fallback `/bin/sh`) or `sh -c <line>`, `cwd = context.current_dir` (fork addition over upstream), stdio inherited; `open_terminal` general shortcut defaults `C-t` (`ShortcutKeys::single`); Input arm triggers `Terminal(None)`; result callback reports spawn failures (fork hardening over upstream's silent default); docs meli.1 (MODES pointer + COMMAND entry; upstream's cd/pwd doc lines belong to task S6) + meli.conf.5 |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S3 of the `1ada94c3..3b543312` range, embedded terminal dirty bitmap)
+- Upstream range: `83c7889c` only
+- Conflicts: none textual. Fork-kept deviations: `CellBuffer::buf`/`cellvec`/`cellvec_mut`, `Area`/`ScreenGeneration` and the PUA width handling are untouched; `EmbeddedGrid::set_terminal_size` keeps its `(cols, rows)` tuple signature (the upstream two-arg signature change in `embedded.rs`/`pager.rs` is API-only and was not applied). The dirty bitmap is purely additive. Rendering adaptation: the embedded branch no longer has its own full-area clear before copying (the component-level `self.dirty` clear is handled by the follow-up fix below) and resizes the grid before reading the bitmap, so the per-row copy is actually incremental (upstream cleared the full area and its `set_dirty(false)` re-filled the bitmap, which degenerated to a full copy); `EmbeddedGrid::set_dirty(false)` acknowledges/clears the bitmap instead.
+- Accounting kinds: see the notes column
+- Baseline prerequisite: `meli/src/accounts/tests.rs` cold-start fixture adapted (`&uid` → `&(uid as u32)`) as in main `96f875a03`; without it the `usize`→`u32` UID port already merged in this base makes the lib test target fail to compile, unrelated to this task
+- Verification: `cargo test -p meli --lib` **673 passed / 3 failed** (the 3 are the known environment-only failures: `mail::compose::tests::embedded_compose_editor_byte_matrix_roundtrip` and `mail::compose::tests::embedded_editor_exit_notification_carries_stderr` fail because the sandbox denies `/dev/ptmx` with `EACCES`; `sqlite3::tests::test_sqlite3_reindex` fails with SQLite `CannotOpen`); golden/snapshot tests unchanged, including the 2 new dirty-copy tests. `cargo clippy -p meli --all-features -- -D warnings` passed. `cargo fmt --check -p meli` (stable rustfmt; no writable nightly toolchain in this sandbox) reports only pre-existing nightly-vs-stable diffs — no new formatting diff in the touched files.
+- LOW footgun (review): `CellBuffer::buf` is `pub`, and `DerefMut`/`cellvec_mut()` expose mutable cell access that bypasses `DirtyBitmap`; the current embedded path only uses `buffer()`/`copy_area`, so it has no bypass point today. The `set_and_join_{vert,horz,box_corner}` helpers also mutate cells without marking the bitmap, but are used only by the main grid, never by `EmbeddedGrid`. Any future direct `buf`/`cellvec_mut()` write on an embedded grid would silently break incremental copy.
+- Fix follow-up (review, HIGH): the incremental copy was defeated by the component-level `if self.dirty` block in `Composer::draw`, which clears the whole component area (every terminal row in embedded mode) before the embedded branch. `UIEvent::ConfigReload` sets `self.dirty` without a size change, so `set_terminal_size` early-returns and the bitmap only reported the rows the pty had re-dirtied; cleared rows the pty did not touch stayed blank (vim visible only on the cursor row). Chosen fix (a): gate the embedded branch on `self.dirty || embedded_pty.is_dirty()` and call `guard.grid.set_dirty(true)` before reading `dirty_areas()`, propagating the component dirty semantics into the grid bitmap so the frame is a full copy and `self.dirty` is consumed. Rejected (b) (skip the header/clear block in embedded mode) because it leaves `self.dirty` set forever when the pty has no new output (persistent `is_dirty()`/redraws) and depends on the block staying dead code; (a) keeps the existing flag lifecycle. Non-embedded header drawing and the main-screen render pipeline are untouched. Pinned by `incremental_dirty_copy_matches_full_copy_only_on_intact_destination` and `component_dirty_forces_full_repaint_through_incremental_copy`, plus the existing bitmap tests.
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `83c7889c` | port | `DirtyBitmap` row-major cell bitmap on `CellBuffer` (hooks in `copy_area`/`write_string`/`clear_area`/`change_colors`/`change_theme`/`scroll_*`/`IndexMut`/`resize`/`clear`/`empty`, `dirty_areas()` returns merged inclusive `(start, end)` spans per row); `EmbeddedGrid::{dirty_areas,buffer_mut}` and `set_dirty` bitmap sync; the composer copies only dirty spans and pushes those spans as dirty flush areas; unit tests cover single/multi-row writes, interval merging across a word boundary without cross-row bleed, clear/reset/resize, and end-to-end `process_byte` partial writes on the embedded grid |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S6 of the `1ada94c3..3b543312` range, cd/current-dir hardening)
+- Upstream range: `8cf35137`, `0229a1c4`, `42bff4b3`
+- Conflicts: fork-kept deviations — cd resolution expands via the fork's `ShellExpandTrait::expand()` (`~` + `$VAR`) because the fork has no upstream's `expand_tilde`; relative `cd` arguments resolve against `context.current_dir` itself instead of upstream's `current_dir.parent()` join (upstream's join sends a plain `cd sub` to a sibling directory and `cd ..` two levels up — semantically wrong, so not ported verbatim); `create-config` deliberately not canonicalized since its target is expected to not exist yet; baseline adaptation — Wave1's S8 (IMAP UID `usize`→`u32`) left `accounts/tests.rs::cold_start_cached_mails` calling `generate_envelope_hash` with `&usize` (E0308 on base, blocks the whole `--lib` test compile): folded into this feature commit as a `&(uid as u32)` call-site cast rather than a prep commit, noted here
+
+| Upstream commit | Port/Skip | Type | Notes |
+| --- | --- | --- | --- |
+| `8cf35137` | port | feat(meli/state) | `ChangeCurrentDirectory` holds the raw `String`; the state arm expands, resolves, validates (`try_exists` + `is_dir`) and only then switches — an invalid target pushes an `Info` notification and keeps the old directory, a failed `set_current_dir` pushes an `Error` notification; resolution/validation extracted into unit-tested helpers `resolve_cd_target`/`is_existing_directory` |
+| `0229a1c4` | port | fix(meli/state) | `Context::current_dir` expanded (`.expand()`) at both init sites; `ProcessRequest` arm sets `command.current_dir(&self.context.current_dir)` so spawned children run in the displayed session directory (fork previously left them in the startup cwd, diverging from `pwd`) and the exec trace logs the directory |
+| `42bff4b3` | port | fix(meli/subcommands) | `test_config`/`view`/`tool` canonicalize the user-supplied path (failure chained with `chain_err_related_path`) so a later cwd change cannot invalidate an open target; `view` existence check via `try_exists`; `conf.rs::get_config_file` borrows instead of moving (`PathBuf::from(&path)`) |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S9 of the `1ada94c3..3b543312` range, NNTP UID)
+- Upstream range: `4110a0ff` only
+- Conflicts: none (fork-kept deviations: `over_article`'s early ASCII-digit fail-fast guard retained; hash construction already used the raw string bytes, so no hash-input change was needed)
+- Accounting kinds: see the notes column
+
+| Upstream commit | Port/Skip | Type | Notes |
+| --- | --- | --- | --- |
+| `4110a0ff` | port | refactor(melib/nntp) | `UID` `usize`→`NonZeroU32`: `over_article` now parses the article number as `u32` and rejects 0 and values > 2^31-1 as `nom::Err::Failure` (RFC 3977 §6 range); `NntpOp.uid: UID`; sqlite store params use explicit `uid.get()` (rusqlite 0.40). Hash compatibility: fork's `over_article` already hashed the raw article-number string bytes + Message-ID bytes (same as upstream) → **COVERED**, golden-value test pins the env hash to the legacy formula (SipHash-1-3 keys (0,0) = 9367683063824860863 for the fixture line), cache keys stay valid |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S8 of the `1ada94c3..3b543312` range, IMAP UID type)
+- Upstream range: `1ada94c3..3b543312` (`dcec9887`, `8bf479b4` + `042bb21d` decision)
+- Conflicts: fork-kept deviations — cache pagination stays count-typed (`batch_size: usize`, fork's cache-first paging untouched per non-goals); `MessageSequenceNumberMap` does not exist in the fork (upstream's hunk there n/a); panic-path `SequenceSet::try_from(..).unwrap()` deduplicated into `uids_to_sequence_set()` helper with let-else call sites instead of upstream's duplicated blocks; NNTP untouched (parallel task S9)
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `dcec9887` | port | refactor(melib/imap) | `ImapNum`/`UID`/`UIDVALIDITY`/`MessageSequenceNumber` usize→u32 (rusqlite 0.40 dropped `usize: ToSql`; the `sqlite3_cache.rs` `params![env_lastseenuid]` breakpoint disappears since `Option<u32>` implements `ToSql`); mechanical sweep across fetch/protocol_parser/sync/{mod,cache,sqlite3_cache}/watch/connection/untagged + tests (1-based MSN from `enumerate`, msn vec index casts, counters `as usize`); `ResponseCode::Unseen` parses `u32`; `generate_envelope_hash` via `write_usize(uid as usize)`; `copy_messages`/`set_flags`/`delete_messages` UID→`NonZeroU32` conversion collapsed (no more `u32::try_from` hop, "UID exceeded u32" error branch is unrepresentable); empty-uids `SequenceSet::try_from(..).unwrap()` panic path replaced by `uids_to_sequence_set()` returning `Ok(None)` on empty (let-else no-op at call sites, upstream semantics). Regression: `uids_to_sequence_set` rejects 0, accepts full u32 range incl. `u32::MAX`, empty → no-op |
+| — | `8bf479b4` | port | fix(melib/imap/sqlite3_cache) | cache miss resets max_uid: `lastseenuid()` now compares the envelopes-table `MAX(uid)` against the mailbox-table `max_uid` unconditionally and resets `max_uid` to 0 when the envelopes table is empty (the old `if let (Some(env_lastseenuid), true)` pattern left the stale baseline and the next incremental sync trusted a nonexistent `UID FETCH <stale+1>:*` window); in-memory `uid_store.lastseenuid` entry removed on miss, and the same compare-and-reset ported on the `mailbox_state()` read path (fork's analogue of upstream's init-side hunk): reachable fork path — the quarantine flow moves rows out of `envelopes` without touching `max_uid`, so a session arming its baseline from the stored `max_uid` (sync reads the in-memory map) would drive `UID FETCH <stale+1>:*` and permanently skip the missing rows; reconcile on load resets it (fork's `init_mailbox` resets `max_uid` by construction via DELETE+cascading INSERT, so only the read path needed the port). Regression: `test_imap_sync_sqlite3_lastseenuid_cache_miss_resets_max_uid` covering both the cache-miss and the stale-highest-UID-quarantine `mailbox_state()` shapes (fails without the fix, red-green verified) |
+| — | `042bb21d` | **SKIP** | refactor(melib/imap) | UID → `NonZero<u32>`: deliberately deferred per sync decision; this task only lands the `usize`→`u32` step; `uids_to_sequence_set()` already funnels all `NonZeroU32` conversions for the later cutover |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S1 of the `1ada94c3..3b543312` range, embedded terminal / subprocess chain)
+- Upstream range: `1ada94c3..3b543312` (the five embedded/ProcessRequest commits only)
+- Conflicts: none textual; semantic adaptations are listed per row (fork-kept deviations: synchronous ProcessRequest execution in `State`, tracing logging, `find_sh_path` hardening, per-arm `arg_init!` command parsing untouched)
+- Verification: `cargo build`, `cargo test -p meli --lib` **662/662** (incl. new `sh_trampoline_args_*` ×3, `stderr_capture_tests` ×3, `embedded_editor_exit_notification_carries_stderr` e2e), `cargo clippy -p meli --all-features -- -D warnings`
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| `e45a74872` | `f9e8ce82` | port | feat(types, ProcessRequest): `owner` → `Option<ComponentId>`; `State` handler gains the `None` branch (no `IntraComm` delivery, temporary files dropped, `update_size`); fork's StatusBar has no `ProcessRequest` construction (upstream's `utilities.rs` hunk not applicable); mailcap tests assert `Some(owner)` |
+| `6f13938e9` | `f69ad24b` | port | feat(terminal, embedded): child stderr → dedicated `pipe()` instead of the pty; fork goes beyond upstream's `[ref:TODO]`: a per-pty drain thread continuously empties the pipe into a bounded `StderrCapture` (4 KiB, head-kept, `STDERR_CAPTURE_LIMIT`), so a chatty child can never block on a full pipe; exit + SIGTERM notifications carry `stderr: <content>`; `Terminal::new` signature extended; 3 drain unit tests |
+| `fe8207680` | `588c2341` | port | feat(state, ForkedProcess): `Embedded` gains `on_exit: OnExitNotifyFn`; `try_wait(&mut Option<UIEvent>)` forwards the wait status as `UIEvent::IntraComm` to the owning component; the `Key::Null` `EmbeddedInput` hack in `try_wait_on_main_child` is deleted (notification instead when no event was produced); fork keeps its EIO write-failure probe but both detection paths converge on the new shared `Composer::process_wait`; e2e regression test asserts the exit notification carries the child's stderr and the `on_exit` → `IntraComm` wiring; review hardening: the `Exited` and Ctrl-C-on-stopped arms tolerate an already-reaped pty (log + cleanup) instead of unwrapping |
+| `7c0ff6a6a` | `71123f33` | port | refactor(terminal, create_pty): `command: &str` → `Vec<String>`; the `sh -c '<bin> "$@"' <bin> <args…>` trampoline is assembled once inside `create_pty` (`sh_trampoline_args`, matching the fork's non-embedded editor shape) instead of upstream's caller-side pre-wrap; argument paths (draft file, editor arguments) reach the child verbatim through the quoted `"$@"`; the program word stays interpolated unquoted (whitespace-free requirement, same as non-embedded `composing.editor_command`); empty-command `ValueError`; 3 pure-function unit tests |
+| `55df8a0c3` | `6d88d6a7` | port | fix(state, ProcessRequest): owner-less requests redraw immediately (`render()` after `update_size()`) |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S4 of the `1ada94c3..3b543312` range)
+- Upstream range: `1ada94c3..3b543312` (Pipe/PipeAttachment whole-line-command commits only)
+- Conflicts: none taken on `ProcessRequest.owner` (task S1 owns its Option-ization; both sites here keep the fork's plain `ComponentId`) and none on the `cd` cluster (task S6)
+- Accounting kinds: see the notes column
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `ae26e8db` | port | fix(meli/command, mail/view) | `PipeAttachment(usize, String, Vec<String>)` → `PipeAttachment { index, command }`: `pipe-attachment INDEX COMMAND` takes the whole rest of the line (`not_line_ending`, mid-line CR/LF still rejected) so pipes/quotes/spacey paths ride into `sh -c`; execution runs `sh -c` via the fork's existing `ProcessRequest`+`SpawnInteractionFn`+`result_cb` channel (fork's `EnvelopeViewMessage::PipeAttachmentExit` notification path kept); ported upstream's reordering so `index == 0` pipes the whole mail without `open_attachment`'s attachment-kind filter and its spurious not-found notification; parser tests for whole-line/quote/pipe forms and kept arg-count errors |
+| — | `a2569faf` | port | refactor(meli/command, utilities) | `Pipe(String, Vec<String>)` → `Pipe { command }`: same whole-line parse for `pipe COMMAND`; the pager's synchronous `Command::new(bin).args(args)` spawn replaced by the fork's `ProcessRequest` async channel (`sh -c`, stdin piped, stdout/stderr inherited — the old piped-but-unread stdout deadlock face is gone), broken-pipe writes (e.g. `head -1`) reported through `result_cb` instead of panicking; shared `ProcessRequest::shell_command` constructor keeps both call sites' spawn parameterization in one tested place; completion desc `pipe EXECUTABLE ARGS` → `pipe COMMAND`; CVE-2025-49113 regression corpus adapted to the typed whole-line action |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S5 of the `1ada94c3..3b543312` range, small fixes batch)
+- Upstream range: `1ada94c3..3b543312` (this task: `ad6f2b68`, `d2470aa8`, `eec57247`, `8180e9c2`, `e4b5d4d1`, `2bb886ee`, `a5d5e862`, `ef05916a`)
+- Conflicts: none (fork-kept deviations: byte-input command parsers with fork `argcheck` convention, `ShortcutKeys` binding type instead of bare `Key`, fork's `CmdInput`+`ChangeMode` command-input chain, `server_password_command` config format in tests, `PASSED` flag keeps its `$passed` keyword mapping). Intentional behavior change for the release notes: the help/shortcuts panel search trigger key moved from `listing.search` (`/` or `F3`) to `general.search` (`/` only), so a user remap of `listing.search`'s `F3` no longer opens the help-panel search)
+- Accounting kinds: see the SKIP notes in the table
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `ad6f2b68` | port | feat(command) \| `help` command as alias for `man meli.7`: new `parser::help` arm (fork's `arg_init!`/`arg_chk!` byte-parser style, `ManPages::Guide`, `CommandError::Other` when built without `cli-docs`), member of the `new_tab` alt chain, `define_commands!` palette entry; tests: parse `help`/whitespace/no-arg-count/no-shadowing |
+| — | `d2470aa8` | port | feat(shortcuts) \| `general.search` (`/`) shortcut so pager search entry no longer borrows `listing.search`: `GeneralShortcuts` field, `Tabbed` shortcuts view reads `GENERAL`, `Pager` arm opens command mode via the fork's `CmdInput(Key::Paste("search "))`+`ChangeMode(Command)` chain (not upstream's bare `CmdInput`), `meli.conf.5` entry; `listing.search` default (`/`+`F3`) untouched; tests: default value, TOML override, listing default intact |
+| — | `eec57247` | port | fix(keys) \| `parse_key` accepts any single-character string: the single-char check counts `chars()` instead of bytes in the catch-all arm, so multi-byte characters (`é`,`你`,`🦀`) deserialize to `Key::Char`; multi-character strings and `M-é` still error with the fork's `Err(format!(..))` message; tests in `test_key_serde`/`test_shortcut_keys_serde` |
+| — | `8180e9c2` | port | chore(ci) \| `actions/cache` v4→v6 in `build.yaml`/`lints.yaml`/`manifest_lints.yaml`; `if: cache-hit != 'true'` guards dropped from the cache-save steps (v6 saves unconditionally and idempotently); setup-step guards kept, matching upstream |
+| — | `e4b5d4d1` | port | test(cli) \| `meli-test/tests/test_cli_subcommands.rs` gains `test_subcommand_config_file`: `create-config <file>` success (content equals `FileSettings::EXAMPLE_CONFIG`), re-create rejected, `test-config <file>` fails on the sample config then passes after appending an `[accounts.imap]` block (fork's `server_password_command` form), and missing-file error; assertion texts captured from this fork's actual output (fork error-chain rendering differs from upstream) |
+| — | `2bb886ee` | port | refactor(melib/jmap) \| deduplicate the `Flag`→JMAP keyword matches in `set_flags` behind a private `const fn keyword_from_flag(Flag) -> Option<&'static str>`; behavior frozen at the fork's semantics (`PASSED` still maps to `$passed`; upstream's simultaneous "$passed is not used in JMAP" change is not adopted) |
+| — | `a5d5e862` | SKIP | melib ToggleFlag `internal_true`/`internal_false` constructors: the fork has no `#[serde(default = "ToggleFlag::…")]` call sites, adding them would be dead code |
+| — | `ef05916a` | SKIP-UI | conf/terminal use of the ToggleFlag default constructors: fork's `TerminalSettings::default` sets the fields with explicit `ToggleFlag::InternalVal(…)` literals and has no named default functions to convert |
+
+## 2026-10-23 (UTC+8)
+
+- Method: per-commit semantic port (task S7 of the `1ada94c3..3b543312` range, shortcut config overrides)
+- Conflicts: none at the text level; upstream's `Context::{general,listing,…}_shortcuts` method layer is deliberately not ported (fork resolves overrides via the `account_settings!`/`mailbox_settings!` macros on its whole-struct `ShortcutsOverride` model, `meli/src/conf/overrides.rs` is @generated); `conf/shortcuts.rs` key definitions untouched (S5 touches them in parallel)
+
+| Local commit | Upstream commit | Type | Notes |
+| --- | --- | --- | --- |
+| — | `3b543312` | port | fix(meli) | Respect shortcut config overrides (upstream #226), 11 sites switched from global `context.settings.shortcuts` reads to override-aware resolution: the four listing kinds' `Component::shortcuts` (`compact.rs`/`plain.rs`/`conversations.rs`/`listing/thread.rs`) and `Listing::shortcuts`' LISTING section (which used to overwrite the children's maps with the global one) now resolve `mailbox_settings!` (mailbox → account → global, `context has` guard so still-loading accounts don't panic); `Listing::process_event` keeps a focused child's own GENERAL section and otherwise resolves the open mailbox's override (upstream's `contains_key` guard); `ContactList` (`contacts/list.rs`), `AccountMailboxManager` (`manage/mailboxes.rs`) and `AccountStatus` (`mail/status.rs`) resolve account-level `contact_list`/`general` via `account_settings!`. Account-agnostic components keep the global reads with a comment, matching upstream which passes `None` (global) for them too: `Pager`, `Tabbed`, `UIDialog`/`UIConfirmationDialog`, `JobManager`. COVERED (fork already override-aware, upstream's diff there was a mechanical refactor onto its new Context methods): `mail/compose.rs` + `compose/edit_attachments.rs` (`account_settings!`), `mail/view/thread.rs` + `mail/view.rs` + `mail/view/state.rs` (`mailbox_settings!` for thread_view/envelope_view), listing `commands` dispatch in `mail/listing.rs` (guarded `mailbox_settings!`); `utilities/listings.rs` has no fork equivalent. NOT ported: upstream's 682-line `Context::{general,listing,composing,envelope_view,thread_view,contact_list,pager}_shortcuts`/`*_commands` layer and per-field `Option<Key>` `*ShortcutsOverride` structs — under the fork's whole-struct override model an override block replaces the whole section (unset fields take the hardcoded defaults, not the global values), which is the fork's pre-existing config semantics, unchanged here; fork-specific quit pre-arm reads (`utilities.rs`, `mail/listing.rs`) stay on global settings (no upstream counterpart). Regression test `mail::listing::listing_menu_tests::listing_shortcuts_respect_config_overrides` (red before the fix, green after). KNOWN GAP (review follow-up): the `general.scroll_*` fallbacks in `mail/compose.rs` and `compose/edit_attachments.rs` still read the global settings (`context.settings.shortcuts.general.scroll_{right,left}`), while upstream `3b543312` resolves them through the now account-aware GENERAL shortcut map with the global read only as the final fallback — minor, not ported here. OVERRIDE-MODEL NOTE (review follow-up): the fork's override model replaces a whole section (`ShortcutsOverride` holds `Option<CompleteSection>`), whereas upstream #226 merges the `general` section field-by-field; the net effect matches in the "global customization + account defaults" scenario, but the semantics differ — in the fork, fields left unset inside an override block take the hardcoded defaults, not the global values |
+
 ## 2026-10-20 (UTC+8)
 
 - Method: per-commit semantic port (task T6 of the `1ada94c3..1e66d41e` range, conf preprocessing)
@@ -348,4 +546,14 @@ kept tree-identical to this repository at each publish).
 - Identity unification: `611ada51` re-authored post-pick to Kyle Lee <kylelee@users.noreply.github.com> (sign-off rewritten, author name kept); new-range author/committer/sign-off verified unique
 - Hard gate: `git diff` against this fork's `main` tip = **0** (tree-identical, re-verified on the published tip)
 - Verification in the mirror repo: `make lint`, full `cargo test --workspace` (29 suites, 2634 tests), `cargo test -p cve` **1427/1427**, sensitive-info scan clean (new-range commit messages and both trees: no internal domains/repo names)
+- Publish: push to `origin/master` pending (fast-forward, no history rewritten; to be run from the user's shell)
+
+### 2026-10-23 (UTC+8)
+
+- Method: atomic publish — `git cherry-pick -x -X theirs c7e8d3800..0081536d0` (48 commits; 10 merge nodes skipped), one explicit `align` commit, one `--no-ff --signoff` merge to `master`
+- Outcome: **34 picks** with `-x` provenance lines + **2 empty-drops** (`d1a8582da`, `a4eddc19b` — the same baseline u32 test-signature fix already landed via `96f875a03`'s pick) + 1 align + 1 merge
+- Replay fix (align): `-X theirs` silently resolved three cross-branch spots against the linear replay context — the meli.1 `terminal` block, the `owner: Some(...)` wrapping in envelope.rs/pager.rs (the fork lands the Option-ization and the pipe rewrite on parallel branches joined by merge), and SYNC.md ledger blocks; the align commit restored the fork end-state in 4 files. Note: 19 mid-branch picks sit at the temporarily-uncompilable `owner` shape between the pipe rewrite and the align (bisect granularity only; the published tip compiles clean)
+- Identity/DCO unification: `aa6029d43` (MCP) re-authored to Kyle Lee <kylelee@users.noreply.github.com> with a DCO sign-off added (the original carried the `ai-agent` identity and no sign-off); `cb513d542` re-authored likewise, and its preserved `k@example.com` sign-off line rewritten to the noreply identity per mirror policy; all range commits verified unique-author/committer + signed-off
+- Hard gate: `git diff` against this fork's `main` tip = **0** (tree-identical, re-verified after the sign-off rewrite and on the published tip)
+- Verification in the mirror repo: `cargo build`/`cargo clippy` (`-D warnings -W unreachable-pub -W rust-2021-compatibility`) clean, `cargo fmt --check` hunk count identical to the fork baseline, full `cargo test --workspace --all-features` (**2740 passed / 0 failed**), `cargo test -p cve` **1433/1433**, sensitive-info scan clean (new-range commit messages and both trees: no internal domains/repo names/credentials; the private-IP hits are the URL-trust scoring feature's test fixtures, verified by hand)
 - Publish: push to `origin/master` pending (fast-forward, no history rewritten; to be run from the user's shell)
