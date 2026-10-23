@@ -547,3 +547,13 @@ kept tree-identical to this repository at each publish).
 - Hard gate: `git diff` against this fork's `main` tip = **0** (tree-identical, re-verified on the published tip)
 - Verification in the mirror repo: `make lint`, full `cargo test --workspace` (29 suites, 2634 tests), `cargo test -p cve` **1427/1427**, sensitive-info scan clean (new-range commit messages and both trees: no internal domains/repo names)
 - Publish: push to `origin/master` pending (fast-forward, no history rewritten; to be run from the user's shell)
+
+### 2026-10-23 (UTC+8)
+
+- Method: atomic publish — `git cherry-pick -x -X theirs c7e8d3800..0081536d0` (48 commits; 10 merge nodes skipped), one explicit `align` commit, one `--no-ff --signoff` merge to `master`
+- Outcome: **34 picks** with `-x` provenance lines + **2 empty-drops** (`d1a8582da`, `a4eddc19b` — the same baseline u32 test-signature fix already landed via `96f875a03`'s pick) + 1 align + 1 merge
+- Replay fix (align): `-X theirs` silently resolved three cross-branch spots against the linear replay context — the meli.1 `terminal` block, the `owner: Some(...)` wrapping in envelope.rs/pager.rs (the fork lands the Option-ization and the pipe rewrite on parallel branches joined by merge), and SYNC.md ledger blocks; the align commit restored the fork end-state in 4 files. Note: 19 mid-branch picks sit at the temporarily-uncompilable `owner` shape between the pipe rewrite and the align (bisect granularity only; the published tip compiles clean)
+- Identity/DCO unification: `aa6029d43` (MCP) re-authored to Kyle Lee <kylelee@users.noreply.github.com> with a DCO sign-off added (the original carried the `ai-agent` identity and no sign-off); `cb513d542` re-authored likewise, and its preserved `k@example.com` sign-off line rewritten to the noreply identity per mirror policy; all range commits verified unique-author/committer + signed-off
+- Hard gate: `git diff` against this fork's `main` tip = **0** (tree-identical, re-verified after the sign-off rewrite and on the published tip)
+- Verification in the mirror repo: `cargo build`/`cargo clippy` (`-D warnings -W unreachable-pub -W rust-2021-compatibility`) clean, `cargo fmt --check` hunk count identical to the fork baseline, full `cargo test --workspace --all-features` (**2740 passed / 0 failed**), `cargo test -p cve` **1433/1433**, sensitive-info scan clean (new-range commit messages and both trees: no internal domains/repo names/credentials; the private-IP hits are the URL-trust scoring feature's test fixtures, verified by hand)
+- Publish: push to `origin/master` pending (fast-forward, no history rewritten; to be run from the user's shell)
