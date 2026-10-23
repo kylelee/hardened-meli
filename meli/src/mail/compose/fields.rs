@@ -163,8 +163,21 @@ mod tests {
     fn run_compose_address_complete() {
         use melib::contacts::Card;
 
+        // Pin XDG: `Account::new` loads the mock account's address book
+        // from (and `Account::drop` writes it back to)
+        // `${XDG_DATA_HOME}/meli/<account>/contacts`. Without the pin those
+        // reads/writes hit the developer's real data dir, and because every
+        // `Card` gets a fresh UUID the file accumulated one duplicate per
+        // earlier run, breaking the exact-count assertions below (observed:
+        // 6 persisted + 1 added = 7 completions for "foo").
+        let _home = crate::golden::shared_test_home();
         let tempdir = tempfile::tempdir().unwrap();
         let mut context = crate::Context::new_mock(&tempdir);
+        // The shared sandbox can still hold a `meli/test/contacts` written
+        // by another mock-context account dropped earlier in this process
+        // (`cargo test` runs the suite in one process); start from a clean
+        // book so the assertions below see exactly the cards added here.
+        context.accounts[0].contacts.cards.clear();
         let card_a = Card {
             email: "foo@example.com".into(),
             ..Card::default()
