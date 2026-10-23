@@ -281,6 +281,15 @@ impl Context {
     pub fn new_mock(dir: &tempfile::TempDir) -> Self {
         use crate::conf::tests::{ConfigFile, IMAP_CONFIG};
 
+        // Hermeticity: the mock account (named "test") loads its address
+        // book in `Account::new` and writes it back in `Account::drop`,
+        // both via the XDG data dir. Pin XDG to the process-wide shared
+        // test home first, so no mock context ever reads or writes the
+        // developer's real `~/.local/share/meli/test/contacts` (unpinned
+        // callers under nextest's per-process isolation would run with the
+        // real environment).
+        let _home = crate::golden::shared_test_home();
+
         // Serialize against the environment-rewriting tests: constructing a
         // mock `Context` derives the contacts and log-file locations from
         // the current environment, which must not be another test's

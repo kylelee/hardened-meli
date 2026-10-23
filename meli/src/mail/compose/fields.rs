@@ -240,5 +240,10 @@ mod tests {
         );
         // Ensure values are not repeated
         assert_eq!(complete_fn(&context, "foo@example.com, foo"), vec![]);
+        // `Account::drop` persists the address book back to the (pinned)
+        // shared test home; clear the fixture cards first so no later
+        // mock-context test in this process (`cargo test` runs the suite
+        // in one process) can load them.
+        context.accounts[0].contacts.cards.clear();
     }
 }
