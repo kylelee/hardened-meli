@@ -124,6 +124,14 @@ Print log directory location.
 Testing tools such as IMAP, ManageSieve, SMTP shells for debugging.
 .It Cm view
 View mail from input file.
+.It Cm mcp
+Run a local MCP (Model Context Protocol) server on stdio for AI agents:
+read/search/organize tools plus a local, offline URL phishing scorer.
+Read-only by default; mutations and sending are enabled in the
+configuration file (see the
+.Sx MCP
+section of
+.Xr meli.conf 5 ) .
 .El
 .Sh DESCRIPTION
 .Nm

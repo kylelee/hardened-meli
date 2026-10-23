@@ -62,6 +62,7 @@ pub mod tags;
 #[macro_use]
 pub mod shortcuts;
 mod listing;
+pub mod mcp;
 pub mod terminal;
 mod themes;
 use default_values::*;
@@ -252,6 +253,8 @@ impl FileAccount {
 #[serde(deny_unknown_fields)]
 pub struct FileSettings {
     pub accounts: IndexMap<String, FileAccount>,
+    #[serde(default)]
+    pub mcp: mcp::MCPSettings,
     #[serde(default)]
     pub pager: pager::PagerSettings,
     #[serde(default)]
@@ -647,6 +650,7 @@ impl FileSettings {
                 .set_kind(ErrorKind::Configuration)
         })?;
         s.fixup_non_fatal();
+        s.mcp.validate()?;
         let backends = melib::backends::Backends::new();
         let Themes {
             light: default_light,
@@ -762,6 +766,7 @@ impl FileSettings {
                 .set_kind(ErrorKind::Configuration)
         })?;
         s.fixup_non_fatal();
+        s.mcp.validate()?;
         let backends = melib::backends::Backends::new();
         let Themes {
             light: default_light,
@@ -864,6 +869,7 @@ impl FileSettings {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Settings {
     pub accounts: IndexMap<String, AccountConf>,
+    pub mcp: mcp::MCPSettings,
     pub pager: pager::PagerSettings,
     pub listing: listing::ListingSettings,
     pub notifications: notifications::NotificationsSettings,
@@ -892,7 +898,7 @@ impl Settings {
         Self::from_file_settings(FileSettings::from_path(path)?)
     }
 
-    fn from_file_settings(mut fs: FileSettings) -> Result<Self> {
+    pub fn from_file_settings(mut fs: FileSettings) -> Result<Self> {
         // Logging is configured by the single startup call below. If the
         // configuration file still carries the legacy `[logging]` overrides,
         // surface a warning instead of silently ignoring them.
@@ -913,8 +919,11 @@ impl Settings {
             s.insert(id, ac);
         }
 
+        fs.mcp.validate()?;
+
         Ok(Self {
             accounts: s,
+            mcp: fs.mcp,
             pager: fs.pager,
             listing: fs.listing,
             notifications: fs.notifications,
@@ -933,8 +942,11 @@ impl Settings {
 
         crate::logging::init_log();
 
+        fs.mcp.validate()?;
+
         Ok(Self {
             accounts: IndexMap::new(),
+            mcp: fs.mcp,
             pager: fs.pager,
             listing: fs.listing,
             notifications: fs.notifications,

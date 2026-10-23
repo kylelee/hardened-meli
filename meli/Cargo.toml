@@ -84,6 +84,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
+smol = { workspace = true }
 smallvec = { workspace = true }
 structopt = { version = "0.3.26", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "signal", "sync", "time"] }

@@ -143,6 +143,11 @@ pub fn test_config(path: Option<PathOrStdio>) -> Result<()> {
     Ok(())
 }
 
+/// Entry point of `meli mcp`: serve MCP on stdio.
+pub fn mcp() -> Result<()> {
+    crate::mcp::run()
+}
+
 pub fn view(
     path: PathBuf,
     sender: Sender<ThreadEvent>,
