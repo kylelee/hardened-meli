@@ -1084,7 +1084,7 @@ impl Component for Pager {
                 context
                     .replies
                     .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
-                        owner: self.id,
+                        owner: Some(self.id),
                         command: ProcessRequest::shell_command(&command),
                         spawn: Some(SpawnInteractionFn(Box::new({
                             let command = command.clone();

@@ -2130,7 +2130,7 @@ impl Component for EnvelopeView {
                 context
                     .replies
                     .push_back(UIEvent::ProcessRequest(Box::new(ProcessRequest {
-                        owner: self.id,
+                        owner: Some(self.id),
                         command: ProcessRequest::shell_command(&command),
                         spawn: Some(SpawnInteractionFn(Box::new(move |mut child| {
                             let Some(mut stdin) = child.stdin.take() else {
