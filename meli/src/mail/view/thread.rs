@@ -3718,7 +3718,7 @@ ZHVtbXk=\r\n\
                 .expect("could not pre-create the blocking directory");
         }
 
-        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(out_dir.clone())));
+        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(out_dir)));
         assert!(
             view.process_event(&mut event, &mut ctx),
             "the export action must be consumed"

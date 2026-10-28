@@ -3164,7 +3164,7 @@ fn save_whole_mail_degenerate_message_id_gets_generated_name() {
     std::fs::create_dir(&dir).unwrap();
     let mut event = UIEvent::Action(Action::View(ViewAction::SaveAttachment(
         0,
-        FileAction::Path(dir.to_path_buf()),
+        FileAction::Path(dir.clone()),
     )));
     _ = view.process_event(&mut event, &mut ctx);
 
@@ -3227,7 +3227,7 @@ fn save_whole_mail_to_dir_sanitizes_traversal_message_id() {
     std::fs::create_dir(&dir).unwrap();
     let mut event = UIEvent::Action(Action::View(ViewAction::SaveAttachment(
         0,
-        FileAction::Path(dir.to_path_buf()),
+        FileAction::Path(dir.clone()),
     )));
     _ = view.process_event(&mut event, &mut ctx);
 

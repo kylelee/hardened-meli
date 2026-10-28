@@ -473,7 +473,7 @@ fn test_command_parser_mail_actions() {
     );
 }
 
-/// `refresh` takes an optional ACCOUNT and MAILBOX_PATH: with no arguments it
+/// `refresh` takes an optional `ACCOUNT` and `MAILBOX_PATH`: with no arguments it
 /// refreshes the current mailbox listing (unchanged), with an account it
 /// requests a refresh of the account's mailboxes, and with both it targets one
 /// specific mailbox.
