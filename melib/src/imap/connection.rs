@@ -423,7 +423,7 @@ pub struct ImapConnection {
     /// `Some`, `read_response` pushes untagged events here instead of
     /// delivering them through `add_backend_event` right away: during that
     /// window the watch itself holds the connection and its own event
-    /// sequence, so out-of-band delivery would scramble the event order or
+    /// sequence, so out-of-band delivery would break the event order or
     /// lose events. The watch drains the buffer when it leaves the
     /// critical section and forwards every event through its own stream
     /// (upstream port `c537d9d7`).
