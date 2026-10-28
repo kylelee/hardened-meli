@@ -39,6 +39,38 @@ git fetch upstream
 ## 同步记录
 
 
+## 2026-10-29 (UTC+8)
+
+- 同步方式：七个并行任务分支逐提交语义移植（`sync/imap-auth-watch`、`sync/nntp-store`、`sync/job-names`、`sync/misc-hygiene`、`sync/pathbuf-args`、`sync/refresh-cmd`、`sync/varlink-ipc`）；非 cherry-pick
+- 上游区间：`3b543312..135de3f3`（21 个提交；9 个移植、2 个已覆盖、6 个跳过-UI、4 个跳过-CI）
+- 合并提交：`7e4b55e4d`（imap-auth-watch）、`933a775fa`（nntp-store）、`53cf0838a`（job-names）、`844e3c592`（misc-hygiene）、`fba71cd78`（pathbuf-args）、`0efa79124`（refresh-cmd）、`75109cff8`（varlink-ipc；main 同步 HEAD），基线 `6efff4ab1`
+- 冲突：无
+- 记账类型：`ported`（语义移植，1:1 处给出本地提交）、`already-covered`（fork 已有等价物，仅个别文案对齐）、`skipped-UI`（fork 自有 UI 架构）、`skipped-CI`（上游 workflow 基建；fork CI 结构不同）；一处 2:1（`b137b939`+`fcfa3c2b` → `49cd8d6a4`）
+
+| 上游提交 | 结论 | 说明 |
+| --- | --- | --- |
+| `609630d8` | ported | IMAP AUTHENTICATE 多行响应（夹带 untagged CAPABILITY）循环读取至 tagged 行；`RequiredResponses::NO` → `NO_OR_BAD`（BAD 与 NO 同为可预期失败 → Authentication 错误，而非 unexpected-response 断连）；本地 `93e054c9a`——fork 既有认证多行循环回归钉死，新增 4 个回归测试（拆包 TCP 写、BAD → Authentication 错误、UNSELECT 回退收 BAD） |
+| `c537d9d7` | ported | IMAP watch：IDLE 唤醒关键区内到达的 untagged 事件改由 `ImapConnection.forward_untagged_responses` 缓冲，出区后按序转发为 RefreshEvent（推送数据与心跳 `examine_updates` 两条路径）；本地 `abe023b7e` |
+| `cfc53c5e` | ported | NNTP store：article upsert `ON CONFLICT(mailbox_hash,uid) DO UPDATE SET hash`、flags 按 (mailbox, uid) 查询——Message-ID 变化不再产生重复行或查不到 flags；2 个回归测试；本地 `75bbd1ce0` |
+| `5c9b097b` | ported | job 名加账户前缀（26 个 spawn 点 `{name}:<job>`；fetch-mailbox/refresh 携带邮箱 path）；对不存在邮箱的 `refresh` 提前返回 NotFound；`fetch-mailbox-continued` 邮箱索引守卫；本地 `d8026c1ee` |
+| `8eaf4daa` | ported | `refresh [ACCOUNT [MAILBOX_PATH]]`——0 参保持刷新当前列表行为，1 参刷新指定账户全部邮箱，2 参刷新指定邮箱；man 页、补全表、解析测试更新；本地 `b2ed16e3f` |
+| `135de3f3` | ported | varlink IPC：新增 `meli/src/varlink/`（interface/handler/server/unix/tests）；`--varlink <addr>`（unix/tcp/abstract socket、LISTEN_FDS 激活、`--varlink-replace`）；方法 Command/ServerVersion/InputKey/InputCharacter/InputPaste + 标准 org.varlink.service；`ThreadEvent::Ipc` + `ipc_jobs`（JobFinished swap_remove 守卫防误扇出）；smol 监听器跑 fork tokio 执行器；适配 fork 的 `&[u8]` 命令解析与 tracing；man 文档；本地 `d234d17d6` |
+| `23f83fe5` | ported | `FileAction::Path`/`ExportMail`/`ExportThread` String → PathBuf；fork 偏离：不引入上游 `expand_tilde`（依赖未同步的 `08561c25`，丢失 `$VAR` 展开）——保留 `.expand()`；本地 `43051f4fd` |
+| `b137b939` | ported | list_management 测试：CFWS 注释、折叠多行头、`%20` 编码保留、尾随空白（已有覆盖不重复；产品代码未动）；本地 `49cd8d6a4`（与 `fcfa3c2b` 合 2:1） |
+| `fcfa3c2b` | ported | Makefile test-docs 加 `-j1 -- --test-threads=8`；本地 `49cd8d6a4`（与 `b137b939` 合 2:1） |
+| `dac5e7b7` | already-covered | fork 的 `BytesExt::replace` 重写已免疫 to-contains-from |
+| `8ad17d01` | already-covered | fork `UID` 为普通 u32 newtype——无 NonZero 故障面；仅文案对齐（`Could not update` → `load cache`） |
+| `6ee97e3f` | skipped-UI | listing `relative_list_indices` 覆写 |
+| `0bf877dc` | skipped-UI | 对话框默认选项 |
+| `6b67c700` | skipped-UI | 滚动条计算+测试 |
+| `0fb643ea` | skipped-UI | 快捷键尺寸计算 |
+| `33e0279c` | skipped-UI | 嵌入终端脏区 |
+| `f79bd211` | skipped-UI | form 高亮主题 |
+| `810b8adc` | skipped-CI | 上游 workflow 基建；fork CI 结构不同 |
+| `ac8e1eb4` | skipped-CI | 上游 workflow 基建；fork CI 结构不同 |
+| `92eab810` | skipped-CI | 上游 workflow 基建；fork CI 结构不同 |
+| `50d949b9` | skipped-CI | 上游 workflow 基建；fork CI 结构不同 |
+
 ## 2026-10-13 20:00 (UTC+8)
 
 - 同步方式：七个并行 worktree 分支逐提交语义移植（`sync/w1-jscontact`、`sync/w1-contacts-core`、`sync/w2-carddav`、`sync/w3-jmap`、`sync/w5-smallfix`、`sync/w4-contacts-glue`、`sync/w6-backend-api`）+ main 上两个契约提交（`f0f859d`、`3e0eaab`，先行落地 `ContactBackend`/`AddressBook` 类型作共享编译基线）

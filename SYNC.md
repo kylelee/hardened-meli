@@ -39,6 +39,38 @@ After each sync, prepend a new section at the **top** of "Sync log" below (newes
 ## Sync log
 
 
+## 2026-10-29 (UTC+8)
+
+- Method: per-commit semantic port on seven parallel task branches (`sync/imap-auth-watch`, `sync/nntp-store`, `sync/job-names`, `sync/misc-hygiene`, `sync/pathbuf-args`, `sync/refresh-cmd`, `sync/varlink-ipc`); no cherry-pick
+- Upstream range: `3b543312..135de3f3` (21 commits; 9 ported, 2 already-covered, 6 skipped-UI, 4 skipped-CI)
+- Merge commits: `7e4b55e4d` (imap-auth-watch), `933a775fa` (nntp-store), `53cf0838a` (job-names), `844e3c592` (misc-hygiene), `fba71cd78` (pathbuf-args), `0efa79124` (refresh-cmd), `75109cff8` (varlink-ipc; sync HEAD on main), from baseline `6efff4ab1`
+- Conflicts: none
+- Accounting kinds: `ported` (semantically ported; local commit named where 1:1), `already-covered` (the fork has an equivalent — alignment limited to wording where noted), `skipped-UI` (the fork ships its own UI architecture), `skipped-CI` (upstream workflow infra; the fork's CI structure differs); one 2:1 (`b137b939`+`fcfa3c2b` → `49cd8d6a4`)
+
+| Upstream commit | Verdict | Notes |
+| --- | --- | --- |
+| `609630d8` | ported | IMAP AUTHENTICATE multi-line responses (interleaved untagged CAPABILITY) loop-read until the tagged line; `RequiredResponses::NO` → `NO_OR_BAD` (BAD is as expected a failure as NO → Authentication error, not an unexpected-response disconnect); local `93e054c9a` — the fork's existing auth multi-line loop pinned, 4 new regression tests (split TCP writes, BAD → Authentication error, UNSELECT fallback answered BAD) |
+| `c537d9d7` | ported | IMAP watch: untagged events arriving inside the IDLE-wakeup critical section are buffered by `ImapConnection.forward_untagged_responses` and forwarded in order as RefreshEvents once it is left (both push-data and heartbeat `examine_updates` paths); local `abe023b7e` |
+| `cfc53c5e` | ported | NNTP store: article upsert `ON CONFLICT(mailbox_hash,uid) DO UPDATE SET hash`, flags keyed by (mailbox, uid) — a Message-ID change no longer duplicates rows or orphans flags; 2 regression tests; local `75bbd1ce0` |
+| `5c9b097b` | ported | job names gain the account prefix (`{name}:<job>` at 26 spawn points; fetch-mailbox/refresh carry the mailbox path); `refresh` on a nonexistent mailbox returns NotFound up front; `fetch-mailbox-continued` mailbox-index guard; local `d8026c1ee` |
+| `8eaf4daa` | ported | `refresh [ACCOUNT [MAILBOX_PATH]]` — 0 args keep the refresh-current-list behaviour, 1 arg refreshes an account's every mailbox, 2 args one mailbox; man page, completion table, parser tests updated; local `b2ed16e3f` |
+| `135de3f3` | ported | varlink IPC: new `meli/src/varlink/` (interface/handler/server/unix/tests); `--varlink <addr>` (unix/tcp/abstract socket, LISTEN_FDS activation, `--varlink-replace`); methods Command/ServerVersion/InputKey/InputCharacter/InputPaste + standard org.varlink.service; `ThreadEvent::Ipc` + `ipc_jobs` (JobFinished swap_remove guard against mis-fanout); smol listener on the fork's tokio executor; adapted to the fork's `&[u8]` command parsing and tracing; man docs; local `d234d17d6` |
+| `23f83fe5` | ported | `FileAction::Path`/`ExportMail`/`ExportThread` String → PathBuf; fork deviation: upstream `expand_tilde` not adopted (depends on unsynced `08561c25`, drops `$VAR` expansion) — `.expand()` kept; local `43051f4fd` |
+| `b137b939` | ported | list_management tests: CFWS comments, folded multi-line headers, `%20` encoding preserved, trailing whitespace (existing fork coverage not duplicated; product code untouched); local `49cd8d6a4` (2:1 with `fcfa3c2b`) |
+| `fcfa3c2b` | ported | Makefile test-docs gains `-j1 -- --test-threads=8`; local `49cd8d6a4` (2:1 with `b137b939`) |
+| `dac5e7b7` | already-covered | the fork's `BytesExt::replace` rewrite is immune to the to-contains-from issue |
+| `8ad17d01` | already-covered | the fork's `UID` is a plain u32 newtype — no NonZero failure mode; only the message wording aligned (`Could not update` → `load cache`) |
+| `6ee97e3f` | skipped-UI | listing `relative_list_indices` override |
+| `0bf877dc` | skipped-UI | dialogs default option |
+| `6b67c700` | skipped-UI | scrollbar calculation + tests |
+| `0fb643ea` | skipped-UI | shortcut size calculation |
+| `33e0279c` | skipped-UI | embedded terminal dirty area |
+| `f79bd211` | skipped-UI | form highlight theme |
+| `810b8adc` | skipped-CI | upstream workflow infra; the fork's CI structure differs |
+| `ac8e1eb4` | skipped-CI | upstream workflow infra; the fork's CI structure differs |
+| `92eab810` | skipped-CI | upstream workflow infra; the fork's CI structure differs |
+| `50d949b9` | skipped-CI | upstream workflow infra; the fork's CI structure differs |
+
 ## 2026-10-23 (UTC+8)
 
 - Method: closing accounting (task S11; makes the `1ada94c3..3b543312` **full-sync** claim auditable — every one of the 120 commits now has a row either here or in the S1–S10 blocks above; verdicts from three parallel scout reports with file:line evidence on both sides, plus follow-up checks)
