@@ -95,6 +95,11 @@ pub enum ThreadEvent {
     /// periodically by the signal watchdog thread.
     Pulse,
     JobFinished(JobId),
+    /// A varlink IPC connection was accepted. Pure wakeup/bookkeeping: the
+    /// connection job's handle is registered in the main loop handler's
+    /// shared `ipc_jobs` table by the varlink server itself, before this
+    /// event is even sent; see `crate::varlink`.
+    Ipc,
 }
 
 impl ThreadEvent {

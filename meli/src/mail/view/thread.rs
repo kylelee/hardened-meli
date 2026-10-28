@@ -1420,7 +1420,7 @@ impl ThreadView {
             }
             UIEvent::Action(View(ViewAction::ExportThread(ref path))) => {
                 // Save entire thread as eml files in a directory path
-                let mut path = std::path::Path::new(path).to_path_buf().expand();
+                let mut path = path.clone().expand();
                 if path.is_relative() {
                     path = context.current_dir().join(&path);
                 }
@@ -1534,7 +1534,7 @@ impl ThreadView {
             }
             UIEvent::Action(View(ViewAction::ExportThreadMbox(ref format, ref path))) => {
                 // Save entire thread as eml files in a directory path
-                let mut path = std::path::Path::new(path).to_path_buf().expand();
+                let mut path = path.clone().expand();
                 if path.is_relative() {
                     path = context.current_dir().join(&path);
                 }
@@ -3659,9 +3659,7 @@ ZHVtbXk=\r\n\
 
         // Absolute path so the export cannot resolve it relative to
         // `context.current_dir()` (the shared test HOME).
-        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(
-            out_dir.display().to_string(),
-        )));
+        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(out_dir.clone())));
         assert!(
             view.process_event(&mut event, &mut ctx),
             "the export action must be consumed"
@@ -3720,9 +3718,7 @@ ZHVtbXk=\r\n\
                 .expect("could not pre-create the blocking directory");
         }
 
-        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(
-            out_dir.display().to_string(),
-        )));
+        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(out_dir)));
         assert!(
             view.process_event(&mut event, &mut ctx),
             "the export action must be consumed"
@@ -3766,9 +3762,7 @@ ZHVtbXk=\r\n\
         std::fs::create_dir(out_dir.join(thread_export_filename(root_envelope.message_id())))
             .expect("could not pre-create the blocking directory");
 
-        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(
-            out_dir.display().to_string(),
-        )));
+        let mut event = UIEvent::Action(Action::View(ViewAction::ExportThread(out_dir.clone())));
         assert!(
             view.process_event(&mut event, &mut ctx),
             "the export action must be consumed"

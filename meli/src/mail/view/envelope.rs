@@ -763,9 +763,7 @@ impl EnvelopeView {
         &self.body_text
     }
 
-    fn save_attachment(&self, a_i: usize, path: &str, context: &mut Context) {
-        let mut path = std::path::Path::new(path).to_path_buf().expand();
-
+    fn save_attachment(&self, a_i: usize, mut path: std::path::PathBuf, context: &mut Context) {
         if let Some(u) = self.open_attachment(a_i, context) {
             if path.is_dir() {
                 // The filename is mail-controlled: sanitize it into one
@@ -2013,7 +2011,7 @@ impl Component for EnvelopeView {
             }
             UIEvent::Action(View(ViewAction::ExportMail(ref path))) => {
                 // Save entire message as eml
-                let mut path = std::path::Path::new(path).to_path_buf().expand();
+                let mut path = path.clone().expand();
 
                 if path.is_dir() {
                     // The Message-ID is mail-controlled: derive the same
@@ -2053,7 +2051,7 @@ impl Component for EnvelopeView {
                 return true;
             }
             UIEvent::Action(View(ViewAction::SaveAttachment(a_i, FileAction::Path(ref path)))) => {
-                self.save_attachment(a_i, path, context);
+                self.save_attachment(a_i, path.clone().expand(), context);
                 return true;
             }
             UIEvent::Action(View(ViewAction::SaveAllAttachments)) => {
@@ -2457,9 +2455,11 @@ impl Component for EnvelopeView {
                                     )),
                                 });
                             } else {
-                                let path = String::from_utf8_lossy(paths[0]);
+                                let path = std::path::PathBuf::from(
+                                    String::from_utf8_lossy(paths[0]).as_ref(),
+                                );
                                 tracing::trace!("saving to {path:?}");
-                                self.save_attachment(a_i, &path, context);
+                                self.save_attachment(a_i, path.expand(), context);
                             }
                         }
                     },

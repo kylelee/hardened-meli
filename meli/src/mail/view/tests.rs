@@ -2288,7 +2288,7 @@ fn trigger_save_attachment(
 ) {
     let mut event = UIEvent::Action(Action::View(ViewAction::SaveAttachment(
         idx,
-        FileAction::Path(path.display().to_string()),
+        FileAction::Path(path.to_path_buf()),
     )));
     _ = view.process_event(&mut event, context);
 }
@@ -3027,6 +3027,7 @@ fn deeply_nested_rfc822_opens_without_stack_overflow() {
             let handler = MainLoopHandler {
                 job_executor: Arc::new(JobExecutor::new(sender.clone())),
                 sender,
+                ipc_jobs: Default::default(),
             };
             let mail = melib::Mail::new(nested_rfc822_mail(16000), None).unwrap();
             let view = EnvelopeView::new(mail, None, None, None, handler);
@@ -3062,6 +3063,7 @@ fn shallow_rfc822_nesting_still_renders_fully_inline() {
             let handler = MainLoopHandler {
                 job_executor: Arc::new(JobExecutor::new(sender.clone())),
                 sender,
+                ipc_jobs: Default::default(),
             };
             let mail = melib::Mail::new(nested_rfc822_mail(2), None).unwrap();
             let view = EnvelopeView::new(mail, None, None, None, handler);
@@ -3162,7 +3164,7 @@ fn save_whole_mail_degenerate_message_id_gets_generated_name() {
     std::fs::create_dir(&dir).unwrap();
     let mut event = UIEvent::Action(Action::View(ViewAction::SaveAttachment(
         0,
-        FileAction::Path(dir.display().to_string()),
+        FileAction::Path(dir.clone()),
     )));
     _ = view.process_event(&mut event, &mut ctx);
 
@@ -3225,7 +3227,7 @@ fn save_whole_mail_to_dir_sanitizes_traversal_message_id() {
     std::fs::create_dir(&dir).unwrap();
     let mut event = UIEvent::Action(Action::View(ViewAction::SaveAttachment(
         0,
-        FileAction::Path(dir.display().to_string()),
+        FileAction::Path(dir.clone()),
     )));
     _ = view.process_event(&mut event, &mut ctx);
 

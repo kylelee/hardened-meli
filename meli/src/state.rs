@@ -40,7 +40,7 @@ use std::{
     collections::BTreeSet,
     os::fd::OwnedFd,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -87,7 +87,7 @@ impl Drop for DrawSpan {
     }
 }
 use crate::{
-    jobs::{JobExecutor, Pulse},
+    jobs::{JobExecutor, JobId, JoinHandle, Pulse},
     notifications::DisplayMessageBox,
     terminal::{get_events, Screen, Tty},
 };
@@ -180,6 +180,9 @@ impl InputHandler {
 pub struct MainLoopHandler {
     pub sender: Sender<ThreadEvent>,
     pub job_executor: Arc<JobExecutor>,
+    /// Shared registry of live varlink IPC connection jobs; see
+    /// [`IpcJobs`] and `crate::varlink`.
+    pub ipc_jobs: IpcJobs,
 }
 
 impl MainLoopHandler {
@@ -188,6 +191,37 @@ impl MainLoopHandler {
         if let Err(err) = self.sender.send(event) {
             tracing::error!("Could not send event to main loop: {}", err);
         }
+    }
+}
+
+/// Shared registry of live varlink IPC connection jobs, keyed by job id;
+/// see `crate::varlink`.
+///
+/// The varlink server registers each connection job's handle here
+/// synchronously right after spawning it, and the main loop removes it when
+/// the job's `JobFinished` event arrives. Both sides operate on the same
+/// table, so the handle can never be orphaned by event reordering between
+/// the producer thread and the main loop.
+#[derive(Clone, Debug, Default)]
+pub struct IpcJobs(Arc<Mutex<IndexMap<JobId, JoinHandle<Result<()>>>>>);
+
+impl IpcJobs {
+    /// Register a connection job's handle. Called by the varlink server
+    /// right after spawning the job.
+    pub fn insert(&self, id: JobId, handle: JoinHandle<Result<()>>) {
+        self.0.lock().unwrap().insert(id, handle);
+    }
+
+    /// Take a connection job's handle when its `JobFinished` event arrives.
+    /// Returns `None` if the job is not a varlink IPC job. Entry order is
+    /// irrelevant for this table, so the cheap `swap_remove` is used.
+    pub fn remove(&self, id: &JobId) -> Option<JoinHandle<Result<()>>> {
+        self.0.lock().unwrap().swap_remove(id)
+    }
+
+    /// Whether no connection jobs are currently tracked.
+    pub fn is_empty(&self) -> bool {
+        self.0.lock().unwrap().is_empty()
     }
 }
 
@@ -328,6 +362,7 @@ impl Context {
                 MainLoopHandler {
                     job_executor: job_executor.clone(),
                     sender: sender.clone(),
+                    ipc_jobs: IpcJobs::default(),
                 },
                 BackendEventConsumer::new(Arc::new(
                     move |account_hash: AccountHash, ev: BackendEvent| {
@@ -367,6 +402,7 @@ impl Context {
             main_loop_handler: MainLoopHandler {
                 job_executor,
                 sender,
+                ipc_jobs: IpcJobs::default(),
             },
             receiver,
         }
@@ -591,6 +627,7 @@ impl State {
                         MainLoopHandler {
                             job_executor: job_executor.clone(),
                             sender: sender.clone(),
+                            ipc_jobs: IpcJobs::default(),
                         },
                         BackendEventConsumer::new(Arc::new(
                             move |account_hash: AccountHash, ev: BackendEvent| {
@@ -665,6 +702,7 @@ impl State {
                 main_loop_handler: MainLoopHandler {
                     job_executor,
                     sender,
+                    ipc_jobs: IpcJobs::default(),
                 },
                 receiver,
             }),
@@ -1316,6 +1354,69 @@ impl State {
                         source: None,
                         body: format!("Account with name `{account_name}` not found.").into(),
                         kind: Some(NotificationType::Info),
+                    });
+                }
+            }
+            AccountAction(ref account_name, AccountAction::Refresh { ref mailbox }) => {
+                let account_index = if let Some(a) = self
+                    .context
+                    .accounts
+                    .iter()
+                    .position(|(_, acc)| acc.name() == account_name)
+                {
+                    a
+                } else {
+                    self.context.replies.push_back(UIEvent::Notification {
+                        title: None,
+                        source: None,
+                        body: format!("Account {account_name} was not found.").into(),
+                        kind: Some(NotificationType::Error(ErrorKind::None)),
+                    });
+                    return;
+                };
+
+                let result = if let Some(mailbox) = mailbox.as_ref() {
+                    self.context.accounts[account_index]
+                        .mailbox_by_path(mailbox)
+                        .and_then(|mailbox_hash| {
+                            self.context.accounts[account_index].refresh(mailbox_hash)
+                        })
+                } else {
+                    let mailbox_hashes: SmallVec<[MailboxHash; 16]> = self.context.accounts
+                        [account_index]
+                        .mailbox_entries
+                        .keys()
+                        .copied()
+                        .collect();
+                    // Refresh every mailbox even when some fail: bailing
+                    // out at the first error would leave the remaining
+                    // mailboxes stale. Report all failures together.
+                    let mut errors = Vec::new();
+                    for mailbox_hash in mailbox_hashes {
+                        if let Err(err) =
+                            self.context.accounts[account_index].refresh(mailbox_hash)
+                        {
+                            errors.push(err);
+                        }
+                    }
+                    if errors.is_empty() {
+                        Ok(())
+                    } else {
+                        let kind = errors[0].kind;
+                        let body = errors
+                            .iter()
+                            .map(|err| err.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        Err(Error::new(body).set_kind(kind))
+                    }
+                };
+                if let Err(err) = result {
+                    self.context.replies.push_back(UIEvent::Notification {
+                        title: Some("Could not refresh.".into()),
+                        source: None,
+                        body: err.to_string().into(),
+                        kind: Some(NotificationType::Error(err.kind)),
                     });
                 }
             }
@@ -2134,6 +2235,8 @@ mod tests {
 
     #[test]
     fn test_context_current_dir_is_expanded_and_absolute() {
+        // Create the TempDir under the env lock: a concurrent env-rewriting test (e.g. mailcap's TMPDIR) would resolve it into its drop-deleted sandbox.
+        let _env = crate::utilities::tests::env_lock_shared();
         let temp = tempfile::TempDir::new().unwrap();
         let ctx = crate::Context::new_mock(&temp);
         assert!(ctx.current_dir.is_absolute());
@@ -2147,6 +2250,8 @@ mod tests {
         // The `ProcessRequest` arm forwards the session's current directory
         // to every spawned child via `apply_session_cwd`; assert that
         // wiring against a real `Context`.
+        // Create the TempDir under the env lock: a concurrent env-rewriting test (e.g. mailcap's TMPDIR) would resolve it into its drop-deleted sandbox.
+        let _env = crate::utilities::tests::env_lock_shared();
         let temp = tempfile::TempDir::new().unwrap();
         let ctx = crate::Context::new_mock(&temp);
         let mut command = std::process::Command::new("true");

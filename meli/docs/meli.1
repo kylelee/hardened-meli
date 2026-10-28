@@ -65,6 +65,10 @@ Show help message and exit.
 Show version and exit.
 .It Fl -config Ar path
 Start meli with given configuration file.
+.It Fl -varlink Ar varlink_addr
+Start a varlink server listener at given address.
+.It Fl -varlink-replace
+Replace existing varlink socket if it already exists and it's possible.
 .It Cm create-config Op Ar path
 Create configuration file in
 .Pa path
@@ -627,6 +631,10 @@ Clear current selection.
 Open the mail or thread under the cursor.
 .It Cm refresh
 Refresh the current mailbox.
+.It Cm refresh Ar ACCOUNT
+Refresh all mailboxes of the given account.
+.It Cm refresh Ar ACCOUNT Ar MAILBOX_PATH
+Refresh the given mailbox of the given account.
 .It Cm set Ar seen | unseen
 Set seen status of message.
 .It Cm import Ar FILEPATH Ar MAILBOX_PATH
@@ -805,6 +813,56 @@ Print current directory of the
 .Nm
 process.
 .El
+.Sh varlink IPC
+Pass a socket address with the
+.Fl -varlink
+command-line flag,
+.Pp
+Example values:
+.Bl -tag -compact -width 33n
+.It TCP socket
+.D1 tcp:127.0.0.1:12345
+.It UNIX socket
+.D1 unix:/run/org.meli-email.meli
+.It Unix abstract socket (Linux only)
+.D1 unix:@org.meli-email.meli
+.El
+.Pp
+Example usage with
+.Xr varlinkctl 1 Ns
+:
+.Bd -literal
+varlinkctl call unix:/tmp/org.meli-email.meli org.meli-email.meli.ServerVersion '{}'
+varlinkctl call unix:/tmp/org.meli-email.meli org.meli-email.meli.Command '{"command":"mailto mailto:user@example.com"}'
+varlinkctl call unix:/tmp/org.meli-email.meli org.meli-email.meli.Command '{"command":"refresh mynotmuchaccount INBOX"}'
+varlinkctl call unix:/tmp/org.meli-email.meli org.meli-email.meli.InputCharacter '{"character":"i"}'
+varlinkctl call unix:/tmp/org.meli-email.meli org.meli-email.meli.InputPaste '{"paste":"paste contents"}'
+varlinkctl call unix:/tmp/org.meli-email.meli org.meli-email.meli.InputKey '{"key":"Backspace"}'
+.Ed
+.Pp
+See the complete interface methods using the varlink client of your choice:
+.Bd -literal
+varlinkctl call unix:/tmp/org.meli-email.meli org.varlink.service.GetInterfaceDescription '{"interface":"org.meli-email.meli"}'
+.Ed
+.Pp
+Security notes: a
+.Ql unix:
+socket file is created with owner-only permissions (0600), so only your
+user can connect to it; a
+.Ql tcp:
+socket performs no authentication whatsoever \(em binding it to a
+non-loopback address hands full control of
+.Nm
+(command execution and keystroke injection included) to any principal
+that can reach the address, so only the loopback interface or a trusted
+network is recommended; a
+.Ql unix:@
+abstract socket has no filesystem permission model, and any local user
+may connect to it.
+.Pp
+.Fl -varlink-replace
+removes an existing socket file without following symbolic links (a
+plain unlink) and binds a fresh socket in its place.
 .Sh EXIT STATUS
 .Nm
 exits with 0 on a successful run.

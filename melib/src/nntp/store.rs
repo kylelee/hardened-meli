@@ -95,22 +95,119 @@ CREATE TABLE IF NOT EXISTS article (
             uid: UID,
         ) -> Result<Flag> {
             self.connection.execute(
-                "INSERT OR IGNORE INTO article(hash,mailbox_hash,uid,flags) VALUES(?1,?2,?3,0);",
+                "INSERT INTO article(hash,mailbox_hash,uid) VALUES(?1,?2,?3) ON \
+                 CONFLICT(mailbox_hash, uid) DO UPDATE SET hash = ?1",
                 sqlite3::params![&envelope_hash, &mailbox_hash, uid.get()],
             )?;
-            let mut stmt = self.connection.prepare(
-                "SELECT flags FROM article WHERE hash = ?1 AND mailbox_hash = ?2 AND uid = ?3;",
-            )?;
+            let mut stmt = self
+                .connection
+                .prepare("SELECT flags FROM article WHERE mailbox_hash = ?1 AND uid = ?2;")?;
             Ok(Flag::from_bits({
-                stmt.query_row(
-                    sqlite3::params![&envelope_hash, &mailbox_hash, uid.get()],
-                    |row| {
-                        let flag: u8 = row.get(0)?;
-                        Ok(flag)
-                    },
-                )?
+                stmt.query_row(sqlite3::params![&mailbox_hash, uid.get()], |row| {
+                    let flag: u8 = row.get(0)?;
+                    Ok(flag)
+                })?
             })
             .unwrap_or_default())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn in_memory_store() -> Store {
+            let connection = Connection::open_in_memory().unwrap();
+            connection
+                .execute_batch(DB_DESCRIPTION.init_script.unwrap())
+                .unwrap();
+            Store { connection }
+        }
+
+        /// Regression: when an article's message-id changes, its
+        /// `EnvelopeHash` changes with it. The uid store must keep exactly
+        /// one row per `(mailbox_hash, uid)` and always point that row's
+        /// `hash` at the newest value, instead of silently ignoring the
+        /// insert and then failing to find the flags row keyed by the old
+        /// hash.
+        #[test]
+        fn test_flags_upsert_keeps_single_row_and_updates_hash() {
+            let store = in_memory_store();
+            let mailbox_hash = MailboxHash(1);
+            let uid = UID::new(7).unwrap();
+            let hash_a = EnvelopeHash(100);
+            let hash_b = EnvelopeHash(200);
+
+            assert_eq!(
+                store.flags(hash_a, mailbox_hash, uid).unwrap(),
+                Flag::default()
+            );
+            assert_eq!(
+                store.flags(hash_b, mailbox_hash, uid).unwrap(),
+                Flag::default()
+            );
+
+            let count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM article WHERE mailbox_hash = ?1 AND uid = ?2;",
+                    sqlite3::params![mailbox_hash, uid.get()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "same (mailbox_hash, uid) must map to one row");
+
+            let stored_hash: i64 = store
+                .connection
+                .query_row(
+                    "SELECT hash FROM article WHERE mailbox_hash = ?1 AND uid = ?2;",
+                    sqlite3::params![mailbox_hash, uid.get()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored_hash, hash_b.0 as i64, "hash must track newest");
+
+            let stale: i64 = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM article WHERE hash = ?1;",
+                    sqlite3::params![hash_a],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stale, 0, "old hash must no longer match any row");
+        }
+
+        /// Flags set on the old hash must stay readable after the hash
+        /// changes, because the flags lookup is keyed by
+        /// `(mailbox_hash, uid)` alone.
+        #[test]
+        fn test_flags_survive_hash_change() {
+            let store = in_memory_store();
+            let mailbox_hash = MailboxHash(2);
+            let uid = UID::new(9).unwrap();
+            let hash_a = EnvelopeHash(300);
+            let hash_b = EnvelopeHash(400);
+
+            store.flags(hash_a, mailbox_hash, uid).unwrap();
+            store
+                .set_flags(hash_a, mailbox_hash, uid, Flag::SEEN)
+                .unwrap();
+
+            assert_eq!(
+                store.flags(hash_b, mailbox_hash, uid).unwrap(),
+                Flag::SEEN
+            );
+
+            let count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM article WHERE mailbox_hash = ?1 AND uid = ?2;",
+                    sqlite3::params![mailbox_hash, uid.get()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "hash change must not duplicate rows");
         }
     }
 }

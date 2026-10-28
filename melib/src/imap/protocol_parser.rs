@@ -59,19 +59,24 @@ const UNTAGGED_PREFIX: &[u8] = b"* ";
 bitflags! {
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct RequiredResponses: u32 {
-        /// Require a **tagged** `NO` response.
+        /// Require a **tagged** `NO` or `BAD` response.
         ///
-        /// This must be a real, non-zero bit. It used to be `0`, which made
-        /// the flag a silent no-op: [`bitflags`]' `intersects` is
-        /// `self & other != 0`, so it is always `false` for a zero-valued
-        /// flag. The expected-`NO` guard in `Connection::read_response`
-        /// (`required_responses.intersects(Self::NO)`) therefore never
-        /// matched and an expected tagged `NO` fell through to the BAD/`NO`
-        /// error path, which emits an ERROR-level `BackendEvent::Notice`
-        /// and returns an error. That in turn broke
-        /// `Connection::unselect`'s RFC 3691 fallback (selecting a
-        /// nonexistent mailbox) on servers that do not advertise `UNSELECT`.
-        const NO                  = 1 << 0;
+        /// `BAD` and `NO` are equally predictable failure replies for the
+        /// commands that use this flag (e.g. `Connection::unselect`'s RFC
+        /// 3691 fallback, whose `SELECT` of a nonexistent mailbox is
+        /// answered `NO` by some servers and `BAD` by others), so both are
+        /// treated as the expected outcome instead of an error.
+        ///
+        /// This must be a real, non-zero bit. Upstream defined it as `0`,
+        /// which made the flag a silent no-op: [`bitflags`]' `intersects`
+        /// is `self & other != 0`, so it is always `false` for a
+        /// zero-valued flag. The expected-`NO`/`BAD` guard in
+        /// `Connection::read_response`
+        /// (`required_responses.intersects(Self::NO_OR_BAD)`) therefore
+        /// never matched and an expected tagged `NO` fell through to the
+        /// BAD/`NO` error path, which emits an ERROR-level
+        /// `BackendEvent::Notice` and returns an error.
+        const NO_OR_BAD           = 1 << 0;
         /// Require an *untagged* `CAPABILITY` response.
         const CAPABILITY          = 1 << 1;
         /// Require an *untagged* `BYE` response.
@@ -136,8 +141,8 @@ bitflags! {
 
 impl RequiredResponses {
     pub fn check(&self, line: &[u8]) -> bool {
-        if *self == Self::NO {
-            return matches!(line.splitn(2, |b| *b == b' ').nth(1), Some(l) if l.starts_with(b"NO "));
+        if *self == Self::NO_OR_BAD {
+            return matches!(line.splitn(2, |b| *b == b' ').nth(1), Some(l) if l.starts_with(b"NO ") || l.starts_with(b"BAD "));
         }
         let Some(stripped) = line.strip_prefix(UNTAGGED_PREFIX) else {
             return false;

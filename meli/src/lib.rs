@@ -167,5 +167,7 @@ pub use self::accounts::Account;
 
 pub mod version_migrations;
 
+pub mod varlink;
+
 #[cfg(test)]
 pub mod golden;

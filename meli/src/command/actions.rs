@@ -85,7 +85,7 @@ pub enum ListingAction {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum FileAction {
-    Path(String),
+    Path(PathBuf),
     FilePicker(Option<String>),
 }
 
@@ -128,8 +128,8 @@ pub enum ViewAction {
     SaveAttachment(usize, FileAction),
     SaveAllAttachments,
     PipeAttachment { index: usize, command: String },
-    ExportMail(String),
-    ExportThread(String),
+    ExportMail(PathBuf),
+    ExportThread(PathBuf),
     ExportThreadMbox(Option<melib::mbox::MboxFormat>, PathBuf),
     AddAddressesToContacts,
 }
@@ -155,6 +155,7 @@ pub enum ComposeAction {
 #[derive(Debug, Eq, PartialEq)]
 pub enum AccountAction {
     ReIndex,
+    Refresh { mailbox: Option<String> },
     PrintAccountSetting(String),
 }
 

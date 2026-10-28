@@ -267,6 +267,7 @@ mod tests {
         let handler = crate::MainLoopHandler {
             sender,
             job_executor: std::sync::Arc::new(JobExecutor::new(crossbeam::channel::unbounded().0)),
+            ipc_jobs: Default::default(),
         };
         let env_view = Box::new(EnvelopeView::new(
             Mail {
@@ -305,6 +306,7 @@ mod tests {
             main_loop_handler: crate::MainLoopHandler {
                 sender: crossbeam::channel::unbounded().0,
                 job_executor: std::sync::Arc::new(executor),
+                ipc_jobs: Default::default(),
             },
             handle,
             pending_action: None,
@@ -319,6 +321,7 @@ mod tests {
         let main_loop_handler = crate::MainLoopHandler {
             sender,
             job_executor: std::sync::Arc::new(JobExecutor::new(crossbeam::channel::unbounded().0)),
+            ipc_jobs: Default::default(),
         };
         let view = MailView {
             coordinates: None,

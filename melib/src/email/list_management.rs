@@ -288,6 +288,92 @@ mod tests {
         );
     }
 
+    /// Upstream-parity RFC 2369 parsing scenarios: CFWS comments inside
+    /// header values, folded (multi-line) headers, percent-encoded queries
+    /// and trailing whitespace must not corrupt or drop the extracted
+    /// actions.
+    #[test]
+    fn test_list_management_parse_comments_folds_and_encodings() {
+        // A comment after the option list is consumed as CFWS.
+        let envelope =
+            envelope_with_headers("List-Help: <mailto:list@host.com?subject=help> (List Instructions)");
+        let actions = ListActions::detect(&envelope).expect("List-Help must be detected");
+        assert_eq!(
+            actions.help.as_deref().unwrap_or(&[]),
+            &[ListAction::Email(b"mailto:list@host.com?subject=help".to_vec())]
+        );
+
+        // A comment before the option list is consumed as CFWS, too, and
+        // percent-escapes in a mailto query are preserved verbatim.
+        let envelope = envelope_with_headers(concat!(
+            "List-Unsubscribe: (Use this command to get off the list) ",
+            "<mailto:list-manager@host.com?body=unsubscribe%20list>",
+        ));
+        let actions = ListActions::detect(&envelope).expect("List-Unsubscribe must be detected");
+        assert_eq!(
+            actions.unsubscribe.as_deref().unwrap_or(&[]),
+            &[ListAction::Email(
+                b"mailto:list-manager@host.com?body=unsubscribe%20list".to_vec()
+            )]
+        );
+
+        // A folded header (continuation line) unfolds to a single value
+        // before parsing; mailto: options still sort first.
+        let envelope = envelope_with_headers(
+            "List-Help: <ftp://ftp.host.com/list.txt> (FTP),\n <mailto:list@host.com?subject=help>",
+        );
+        let actions = ListActions::detect(&envelope).expect("List-Help must be detected");
+        assert_eq!(
+            actions.help.as_deref().unwrap_or(&[]),
+            &[
+                ListAction::Email(b"mailto:list@host.com?subject=help".to_vec()),
+                ListAction::Url(b"ftp://ftp.host.com/list.txt".to_vec()),
+            ]
+        );
+
+        // Folding between two options keeps both.
+        let envelope = envelope_with_headers(concat!(
+            "List-Unsubscribe: <http://www.host.com/list.cgi?cmd=unsub&lst=list>,\n",
+            "         <mailto:list-request@host.com?subject=unsubscribe>",
+        ));
+        let actions = ListActions::detect(&envelope).expect("List-Unsubscribe must be detected");
+        assert_eq!(
+            actions.unsubscribe.as_deref().unwrap_or(&[]),
+            &[
+                ListAction::Email(b"mailto:list-request@host.com?subject=unsubscribe".to_vec()),
+                ListAction::Url(b"http://www.host.com/list.cgi?cmd=unsub&lst=list".to_vec()),
+            ]
+        );
+
+        // `NO` followed by a comment keeps the special marker value.
+        let envelope = envelope_with_headers("List-Post: NO (posting not allowed on this list)");
+        let actions = ListActions::detect(&envelope).expect("List-Post must be detected");
+        assert_eq!(actions.post.as_deref().unwrap_or(&[]), &[ListAction::No]);
+
+        // A trailing comment on `List-Owner` is ignored.
+        let envelope = envelope_with_headers(
+            "List-Owner: <mailto:listmom@host.com> (Contact Person for Help)",
+        );
+        let actions = ListActions::detect(&envelope).expect("List-Owner must be detected");
+        assert_eq!(
+            actions.owner.as_deref().unwrap_or(&[]),
+            &[ListAction::Email(b"mailto:listmom@host.com".to_vec())]
+        );
+
+        // Trailing whitespace after an option is ignored; percent-escapes
+        // are preserved verbatim.
+        let envelope = envelope_with_headers(
+            "List-Archive: <mailto:archive@host.com?subject=index%20list> ",
+        );
+        let actions = ListActions::detect(&envelope).expect("List-Archive must be detected");
+        assert_eq!(
+            actions.archive.as_deref().unwrap_or(&[]),
+            &[ListAction::Email(
+                b"mailto:archive@host.com?subject=index%20list".to_vec()
+            )]
+        );
+    }
+
     /// RFC 2919 `list_id()` extraction keeps working on the raw header value.
     #[test]
     fn test_list_management_list_id_extraction() {

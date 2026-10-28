@@ -78,6 +78,28 @@ fn test_imap_capabilities_on_auth() {
     });
 }
 
+/// Regression pin for upstream `609630d8`: an untagged `* CAPABILITY` line
+/// arriving in a separate TCP read before the tagged auth completion must
+/// not fail authentication; see `tests::run_imap_auth_capability_interleaved`.
+#[test]
+fn test_imap_auth_capability_interleaved() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_auth_capability_interleaved();
+    });
+}
+
+/// Regression pin for upstream `609630d8`: a tagged `BAD` reply to
+/// `AUTHENTICATE` must surface as an authentication error, not a protocol
+/// error or panic; see `tests::run_imap_auth_bad_reply`.
+#[test]
+fn test_imap_auth_bad_reply() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_auth_bad_reply();
+    });
+}
+
 #[test]
 fn test_imap_exists_equal_count_probe() {
     let _env = env_lock();
@@ -299,7 +321,7 @@ fn test_imap_watch_startup_unselect() {
     });
 }
 
-/// Regression pin for the `RequiredResponses::NO` zero-valued bit-flag
+/// Regression pin for the `RequiredResponses::NO_OR_BAD` zero-valued bit-flag
 /// bug on a server that does not advertise `UNSELECT`: the RFC 3691
 /// fallback (`SELECT` a nonexistent mailbox, expect a tagged `NO`) must
 /// clear the main connection's selection without emitting an
@@ -310,6 +332,28 @@ fn test_imap_watch_startup_unselect_fallback_no() {
     let _env = env_lock();
     tokio_test::block_on(async {
         tests::run_imap_watch_startup_unselect_fallback_no();
+    });
+}
+
+/// Regression pin for upstream `609630d8`: a tagged `BAD` answer to the RFC
+/// 3691 unselect fallback must be treated like the expected `NO`; see
+/// `tests::run_imap_watch_startup_unselect_fallback_bad`.
+#[test]
+fn test_imap_watch_startup_unselect_fallback_bad() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_watch_startup_unselect_fallback_bad();
+    });
+}
+
+/// Regression pin for upstream `c537d9d7`: untagged events produced while
+/// the watch holds the connection must be forwarded through the watch
+/// stream; see `tests::run_imap_watch_untagged_buffered_via_stream`.
+#[test]
+fn test_imap_watch_untagged_buffered_via_stream() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_watch_untagged_buffered_via_stream();
     });
 }
 
@@ -1057,6 +1101,19 @@ pub mod server {
         /// continuation, then (after the client's cancel token) a tagged
         /// `NO`.
         pub auth_sasl_failure: bool,
+        /// When `true` (together with `advertise_unselect == false`), the
+        /// mock answers the RFC 3691 fallback `SELECT` of a nonexistent
+        /// mailbox with a tagged `BAD` instead of the historical `NO`
+        /// (some servers do): the client must treat it as the expected
+        /// failure reply and still drop the selection.
+        pub unselect_fallback_reply_bad: bool,
+        /// When `true`, the first `EXAMINE INBOX` reply that follows a
+        /// `DONE` terminator on the same session carries a glued `* n
+        /// EXPUNGE` untagged line (n = the current message count): the
+        /// event it produces is generated while the IDLE watch holds the
+        /// connection, exercising its untagged buffer (upstream port
+        /// `c537d9d7`).
+        pub examine_reply_expunge_once_after_done: bool,
     }
 
     impl Default for ServerState {
@@ -1109,6 +1166,8 @@ pub mod server {
                 omit_sasl_ir: false,
                 send_capabilities_on_auth: false,
                 auth_sasl_failure: false,
+                unselect_fallback_reply_bad: false,
+                examine_reply_expunge_once_after_done: false,
             }
         }
     }
@@ -2021,6 +2080,11 @@ pub mod server {
             // Whether the first `DONE` of this connection was answered with
             // a tagged BAD (see `ServerState::push_before_continuation`).
             let mut done_bad_answered = false;
+            // Whether a `DONE` terminator was seen on this session, and
+            // whether the one-shot EXPUNGE glue of
+            // `examine_reply_expunge_once_after_done` has been used.
+            let mut done_seen = false;
+            let mut expunge_glued = false;
             // Bytes pre-read at the handshake `M4` stage (a `use_id`
             // disabled client's first command) must be consumed before
             // reading more from the socket.
@@ -2307,13 +2371,32 @@ pub mod server {
                                 status_snapshot = Some((exists, unseen, next_uid, uidvalidity));
                             }
                             select_time_exists = exists;
+                            // One-shot EXPUNGE glue on the first EXAMINE
+                            // reply that follows a DONE terminator (see
+                            // `examine_reply_expunge_once_after_done`): the
+                            // untagged EXPUNGE is processed while the watch
+                            // holds the connection, inside its wake-up
+                            // critical section.
+                            let expunge_line = if state
+                                .lock()
+                                .unwrap()
+                                .examine_reply_expunge_once_after_done
+                                && done_seen
+                                && !expunge_glued
+                            {
+                                expunge_glued = true;
+                                format!("* {exists} EXPUNGE\r\n")
+                            } else {
+                                String::new()
+                            };
                             tcp_stream
                                 .write_all(
                                     format!(
                                         "* {exists} EXISTS\r\n* {recent} RECENT\r\n* OK \
                                          [UIDVALIDITY {uidvalidity}] UIDs valid\r\n* FLAGS \
                                          (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n* OK \
-                                         [PERMANENTFLAGS ()] No permanent flags permitted\r\n{id} \
+                                         [PERMANENTFLAGS ()] No permanent flags \
+                                         permitted\r\n{expunge_line}{id} \
                                          OK [READ-ONLY] EXAMINE completed\r\n"
                                     )
                                     .as_bytes(),
@@ -2444,10 +2527,22 @@ pub mod server {
                                 session_state = SessionState::Authenticated;
                                 status_snapshot = None;
                                 tcp_stream.write_all(id.as_bytes()).await.unwrap();
-                                tcp_stream
-                                    .write_all(b" NO Folder not exist!\r\n")
-                                    .await
-                                    .unwrap();
+                                if state.lock().unwrap().unselect_fallback_reply_bad {
+                                    // Some servers answer the fallback
+                                    // `SELECT` of a nonexistent mailbox with
+                                    // a tagged `BAD` instead of `NO`; the
+                                    // client must treat it as the expected
+                                    // failure reply (upstream `609630d8`).
+                                    tcp_stream
+                                        .write_all(b" BAD Invalid mailbox name\r\n")
+                                        .await
+                                        .unwrap();
+                                } else {
+                                    tcp_stream
+                                        .write_all(b" NO Folder not exist!\r\n")
+                                        .await
+                                        .unwrap();
+                                }
                                 tcp_stream.flush().await.unwrap();
                                 continue 'main;
                             }
@@ -3839,6 +3934,7 @@ pub mod server {
                     tracing::debug!("{name} loop_handler 'idle received: {input:?}");
                     idle_received_lines.lock().unwrap().push(input.clone());
                     if input == "DONE\r\n" {
+                        done_seen = true;
                         if state.lock().unwrap().ignore_done {
                             tracing::debug!("{name} ignore_done: staying silent on DONE");
                             continue 'idle;
@@ -10293,6 +10389,8 @@ hello new world b.
             omit_sasl_ir: false,
             send_capabilities_on_auth: false,
             auth_sasl_failure: false,
+            unselect_fallback_reply_bad: false,
+            examine_reply_expunge_once_after_done: false,
             primary_mailbox: None,
             mailbox_envelopes: Default::default(),
             mailbox_next_uid: Default::default(),
@@ -10731,6 +10829,208 @@ hello new world.
                 }
             }
         });
+
+        watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        watch_loops_handle.join().unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Regression pin for upstream `c537d9d7` (`forward_untagged_
+    /// responses`): untagged events produced inside the watch's wake-up
+    /// critical section — here an `* n EXPUNGE` glued to the heartbeat
+    /// re-sync's `EXAMINE` reply, i.e. while the watch holds the
+    /// connection — must be forwarded through the watch stream in order,
+    /// not delivered out-of-band through the backend event consumer.
+    pub(crate) fn run_imap_watch_untagged_buffered_via_stream() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: warm seed 1
+Message-ID: <bufwarm1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: warm seed 2
+Message-ID: <bufwarm2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        // The event's `EnvelopeHash` is the fetch-path hash
+        // (`melib::imap::protocol_parser::generate_envelope_hash`, private
+        // to melib): `DefaultHasher` over the UID then the mailbox path.
+        // Seed mail 2 gets UID 2 in `INBOX` (see the inserts above).
+        let expunge_hash = {
+            use std::{collections::hash_map::DefaultHasher, hash::Hasher};
+
+            let mut h = DefaultHasher::new();
+            h.write_usize(2_usize);
+            h.write(b"INBOX");
+            EnvelopeHash(h.finish())
+        };
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            idle_no_push: true,
+            examine_reply_expunge_once_after_done: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        // Short heartbeat so the wake-up (and with it the buffered EXPUNGE)
+        // happens quickly; default sweep interval so no sweep interferes.
+        // The offline cache is disabled so the heartbeat wake-up takes the
+        // direct `examine_mailbox` path (`SyncPolicy::None` short-circuits
+        // `resync`) — the EXAMINE reply is where the mock glues the
+        // EXPUNGE.
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                2,
+                300,
+                true,
+                false,
+            );
+
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let mut watch_fut = Box::pin(imap.watch().unwrap().into_future());
+        let (watch_conn_sender, watch_conn_receiver) = unbounded();
+        let watch_conn = ImapServerStream::new(
+            &listener,
+            &mut watch_fut,
+            (watch_conn_sender.clone(), watch_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let watch_conn_loop = watch_conn.loop_handler("watch");
+        let watch_loops_handle = std::thread::spawn(move || {
+            block_on(watch_conn_loop);
+        });
+
+        block_on(async {
+            let mut found = false;
+            while !found {
+                let item = match future::select(
+                    watch_fut.as_mut(),
+                    smol::Timer::after(Duration::from_secs(30)),
+                )
+                .await
+                {
+                    Either::Left(((item, rest), _timeout)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        item
+                    }
+                    Either::Right((_timeout, _pending)) => {
+                        panic!(
+                            "watch stream did not emit the buffered Remove event within \
+                             30 seconds even though the heartbeat EXAMINE carries the glued \
+                             EXPUNGE"
+                        );
+                    }
+                };
+                let Some(backend_event) = item else {
+                    panic!("watch stream ended before the buffered Remove event");
+                };
+                match backend_event.unwrap() {
+                    BackendEvent::RefreshBatch(events) => {
+                        found |= events.iter().any(|event| {
+                            matches!(
+                                &event.kind,
+                                RefreshEventKind::Remove(hash) if *hash == expunge_hash
+                            )
+                        });
+                    }
+                    BackendEvent::Refresh(event) => {
+                        found |= matches!(
+                            &event.kind,
+                            RefreshEventKind::Remove(hash) if *hash == expunge_hash
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Channel pin: the event must have been forwarded through the watch
+        // stream; the out-of-band backend event consumer queue must not
+        // carry it.
+        let queued = backend_event_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, be)| match be {
+                BackendEvent::Refresh(event) => {
+                    matches!(&event.kind, RefreshEventKind::Remove(hash) if *hash == expunge_hash)
+                }
+                BackendEvent::RefreshBatch(events) => events.iter().any(|event| {
+                    matches!(&event.kind, RefreshEventKind::Remove(hash) if *hash == expunge_hash)
+                }),
+                _ => false,
+            });
+        assert!(
+            !queued,
+            "the buffered untagged Remove event must be forwarded through the watch stream, \
+             not delivered through the backend event consumer"
+        );
 
         watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
         main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
@@ -12735,13 +13035,13 @@ hello new world.
         watch_loops_handle.join().unwrap();
         loops_handle.join().unwrap();
     }
-    /// Regression pin for the `RequiredResponses::NO` zero-valued bit-flag
+    /// Regression pin for the `RequiredResponses::NO_OR_BAD` zero-valued bit-flag
     /// bug. The mock does not advertise `UNSELECT` (see
     /// `ServerState::advertise_unselect`), so `Connection::unselect` must
     /// take the RFC 3691 fallback: `SELECT` a nonexistent mailbox and
-    /// expect a tagged `NO`. Before the fix `RequiredResponses::NO` was `0`,
+    /// expect a tagged `NO`. Before the fix `RequiredResponses::NO_OR_BAD` was `0`,
     /// so the `read_response` expected-`NO` guard
-    /// (`required_responses.intersects(RequiredResponses::NO)`) never
+    /// (`required_responses.intersects(RequiredResponses::NO_OR_BAD)`) never
     /// matched: the tagged `NO` fell through to the BAD/`NO` error path,
     /// emitted an ERROR-level `BackendEvent::Notice` and failed
     /// `ImapType::watch` at startup (the `imap.watch().unwrap()` below
@@ -12960,6 +13260,199 @@ hello new world.
         assert!(
             error_notices.is_empty(),
             "the expected NO from the RFC 3691 fallback must not produce ERROR notices, got: \
+             {error_notices:?}"
+        );
+
+        watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        watch_loops_handle.join().unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Regression pin for upstream `609630d8` (`RequiredResponses::
+    /// NO_OR_BAD`): a server that answers the RFC 3691 fallback `SELECT` of
+    /// a nonexistent mailbox with a tagged `BAD` instead of `NO` must have
+    /// it treated as the expected failure reply: the main connection drops
+    /// INBOX without an ERROR-level notice, and the watch still reaches
+    /// `IDLE`.
+    pub(crate) fn run_imap_watch_startup_unselect_fallback_bad() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+        let (seed_mail_1, seed_mail_2, _new_mail) = gated_push_test_mails();
+
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            advertise_unselect: false,
+            unselect_fallback_reply_bad: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        // Long heartbeat and default sweep interval: within the bounded
+        // observation window only the watch startup runs, which is the
+        // code path under test.
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash, main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                600,
+                300,
+                true,
+                cfg!(feature = "sqlite3"),
+            );
+
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        assert!(
+            main_commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("SELECT INBOX")),
+            "warm start must have selected INBOX on the main connection"
+        );
+        let snapshot_len = main_commands.lock().unwrap().len();
+        // Events emitted before the watch starts are unrelated to the path
+        // under test.
+        let event_snapshot_len = backend_event_queue.lock().unwrap().len();
+
+        // The fallback path must not fail even though the server answers
+        // the nonexistent `SELECT` with a tagged `BAD`: `watch()` returning
+        // `Err` here would panic.
+        let mut watch_fut = Box::pin(imap.watch().unwrap().into_future());
+        let (watch_conn_sender, watch_conn_receiver) = unbounded();
+        let watch_conn = ImapServerStream::new(
+            &listener,
+            &mut watch_fut,
+            (watch_conn_sender.clone(), watch_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let watch_commands = Arc::clone(&watch_conn.received_commands);
+        let watch_conn_loop = watch_conn.loop_handler("watch");
+        let watch_loops_handle = std::thread::spawn(move || {
+            block_on(watch_conn_loop);
+        });
+
+        block_on(async {
+            let deadline = std::time::Instant::now() + WATCH_TEST_DEADLINE;
+            // First wait until the main connection has sent the RFC 3691
+            // fallback `SELECT` of the nonexistent mailbox.
+            loop {
+                if main_commands.lock().unwrap()[snapshot_len..]
+                    .iter()
+                    .any(|l| l.contains("SELECT blurdybloop"))
+                {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "the main connection did not fall back to selecting a nonexistent \
+                         mailbox within {WATCH_TEST_DEADLINE:?}; post-snapshot main log: {:?}",
+                        main_commands.lock().unwrap()[snapshot_len..].to_vec()
+                    );
+                }
+                match future::select(watch_fut.as_mut(), smol::Timer::after(WATCH_TEST_POLL_TICK))
+                    .await
+                {
+                    Either::Left(((item, rest), _tick)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        if let Some(ev) = item {
+                            let _ = ev.unwrap();
+                        }
+                    }
+                    Either::Right((_tick, _pending)) => {}
+                }
+            }
+            // Then wait until the watch connection has reached IDLE: the
+            // tagged BAD must have been accepted as the expected response,
+            // so the watch startup sequence continued past the selection
+            // cleanup.
+            loop {
+                if watch_commands
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.contains("IDLE"))
+                {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "the watch connection did not reach IDLE within {WATCH_TEST_DEADLINE:?}; \
+                         watch command log: {:?}",
+                        watch_commands.lock().unwrap()
+                    );
+                }
+                match future::select(watch_fut.as_mut(), smol::Timer::after(WATCH_TEST_POLL_TICK))
+                    .await
+                {
+                    Either::Left(((item, rest), _tick)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        if let Some(ev) = item {
+                            let _ = ev.unwrap();
+                        }
+                    }
+                    Either::Right((_tick, _pending)) => {}
+                }
+            }
+        });
+
+        // The expected tagged BAD must have been handled as expected, not
+        // as an error: no ERROR-level `BackendEvent::Notice` may have been
+        // emitted while the watch started.
+        let error_notices: Vec<String> = backend_event_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(event_snapshot_len)
+            .filter(|(_, be)| {
+                matches!(
+                    be,
+                    BackendEvent::Notice {
+                        level: tracing::Level::ERROR,
+                        ..
+                    }
+                )
+            })
+            .map(|(_, be)| format!("{be:?}"))
+            .collect();
+        assert!(
+            error_notices.is_empty(),
+            "the expected BAD from the RFC 3691 fallback must not produce ERROR notices, got: \
              {error_notices:?}"
         );
 
@@ -15499,6 +15992,118 @@ kfcMJpFWNRl6P2sUcsOhR6g=
         });
         main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
         loops_handle.join().unwrap();
+    }
+
+    /// Regression pin for upstream `609630d8`: during `AUTHENTICATE`, an
+    /// untagged `* CAPABILITY` line may arrive in one TCP read and the
+    /// tagged completion only in a later one. The client must keep reading
+    /// until the tagged line instead of treating the first read as the
+    /// whole reply, authenticate successfully, and adopt the interleaved
+    /// capabilities without re-sending `CAPABILITY`.
+    pub(crate) fn run_imap_auth_capability_interleaved() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut buf = [0; 4096];
+            let n = tcp.read(&mut buf).unwrap();
+            assert_eq!(&buf[..n], b"M1 CAPABILITY\r\n");
+            tcp.write_all(
+                b"* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR\r\nM1 OK CAPABILITY \
+                 completed\r\n",
+            )
+            .unwrap();
+            let n = tcp.read(&mut buf).unwrap();
+            let line = String::from_utf8_lossy(&buf[..n]).to_string();
+            assert!(
+                line.starts_with("M2 AUTHENTICATE PLAIN "),
+                "unexpected auth line: {line:?}"
+            );
+            // Split the reply across two TCP writes with a pause between
+            // them: the untagged `* CAPABILITY` line is delivered in one
+            // client read and the tagged `M2 OK` only in a later one.
+            tcp.write_all(b"* CAPABILITY IMAP4rev1 ID IDLE UNSELECT ENABLE MOVE\r\n")
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            tcp.write_all(b"M2 OK Success\r\n").unwrap();
+            // With the interleaved capabilities adopted, the client must
+            // not re-send `CAPABILITY`: the next command is the RFC 2971
+            // `ID`.
+            let n = tcp.read(&mut buf).unwrap();
+            let line = String::from_utf8_lossy(&buf[..n]).to_string();
+            assert!(
+                line.starts_with("M3 ID ") && !line.contains("CAPABILITY"),
+                "the next command must be `ID`, not another `CAPABILITY`: {line:?}"
+            );
+            tcp.write_all(b"M3 OK ID completed\r\n").unwrap();
+            // The connection stays open; unblock the read when the client
+            // drops it at the end of the test.
+            let _ = tcp.read(&mut buf);
+        });
+        let account_conf = test_account_conf(&local_addr, &[]);
+        let mut imap =
+            ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
+        block_on(imap.is_online().unwrap())
+            .unwrap_or_else(|err| panic!("authentication must succeed across the split reply: {err}"));
+        drop(imap);
+        server.join().unwrap();
+    }
+
+    /// Regression pin for upstream `609630d8`: a tagged `BAD` reply to the
+    /// `AUTHENTICATE` exchange is an expected authentication failure, not a
+    /// protocol error: the client surfaces an `ErrorKind::Authentication`
+    /// error carrying the server's reply text, without panicking.
+    pub(crate) fn run_imap_auth_bad_reply() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        set_test_xdg_env(&temp_dir);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+
+            // `is_online` retries `connect()` once on failure, so serve a
+            // second connection producing the same failure.
+            for _ in 0..2 {
+                let (mut tcp, _) = listener.accept().unwrap();
+                let mut buf = [0; 4096];
+                let n = tcp.read(&mut buf).unwrap();
+                assert_eq!(&buf[..n], b"M1 CAPABILITY\r\n");
+                tcp.write_all(
+                    b"* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN SASL-IR\r\nM1 OK \
+                     CAPABILITY completed\r\n",
+                )
+                .unwrap();
+                let n = tcp.read(&mut buf).unwrap();
+                let line = String::from_utf8_lossy(&buf[..n]).to_string();
+                assert!(
+                    line.starts_with("M2 AUTHENTICATE PLAIN "),
+                    "unexpected auth line: {line:?}"
+                );
+                tcp.write_all(b"M2 BAD [AUTHENTICATIONFAILED] Authentication failed\r\n")
+                    .unwrap();
+                let _ = tcp.read(&mut buf);
+            }
+        });
+        let account_conf = test_account_conf(&local_addr, &[]);
+        let mut imap =
+            ImapType::new(&account_conf, Default::default(), Default::default()).unwrap();
+        let err = block_on(imap.is_online().unwrap()).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::Authentication,
+            "a tagged BAD to AUTHENTICATE must be an authentication error: {err}"
+        );
+        assert!(
+            err.to_string().contains("BAD [AUTHENTICATIONFAILED] Authentication failed"),
+            "the server's reply text must be surfaced verbatim: {err}"
+        );
+        server.join().unwrap();
     }
 
     /// Equal-count EXISTS probe (upstream port `747676ab`): when the total

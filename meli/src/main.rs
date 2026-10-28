@@ -63,6 +63,9 @@ fn run_app(mut opt: Opt) -> Result<()> {
     } else {
         None
     };
+    let varlink = opt.varlink.take();
+    let varlink_replace = opt.varlink_replace;
+
     if let Some(result) = opt.execute() {
         return result;
     }
@@ -113,6 +116,24 @@ fn run_app(mut opt: Opt) -> Result<()> {
         .general
         .enter_command_mode
         .clone();
+
+    let _varlink_server = if let Some(addr) = varlink {
+        let listener = crate::varlink::server::new_listener(&addr, varlink_replace)?;
+        tracing::trace!("varlink listening on {addr}");
+        let server = crate::varlink::server::serve(
+            addr,
+            listener,
+            None,
+            state.context.main_loop_handler.clone(),
+        );
+        Some(state.context.main_loop_handler.job_executor.spawn(
+            "varlink-server".into(),
+            server,
+            crate::jobs::IsAsync::Async,
+        ))
+    } else {
+        None
+    };
 
     /* Keep track of the input mode. See UIMode for details */
     'main: loop {
@@ -240,12 +261,31 @@ fn run_app(mut opt: Opt) -> Result<()> {
                         ThreadEvent::JobFinished(id) => {
                             tracing::debug!("main loop: JobFinished {id}");
                             state.context.main_loop_handler.job_executor.set_job_finished(id);
-                            for account in state.context.accounts.values_mut() {
-                                if account.process_event(&id) {
-                                    break;
+                            // Varlink IPC jobs are registered in the shared
+                            // `ipc_jobs` table by the varlink server as soon
+                            // as they are spawned; when one completes, drop
+                            // its handle and skip the account/status fan-out
+                            // that regular jobs go through, since no
+                            // component waits on them.
+                            if let Some(mut handle) =
+                                state.context.main_loop_handler.ipc_jobs.remove(&id)
+                            {
+                                // Surface unexpected connection job failures
+                                // (the result is already in the channel once
+                                // `JobFinished` is processed). Log only the
+                                // error chain, never request contents.
+                                if let Ok(Some(Err(err))) = handle.chan.try_recv() {
+                                    tracing::error!("varlink connection job {id} failed: {err}");
                                 }
+                            } else {
+                                for account in state.context.accounts.values_mut() {
+                                    if account.process_event(&id) {
+                                        break;
+                                    }
+                                }
+                                state
+                                    .rcv_event(UIEvent::StatusEvent(StatusEvent::JobFinished(id)));
                             }
-                            state.rcv_event(UIEvent::StatusEvent(StatusEvent::JobFinished(id)));
                             // A finished job may have applied state a
                             // component now marks dirty (e.g. the search
                             // filter); paint it now — the UIEvent arm
@@ -261,6 +301,12 @@ fn run_app(mut opt: Opt) -> Result<()> {
                             } else {
                                 state.redraw();
                             }
+                        },
+                        ThreadEvent::Ipc => {
+                            // Bookkeeping/wakeup only: the connection job's
+                            // handle was already registered in the shared
+                            // `ipc_jobs` table by the varlink server before
+                            // this event was sent.
                         },
                     }
                 },
