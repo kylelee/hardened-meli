@@ -39,7 +39,7 @@ impl Account {
                     .unwrap()
                     .create_mailbox(path.to_string())?;
                 let handle = self.main_loop_handler.job_executor.spawn(
-                    "create_mailbox".into(),
+                    format!("{name}:create_mailbox", name = self.name).into(),
                     job,
                     self.is_async(),
                 );
@@ -58,7 +58,7 @@ impl Account {
                 let mailbox_hash = self.mailbox_by_path(&path)?;
                 let job = self.backend.lock().unwrap().delete_mailbox(mailbox_hash)?;
                 let handle = self.main_loop_handler.job_executor.spawn(
-                    "delete-mailbox".into(),
+                    format!("{name}:delete-mailbox", name = self.name).into(),
                     job,
                     self.is_async(),
                 );
@@ -80,7 +80,7 @@ impl Account {
                     .unwrap()
                     .set_mailbox_subscription(mailbox_hash, true)?;
                 let handle = self.main_loop_handler.job_executor.spawn(
-                    "subscribe-mailbox".into(),
+                    format!("{name}:subscribe-mailbox", name = self.name).into(),
                     job,
                     self.is_async(),
                 );
@@ -103,7 +103,7 @@ impl Account {
                     .unwrap()
                     .set_mailbox_subscription(mailbox_hash, false)?;
                 let handle = self.main_loop_handler.job_executor.spawn(
-                    "unsubscribe-mailbox".into(),
+                    format!("{name}:unsubscribe-mailbox", name = self.name).into(),
                     job,
                     self.is_async(),
                 );
@@ -126,7 +126,11 @@ impl Account {
                     .unwrap()
                     .rename_mailbox(mailbox_hash, new_path.clone())?;
                 let handle = self.main_loop_handler.job_executor.spawn(
-                    format!("rename-mailbox {path} to {new_path}").into(),
+                    format!(
+                        "{name}:rename-mailbox {path} to {new_path}",
+                        name = self.name
+                    )
+                    .into(),
                     job,
                     self.is_async(),
                 );
@@ -221,7 +225,7 @@ impl Account {
                         };
                         if let Ok(mailboxes_job) = mailboxes_job {
                             let handle = self.main_loop_handler.job_executor.spawn(
-                                "list-mailboxes".into(),
+                                format!("{name}:list-mailboxes", name = self.name).into(),
                                 mailboxes_job,
                                 self.is_async(),
                             );

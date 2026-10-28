@@ -72,7 +72,7 @@ impl Account {
     ) {
         let account_name = &self.name;
         let handle = self.main_loop_handler.job_executor.spawn(
-            format!("initialize {account_name} {name} {format} contacts").into(),
+            format!("{account_name}: initialize {name} {format} contacts").into(),
             fut,
             is_async,
         );
@@ -213,7 +213,8 @@ impl Account {
             Ok(v) => {
                 let handle = self.main_loop_handler.job_executor.spawn(
                     format!(
-                        "fetch {name} {format} address books",
+                        "{account_name}:fetch {name} {format} address books",
+                        account_name = self.name,
                         name = backend_id.name,
                         format = backend_id.format
                     )
@@ -267,7 +268,8 @@ impl Account {
             Ok(v) => {
                 let handle = self.main_loop_handler.job_executor.spawn(
                     format!(
-                        "fetch {name} {format} address book",
+                        "{account_name}:fetch {name} {format} address book",
+                        account_name = self.name,
                         name = backend_id.name,
                         format = backend_id.format
                     )
