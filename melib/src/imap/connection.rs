@@ -1766,13 +1766,14 @@ impl ImapConnection {
                             ret.extend_from_slice(&response);
                             return r.into();
                         }
-                        ImapResponse::No(ref _response_code)
-                            if required_responses.intersects(RequiredResponses::NO) =>
+                        ImapResponse::Bad(ref _response_code)
+                        | ImapResponse::No(ref _response_code)
+                            if required_responses.intersects(RequiredResponses::NO_OR_BAD) =>
                         {
                             imap_log!(
                                 trace,
                                 self,
-                                "Received expected NO response: {:?} {:?}",
+                                "Received expected NO/BAD response: {:?} {:?}",
                                 _response_code,
                                 String::from_utf8_lossy(&response)
                             );
@@ -2270,7 +2271,7 @@ impl ImapConnection {
                         }
                     }
                     self.send_command(CommandBody::select(nonexistent)?).await?;
-                    self.read_response(&mut response, RequiredResponses::NO)
+                    self.read_response(&mut response, RequiredResponses::NO_OR_BAD)
                         .await?;
                 }
             }

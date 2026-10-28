@@ -69,7 +69,9 @@ fn test_imap_list_mailbox_result_decodes_mutf7() {
 
 #[test]
 fn test_imap_required_responses() {
-    assert!(RequiredResponses::NO.check(b"M12 NO [CANNOT] Invalid something\r\n"));
+    assert!(RequiredResponses::NO_OR_BAD
+        .check(b"M12 NO [CANNOT] Invalid something\r\n"));
+    assert!(RequiredResponses::NO_OR_BAD.check(b"M12 BAD Invalid something\r\n"));
     {
         let mut ret = Vec::new();
         let required_responses = RequiredResponses::FETCH_UID | RequiredResponses::FETCH_FLAGS;
@@ -179,26 +181,28 @@ fn test_imap_required_responses() {
     }
 }
 
-/// Regression test for the `RequiredResponses::NO` zero-valued bit-flag
+/// Regression test for the `RequiredResponses::NO_OR_BAD` zero-valued bit-flag
 /// bug: `NO` must be a real bit, otherwise `intersects` is always `false`
 /// for it and the expected-`NO` paths (the `read_response` guard and
 /// `Connection::unselect`'s RFC 3691 fallback) silently never match.
 #[test]
 fn test_imap_required_responses_no_is_nonzero_bit() {
     assert_ne!(
-        RequiredResponses::NO.bits(),
+        RequiredResponses::NO_OR_BAD.bits(),
         0,
         "NO must be a real bit; a zero-valued flag makes intersects() always false"
     );
-    assert!(RequiredResponses::NO.intersects(RequiredResponses::NO));
+    assert!(RequiredResponses::NO_OR_BAD.intersects(RequiredResponses::NO_OR_BAD));
     assert!(
-        !RequiredResponses::empty().intersects(RequiredResponses::NO),
+        !RequiredResponses::empty().intersects(RequiredResponses::NO_OR_BAD),
         "empty() must not imply the expected-NO flag"
     );
-    assert!(!RequiredResponses::CAPABILITY.intersects(RequiredResponses::NO));
+    assert!(!RequiredResponses::CAPABILITY.intersects(RequiredResponses::NO_OR_BAD));
     // A bare `NO` still matches a tagged `NO` line and nothing else.
-    assert!(RequiredResponses::NO.check(b"M12 NO [CANNOT] Invalid something\r\n"));
-    assert!(!RequiredResponses::NO.check(b"M12 OK done\r\n"));
+    assert!(RequiredResponses::NO_OR_BAD
+        .check(b"M12 NO [CANNOT] Invalid something\r\n"));
+    assert!(RequiredResponses::NO_OR_BAD.check(b"M12 BAD Invalid something\r\n"));
+    assert!(!RequiredResponses::NO_OR_BAD.check(b"M12 OK done\r\n"));
     assert!(
         !RequiredResponses::empty().check(b"M12 NO [CANNOT] Invalid something\r\n"),
         "empty() must not treat a tagged NO as an expected response"
