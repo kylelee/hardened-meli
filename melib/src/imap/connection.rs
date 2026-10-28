@@ -418,6 +418,16 @@ pub struct ImapConnection {
     pub sync_policy: SyncPolicy,
     pub uid_store: Arc<UIDStore>,
     pub send_state_changes: bool,
+    /// Buffer for untagged-response events produced while the IDLE watch
+    /// is inside its wake-up critical section (see `watch::idle`). When
+    /// `Some`, `read_response` pushes untagged events here instead of
+    /// delivering them through `add_backend_event` right away: during that
+    /// window the watch itself holds the connection and its own event
+    /// sequence, so out-of-band delivery would scramble the event order or
+    /// lose events. The watch drains the buffer when it leaves the
+    /// critical section and forwards every event through its own stream
+    /// (upstream port `c537d9d7`).
+    pub forward_untagged_responses: Option<Vec<BackendEvent>>,
     /// For each mailbox, the `UIDVALIDITY` for which its `msn_index` was
     /// restored from the persistent cache during this connection's
     /// lifetime. While it matches the current `UIDVALIDITY`, the redundant
@@ -1531,6 +1541,7 @@ impl ImapConnection {
             },
             uid_store,
             send_state_changes,
+            forward_untagged_responses: None,
             msn_index_cache_uidvalidity: HashMap::default(),
         }
     }
@@ -1819,7 +1830,13 @@ impl ImapConnection {
                                 String::from_utf8_lossy(&l[..l.len().min(200)])
                             );
                             if let Some(ev) = self.process_untagged(untagged_response).await? {
-                                self.add_backend_event(ev);
+                                if let Some(forward_untagged_responses) =
+                                    &mut self.forward_untagged_responses
+                                {
+                                    forward_untagged_responses.push(ev);
+                                } else {
+                                    self.add_backend_event(ev);
+                                }
                             }
                         } else {
                             ret.extend_from_slice(l);

@@ -310,6 +310,13 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                         tracing::trace!("IDLE: no response to DONE within {done_timeout:?}: {err}");
                         return Err(err);
                     }
+                    // Critical section (upstream port `c537d9d7`): the
+                    // commands issued below (the mailbox re-sync) may
+                    // receive untagged responses while the watch holds the
+                    // connection. Buffer those instead of delivering them
+                    // out-of-band, and forward them through this stream in
+                    // order once the section ends.
+                    blockn.conn.forward_untagged_responses = Some(vec![]);
                     // The server may never deliver untagged updates during
                     // IDLE; the heartbeat wake-up may be the only chance to
                     // notice new mail, so re-sync the watched mailbox before
@@ -318,6 +325,11 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                         examine_updates(Clone::clone(&mailbox), &mut blockn.conn).await?
                     {
                         emitter.emit(ev).await;
+                    }
+                    if let Some(untagged_responses) =
+                        blockn.conn.forward_untagged_responses.take()
+                    {
+                        events.extend(untagged_responses);
                     }
                     blockn.conn.send_command(CommandBody::Idle).await?;
                     continuation_seen = false;
@@ -434,6 +446,14 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                         return Err(err.clone());
                     }
                 }
+                // Critical section (upstream port `c537d9d7`): the watch
+                // holds the connection and processes the wake-up's untagged
+                // data below; the commands issued while processing (an
+                // EXISTS-triggered fetch, …) may receive further untagged
+                // responses. Buffer those instead of delivering them
+                // out-of-band, and forward them through this stream in
+                // order once the section ends.
+                blockn.conn.forward_untagged_responses = Some(vec![]);
                 for l in pending_lines
                     .iter()
                     .flat_map(|l| l.split_rn())
@@ -450,6 +470,9 @@ pub fn idle(kit: ImapWatchKit) -> impl futures::stream::Stream<Item = Result<Bac
                             events.push(ev);
                         }
                     }
+                }
+                if let Some(untagged_responses) = blockn.conn.forward_untagged_responses.take() {
+                    events.extend(untagged_responses);
                 }
                 blockn.conn.send_command(CommandBody::Idle).await?;
                 continuation_seen = false;

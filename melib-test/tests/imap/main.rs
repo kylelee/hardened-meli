@@ -346,6 +346,17 @@ fn test_imap_watch_startup_unselect_fallback_bad() {
     });
 }
 
+/// Regression pin for upstream `c537d9d7`: untagged events produced while
+/// the watch holds the connection must be forwarded through the watch
+/// stream; see `tests::run_imap_watch_untagged_buffered_via_stream`.
+#[test]
+fn test_imap_watch_untagged_buffered_via_stream() {
+    let _env = env_lock();
+    tokio_test::block_on(async {
+        tests::run_imap_watch_untagged_buffered_via_stream();
+    });
+}
+
 #[test]
 fn test_imap_watch_id_gated_push() {
     let _env = env_lock();
@@ -1096,6 +1107,13 @@ pub mod server {
         /// (some servers do): the client must treat it as the expected
         /// failure reply and still drop the selection.
         pub unselect_fallback_reply_bad: bool,
+        /// When `true`, the first `EXAMINE INBOX` reply that follows a
+        /// `DONE` terminator on the same session carries a glued `* n
+        /// EXPUNGE` untagged line (n = the current message count): the
+        /// event it produces is generated while the IDLE watch holds the
+        /// connection, exercising its untagged buffer (upstream port
+        /// `c537d9d7`).
+        pub examine_reply_expunge_once_after_done: bool,
     }
 
     impl Default for ServerState {
@@ -1149,6 +1167,7 @@ pub mod server {
                 send_capabilities_on_auth: false,
                 auth_sasl_failure: false,
                 unselect_fallback_reply_bad: false,
+                examine_reply_expunge_once_after_done: false,
             }
         }
     }
@@ -2061,6 +2080,11 @@ pub mod server {
             // Whether the first `DONE` of this connection was answered with
             // a tagged BAD (see `ServerState::push_before_continuation`).
             let mut done_bad_answered = false;
+            // Whether a `DONE` terminator was seen on this session, and
+            // whether the one-shot EXPUNGE glue of
+            // `examine_reply_expunge_once_after_done` has been used.
+            let mut done_seen = false;
+            let mut expunge_glued = false;
             // Bytes pre-read at the handshake `M4` stage (a `use_id`
             // disabled client's first command) must be consumed before
             // reading more from the socket.
@@ -2347,13 +2371,32 @@ pub mod server {
                                 status_snapshot = Some((exists, unseen, next_uid, uidvalidity));
                             }
                             select_time_exists = exists;
+                            // One-shot EXPUNGE glue on the first EXAMINE
+                            // reply that follows a DONE terminator (see
+                            // `examine_reply_expunge_once_after_done`): the
+                            // untagged EXPUNGE is processed while the watch
+                            // holds the connection, inside its wake-up
+                            // critical section.
+                            let expunge_line = if state
+                                .lock()
+                                .unwrap()
+                                .examine_reply_expunge_once_after_done
+                                && done_seen
+                                && !expunge_glued
+                            {
+                                expunge_glued = true;
+                                format!("* {exists} EXPUNGE\r\n")
+                            } else {
+                                String::new()
+                            };
                             tcp_stream
                                 .write_all(
                                     format!(
                                         "* {exists} EXISTS\r\n* {recent} RECENT\r\n* OK \
                                          [UIDVALIDITY {uidvalidity}] UIDs valid\r\n* FLAGS \
                                          (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n* OK \
-                                         [PERMANENTFLAGS ()] No permanent flags permitted\r\n{id} \
+                                         [PERMANENTFLAGS ()] No permanent flags \
+                                         permitted\r\n{expunge_line}{id} \
                                          OK [READ-ONLY] EXAMINE completed\r\n"
                                     )
                                     .as_bytes(),
@@ -3891,6 +3934,7 @@ pub mod server {
                     tracing::debug!("{name} loop_handler 'idle received: {input:?}");
                     idle_received_lines.lock().unwrap().push(input.clone());
                     if input == "DONE\r\n" {
+                        done_seen = true;
                         if state.lock().unwrap().ignore_done {
                             tracing::debug!("{name} ignore_done: staying silent on DONE");
                             continue 'idle;
@@ -10346,6 +10390,7 @@ hello new world b.
             send_capabilities_on_auth: false,
             auth_sasl_failure: false,
             unselect_fallback_reply_bad: false,
+            examine_reply_expunge_once_after_done: false,
             primary_mailbox: None,
             mailbox_envelopes: Default::default(),
             mailbox_next_uid: Default::default(),
@@ -10784,6 +10829,208 @@ hello new world.
                 }
             }
         });
+
+        watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
+        watch_loops_handle.join().unwrap();
+        loops_handle.join().unwrap();
+    }
+
+    /// Regression pin for upstream `c537d9d7` (`forward_untagged_
+    /// responses`): untagged events produced inside the watch's wake-up
+    /// critical section — here an `* n EXPUNGE` glued to the heartbeat
+    /// re-sync's `EXAMINE` reply, i.e. while the watch holds the
+    /// connection — must be forwarded through the watch stream in order,
+    /// not delivered out-of-band through the backend event consumer.
+    pub(crate) fn run_imap_watch_untagged_buffered_via_stream() {
+        melib_test::init_test_logging();
+        let temp_dir = TempDir::new().unwrap();
+        let backend_event_queue =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(16)));
+        let backend_event_consumer = {
+            let backend_event_queue = Arc::clone(&backend_event_queue);
+
+            BackendEventConsumer::new(Arc::new(move |ah, be| {
+                tracing::debug!("BackendEventConsumer: ah {ah:?} be {be:?}");
+                backend_event_queue.lock().unwrap().push_back((ah, be));
+            }))
+        };
+        set_test_xdg_env(&temp_dir);
+
+        let seed_mail_1 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: warm seed 1
+Message-ID: <bufwarm1@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        let seed_mail_2 = Box::new(
+            Mail::new(
+                br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Cc:
+Subject: RE: warm seed 2
+Message-ID: <bufwarm2@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+                .to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        // The event's `EnvelopeHash` is the fetch-path hash
+        // (`melib::imap::protocol_parser::generate_envelope_hash`, private
+        // to melib): `DefaultHasher` over the UID then the mailbox path.
+        // Seed mail 2 gets UID 2 in `INBOX` (see the inserts above).
+        let expunge_hash = {
+            use std::{collections::hash_map::DefaultHasher, hash::Hasher};
+
+            let mut h = DefaultHasher::new();
+            h.write_usize(2_usize);
+            h.write(b"INBOX");
+            EnvelopeHash(h.finish())
+        };
+
+        let server_state = Arc::new(Mutex::new(ServerState {
+            envelopes: indexmap::indexmap! {},
+            next_uid: 1,
+            uidvalidity: 1,
+            idle_no_push: true,
+            examine_reply_expunge_once_after_done: true,
+            ..Default::default()
+        }));
+        {
+            let mut state_lck = server_state.lock().unwrap();
+            state_lck.insert(seed_mail_1);
+            state_lck.insert(seed_mail_2);
+        }
+
+        // Short heartbeat so the wake-up (and with it the buffered EXPUNGE)
+        // happens quickly; default sweep interval so no sweep interferes.
+        // The offline cache is disabled so the heartbeat wake-up takes the
+        // direct `examine_mailbox` path (`SyncPolicy::None` short-circuits
+        // `resync`) — the EXAMINE reply is where the mock glues the
+        // EXPUNGE.
+        let (mut imap, listener, main_conn_sender, loops_handle, inbox_hash, _main_commands) =
+            warm_start_setup(
+                backend_event_consumer,
+                Arc::clone(&server_state),
+                2,
+                300,
+                true,
+                false,
+            );
+
+        {
+            let imap = &mut imap;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        block_on(async {
+                            let seed_envs = fetch_all_envs(imap, inbox_hash).await;
+                            assert_eq!(
+                                seed_envs.len(),
+                                2,
+                                "initial fetch must load the two seed mails"
+                            );
+                        });
+                    })
+                    .join()
+                    .unwrap();
+            });
+        }
+
+        let mut watch_fut = Box::pin(imap.watch().unwrap().into_future());
+        let (watch_conn_sender, watch_conn_receiver) = unbounded();
+        let watch_conn = ImapServerStream::new(
+            &listener,
+            &mut watch_fut,
+            (watch_conn_sender.clone(), watch_conn_receiver),
+            Arc::clone(&server_state),
+        );
+        let watch_conn_loop = watch_conn.loop_handler("watch");
+        let watch_loops_handle = std::thread::spawn(move || {
+            block_on(watch_conn_loop);
+        });
+
+        block_on(async {
+            let mut found = false;
+            while !found {
+                let item = match future::select(
+                    watch_fut.as_mut(),
+                    smol::Timer::after(Duration::from_secs(30)),
+                )
+                .await
+                {
+                    Either::Left(((item, rest), _timeout)) => {
+                        watch_fut = Box::pin(rest.into_future());
+                        item
+                    }
+                    Either::Right((_timeout, _pending)) => {
+                        panic!(
+                            "watch stream did not emit the buffered Remove event within \
+                             30 seconds even though the heartbeat EXAMINE carries the glued \
+                             EXPUNGE"
+                        );
+                    }
+                };
+                let Some(backend_event) = item else {
+                    panic!("watch stream ended before the buffered Remove event");
+                };
+                match backend_event.unwrap() {
+                    BackendEvent::RefreshBatch(events) => {
+                        found |= events.iter().any(|event| {
+                            matches!(
+                                &event.kind,
+                                RefreshEventKind::Remove(hash) if *hash == expunge_hash
+                            )
+                        });
+                    }
+                    BackendEvent::Refresh(event) => {
+                        found |= matches!(
+                            &event.kind,
+                            RefreshEventKind::Remove(hash) if *hash == expunge_hash
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Channel pin: the event must have been forwarded through the watch
+        // stream; the out-of-band backend event consumer queue must not
+        // carry it.
+        let queued = backend_event_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, be)| match be {
+                BackendEvent::Refresh(event) => {
+                    matches!(&event.kind, RefreshEventKind::Remove(hash) if *hash == expunge_hash)
+                }
+                BackendEvent::RefreshBatch(events) => events.iter().any(|event| {
+                    matches!(&event.kind, RefreshEventKind::Remove(hash) if *hash == expunge_hash)
+                }),
+                _ => false,
+            });
+        assert!(
+            !queued,
+            "the buffered untagged Remove event must be forwarded through the watch stream, \
+             not delivered through the backend event consumer"
+        );
 
         watch_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
         main_conn_sender.unbounded_send(ServerEvent::Quit).unwrap();
