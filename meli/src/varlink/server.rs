@@ -1,7 +1,8 @@
 //
 // meli
 //
-// Copyright 2026 Kyle Lee
+// Copyright 2026 Manos Pitsidianakis <manos@pitsidianak.is>
+// Fork modifications Copyright 2026 Kyle Lee <kylelee@users.noreply.github.com>
 //
 // This file is part of meli.
 //
@@ -110,10 +111,13 @@ pub fn new_listener(addr: &str, replace: bool) -> Result<Box<dyn Listener>> {
     }
 }
 
-/// Accept clients from `listener` forever, handling each connection in its
-/// own job on the main loop's job executor. `timeout` bounds how long the
-/// listener waits for a first client before giving up.
+/// Accept clients from `addr`'s listener forever.
+///
+/// Each connection is handled in its own job on the main loop's job
+/// executor. `timeout` bounds how long the listener waits for a first
+/// client before giving up.
 pub async fn serve<L: Listener>(
+    addr: String,
     listener: L,
     timeout: Option<Duration>,
     main_loop_handler: crate::state::MainLoopHandler,
@@ -121,13 +125,23 @@ pub async fn serve<L: Listener>(
     loop {
         let conn = if let Some(timeout) = timeout {
             match future::select(listener.accept(), smol::Timer::after(timeout)).await {
-                Either::Left((out, _)) => out?,
+                Either::Left((out, _)) => out,
                 Either::Right(_) => {
-                    return Err(Error::new("Timed out").set_kind(ErrorKind::TimedOut))
+                    tracing::debug!("varlink listener on {addr}: timed out waiting for a client");
+                    return Err(Error::new("Timed out").set_kind(ErrorKind::TimedOut));
                 }
             }
         } else {
-            listener.accept().await?
+            listener.accept().await
+        };
+        let conn = match conn {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::error!(
+                    "varlink listener on {addr}: could not accept client connection: {err}"
+                );
+                return Err(err);
+            }
         };
         let _main_loop_handler = main_loop_handler.clone();
         let job = main_loop_handler.job_executor.spawn(
@@ -138,6 +152,12 @@ pub async fn serve<L: Listener>(
             },
             true.into(),
         );
-        main_loop_handler.send(crate::types::ThreadEvent::Ipc(job));
+        // Register the job's handle in the shared table *synchronously*,
+        // before the job can possibly complete: its `JobFinished` event may
+        // reach the main loop before the `Ipc` wakeup below, so inserting
+        // from the event would orphan the handle and leak the job. The
+        // `Ipc` event is now only bookkeeping/wakeup.
+        main_loop_handler.ipc_jobs.insert(job.job_id, job);
+        main_loop_handler.send(crate::types::ThreadEvent::Ipc);
     }
 }

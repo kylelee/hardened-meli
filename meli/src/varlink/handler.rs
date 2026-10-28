@@ -1,7 +1,8 @@
 //
 // meli
 //
-// Copyright 2026 Kyle Lee
+// Copyright 2026 Manos Pitsidianakis <manos@pitsidianak.is>
+// Fork modifications Copyright 2026 Kyle Lee <kylelee@users.noreply.github.com>
 //
 // This file is part of meli.
 //
@@ -70,7 +71,10 @@ impl Handler {
                 break;
             }
             i += bytes;
-            if let Some(pos) = buf[..i].iter().position(|b| *b == b'\0') {
+            // Handle every complete NUL-terminated message currently in the
+            // buffer: a single read may carry several requests, and bytes
+            // past the first NUL must not be discarded.
+            while let Some(pos) = buf[..i].iter().position(|b| *b == b'\0') {
                 let mut oneway = false;
                 let reply: Result<serde_json::Value> = match serde_json::from_reader::<
                     _,
@@ -263,8 +267,11 @@ impl Handler {
                     let reply = format!("{}\0", serde_json::to_string(&json_val).unwrap());
                     writer.write_all(reply.as_bytes()).await?;
                 }
-                buf.splice(..=pos, std::iter::repeat_n(0, pos));
-                i = 0;
+                // Consume the handled message, keeping any bytes of the
+                // next request that were already read; replies stay
+                // strictly serial (one reply per request, in order).
+                buf.copy_within(pos + 1..i, 0);
+                i -= pos + 1;
             }
             if i >= buf.len() {
                 break;

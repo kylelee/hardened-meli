@@ -40,7 +40,7 @@ use std::{
     collections::BTreeSet,
     os::fd::OwnedFd,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -180,6 +180,9 @@ impl InputHandler {
 pub struct MainLoopHandler {
     pub sender: Sender<ThreadEvent>,
     pub job_executor: Arc<JobExecutor>,
+    /// Shared registry of live varlink IPC connection jobs; see
+    /// [`IpcJobs`] and `crate::varlink`.
+    pub ipc_jobs: IpcJobs,
 }
 
 impl MainLoopHandler {
@@ -188,6 +191,37 @@ impl MainLoopHandler {
         if let Err(err) = self.sender.send(event) {
             tracing::error!("Could not send event to main loop: {}", err);
         }
+    }
+}
+
+/// Shared registry of live varlink IPC connection jobs, keyed by job id;
+/// see `crate::varlink`.
+///
+/// The varlink server registers each connection job's handle here
+/// synchronously right after spawning it, and the main loop removes it when
+/// the job's `JobFinished` event arrives. Both sides operate on the same
+/// table, so the handle can never be orphaned by event reordering between
+/// the producer thread and the main loop.
+#[derive(Clone, Debug, Default)]
+pub struct IpcJobs(Arc<Mutex<IndexMap<JobId, JoinHandle<Result<()>>>>>);
+
+impl IpcJobs {
+    /// Register a connection job's handle. Called by the varlink server
+    /// right after spawning the job.
+    pub fn insert(&self, id: JobId, handle: JoinHandle<Result<()>>) {
+        self.0.lock().unwrap().insert(id, handle);
+    }
+
+    /// Take a connection job's handle when its `JobFinished` event arrives.
+    /// Returns `None` if the job is not a varlink IPC job. Entry order is
+    /// irrelevant for this table, so the cheap `swap_remove` is used.
+    pub fn remove(&self, id: &JobId) -> Option<JoinHandle<Result<()>>> {
+        self.0.lock().unwrap().swap_remove(id)
+    }
+
+    /// Whether no connection jobs are currently tracked.
+    pub fn is_empty(&self) -> bool {
+        self.0.lock().unwrap().is_empty()
     }
 }
 
@@ -328,6 +362,7 @@ impl Context {
                 MainLoopHandler {
                     job_executor: job_executor.clone(),
                     sender: sender.clone(),
+                    ipc_jobs: IpcJobs::default(),
                 },
                 BackendEventConsumer::new(Arc::new(
                     move |account_hash: AccountHash, ev: BackendEvent| {
@@ -367,6 +402,7 @@ impl Context {
             main_loop_handler: MainLoopHandler {
                 job_executor,
                 sender,
+                ipc_jobs: IpcJobs::default(),
             },
             receiver,
         }
@@ -450,10 +486,6 @@ pub struct State {
     overlay: IndexMap<ComponentId, Box<dyn Component>>,
     components: IndexMap<ComponentId, Box<dyn Component>>,
     component_tree: IndexMap<ComponentId, ComponentPath>,
-    /// Live varlink IPC connection jobs keyed by job id; see
-    /// `crate::varlink`. The main loop removes each entry as soon as its
-    /// `JobFinished` event arrives, so finished handles do not leak.
-    pub ipc_jobs: IndexMap<JobId, JoinHandle<Result<()>>>,
     pub context: Box<Context>,
     /// Main-loop heartbeat emitted while any account is still offline; see
     /// [`Pulse`].
@@ -595,6 +627,7 @@ impl State {
                         MainLoopHandler {
                             job_executor: job_executor.clone(),
                             sender: sender.clone(),
+                            ipc_jobs: IpcJobs::default(),
                         },
                         BackendEventConsumer::new(Arc::new(
                             move |account_hash: AccountHash, ev: BackendEvent| {
@@ -645,7 +678,6 @@ impl State {
             components: IndexMap::default(),
             overlay: IndexMap::default(),
             component_tree: IndexMap::default(),
-            ipc_jobs: IndexMap::default(),
             pulse,
             draw_rate_limit: RateLimit::new(1, 3, job_executor.clone()),
             message_box,
@@ -670,6 +702,7 @@ impl State {
                 main_loop_handler: MainLoopHandler {
                     job_executor,
                     sender,
+                    ipc_jobs: IpcJobs::default(),
                 },
                 receiver,
             }),
@@ -1355,9 +1388,28 @@ impl State {
                         .keys()
                         .copied()
                         .collect();
-                    mailbox_hashes.into_iter().try_for_each(|mailbox_hash| {
-                        self.context.accounts[account_index].refresh(mailbox_hash)
-                    })
+                    // Refresh every mailbox even when some fail: bailing
+                    // out at the first error would leave the remaining
+                    // mailboxes stale. Report all failures together.
+                    let mut errors = Vec::new();
+                    for mailbox_hash in mailbox_hashes {
+                        if let Err(err) =
+                            self.context.accounts[account_index].refresh(mailbox_hash)
+                        {
+                            errors.push(err);
+                        }
+                    }
+                    if errors.is_empty() {
+                        Ok(())
+                    } else {
+                        let kind = errors[0].kind;
+                        let body = errors
+                            .iter()
+                            .map(|err| err.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        Err(Error::new(body).set_kind(kind))
+                    }
                 };
                 if let Err(err) = result {
                     self.context.replies.push_back(UIEvent::Notification {

@@ -844,6 +844,25 @@ See the complete interface methods using the varlink client of your choice:
 .Bd -literal
 varlinkctl call unix:/tmp/org.meli-email.meli org.varlink.service.GetInterfaceDescription '{"interface":"org.meli-email.meli"}'
 .Ed
+.Pp
+Security notes: a
+.Ql unix:
+socket file is created with owner-only permissions (0600), so only your
+user can connect to it; a
+.Ql tcp:
+socket performs no authentication whatsoever \(em binding it to a
+non-loopback address hands full control of
+.Nm
+(command execution and keystroke injection included) to any principal
+that can reach the address, so only the loopback interface or a trusted
+network is recommended; a
+.Ql unix:@
+abstract socket has no filesystem permission model, and any local user
+may connect to it.
+.Pp
+.Fl -varlink-replace
+removes an existing socket file without following symbolic links (a
+plain unlink) and binds a fresh socket in its place.
 .Sh EXIT STATUS
 .Nm
 exits with 0 on a successful run.

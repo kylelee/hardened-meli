@@ -120,8 +120,12 @@ fn run_app(mut opt: Opt) -> Result<()> {
     let _varlink_server = if let Some(addr) = varlink {
         let listener = crate::varlink::server::new_listener(&addr, varlink_replace)?;
         tracing::trace!("varlink listening on {addr}");
-        let server =
-            crate::varlink::server::serve(listener, None, state.context.main_loop_handler.clone());
+        let server = crate::varlink::server::serve(
+            addr,
+            listener,
+            None,
+            state.context.main_loop_handler.clone(),
+        );
         Some(state.context.main_loop_handler.job_executor.spawn(
             "varlink-server".into(),
             server,
@@ -257,11 +261,23 @@ fn run_app(mut opt: Opt) -> Result<()> {
                         ThreadEvent::JobFinished(id) => {
                             tracing::debug!("main loop: JobFinished {id}");
                             state.context.main_loop_handler.job_executor.set_job_finished(id);
-                            // Varlink IPC jobs are tracked in `ipc_jobs`;
-                            // when one completes, drop its handle and skip
-                            // the account/status fan-out that regular jobs
-                            // go through, since no component waits on them.
-                            if state.ipc_jobs.swap_remove(&id).is_none() {
+                            // Varlink IPC jobs are registered in the shared
+                            // `ipc_jobs` table by the varlink server as soon
+                            // as they are spawned; when one completes, drop
+                            // its handle and skip the account/status fan-out
+                            // that regular jobs go through, since no
+                            // component waits on them.
+                            if let Some(mut handle) =
+                                state.context.main_loop_handler.ipc_jobs.remove(&id)
+                            {
+                                // Surface unexpected connection job failures
+                                // (the result is already in the channel once
+                                // `JobFinished` is processed). Log only the
+                                // error chain, never request contents.
+                                if let Ok(Some(Err(err))) = handle.chan.try_recv() {
+                                    tracing::error!("varlink connection job {id} failed: {err}");
+                                }
+                            } else {
                                 for account in state.context.accounts.values_mut() {
                                     if account.process_event(&id) {
                                         break;
@@ -286,8 +302,11 @@ fn run_app(mut opt: Opt) -> Result<()> {
                                 state.redraw();
                             }
                         },
-                        ThreadEvent::Ipc(job) => {
-                            state.ipc_jobs.insert(job.job_id, job);
+                        ThreadEvent::Ipc => {
+                            // Bookkeeping/wakeup only: the connection job's
+                            // handle was already registered in the shared
+                            // `ipc_jobs` table by the varlink server before
+                            // this event was sent.
                         },
                     }
                 },

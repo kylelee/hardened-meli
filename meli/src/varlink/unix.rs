@@ -1,7 +1,8 @@
 //
 // meli
 //
-// Copyright 2026 Kyle Lee
+// Copyright 2026 Manos Pitsidianakis <manos@pitsidianak.is>
+// Fork modifications Copyright 2026 Kyle Lee <kylelee@users.noreply.github.com>
 //
 // This file is part of meli.
 //
@@ -19,7 +20,11 @@
 // along with meli. If not, see <http://www.gnu.org/licenses/>.
 //
 
-use std::{net::Shutdown, os::fd::FromRawFd as _, pin::Pin};
+use std::{
+    net::Shutdown,
+    os::{fd::FromRawFd as _, unix::fs::PermissionsExt as _},
+    pin::Pin,
+};
 
 use futures::future::BoxFuture;
 use melib::error::{Error, Result, ResultIntoError as _};
@@ -154,9 +159,20 @@ impl UnixListener {
         if replace && matches!(path.try_exists(), Ok(true)) {
             std::fs::remove_file(path).chain_err_related_path(path)?;
         }
-        Ok(Self {
-            inner: smol::net::unix::UnixListener::bind(path)?,
-        })
+        let inner = smol::net::unix::UnixListener::bind(path)?;
+        // Lock the socket file down to its owner: bind(2) creates the node
+        // with 0777 & ~umask, so under a permissive umask (service managers
+        // often run with 0) the socket would be accessible by any local
+        // user, handing them full control of meli — commands and keystroke
+        // injection included. Abstract sockets have no backing file and
+        // inherited LISTEN_FDS descriptors are the activator's
+        // responsibility, so neither is touched here.
+        if let Err(err) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            // Never leave a possibly world-accessible socket behind.
+            _ = std::fs::remove_file(path);
+            return Err(err.into());
+        }
+        Ok(Self { inner })
     }
 }
 

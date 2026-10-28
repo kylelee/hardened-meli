@@ -3027,6 +3027,7 @@ fn deeply_nested_rfc822_opens_without_stack_overflow() {
             let handler = MainLoopHandler {
                 job_executor: Arc::new(JobExecutor::new(sender.clone())),
                 sender,
+                ipc_jobs: Default::default(),
             };
             let mail = melib::Mail::new(nested_rfc822_mail(16000), None).unwrap();
             let view = EnvelopeView::new(mail, None, None, None, handler);
@@ -3062,6 +3063,7 @@ fn shallow_rfc822_nesting_still_renders_fully_inline() {
             let handler = MainLoopHandler {
                 job_executor: Arc::new(JobExecutor::new(sender.clone())),
                 sender,
+                ipc_jobs: Default::default(),
             };
             let mail = melib::Mail::new(nested_rfc822_mail(2), None).unwrap();
             let view = EnvelopeView::new(mail, None, None, None, handler);

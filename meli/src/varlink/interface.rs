@@ -1,7 +1,8 @@
 //
 // meli
 //
-// Copyright 2026 Kyle Lee
+// Copyright 2026 Manos Pitsidianakis <manos@pitsidianak.is>
+// Fork modifications Copyright 2026 Kyle Lee <kylelee@users.noreply.github.com>
 //
 // This file is part of meli.
 //
