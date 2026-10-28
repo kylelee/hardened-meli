@@ -51,6 +51,12 @@ pub struct Opt {
     /// use specified configuration file
     #[structopt(short, long, parse(from_os_str))]
     pub config: Option<PathBuf>,
+    /// start a varlink server listener at the given address
+    #[structopt(long)]
+    pub varlink: Option<String>,
+    /// replace an existing varlink socket if possible
+    #[structopt(long)]
+    pub varlink_replace: bool,
 
     #[structopt(subcommand)]
     pub subcommand: Option<SubCommand>,

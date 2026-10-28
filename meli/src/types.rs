@@ -46,7 +46,7 @@ use nix::{errno::Errno, unistd::Pid};
 
 use super::{
     command::Action,
-    jobs::{JobExecutor, JobId, TimerId},
+    jobs::{JobExecutor, JobId, JoinHandle, TimerId},
     terminal::*,
 };
 use crate::components::{Component, ComponentId, ScrollUpdate};
@@ -95,6 +95,9 @@ pub enum ThreadEvent {
     /// periodically by the signal watchdog thread.
     Pulse,
     JobFinished(JobId),
+    /// A varlink IPC connection job for the main loop to track until
+    /// completion; see `crate::varlink`.
+    Ipc(JoinHandle<Result<()>>),
 }
 
 impl ThreadEvent {

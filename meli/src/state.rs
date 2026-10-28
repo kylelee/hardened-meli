@@ -87,7 +87,7 @@ impl Drop for DrawSpan {
     }
 }
 use crate::{
-    jobs::{JobExecutor, Pulse},
+    jobs::{JobExecutor, JobId, JoinHandle, Pulse},
     notifications::DisplayMessageBox,
     terminal::{get_events, Screen, Tty},
 };
@@ -450,6 +450,10 @@ pub struct State {
     overlay: IndexMap<ComponentId, Box<dyn Component>>,
     components: IndexMap<ComponentId, Box<dyn Component>>,
     component_tree: IndexMap<ComponentId, ComponentPath>,
+    /// Live varlink IPC connection jobs keyed by job id; see
+    /// `crate::varlink`. The main loop removes each entry as soon as its
+    /// `JobFinished` event arrives, so finished handles do not leak.
+    pub ipc_jobs: IndexMap<JobId, JoinHandle<Result<()>>>,
     pub context: Box<Context>,
     /// Main-loop heartbeat emitted while any account is still offline; see
     /// [`Pulse`].
@@ -641,6 +645,7 @@ impl State {
             components: IndexMap::default(),
             overlay: IndexMap::default(),
             component_tree: IndexMap::default(),
+            ipc_jobs: IndexMap::default(),
             pulse,
             draw_rate_limit: RateLimit::new(1, 3, job_executor.clone()),
             message_box,
