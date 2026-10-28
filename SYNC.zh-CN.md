@@ -46,7 +46,7 @@ git fetch upstream
 - 合并提交：`7e4b55e4d`（imap-auth-watch）、`933a775fa`（nntp-store）、`53cf0838a`（job-names）、`844e3c592`（misc-hygiene）、`fba71cd78`（pathbuf-args）、`0efa79124`（refresh-cmd）、`75109cff8`（varlink-ipc；main 同步 HEAD），基线 `6efff4ab1`
 - 冲突：无
 - 记账类型：`ported`（语义移植，1:1 处给出本地提交）、`already-covered`（fork 已有等价物，仅个别文案对齐）、`skipped-UI`（fork 自有 UI 架构）、`skipped-CI`（上游 workflow 基建；fork CI 结构不同）；一处 2:1（`b137b939`+`fcfa3c2b` → `49cd8d6a4`）
-- 后续评审修复（本批次）：R1–R4、R6 为有意的 varlink 加固偏离上游（socket 0600 权限、共享 `ipc_jobs` 句柄表防跨生产者事件乱序泄漏、accept/连接作业错误日志、单次读取多消息处理、恢复上游版权署名）；R5 完善 fork 语义（不带邮箱的 `refresh` 汇总所有失败邮箱，而非首错即止）
+- 后续评审修复（本批次）：R1–R4、R6 为有意的 varlink 加固偏离上游（socket 0600 权限、共享 `ipc_jobs` 句柄表防跨生产者事件乱序泄漏、accept/连接作业错误日志、单次读取多消息处理、恢复上游版权署名）；R5 完善 fork 语义（不带邮箱的 `refresh` 汇总所有失败邮箱，而非首错即止）；已知残留窗口（技术债，未根治）：R2 后 `serve` 侧向共享表的插入仍发生在 `spawn` 之后数条指令内，窗口内完成的作业其 `JobFinished` 可能先被处理——该表项随后泄漏一个 `JoinHandle`；彻底修法需注册先于完成的顺序保证（oneshot 握手或给 `JobFinished` 加 kind 标记，涉及 `jobs.rs`）
 
 | 上游提交 | 结论 | 说明 |
 | --- | --- | --- |
