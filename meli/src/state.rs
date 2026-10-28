@@ -2235,6 +2235,8 @@ mod tests {
 
     #[test]
     fn test_context_current_dir_is_expanded_and_absolute() {
+        // Create the TempDir under the env lock: a concurrent env-rewriting test (e.g. mailcap's TMPDIR) would resolve it into its drop-deleted sandbox.
+        let _env = crate::utilities::tests::env_lock_shared();
         let temp = tempfile::TempDir::new().unwrap();
         let ctx = crate::Context::new_mock(&temp);
         assert!(ctx.current_dir.is_absolute());
@@ -2248,6 +2250,8 @@ mod tests {
         // The `ProcessRequest` arm forwards the session's current directory
         // to every spawned child via `apply_session_cwd`; assert that
         // wiring against a real `Context`.
+        // Create the TempDir under the env lock: a concurrent env-rewriting test (e.g. mailcap's TMPDIR) would resolve it into its drop-deleted sandbox.
+        let _env = crate::utilities::tests::env_lock_shared();
         let temp = tempfile::TempDir::new().unwrap();
         let ctx = crate::Context::new_mock(&temp);
         let mut command = std::process::Command::new("true");
