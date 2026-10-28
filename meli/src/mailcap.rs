@@ -2696,6 +2696,9 @@ is 50 \% Greek to me" \; cat %s; copiousoutput"#;
 
     fn run_mailcap_execution() {
         let temp_dir = tempfile::tempdir().unwrap();
+        // Resolve the process-lifetime test home before the env vars below
+        // are rewritten (its first initialization sets HOME/XDG vars).
+        let shared_home = crate::golden::shared_test_home();
         for var in [
             "HOME",
             "TMPDIR",
@@ -2710,13 +2713,18 @@ is 50 \% Greek to me" \; cat %s; copiousoutput"#;
         }
         for (var, dir) in [
             ("HOME", temp_dir.path().to_path_buf()),
-            // Mailcap handlers create their `%s` temp files with
-            // `delete_on_drop: false` (they are reaped via
+            // `TMPDIR` must point at a process-lifetime directory, not the
+            // test-owned sandbox: concurrent tests that do not hold the env
+            // lock can call `TempDir::new()` while the exclusive lock is
+            // held here, resolving their dirs under `TMPDIR` — and
+            // `temp_dir`'s drop would `remove_dir_all` them away. Point it
+            // into `golden::shared_test_home` (per-process static TempDir,
+            // never deleted in-process); this also keeps mailcap `%s` temp
+            // files (`delete_on_drop: false`, reaped via
             // `ProcessRequest::temporary_files` at runtime, which a unit
-            // test never runs) — point `TMPDIR` into the test-owned
-            // directory so re-runs cannot collide with leftovers in the
-            // real `/tmp`.
-            ("TMPDIR", temp_dir.path().join("tmp")),
+            // test never runs) from colliding with leftovers in the real
+            // `/tmp` across re-runs.
+            ("TMPDIR", shared_home.path().join("tmp")),
             ("XDG_CACHE_HOME", temp_dir.path().join(".cache")),
             ("XDG_STATE_HOME", temp_dir.path().join(".local/state")),
             ("XDG_CONFIG_HOME", temp_dir.path().join(".config")),
