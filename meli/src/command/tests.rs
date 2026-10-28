@@ -473,6 +473,85 @@ fn test_command_parser_mail_actions() {
     );
 }
 
+/// `refresh` takes an optional ACCOUNT and MAILBOX_PATH: with no arguments it
+/// refreshes the current mailbox listing (unchanged), with an account it
+/// requests a refresh of the account's mailboxes, and with both it targets one
+/// specific mailbox.
+#[test]
+fn test_command_parser_refresh() {
+    use super::{AccountAction, Action, ListingAction};
+
+    // No arguments: the current mailbox listing, with or without trailing
+    // whitespace.
+    assert_eq!(
+        parse_command(b"refresh").unwrap(),
+        Action::Listing(ListingAction::Refresh)
+    );
+    assert_eq!(
+        parse_command(b"refresh ").unwrap(),
+        Action::Listing(ListingAction::Refresh)
+    );
+
+    // One argument: all mailboxes of the account.
+    assert_eq!(
+        parse_command(b"refresh accname").unwrap(),
+        Action::AccountAction(
+            "accname".to_string(),
+            AccountAction::Refresh { mailbox: None },
+        )
+    );
+
+    // Two arguments: one specific mailbox of the account; quoted arguments
+    // are accepted.
+    assert_eq!(
+        parse_command(b"refresh accname INBOX").unwrap(),
+        Action::AccountAction(
+            "accname".to_string(),
+            AccountAction::Refresh {
+                mailbox: Some("INBOX".to_string()),
+            },
+        )
+    );
+    assert_eq!(
+        parse_command(b"refresh \"acc name\" \"INBOX/Foo\"").unwrap(),
+        Action::AccountAction(
+            "acc name".to_string(),
+            AccountAction::Refresh {
+                mailbox: Some("INBOX/Foo".to_string()),
+            },
+        )
+    );
+}
+
+/// Malformed `refresh` input must be reported as structured command errors.
+#[test]
+fn test_command_parser_refresh_rejects_bad_input() {
+    use crate::command::parser;
+
+    // More arguments than the accepted ACCOUNT MAILBOX_PATH form.
+    for cmd in [
+        "refresh accname INBOX extra",
+        "refresh accname INBOX extra even-more",
+    ] {
+        let (_, res) = parser::refresh(cmd.as_bytes())
+            .unwrap_or_else(|err| panic!("{cmd} failed to parse at all: {err}"));
+        assert!(
+            matches!(res, Err(CommandError::WrongNumberOfArguments { .. })),
+            "{cmd} must be rejected, got {res:?}"
+        );
+    }
+
+    // Empty quoted arguments.
+    for cmd in ["refresh \"\"", "refresh accname \"\""] {
+        let (_, res) = parser::refresh(cmd.as_bytes())
+            .unwrap_or_else(|err| panic!("{cmd} failed to parse at all: {err}"));
+        assert!(
+            matches!(res, Err(CommandError::BadValue { .. })),
+            "{cmd} must be rejected, got {res:?}"
+        );
+    }
+}
+
 /// Prefix disambiguation: the single-word parsers must not swallow the
 /// multi-word commands, and `open` must not swallow the existing
 /// `open-in-tab`.

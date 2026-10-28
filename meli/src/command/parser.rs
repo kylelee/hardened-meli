@@ -1134,12 +1134,61 @@ pub fn open(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
 }
 
 pub fn refresh(input: &[u8]) -> IResult<&[u8], Result<Action, CommandError>> {
-    let mut check = arg_init! { min_arg:0, max_arg: 0, refresh};
+    let mut check = arg_init! { min_arg:0, max_arg: 2, refresh};
     let (input, _) = tag("refresh").parse(input.trim())?;
     arg_chk!(start check, input);
+    // Without arguments the current mailbox listing is refreshed, as before;
+    // an optional ACCOUNT (and MAILBOX_PATH) targets an account's mailboxes
+    // instead.
+    let (input, account) = match is_a::<_, &[u8], melib::nom::error::Error<&[u8]>>(" ").parse(input)
+    {
+        Ok((input, _)) => {
+            arg_chk!(inc check, input);
+            let (input, account) = quoted_argument(input)?;
+            if account.is_empty() {
+                return Ok((
+                    input,
+                    Err(CommandError::BadValue {
+                        inner: "refresh: ACCOUNT argument cannot be empty.".into(),
+                        suggestions: None,
+                    }),
+                ));
+            }
+            (input, Some(account))
+        }
+        Err(_) => (input, None),
+    };
+    let (input, mailbox) = match is_a::<_, &[u8], melib::nom::error::Error<&[u8]>>(" ").parse(input)
+    {
+        Ok((input, _)) => {
+            arg_chk!(inc check, input);
+            let (input, mailbox) = quoted_argument(input)?;
+            if mailbox.is_empty() {
+                return Ok((
+                    input,
+                    Err(CommandError::BadValue {
+                        inner: "refresh: MAILBOX_PATH argument cannot be empty.".into(),
+                        suggestions: None,
+                    }),
+                ));
+            }
+            (input, Some(mailbox.to_string()))
+        }
+        Err(_) => (input, None),
+    };
     arg_chk!(finish check, input);
     let (input, _) = eof(input.trim())?;
-    Ok((input, Ok(Listing(Refresh))))
+    Ok((
+        input,
+        if let Some(account) = account {
+            Ok(AccountAction(
+                account.to_string(),
+                AccountAction::Refresh { mailbox },
+            ))
+        } else {
+            Ok(Listing(ListingAction::Refresh))
+        },
+    ))
 }
 
 pub fn save_attachment<'a>(input: &'a [u8]) -> IResult<&'a [u8], Result<Action, CommandError>> {

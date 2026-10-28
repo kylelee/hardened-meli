@@ -155,6 +155,7 @@ pub enum ComposeAction {
 #[derive(Debug, Eq, PartialEq)]
 pub enum AccountAction {
     ReIndex,
+    Refresh { mailbox: Option<String> },
     PrintAccountSetting(String),
 }
 

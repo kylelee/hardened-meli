@@ -1324,6 +1324,50 @@ impl State {
                     });
                 }
             }
+            AccountAction(ref account_name, AccountAction::Refresh { ref mailbox }) => {
+                let account_index = if let Some(a) = self
+                    .context
+                    .accounts
+                    .iter()
+                    .position(|(_, acc)| acc.name() == account_name)
+                {
+                    a
+                } else {
+                    self.context.replies.push_back(UIEvent::Notification {
+                        title: None,
+                        source: None,
+                        body: format!("Account {account_name} was not found.").into(),
+                        kind: Some(NotificationType::Error(ErrorKind::None)),
+                    });
+                    return;
+                };
+
+                let result = if let Some(mailbox) = mailbox.as_ref() {
+                    self.context.accounts[account_index]
+                        .mailbox_by_path(mailbox)
+                        .and_then(|mailbox_hash| {
+                            self.context.accounts[account_index].refresh(mailbox_hash)
+                        })
+                } else {
+                    let mailbox_hashes: SmallVec<[MailboxHash; 16]> = self.context.accounts
+                        [account_index]
+                        .mailbox_entries
+                        .keys()
+                        .copied()
+                        .collect();
+                    mailbox_hashes.into_iter().try_for_each(|mailbox_hash| {
+                        self.context.accounts[account_index].refresh(mailbox_hash)
+                    })
+                };
+                if let Err(err) = result {
+                    self.context.replies.push_back(UIEvent::Notification {
+                        title: Some("Could not refresh.".into()),
+                        source: None,
+                        body: err.to_string().into(),
+                        kind: Some(NotificationType::Error(err.kind)),
+                    });
+                }
+            }
             #[cfg(feature = "sqlite3")]
             AccountAction(ref account_name, ReIndex) => {
                 let account_index = if let Some(a) = self

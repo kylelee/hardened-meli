@@ -57,6 +57,10 @@ pub use parser::parse_command;
 // Only `ComposeAction` itself is re-exported: glob-importing its variants
 // would make the bare name `New` ambiguous with `TabAction::New` in every
 // module that reaches the command module through the crate root's glob.
+// `AccountAction::Refresh` and `ListingAction::Refresh` are distinct
+// commands, so the flat variant re-exports collide on that name; keep the
+// upstream-style glob re-exports and spell out the enum path at use sites.
+#[allow(ambiguous_glob_reexports)]
 pub use crate::actions::{
     AccountAction::{self, *},
     Action::{self, *},
@@ -298,7 +302,7 @@ define_commands!([
                   parser: parser::open
                 },
                 { tags: ["refresh"],
-                  desc: "refresh the current mailbox",
+                  desc: "refresh [ACCOUNT [MAILBOX_PATH]], refresh the current mailbox, an account's mailboxes or a specific mailbox",
                   parser: parser::refresh
                 },
                 { tags: ["save-attachment ", "save-attachment-picker "],
